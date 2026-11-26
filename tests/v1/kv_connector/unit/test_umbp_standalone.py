@@ -47,6 +47,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.standalone import
     _ABANDONED_STORAGES,
     _DaemonTransferPool,
     _SharedPoolWorkerHandle,
+    _StandaloneSchedulerHandle,
+    _StandaloneWorkerHandle,
     normalize_endpoint,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
@@ -54,6 +56,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     _StoreBatch,
 )
 from vllm.platforms import current_platform
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroup,
+    KVCacheTensor,
+    MLAAttentionSpec,
+)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="UMBP requires ROCm"
@@ -401,6 +413,7 @@ def test_async_load_past_its_deadline_stays_pending(monkeypatch, tmp_path):
         assert worker.get_finished(set()) == (None, None)
         refused = handle.store([BlockTransferPlan("next", 2)])
         assert refused.status is TransferJobStatus.FAILED
+        assert refused.error is not None
         assert refused.error.startswith(TRANSFER_NOT_ATTEMPTED)
 
         release.set()
@@ -515,16 +528,21 @@ def test_close_releases_the_client_kv_buffers_and_threads(server, role):
     """MORI drops a connection only once its client object is destroyed."""
     runtime = _runtime()
     if role == "scheduler":
-        handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
-        threads = handle._calls._threads
+        scheduler_handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        assert isinstance(scheduler_handle, _StandaloneSchedulerHandle)
+        threads = scheduler_handle._calls._threads
         storage = None
     else:
-        handle = runtime.create_worker_handle("ns", RankTopology(), None)
-        threads = handle._executor._threads
+        worker_handle = runtime.create_worker_handle("ns", RankTopology(), None)
+        assert isinstance(worker_handle, _StandaloneWorkerHandle)
+        executor = worker_handle._executor
+        assert isinstance(executor, _DaemonTransferPool)
+        threads = executor._threads
         source = torch.zeros(16, dtype=torch.uint8)
-        handle.register_buffers({"layer0": source})
+        worker_handle.register_buffers({"layer0": source})
         storage = ref(source.untyped_storage())
         del source
+    handle = scheduler_handle if role == "scheduler" else worker_handle
     client = ref(server.clients.pop())
 
     handle.close()
@@ -543,10 +561,13 @@ def test_close_releases_the_client_kv_buffers_and_threads(server, role):
 def test_close_waits_for_a_slow_but_live_server(server, monkeypatch, role, call):
     runtime = _runtime()
     if role == "scheduler":
-        handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        scheduler_handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        assert isinstance(scheduler_handle, _StandaloneSchedulerHandle)
     else:
-        handle = runtime.create_worker_handle("ns", RankTopology(), None)
-        handle.register_buffers({"layer0": torch.zeros(16, dtype=torch.uint8)})
+        worker_handle = runtime.create_worker_handle("ns", RankTopology(), None)
+        assert isinstance(worker_handle, _StandaloneWorkerHandle)
+        worker_handle.register_buffers({"layer0": torch.zeros(16, dtype=torch.uint8)})
+    handle = scheduler_handle if role == "scheduler" else worker_handle
     client = server.clients[0]
     original = getattr(client, call)
     called = threading.Event()
@@ -607,17 +628,23 @@ def _close_against_a_hung_server(role: str, stuck: str) -> None:
     sys.modules["mori.cpp"] = _fake_mori(pool)
     runtime = _runtime(lookup_timeout_ms=100, timeout_ms=100)
     if role == "scheduler":
-        handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        scheduler_handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        assert isinstance(scheduler_handle, _StandaloneSchedulerHandle)
         setattr(pool.clients[0], stuck, _hang)
-        assert handle.lookup(["k"]) == [False]
+        # A hung exists call is unavailable; with a hung close, "k" is absent.
+        assert scheduler_handle.lookup(["k"]) == (
+            [None] if stuck == "batch_exists" else [False]
+        )
     else:
-        handle = runtime.create_worker_handle("ns", RankTopology(), None)
+        worker_handle = runtime.create_worker_handle("ns", RankTopology(), None)
+        assert isinstance(worker_handle, _StandaloneWorkerHandle)
         source = torch.arange(16, dtype=torch.uint8)
-        handle.register_buffers({"layer0": source})
+        worker_handle.register_buffers({"layer0": source})
         setattr(pool.clients[0], stuck, _hang)
         if stuck == "batch_put_ranges_from_ptr":
-            job = handle.store([_block_plan("stuck", source)])
-            assert handle.poll(job) is None
+            job = worker_handle.store([_block_plan("stuck", source)])
+            assert worker_handle.poll(job) is None
+    handle = scheduler_handle if role == "scheduler" else worker_handle
     handle.close()
 
 
@@ -940,7 +967,9 @@ def _stall_scheduler_call(server, monkeypatch, method, release) -> list:
     return calls
 
 
-def test_lookup_without_a_reply_misses_until_the_server_answers(server, monkeypatch):
+def test_lookup_without_a_reply_is_unavailable_until_the_server_answers(
+    server, monkeypatch
+):
     handle = _runtime(lookup_timeout_ms=50).create_scheduler_handle(
         "ns", RankTopology(), None
     )
@@ -948,8 +977,8 @@ def test_lookup_without_a_reply_misses_until_the_server_answers(server, monkeypa
     release = threading.Event()
     calls = _stall_scheduler_call(server, monkeypatch, "batch_exists", release)
     try:
-        assert handle.lookup(["k"]) == [False]
-        assert handle.lookup(["j"]) == [False]
+        assert handle.lookup(["k"]) == [None]
+        assert handle.lookup(["j"]) == [None]
         assert "returned" not in calls
 
         release.set()
@@ -987,7 +1016,7 @@ def test_scheduler_close_does_not_wait_on_a_stalled_server(server, monkeypatch, 
     calls = _stall_scheduler_call(server, monkeypatch, stuck, release)
     try:
         if stuck == "batch_exists":
-            assert handle.lookup(["k"]) == [False]
+            assert handle.lookup(["k"]) == [None]
 
         handle.close()
 
@@ -1001,9 +1030,10 @@ def test_scheduler_drops_its_client_once_a_stalled_call_returns(server, monkeypa
     handle = _runtime(lookup_timeout_ms=50).create_scheduler_handle(
         "ns", RankTopology(), None
     )
+    assert isinstance(handle, _StandaloneSchedulerHandle)
     release = threading.Event()
     _stall_scheduler_call(server, monkeypatch, "batch_exists", release)
-    assert handle.lookup(["k"]) == [False]
+    assert handle.lookup(["k"]) == [None]
 
     handle.close()
     release.set()
@@ -1025,7 +1055,10 @@ def test_lookup_and_clear_degrade_when_the_server_is_lost(server, failure):
 
     server.lose(failure)
 
-    assert handle.lookup(["k", "j"]) == [False, False]
+    # MORI reports a lost server by result, which looks like a miss; only a
+    # raising RPC is known to be unavailable.
+    expected = [False, False] if failure == "server-down" else [None, None]
+    assert handle.lookup(["k", "j"]) == expected
     assert handle.clear() is False
     handle.close()
 
@@ -1035,7 +1068,7 @@ def test_lookup_rejects_a_short_result(server, monkeypatch):
     handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
     monkeypatch.setattr(server.clients[0], "batch_exists", lambda keys: [True])
 
-    assert handle.lookup(["a", "b"]) == [False, False]
+    assert handle.lookup(["a", "b"]) == [None, None]
 
 
 @pytest.mark.parametrize("load_async", [False, True])
@@ -1180,6 +1213,7 @@ def test_stalled_store_stays_pending_and_refuses_new_transfers(server, monkeypat
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(time, "monotonic", lambda: clock.now)
     worker = _runtime(timeout_ms=20).create_worker_handle("ns", RankTopology(), None)
+    assert isinstance(worker, _StandaloneWorkerHandle)
     source = torch.arange(16, dtype=torch.uint8)
     worker.register_buffers({"layer0": source})
     release = threading.Event()
@@ -1204,6 +1238,7 @@ def test_stalled_store_stays_pending_and_refuses_new_transfers(server, monkeypat
             for settle in (worker.wait, worker.cancel):
                 assert settle(refused) is refused
             assert refused.status is TransferJobStatus.FAILED
+            assert refused.error is not None
             assert refused.error.startswith(TRANSFER_NOT_ATTEMPTED)
 
         release.set()
@@ -1221,3 +1256,42 @@ def test_stalled_store_stays_pending_and_refuses_new_transfers(server, monkeypat
     finally:
         release.set()
         worker.close()
+
+
+def _draft_replay_kv_cache_config() -> KVCacheConfig:
+    # Target MLA latents plus a draft sliding-window group that SWA replay
+    # (rebuild_sliding_window) keeps out of prefix caching.
+    spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16
+    )
+    target = FullAttentionManager.layer_config(spec)
+    draft = SlidingWindowManager.layer_config(
+        spec, sliding_window=16, bounded_replay=True
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192, layers=["layer1"], layer_stride=8192, block_stride=1024
+            ),
+            KVCacheTensor(
+                size=8192, layers=["draft"], layer_stride=8192, block_stride=1024
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroup.from_layers({"layer1": target}),
+            KVCacheGroup.from_layers({"draft": draft}),
+        ],
+    )
+
+
+def test_dspark_draft_rebuilt_by_replay_is_accepted(server):
+    # DSpark/DFlash window KV derives from the target's hidden states, so the
+    # replay that rebuilds the target's window rebuilds the draft's too.
+    config = _draft_replay_kv_cache_config()
+    assert config.prefix_cacheable_group_ids == (0,)
+    UMBPStoreConnector(
+        _standalone_config(rebuild_sliding_window=True),
+        KVConnectorRole.SCHEDULER,
+        config,
+    )

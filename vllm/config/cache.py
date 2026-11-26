@@ -64,6 +64,7 @@ CacheDType = Literal[
     "fp8_per_token_head",
     "nvfp4",
     "nvfp4_4over6",
+    "mxfp4_mla",
 ]
 
 # Mutable mirror of the CacheDType Literal. Custom dtypes registered by
@@ -173,7 +174,6 @@ def is_known_kv_cache_dtype(name: str) -> bool:
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
-MambaCacheMode = Literal["align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -211,6 +211,10 @@ class CacheConfig:
     inside a physical block. It controls matching granularity only, not how
     often states are stored.
 
+    An explicit value fails at startup if prefix-cache hits would fall back
+    to the scheduler block size (for example, when a sliding-window group
+    requires block-aligned lookups).
+
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
     gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
@@ -224,7 +228,14 @@ class CacheConfig:
     utilization.
 
     If unspecified, 1.0 with the extensible KV cache (sized from measured
-    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`."""
+    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`.
+
+    With the extensible KV cache (the default on CUDA and ROCm), leave this
+    unset unless something needs memory that vLLM does not measure: other
+    processes sharing the GPU (including ones that allocate after vLLM has
+    started), unified-memory devices whose memory the CPU also uses, weight
+    transfer buffers for weight updates, or KV connectors that allocate their
+    own device buffers. A lower value takes memory away from the KV cache."""
 
     @property
     def device_memory_utilization(self) -> float | None:
@@ -304,31 +315,26 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
-    mamba_cache_mode: MambaCacheMode = "none"
-    """The cache strategy for Mamba layers, derived from `enable_prefix_caching`:
-
-    - "none": prefix caching is disabled.
-    - "align": prefix caching is enabled. Only cache the mamba state of the last
-      token of each scheduler step and when the token is at position
-      i * block_size.
-    """
     enable_mamba_shared_prefix_checkpoint: bool = False
-    """Also register a Mamba "align" checkpoint at the shared-prefix junction --
-    where an EAGLE/MTP sibling was observed to resume -- instead of only at the
-    prompt tail. Off by default; only takes effect with prefix caching enabled,
-    EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
-    block size."""
+    """Also register a Mamba checkpoint at the shared-prefix junction --
+    where a sibling request was observed to resume -- instead of only at the
+    prompt tail. Off by default; only takes effect with prefix caching enabled
+    and a prefix match unit smaller than the Mamba block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM logical history length B for Mamba2. Triton uses B physical
-    rows and FlashInfer uses B+T, where T is the target verification length.
-    Kimi-K3 speculative decode does not use B. Default 16."""
+    """ReplaySSM logical history length B. Mamba2 Triton standard decode and
+    Gated DeltaNet (Qwen3.5, Qwen4Exp) use B physical rows, at most 32 for Gated
+    DeltaNet; FlashInfer and Triton speculative decoding use B+T, where T is
+    the target verification length. Kimi-K3 speculative decode does not use B.
+    Default 16."""
     use_replayssm: bool = False
-    """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
-    the per-step full-state store, writing the checkpoint back only on flush.
-    Triton and FlashInfer support the 'none' and 'align' Mamba cache modes.
-    Mamba2 speculative decoding requires FlashInfer. Pipeline parallelism is not
-    supported. Flushes are most efficient when mamba_block_size is a
-    multiple of replayssm_buffer_len, but this is not required."""
+    """Use the ReplaySSM decode kernels for Mamba2 and Gated DeltaNet (Qwen3.5,
+    Qwen4Exp): cache recent SSM inputs and skip the per-step full-state store,
+    writing the checkpoint back only on flush. Triton and FlashInfer support
+    Mamba prefix caching on and off. Mamba2 speculative decoding supports both
+    backends; Gated DeltaNet supports Triton standard decode only. Pipeline
+    parallelism is not supported. Flushes are most efficient when
+    mamba_block_size is a multiple of replayssm_buffer_len, but this is not
+    required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
@@ -337,9 +343,6 @@ class CacheConfig:
     """The number of blocks to allocate for GPU memory."""
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
-
-    simple_cpu_offload_num_blocks: int | None = field(default=None, init=False)
-    """Worker-aligned offload block count for `SimpleCPUOffloadConnector`."""
 
     # Set after KV cache initialization.
     effective_attention_block_size: int | None = field(default=None, init=False)
@@ -441,7 +444,6 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
-            "simple_cpu_offload_num_blocks",
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",

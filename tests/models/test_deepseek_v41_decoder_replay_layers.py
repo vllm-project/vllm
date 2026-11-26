@@ -178,6 +178,7 @@ def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
     cfg.cache_config.use_kda_recoverssm = False
     cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
     cfg.model_config.dtype = torch.float32
+    cfg.model_config.max_model_len = 64
     cfg.kernel_config.moe_backend = moe_backend
 
     def run_layers(hidden, positions, ids, pre, post, mix, residual):

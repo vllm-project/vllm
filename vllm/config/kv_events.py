@@ -8,29 +8,23 @@ from vllm.config.utils import config
 
 
 @config
-class KVEventsConfig:
-    """Configuration for KV event publishing."""
+class PublisherConfig:
+    """Transport settings shared by all cache event publishers.
 
-    enable_kv_cache_events: bool = False
-    """If True, enable KV cache events for tracking block storage and removal.
-    Events can be published externally by zmq using the event publisher config.
-    """
-
-    enable_kv_event_metadata: bool = False
-    """Include logical source and known resource sharing scope in KV events.
-    Requires `enable_kv_cache_events`. When False, both fields are omitted.
+    Subclasses add the switch that gates the events they publish and override
+    `enable_events`, which resolves `publisher` to "null" when they are off.
     """
 
     publisher: Literal["null", "zmq"] = None  # type: ignore[assignment]
-    """The publisher to use for publishing kv events. Can be "null", "zmq".
+    """The publisher to use for publishing cache events. Can be "null", "zmq".
     """
 
     endpoint: str = "tcp://*:5557"
-    """The zmq endpoint to use for publishing kv events.
+    """The zmq endpoint to use for publishing cache events.
     """
 
     replay_endpoint: str | None = None
-    """The zmq endpoint to use for replaying kv events.
+    """The zmq endpoint to use for replaying cache events.
     """
 
     buffer_steps: int = 10_000
@@ -54,6 +48,36 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    @property
+    def enable_events(self) -> bool:
+        """Whether the events gated by this config are enabled."""
+        return True
+
     def __post_init__(self):
         if self.publisher is None:
-            self.publisher = "zmq" if self.enable_kv_cache_events else "null"
+            self.publisher = "zmq" if self.enable_events else "null"
+
+
+@config
+class _KVEventsToggle:
+    """The original first positional argument of `KVEventsConfig`."""
+
+    enable_kv_cache_events: bool = False
+    """If True, enable KV cache events for tracking block storage and removal.
+    Events can be published externally by zmq using the event publisher config.
+    """
+
+
+@config
+class KVEventsConfig(PublisherConfig, _KVEventsToggle):
+    """Configuration for KV event publishing."""
+
+    enable_kv_event_metadata: bool = False
+    """Include logical source and known resource sharing scope in KV events.
+    Requires `enable_kv_cache_events`. When False, both fields are omitted.
+    """
+
+    # Dataclasses collect base fields in reverse MRO, so the toggle stays first.
+    @property
+    def enable_events(self) -> bool:
+        return self.enable_kv_cache_events

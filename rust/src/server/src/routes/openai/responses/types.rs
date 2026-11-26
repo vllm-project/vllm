@@ -20,7 +20,7 @@ use llm_multimodal::ImageDetail;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use validator::Validate;
+use vllm_chat::AllowedToolsMode;
 
 /// Responses API `input` field: either a plain string (single user message)
 /// or a list of input/output items.
@@ -271,9 +271,8 @@ pub enum ResponseToolChoice {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseToolChoiceObject {
     Function(FunctionChoice),
-    /// TODO: support `allowed_tools` tool choices.
     AllowedTools {
-        mode: String,
+        mode: AllowedToolsMode,
         tools: Vec<ToolReference>,
     },
 }
@@ -292,7 +291,7 @@ pub enum ResponseToolChoiceObject {
 /// are accepted for Codex/Python compatibility, without generating encrypted
 /// state, summaries, or applying a verbosity policy. Other `include` values
 /// that this frontend cannot produce are rejected.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ResponsesRequest {
     /// Fields echoed back unchanged; see [`ResponseEchoFields`].
     #[serde(flatten)]
@@ -370,8 +369,7 @@ pub struct ResponsesRequest {
     pub stop: Option<StringOrArray>,
     #[serde(default)]
     pub ignore_eos: bool,
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    pub skip_special_tokens: Option<bool>,
     /// Accepted as a no-op, as on chat completions.
     #[allow(dead_code)]
     #[serde(default = "default_true")]
@@ -384,6 +382,10 @@ pub struct ResponsesRequest {
     pub logit_bias: Option<HashMap<String, f32>>,
     #[serde(default)]
     pub stop_token_ids: Option<Vec<u32>>,
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited, as on chat completions.
+    #[serde(default)]
+    pub thinking_token_budget: Option<i64>,
 
     // Extra request parameters shared with the other vLLM endpoints.
     /// Caller-supplied request ID used to derive the response and engine IDs.
@@ -394,7 +396,6 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub priority: Option<i32>,
     #[serde(default)]
-    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
     #[serde(default)]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
@@ -415,13 +416,12 @@ pub struct ResponsesRequest {
     pub vllm_xargs: Option<HashMap<String, Value>>,
 }
 
-impl crate::routes::openai::utils::types::Normalizable for ResponsesRequest {}
-
 /// One typed input/output item of [`ResponsesInput::Items`].
 ///
 /// Variants cover the supported Responses API history surface: messages,
-/// function calls, function call outputs, and reasoning items. Other item
-/// types (`custom_tool_call`, `mcp_call`, ...) fail deserialization;
+/// function calls, function call outputs, and reasoning items, plus the
+/// `additional_tools` items that declare tools. Other item types
+/// (`custom_tool_call`, `mcp_call`, ...) fail deserialization;
 /// `item_reference` is kept to report that it requires the response store.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", remote = "Self")]
@@ -432,6 +432,10 @@ pub enum ResponseInputItem {
     FunctionCall(ResponseInputFunctionCall),
     FunctionCallOutput(ResponseInputFunctionCallOutput),
     Reasoning(ResponseInputReasoning),
+    /// Tools declared in the input instead of in `tools`, as Codex does.
+    /// They are moved into the request tools before the input is converted;
+    /// see `tools.rs`.
+    AdditionalTools(ResponseInputAdditionalTools),
     ItemReference {},
 }
 
@@ -542,6 +546,13 @@ pub struct ResponseInputFunctionCallOutput {
     pub id: Option<String>,
     #[serde(default)]
     pub status: Option<ResponseItemStatus>,
+}
+
+/// One `additional_tools` input item. Its tools are deserialized like the
+/// top-level `tools`; its `role` (always `developer`) is not read.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ResponseInputAdditionalTools {
+    pub tools: Vec<ResponsesTool>,
 }
 
 /// One `reasoning` input item (assistant reasoning in history).
@@ -799,6 +810,7 @@ impl serde::Serialize for ResponseObject {
 mod tests {
     use expect_test::expect;
     use serde_json::json;
+    use thiserror_ext::AsReport as _;
 
     use super::*;
 
@@ -830,17 +842,6 @@ mod tests {
 
             assert_eq!(request.top_k, expected);
         }
-    }
-
-    #[test]
-    fn request_rejects_empty_cache_salt() {
-        let request: ResponsesRequest = serde_json::from_value(json!({
-            "input": "hello",
-            "cache_salt": "",
-        }))
-        .expect("deserialize request");
-
-        assert!(request.validate().is_err());
     }
 
     #[test]
@@ -883,6 +884,28 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("unknown variant `custom_tool_call`"));
+    }
+
+    #[test]
+    fn additional_tools_items_are_validated_like_top_level_tools() {
+        for (tools, expected) in [
+            (json!("oops"), "expected a sequence"),
+            (
+                json!([{"type": "custom", "name": "exec"}]),
+                "unknown variant `custom`",
+            ),
+        ] {
+            let error = serde_json::from_value::<ResponsesRequest>(json!({
+                "input": [
+                    {"type": "additional_tools", "role": "developer", "tools": tools},
+                    {"role": "user", "content": "hi"},
+                ],
+            }))
+            .unwrap_err();
+
+            let report = error.to_report_string();
+            assert!(report.contains(expected), "{report}");
+        }
     }
 
     #[test]

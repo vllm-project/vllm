@@ -22,6 +22,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `KimiK25ForConditionalGeneration` | `Kimi-K2.5, Kimi-K2.6` | ✅︎ | ❌︎ | ❌︎ |
 | `KimiK3ForConditionalGeneration` | `Kimi-K3` | ✅︎ | ❌︎ | ❌︎ |
+| `Lfm3VlForConditionalGeneration` | `LFM3-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
 | `Mistral3ForConditionalGeneration` | `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
 | `PixtralForConditionalGeneration` | `Pixtral`, Mistral-format `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
@@ -33,6 +34,17 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ✅︎ |
 | `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
 | `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
+
+Audio encoders use the same manager and protocol:
+
+| Architecture | Models | Graph scope | Attention backends |
+| ------------ | ------ | ----------- | ------------------ |
+| `Qwen3ASRForConditionalGeneration` | `Qwen3-ASR` | Transformer layers and output projection | `FLASH_ATTN`, `TRITON_ATTN` |
+| `Qwen3OmniMoeThinkerForConditionalGeneration` | `Qwen3-Omni` (audio tower) | Transformer layers and output projection | `FLASH_ATTN`, `TRITON_ATTN` |
+
+For these audio towers the conv frontend runs eagerly before each replay; token budgets count encoder output tokens, and the smallest budget is one attention window (104 tokens, 8 s of audio). Other attention backends keep the audio tower eager. `encoder_cudagraph_max_vision_items_per_batch` also caps the number of audio clips per graph.
+
+Audio frontend optimizations also apply when encoder graphs are disabled.
 
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
@@ -77,6 +89,8 @@ The dense default table is affordable for every model because capture buffers ar
 
 Because later captures overwrite a shared buffer, its capture-time contents may belong to another budget. Replay must therefore provide every shared buffer (the manager raises if one is missing), and a custom `padding_logics` entry must write its whole destination buffer.
 
+Qwen3-Omni/ASR audio enable `EncoderCudaGraphConfig.eager_fallback_fast_path` (default `False`) to skip sorting and input concatenation on whole-batch eager fallback. Local outputs are compacted only when they retain excess storage; DP gathering keeps its existing shared-output layout.
+
 Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured encoder path. A path can provide its own minimum token budget and opt into zero-token batches; the manager generates and stores a separate budget graph set for every configured path.
 
 ### Multi-Path Graph Capture
@@ -110,7 +124,7 @@ When a batch of images arrives, the manager replays the **smallest** budget that
 For each graph replay:
 
 1. Call `prepare_encoder_cudagraph_replay_buffers()` to compute buffer values (including `pixel_values` and precomputed metadata) from actual batch inputs.
-2. Zero the pre-allocated `input_buffers`, then slice-copy the replay values into them.
+2. Slice-copy the replay values into the pre-allocated `input_buffers`. By default the tail is zero-filled, except for cumulative offsets (`cu_seqlens`, `cu_window_seqlens`), which repeat their last value so padded sequences are empty. Models can override this per buffer with `EncoderCudaGraphConfig.padding_logics`.
 3. Replay the CUDA Graph.
 4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays of every budget on the path).
 
@@ -132,7 +146,7 @@ Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph
 Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph] protocol. This protocol encapsulates all model-specific logic so that the manager remains model-agnostic. The protocol defines the following methods:
 
 * `get_encoder_cudagraph_config()` — returns static configuration (supported modalities, buffer keys, output hidden size, padding logics, max frames per video).
-* `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets.
+* `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets. The default is `(64, min(max_num_batched_tokens, max_model_len))`.
 * `get_encoder_cudagraph_item_specs(mm_kwargs)` — returns `list[EncoderItemSpec]` describing each item with its input size, total output token count (`output_tokens`), and per-path token counts (`path_output_tokens`) for multi-path models.
 * `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during dispatch and DP sharding.
 * `prepare_encoder_cudagraph_capture_inputs(..., path="default")` — creates dummy inputs for graph capture. The `path` parameter (`"global"` or `"local"`) tells the model which path to generate dummy inputs for. Returns `EncoderCudaGraphCaptureInputs` with a single `values: dict[str, torch.Tensor]` that contains all buffers to be recorded into the graph.
@@ -144,6 +158,12 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
 
+    Models whose vision tower follows the Qwen2-VL tower interface (listed in the mixin docstring) do not implement the protocol from scratch:
+
+    1. Inherit `Qwen2VLEncoderCudaGraphMixin` from `vllm/model_executor/models/encoder_cudagraph_utils.py`.
+    2. Implement `get_encoder_cudagraph_config()`.
+    3. Override a protocol method only where the model really differs (e.g. Qwen2.5-VL's window attention at capture).
+
 ## Configuration
 
 Five fields in `CompilationConfig` control encoder CUDA Graphs:
@@ -151,7 +171,7 @@ Five fields in `CompilationConfig` control encoder CUDA Graphs:
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture on the subdivided grid (see above). User-provided values override auto-inference.
 * `encoder_cudagraph_max_token_budget` (`int | None`, default `5120`) — largest auto-generated token budget. Must be positive or `None`. A batch with more tokens runs eagerly. `None` captures up to the model's largest budget. Ignored when `encoder_cudagraph_token_budgets` is set.
-* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`. A batch with more items runs eagerly in one forward.
+* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images, videos, or audio clips per captured batch. If 0, inferred as `max_budget // min_budget` from the model-provided range, capped by the smallest captured token budget. Larger batches run eagerly.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
 Multi-path mode is configured at the model level through `EncoderCudaGraphConfig.paths`. Each `EncoderCudaGraphPathConfig` can set a path-specific minimum budget and whether zero-token batches are allowed. The manager automatically generates separate budget lists and uses the same execution loop for single- and multi-path models.

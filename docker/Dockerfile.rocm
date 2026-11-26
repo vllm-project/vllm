@@ -8,7 +8,7 @@ FROM stack AS dev
 # Build tools plus the runtime system packages (RDMA userspace, FFmpeg for torchcodec).
 # mold is installed but not the default linker: some packages JIT-compile at runtime
 # with flags mold does not support. Build stages opt in via LDFLAGS="-fuse-ld=mold".
-RUN apt-get update -q -y -o Acquire::Retries=3 && apt-get install -q -y -o Acquire::Retries=3 \
+RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl libnuma-dev ccache mold \
     librdmacm1 libibverbs1 ibverbs-providers ibverbs-utils util-linux unzip libsodium23 \
@@ -139,8 +139,8 @@ RUN cd /opt/nixl && \
 # Fetch and verify pinned LMCache source.
 FROM dev AS lmcache_source
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
-ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
-ARG LMCACHE_VERSION="0.5.3"
+ARG LMCACHE_REF="1181bea5c65a6f477e3680acd14ffac988b13dc3"
+ARG LMCACHE_VERSION="0.5.7.post1"
 
 # Remove NVIDIA-only dependencies and align NumPy and OpenTelemetry with the runtime.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
@@ -149,7 +149,7 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
     && test "$(git -C /app/lmcache rev-parse HEAD)" = "${LMCACHE_REF}" \
     && test "$(grep -Ec '^(cufile-python|nvtx)([<=>[:space:]]|$)' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
-    && test "$(grep -Fxc 'numpy<=2.2.6' \
+    && test "$(grep -Fxc 'numpy<=2.2.6; python_version < "3.14"' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
     && test "$(grep -Fxc 'opentelemetry-api >= 1.20.0, <= 1.40.0' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
@@ -157,7 +157,7 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
-        -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
+        -e 's/^numpy<=2\.2\.6;/numpy<=2.3.5;/' \
         -e '/^opentelemetry-api /s/<= 1\.40\.0$/<= 1.45.2/' \
         -e '/^opentelemetry-exporter-prometheus /s/<= 0\.61b0$/<= 0.66b2/' \
         /app/lmcache/requirements/common.txt \
@@ -169,7 +169,7 @@ COPY --from=lmcache_source \
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -r /tmp/lmcache-build-requirements.txt
 
-ARG LMCACHE_VERSION="0.5.3"
+ARG LMCACHE_VERSION="0.5.7.post1"
 ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
 
 COPY --from=lmcache_source /app/lmcache /app/lmcache
@@ -192,10 +192,10 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
 RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
     set -eu; \
     python3 -m zipfile -e /app/install/*.whl /tmp/lmcache-wheel; \
-    c_ops="$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so')"; \
-    test "$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so' | wc -l)" -eq 1; \
+    cuda_ops="$(find /tmp/lmcache-wheel -type f -name 'cuda_ops*.so')"; \
+    test "$(find /tmp/lmcache-wheel -type f -name 'cuda_ops*.so' | wc -l)" -eq 1; \
     expected="$(printf '%s' "${LMCACHE_ROCM_ARCH}" | tr ';' '\n' | sort -u)"; \
-    actual="$(llvm-objdump --offloading "${c_ops}" \
+    actual="$(llvm-objdump --offloading "${cuda_ops}" \
         | grep -oE 'gfx[0-9a-z]+' | sort -u)"; \
     if [ "${actual}" != "${expected}" ]; then \
         printf 'LMCache code objects mismatch\nexpected:\n%s\nactual:\n%s\n' \
@@ -324,7 +324,7 @@ RUN --mount=type=bind,source=requirements/common.txt,target=/r/common.txt \
     --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -c /etc/rocm-constraints.txt -c /r/test.txt -r /r/rocm.txt \
         /nixl/*.whl /lmcache/*.whl quart==0.22.0 msgpack aiohttp pyzmq \
-    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
+    && python3 -c "import lmcache, lmcache.cuda_ops; print('lmcache', lmcache.__version__)"
 # Rebuild fastsafetensors from source so its C++ extension is compiled with
 # USE_ROCM and can detect libamdhip64.so at runtime.
 RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/r/test.txt \
@@ -396,7 +396,7 @@ ENV HF_XET_HIGH_PERFORMANCE=1
 
 # The pin lives below the marker: a bump rebuilds csrc, not the runtime.
 FROM dev AS triton-kernels
-ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
+ARG ROCM_TRITON_KERNELS_COMMIT=3ef5021860f07f76820cce2e4c8e92d5e834bf39
 ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
@@ -407,6 +407,17 @@ RUN mkdir -p /opt/rocm-triton-kernels \
     && test -f /opt/rocm-triton-kernels/__init__.py \
     && rm /tmp/rocm-triton.tar.gz
 ENV TRITON_KERNELS_SRC_DIR=/opt/rocm-triton-kernels ROCM_TRITON_KERNELS_COMMIT=${ROCM_TRITON_KERNELS_COMMIT}
+
+# torchao for the Quantization steps, which put /opt/quantization-deps on PYTHONPATH: off the default
+# path because torchao queries the GPU at import, which breaks tests that fork. CI only, below the
+# marker so a bump does not change the runtime key. py3-none-any: the abi3 wheel's CUDA extensions
+# cannot load on ROCm.
+FROM dev AS build_torchao
+RUN --mount=type=bind,source=requirements/test/quantization_deps_rocm.txt,target=/r.txt \
+    --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    uv pip install --python python3 --python-platform x86_64-manylinux_2_17 --require-hashes --no-deps \
+        --target /opt/quantization-deps -r /r.txt \
+    && ! find /opt/quantization-deps -name '*.so' | grep .
 
 # The version every per-commit artifact carries. build.sh builds from an export of HEAD (no .git)
 # and writes .git_archival.txt from the host's `git describe`; without it, e.g. locally, .git and a
@@ -610,6 +621,21 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
     fi; \
     if [ -n "$spec" ]; then \
         pip install --no-cache-dir --pre --no-deps --force-reinstall "$spec" || exit 1; \
+        # --no-deps keeps the stack's torch and triton, but also any requirement the wheel moved past
+        # the stack's AITER release (flydsl): AITER refuses to import with an older one. Install what
+        # the wheel requires, within the stack's constraints, and fail if any is still unmet. vLLM's
+        # own FlyDSL kernels run on what this moves, so list it in the log.
+        python3 -c 'import importlib.metadata as m; print("\n".join(m.requires("amd-aiter") or []))' \
+            > /tmp/aiter-requires.txt; \
+        pip list --format=freeze > /tmp/stack-packages.txt; \
+        pip install --no-cache-dir -c /etc/rocm-constraints.txt -r /tmp/aiter-requires.txt || exit 1; \
+        changed="$(pip list --format=freeze | diff /tmp/stack-packages.txt - | grep '^[<>]' || true)"; \
+        if [ -n "$changed" ]; then \
+            echo "AITER nightly requirements changed these stack packages (< stack, > now):"; echo "$changed"; \
+        fi; \
+        if pip check | grep -iE '^amd[-_]aiter '; then \
+            echo "AITER nightly has requirements the stack's constraints do not allow" >&2; exit 1; \
+        fi; \
         # Locate aiter without importing it: import needs a GPU, which a build has not. A wheel built
         # against a newer glibc or libstdc++ than this image installs fine but fails every test that
         # loads its modules; fail here instead.
@@ -621,18 +647,24 @@ FROM test-base AS test
 # Native fault reporter for AMD CI pytest runs (.buildkite/scripts/hardware_ci/amd_ci_fast_exit.py).
 RUN --mount=type=bind,source=.buildkite/scripts/hardware_ci/amd_ci_fault_trap.c,target=/tmp/trap.c \
     cc -O2 -shared -fPIC -o /usr/local/lib/libamd_ci_fault_trap.so /tmp/trap.c
+COPY --link --from=build_torchao /opt/quantization-deps /opt/quantization-deps
 COPY --link --from=native /out /
 COPY --link --from=install /out /
 COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
 # Source under src/ so it does not shadow the installed package in tests.
 COPY --link vllm /vllm-workspace/src/vllm
 WORKDIR /vllm-workspace
+# Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
+ENV VLLM_GPU_SYNC_CHECK=error
 # run-amd-test.sh's pytest plugin, in site-packages: commands that set PYTHONPATH still load it.
 RUN cp .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py \
     "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/"
 
 FROM test AS test-smoke
-RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)"
+# torchao must stay off the default path (see build_torchao).
+RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)" \
+    && python3 -c "import importlib.util as u; assert u.find_spec('torchao') is None, 'torchao is on the default path'" \
+    && PYTHONPATH=/opt/quantization-deps python3 -c "import importlib.util as u; assert u.find_spec('torchao')"
 
 FROM scratch AS wheels
 COPY --link --from=stack-wheels / /

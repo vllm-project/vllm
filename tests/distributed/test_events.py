@@ -9,6 +9,7 @@ import pytest
 from vllm.distributed.kv_events import (
     EventBatch,
     EventPublisherFactory,
+    KVEventBatch,
     NullEventPublisher,
     ZmqEventPublisher,
 )
@@ -374,6 +375,144 @@ def test_event_publisher_factory(random_port):
     publisher = EventPublisherFactory.create(config, DP_RANK)
     assert isinstance(publisher, ZmqEventPublisher)
     publisher.shutdown()
+
+
+def test_ec_event_publisher_factory(random_port):
+    """EC events use the same publisher plumbing as KV events."""
+    from vllm.config.ec_events import ECEventsConfig
+
+    # Disabled by default, even when a publisher is requested.
+    config = ECEventsConfig(publisher="zmq")
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    assert isinstance(publisher, NullEventPublisher)
+    publisher.shutdown()
+
+    # A default config also resolves to the null publisher.
+    publisher = EventPublisherFactory.create(ECEventsConfig(), DP_RANK)
+    assert isinstance(publisher, NullEventPublisher)
+    publisher.shutdown()
+
+    config = ECEventsConfig(
+        enable_ec_cache_events=True,
+        endpoint=f"tcp://*:{random_port}",
+        replay_endpoint=f"tcp://*:{random_port + 100}",
+    )
+    publisher = EventPublisherFactory.create(config, DP_RANK + 1)
+    assert isinstance(publisher, ZmqEventPublisher)
+    resolved_config = publisher.get_publisher_config()
+    assert isinstance(resolved_config, ECEventsConfig)
+    assert resolved_config.endpoint == f"tcp://*:{random_port + 1}"
+    assert resolved_config.replay_endpoint == f"tcp://*:{random_port + 101}"
+    assert config.endpoint == f"tcp://*:{random_port}"
+    publisher.shutdown()
+
+
+def test_ec_event_batch_roundtrip():
+    """EC events survive msgpack encode/decode like KV events do."""
+    from vllm.distributed.ec_transfer.ec_events import (
+        AllECCleared,
+        ECEventBatch,
+        ECRemoved,
+        ECStored,
+    )
+
+    events = [
+        ECStored(mm_hashes=["mm-a", "mm-b"], medium="GPU"),
+        ECRemoved(mm_hashes=["mm-c"], medium="CPU"),
+        AllECCleared(),
+    ]
+    batch = ECEventBatch(ts=123.0, events=events)
+
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(batch), type=ECEventBatch)
+
+    assert decoded.ts == 123.0
+    assert decoded.events == events
+
+
+def test_default_endpoints_do_not_collide_across_dp_ranks():
+    """KV ranks shift 5557/5558 up by rank; EC must stay outside that block."""
+    from vllm.config.ec_events import ECEventsConfig
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
+    kv_config = KVEventsConfig(
+        enable_kv_cache_events=True, replay_endpoint="tcp://*:5558"
+    )
+    ec_config = ECEventsConfig(enable_ec_cache_events=True)
+
+    assert kv_config.publisher == ec_config.publisher == "zmq"
+
+    def bound_ports(config, ranks):
+        ports = set()
+        for rank in ranks:
+            for endpoint in (config.endpoint, config.replay_endpoint):
+                offset = ZmqEventPublisher.offset_endpoint_port(endpoint, rank)
+                if offset is not None:
+                    ports.add(int(offset.rsplit(":", 1)[1]))
+        return ports
+
+    kv_ports = bound_ports(kv_config, range(1000))
+    ec_ports = bound_ports(ec_config, range(1000))
+    assert kv_ports.isdisjoint(ec_ports)
+
+
+def test_kv_and_ec_event_streams_run_together_across_dp_ranks(random_port):
+    """Every DP rank of both streams binds its own port and decodes its own
+    batch type, with no cross-talk between the two streams."""
+    from vllm.config.ec_events import ECEventsConfig
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed.ec_transfer.ec_events import AllECCleared, ECEventBatch
+
+    from .conftest import MockSubscriber
+
+    ranks = list(range(3))
+    # Mirror the defaults: EC sits one 1000-port block above KV.
+    kv_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        endpoint=f"tcp://*:{random_port}",
+        replay_endpoint=None,
+        topic="kv",
+    )
+    ec_config = ECEventsConfig(
+        enable_ec_cache_events=True,
+        endpoint=f"tcp://*:{random_port + 1000}",
+        replay_endpoint=None,
+        topic="ec",
+    )
+    kv_pubs = [EventPublisherFactory.create(kv_config, rank) for rank in ranks]
+    ec_pubs = [EventPublisherFactory.create(ec_config, rank) for rank in ranks]
+    kv_sub = MockSubscriber(
+        [f"tcp://127.0.0.1:{random_port + rank}" for rank in ranks], None, "kv"
+    )
+    ec_sub = MockSubscriber(
+        [f"tcp://127.0.0.1:{random_port + 1000 + rank}" for rank in ranks],
+        None,
+        "ec",
+        decode_type=ECEventBatch,
+    )
+    try:
+        time.sleep(0.1)
+        kv_ranks: set[int] = set()
+        ec_ranks: set[int] = set()
+        deadline = time.time() + 10
+        while (
+            kv_ranks != set(ranks) or ec_ranks != set(ranks)
+        ) and time.time() < deadline:
+            for rank, kv_pub, ec_pub in zip(ranks, kv_pubs, ec_pubs):
+                kv_pub.publish(KVEventBatch(ts=float(rank), events=[]))
+                ec_pub.publish(ECEventBatch(ts=float(rank), events=[AllECCleared()]))
+            while (result := kv_sub.receive_one(timeout=100)) is not None:
+                kv_ranks.add(result[1].data_parallel_rank)
+            while (result := ec_sub.receive_one(timeout=100)) is not None:
+                ec_ranks.add(result[1].data_parallel_rank)
+
+        assert kv_ranks == set(ranks)
+        assert ec_ranks == set(ranks)
+    finally:
+        for pub in kv_pubs + ec_pubs:
+            pub.shutdown()
+        kv_sub.close()
+        ec_sub.close()
 
 
 @pytest.mark.parametrize(

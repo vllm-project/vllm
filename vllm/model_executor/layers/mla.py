@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class MLAModules:
     """Modules used in MLA."""
 

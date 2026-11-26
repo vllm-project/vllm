@@ -25,6 +25,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
@@ -311,7 +312,7 @@ def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
 def resolve_kv_cache_layout(
     vllm_config: VllmConfig,
     supported_layouts: list[list[str]],
-    kv_cache_specs: Iterable[KVCacheSpec] | None = None,
+    layer_configs: Iterable[KVCacheLayerConfig] | None = None,
 ) -> KVCacheLayout:
     """Resolve one KV cache layout for the whole model.
 
@@ -351,9 +352,8 @@ def resolve_kv_cache_layout(
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
     # Specs without per-layer views lay out their own raw backing tensor.
-    kv_cache_specs = tuple(
-        spec for spec in kv_cache_specs or () if spec.has_layer_views
-    )
+    layer_configs = tuple(lc for lc in layer_configs or () if lc.spec.has_layer_views)
+    kv_cache_specs = [lc.spec for lc in layer_configs]
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
         for spec in kv_cache_specs
@@ -369,9 +369,11 @@ def resolve_kv_cache_layout(
     # Self-addressed per-request rings (e.g. the kpool tail) are replicated
     # state like Mamba and don't need a separate draft group.
     dcp_sharding = {
-        spec.dcp_sharded
-        for spec in kv_cache_specs
-        if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
+        lc.spec.dcp_sharded
+        for lc in layer_configs
+        if isinstance(lc.spec, AttentionSpec)
+        and lc.manager_cls.uses_slot_mapping
+        and lc.spec.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
     is_hybrid = any(isinstance(spec, MambaSpec) for spec in kv_cache_specs)
@@ -428,7 +430,7 @@ def resolve_kv_cache_layout(
     return layout
 
 
-@dataclass
+@dataclass(slots=True)
 class PerLayerParameters:
     """Currently, FlashInfer backend only support models in which all layers share
     the same values for the following hyperparameters. Should not be used for
@@ -858,8 +860,12 @@ def split_decodes_prefills_and_extends(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
 ) -> tuple[int, int, int, int, int, int]:
-    """Assuming a reordered batch, finds the boundary between prefill and decode
-    requests.
+    """Splits a batch whose decodes lead into decodes, extends and prefills.
+
+    Decodes are the leading run under decode_threshold, prefills the trailing
+    run with no computed context, extends everything in between. MRV2 does not
+    order the latter two, so extends may contain context-less requests; the
+    extend path handles them.
 
     Args:
         common_attn_metadata: CommonAttentionMetadata object containing the
@@ -883,39 +889,32 @@ def split_decodes_prefills_and_extends(
     if max_query_len <= decode_threshold:
         return num_reqs, 0, 0, num_tokens, 0, 0
 
-    # Upper bound is exact for prefill rows; decode rows still satisfy
-    # seq_len > query_len under the optimistic bound, so `seq_lens ==
-    # query_lens` identifies prefills correctly either way.
+    # The bound only ever overstates, so seq_len > query_len still means context.
     assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
     seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
 
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    is_prefill_or_extend = query_lens > decode_threshold
-    is_prefill = (seq_lens == query_lens) & is_prefill_or_extend
-    first_extend = is_prefill_or_extend.int().argmax(dim=-1).item()
-    first_prefill = is_prefill.int().argmax(dim=-1).item()
-    num_decodes = first_extend
-    num_decode_tokens = query_start_loc[first_extend].item()
-    if not torch.any(is_prefill_or_extend):
-        return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
+    query_lens = query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
+    is_decode = query_lens <= decode_threshold
+    # max_query_len can overstate, so argmin below would report 0 decodes here.
+    if bool(is_decode.all()):
+        return num_reqs, 0, 0, num_tokens, 0, 0
 
-    num_prefills_or_extends = num_reqs - num_decodes
-    num_prefill_or_extend_tokens = num_tokens - num_decode_tokens
-    if not torch.any(is_prefill):
-        return (
-            num_decodes,
-            num_prefills_or_extends,
-            0,
-            num_decode_tokens,
-            num_prefill_or_extend_tokens,
-            0,
-        )
+    # Only the leading run: MRV1 places short new prompts at the end.
+    num_decodes = int(is_decode.int().argmin().item())
+
+    has_context = seq_lens[num_decodes:num_reqs] > query_lens[num_decodes:]
+    if bool(has_context.any()):
+        last_with_context = len(has_context) - 1
+        last_with_context -= int(has_context.flip(0).int().argmax().item())
+        first_prefill = num_decodes + last_with_context + 1
+    else:
+        first_prefill = num_decodes
 
     num_extends = first_prefill - num_decodes
     num_prefills = num_reqs - first_prefill
-
-    num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
-    num_extend_tokens = num_prefill_or_extend_tokens - num_prefill_tokens
+    num_decode_tokens = int(query_start_loc[num_decodes].item())
+    num_prefill_tokens = num_tokens - int(query_start_loc[first_prefill].item())
+    num_extend_tokens = num_tokens - num_decode_tokens - num_prefill_tokens
     return (
         num_decodes,
         num_extends,
@@ -1223,6 +1222,20 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
+@triton.jit
+def dcp_local_to_global_index(local, dcp_rank, dcp_size, cp_kv_cache_interleave_size):
+    """Global position of a KV slot held locally by `dcp_rank`.
+
+    Describes the same interleaving as `get_dcp_local_seq_lens` and must
+    stay consistent with it.
+    """
+    return (
+        local // cp_kv_cache_interleave_size * (dcp_size * cp_kv_cache_interleave_size)
+        + dcp_rank * cp_kv_cache_interleave_size
+        + local % cp_kv_cache_interleave_size
+    )
+
+
 @triton.jit(
     do_not_specialize_on_alignment=["out_ptr", "block_table_ptr", "seq_lens_ptr"]
 )
@@ -1290,23 +1303,38 @@ def _mamba_align_block_table_kernel(
     tl.store(out_ptr + req_idx * n_out + offs, vals, mask=mask)
 
 
+def get_attn_type_from_layers(vllm_config: VllmConfig, layer_names: list[str]) -> str:
+    """The `AttentionType` shared by the given attention layers."""
+    from vllm.model_executor.layers.attention import Attention
+
+    attn_types = {
+        layer.attn_type
+        for layer in get_layers_from_vllm_config(
+            vllm_config, Attention, layer_names
+        ).values()
+    }
+    assert len(attn_types) == 1, f"Mixed attention types in a group: {attn_types}"
+    return attn_types.pop()
+
+
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     kv_cache_spec: KVCacheSpec,
-    mamba_cache_mode: str,
+    enable_prefix_caching: bool,
+    num_speculative_blocks: int,
 ) -> torch.Tensor:
     """Get the block table tensor for mamba kernels from the input
-    common_attn_metadata.block_table_tensor given different mamba cache modes.
+    common_attn_metadata.block_table_tensor.
 
-    - "none":  input  (#requests, 1 + num_speculative_blocks);
-               output (#requests, 1 + num_speculative_blocks).
+    - Without prefix caching: input and output (#requests,
+      1 + num_speculative_blocks).
 
-    - "align": input  (#requests, cdiv(max_model_len, block_size));
-               output (#requests, 1 + num_speculative_blocks), which are the last
-               1 + num_speculative_blocks of each request.
+    - With prefix caching: input (#requests, cdiv(max_model_len, block_size));
+      output (#requests, 1 + num_speculative_blocks), which are the last
+      1 + num_speculative_blocks of each request.
     """
-    if mamba_cache_mode == "none":
+    if not enable_prefix_caching:
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
@@ -1316,7 +1344,7 @@ def mamba_get_block_table_tensor(
         # one-request decode. One Triton kernel does the same work in one
         # launch. Zero-length requests in a CUDA graph still clamp to row 0.
         num_reqs = block_table.shape[0]
-        n_out = 1 + kv_cache_spec.num_speculative_blocks
+        n_out = 1 + num_speculative_blocks
         # The expression this replaced took its row count from `seq_lens` (a
         # `torch.gather` whose index tensor is built from it), so a mismatch
         # raised and a cross-device pair raised. Taking `num_reqs` from

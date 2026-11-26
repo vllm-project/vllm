@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 import torch
@@ -150,7 +150,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         return current_platform.is_rocm()
 
     @contextmanager
-    def _comm_region(self) -> Iterator[None]:
+    def _comm_region(self) -> Generator[None]:
         """Scope the dispatch/combine collective runs in.
 
         Without DBO the collective runs on the calling stream. Under DBO it
@@ -322,8 +322,10 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        a1_scale: torch.Tensor | None = None,
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
+        assert a1_scale is None, "naive DP/EP dispatch quantizes its own input"
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
             a1, quant_config, defer_input_quant
         )

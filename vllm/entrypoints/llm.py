@@ -33,6 +33,7 @@ from vllm.entrypoints.common.startup import log_non_default_args
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.rl.offline import RLOfflineMixin
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
@@ -110,6 +111,10 @@ class LLM(
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors. Defaults to 1.0 with the extensible KV cache
             (which sizes the cache from measured memory) and to 0.92 otherwise.
+            With the extensible KV cache (the default on CUDA and ROCm), leave
+            it unset unless the GPU is shared with other processes or
+            something else needs memory that vLLM does not measure; see the
+            "GPU Memory Utilization" section of the optimization guide.
         kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
             this is set to None and vllm can automatically infer the kv cache
             size based on gpu_memory_utilization. However, users may want to
@@ -253,9 +258,10 @@ class LLM(
                     raw_config_dict,
                     e,
                 )
-                # Consider re-raising a more specific vLLM error or ValueError
-                # to provide better context to the user.
-                raise ValueError(f"Invalid 'kv_transfer_config' provided: {e}") from e
+                raise VLLMValidationError(
+                    f"Invalid 'kv_transfer_config' provided: {e}",
+                    parameter="kv_transfer_config",
+                ) from e
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -291,12 +297,20 @@ class LLM(
             and not _distributed_executor_backend == "external_launcher"
             and not current_platform.is_tpu()
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
                 "process usage and may hang. Please use "
                 "the explicit multi-process data-parallel example at "
-                "'examples/features/data_parallel/data_parallel_offline.py'."
+                "'examples/features/data_parallel/data_parallel_offline.py'.",
+                parameter="data_parallel_size",
+                value=_dp_size,
             )
+
+        # The synchronous offline renderer never uses the renderer thread pool,
+        # so keep it at one worker unless the caller asks for more.
+        # `from_engine_args()` forwards an explicit `None`, so check the value.
+        if kwargs.get("renderer_num_workers") is None:
+            kwargs["renderer_num_workers"] = 1
 
         engine_args = EngineArgs(
             model=model,
@@ -368,7 +382,12 @@ class LLM(
         # path; the synchronous `LLM` entrypoint runs multimodal
         # preprocessing serially. Warn so the setting is not a silent
         # no-op. See vllm-project/vllm#42901.
-        if self.model_config.renderer_num_workers > 1 and self.runner_type != "pooling":
+        renderer_num_workers = self.model_config.renderer_num_workers
+        if (
+            renderer_num_workers is not None
+            and renderer_num_workers > 1
+            and self.runner_type != "pooling"
+        ):
             logger.warning_once(
                 "`renderer_num_workers=%d` was set, but the offline `LLM` "
                 "entrypoint uses the synchronous renderer path and runs "
@@ -376,7 +395,7 @@ class LLM(
                 "renderer thread pool is only consumed by the async "
                 "renderer path used by `vllm serve` / `AsyncLLM`, so this "
                 "setting has no effect here.",
-                self.model_config.renderer_num_workers,
+                renderer_num_workers,
             )
 
         PoolingOfflineMixin.__init__(self)
@@ -466,7 +485,7 @@ class LLM(
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
-            raise ValueError(
+            raise RuntimeError(
                 "LLM.generate() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
                 "generative model."
@@ -521,7 +540,7 @@ class LLM(
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
-            raise ValueError("LLM.enqueue() is only supported for generative models.")
+            raise RuntimeError("LLM.enqueue() is only supported for generative models.")
 
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
@@ -695,7 +714,7 @@ class LLM(
         model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
-            raise ValueError(
+            raise RuntimeError(
                 "LLM.chat() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
                 "generative model."
@@ -778,7 +797,7 @@ class LLM(
         model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
-            raise ValueError(
+            raise RuntimeError(
                 "LLM.enqueue_chat() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
                 "generative model."

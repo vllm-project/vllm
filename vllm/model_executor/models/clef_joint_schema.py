@@ -49,7 +49,7 @@ def segment_mean(
     return (sums / lengths[:, None]).to(values.dtype)
 
 
-@dataclass
+@dataclass(slots=True)
 class SchemaIndices:
     """Where one prompt's questions and options are, on the model's device."""
 

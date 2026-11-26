@@ -1142,7 +1142,7 @@ def hc_head_fuse_tilelang(
 class HcPrenormGemmTileLangKernel(
     VllmTileLangJitKernel["HcPrenormGemmTileLangKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1159,7 +1159,7 @@ class HcPrenormGemmTileLangKernel(
             return hc_prenorm_gemm_block_m_tilelang
         return hc_prenorm_gemm_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
@@ -1289,7 +1289,7 @@ class HcPrenormGemmTileLangKernel(
 class MhcPreBigFuseTileLangKernel(
     VllmTileLangJitKernel["MhcPreBigFuseTileLangKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1370,7 +1370,7 @@ class MhcPreBigFuseTileLangKernel(
             compile_key.hc_mult,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         hidden_size: int,
@@ -1607,7 +1607,7 @@ class MhcPreBigFuseTileLangKernel(
 
 
 class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1616,7 +1616,7 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
     def kernel() -> Any:
         return mhc_post_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:
@@ -1685,7 +1685,7 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
 class MhcFusedTileLangKernel(
     VllmTileLangJitKernel["MhcFusedTileLangKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1697,7 +1697,7 @@ class MhcFusedTileLangKernel(
     def kernel() -> Any:
         return mhc_fused_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
@@ -1808,7 +1808,7 @@ class MhcFusedTileLangKernel(
 class HcHeadFusedTileLangKernel(
     VllmTileLangJitKernel["HcHeadFusedTileLangKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         hc_mult: int
@@ -1819,7 +1819,7 @@ class HcHeadFusedTileLangKernel(
     def kernel() -> Any:
         return hc_head_fuse_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         hidden_size: int,

@@ -20,7 +20,7 @@ from ..base import (
 from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class FP8BlockParams(FP8Params):
     weight_scale_inv: torch.Tensor | None
     weight_scale: torch.Tensor | None

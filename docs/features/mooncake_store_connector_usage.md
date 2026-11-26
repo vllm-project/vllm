@@ -257,8 +257,8 @@ Lookup reports a reusable prefix only when every required cache group is
 present. For each Attention page, this includes every Store chunk covering its
 reusable tokens, across all Store shards.
 
-Attention groups are planned from their per-layer cache specs, including specs
-wrapped by `UniformTypeKVCacheSpecs`. The Store TP and global head-slot count
+Attention groups are planned from their per-layer cache specs, including groups
+that pack layers with different layouts. The Store TP and global head-slot count
 must divide one another; MQA and replicated GQA use the smaller head-slot count
 as the physical Store shard count. `MambaSpec` state segments map in complete
 state units; a replicated local unit can serve multiple Store shards. All
@@ -323,6 +323,10 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
 
+To free the pool's host memory while the engine sleeps, stop the external
+`mooncake_client`; see
+[Sleep Mode](sleep_mode.md#free-a-kv-connectors-host-memory).
+
 ### Tenant Isolation
 
 Set `tenant_id` in the Mooncake JSON config when different vLLM deployments should use separate Mooncake tenant namespaces:
@@ -355,6 +359,24 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 | `VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO` | Fraction of the owner's DirectIO staging buffer that the requester will fill in a single `batch_get_into_multi_buffers` call. Lower → more conservative pre-split, more round trips. | 0.9 |
 
 ## KV Transfer Config
+
+### Per-request offload limit
+
+Set `kv_transfer_params.max_offload_tokens` to the integer `0` to disable all
+Mooncake writes for that request, including prefill, decode, and finish-time
+checkpoint saves. Store lookups and loads remain enabled.
+
+```json
+{
+  "kv_transfer_params": {"max_offload_tokens": 0}
+}
+```
+
+Positive integers cap writes at that token offset. For example,
+`max_offload_tokens=100` stores only complete blocks and checkpoints within the
+first 100 tokens. Partial-tail attention proofs must also fit within the cap.
+Omit the option or set it to `null` for no cap. Invalid values, including
+booleans, negatives, strings, and floats, are ignored with a warning.
 
 ### KV Role Options
 
@@ -621,3 +643,7 @@ To use a custom shared seed, set the same `PYTHONHASHSEED` on every instance tha
 ```bash
 PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
+
+Set `kv_load_failure_policy="recompute"` in the KV transfer configuration to
+recompute failed remote loads locally. The existing `"fail"` policy terminates
+affected requests. Transfer completion is reported after synchronous SDK return.

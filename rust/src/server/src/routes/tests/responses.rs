@@ -10,7 +10,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::json;
 use serial_test::serial;
 use tower::Service as _;
-use vllm_engine_core_client::protocol::output::EngineCoreFinishReason;
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason,
+};
 
 use super::*;
 
@@ -474,14 +476,75 @@ async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn responses_thinking_token_budget_reaches_engine_core() {
+    for (budget, expected) in [(None, None), (Some(256), Some(256)), (Some(-1), None)] {
+        // Assert after the response drains, so a mismatch fails the test
+        // instead of stalling the mock engine mid-request.
+        let (budget_tx, budget_rx) = std::sync::mpsc::channel();
+        let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+            Arc::new(FakeChatBackend::new()),
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                budget_tx.send(params.thinking_token_budget).expect("send budget");
+            },
+        )
+        .await;
+
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "stream": true,
+        });
+        if let Some(budget) = budget {
+            body["thinking_token_budget"] = json!(budget);
+        }
+        let response = responses_call(&app, body).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+        assert_eq!(budget_rx.recv().expect("engine request"), expected);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn responses_per_request_metrics_follow_server_option() {
-    for (enabled, stream) in [(false, false), (true, false), (true, true)] {
-        let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+    for (enabled, stream, empty_with_tool_parser) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
             b"engine-openai-responses-metrics",
-            default_stream_output_specs(),
+            move |request_id| {
+                let text: &[u8] = if empty_with_tool_parser { b"!" } else { b"Hi!" };
+                let mut output = request_output(
+                    request_id,
+                    bytes_to_token_ids(text),
+                    Some(EngineCoreFinishReason::Stop),
+                );
+                output.events = Some(vec![EngineCoreEvent {
+                    r#type: EngineCoreEventType::Scheduled,
+                    timestamp: 1.0,
+                }]);
+                RequestBatchOutputs {
+                    outputs: vec![output],
+                    timestamp: 2.0,
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
             Arc::new(FakeChatBackend::new()),
         )
         .await;
+        let chat = chat.with_tool_call_parser(if empty_with_tool_parser {
+            ParserSelection::Explicit("hermes".to_string())
+        } else {
+            ParserSelection::None
+        });
         let app = build_router(Arc::new(
             AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
                 .with_api_server_options(ApiServerOptions {
@@ -516,6 +579,18 @@ async fn responses_per_request_metrics_follow_server_option() {
             terminal
         };
         assert_eq!(final_response["metrics"].is_object(), enabled, "{text}");
+        if enabled {
+            let metrics = &final_response["metrics"];
+            assert_eq!(metrics["time_to_first_token_ms"], 1000.0);
+            if stream && !empty_with_tool_parser {
+                assert_eq!(
+                    metrics["time_to_first_content_token_ms"],
+                    metrics["time_to_first_token_ms"]
+                );
+            } else {
+                assert!(metrics["time_to_first_content_token_ms"].is_null());
+            }
+        }
         assert!(
             lifecycle.iter().all(|event| event["response"].get("metrics").is_none()),
             "{text}"
@@ -1050,6 +1125,10 @@ async fn responses_streaming_emits_ordered_event_sequence() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
+        Some("text/event-stream; charset=utf-8")
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
@@ -1292,6 +1371,51 @@ async fn responses_namespace_tool_call_reports_function_name_and_namespace() {
         assert_eq!(call["name"], "get_app_state", "{json}");
         assert_eq!(call["namespace"], "mcp__computer_use", "{json}");
         assert_eq!(call["arguments"], "{\"app\":\"Chrome\"}", "{json}");
+        assert_eq!(json["tools"], json!([computer_use_namespace_tool()]));
+    }
+}
+
+/// Codex declares its tools through an `additional_tools` input item instead
+/// of `tools`; they reach the model and the echo like top-level tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_additional_tools_item_declares_tools() {
+    for stream in [false, true] {
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            namespaced_tool_call_output_specs(),
+        )
+        .await;
+        let request = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [computer_use_namespace_tool()]
+                },
+                {"role": "user", "content": "Inspect Google Chrome."}
+            ],
+        });
+        let json = if stream {
+            responses_stream_terminal(&app, request).await
+        } else {
+            let response = responses_call(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            serde_json::from_slice(&body).expect("decode json")
+        };
+        engine_task.await.expect("mock engine task");
+
+        let call = json["output"]
+            .as_array()
+            .expect("output items")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap_or_else(|| panic!("function call item: {json}"));
+        assert_eq!(call["name"], "get_app_state", "{json}");
+        assert_eq!(call["namespace"], "mcp__computer_use", "{json}");
+        assert_eq!(json["tool_choice"], "auto", "{json}");
         assert_eq!(json["tools"], json!([computer_use_namespace_tool()]));
     }
 }

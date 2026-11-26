@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 import os
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Literal
 
+import numpy as np
 import torch
 import zmq
 from lmcache.integration.vllm.utils import mla_enabled
@@ -22,7 +23,6 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.utils import ConstantList
 
 try:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
@@ -50,6 +50,35 @@ except ImportError:
         ParallelStrategy,
     )
 
+# LMCache 0.5.7 takes token IDs packed into bytes, in `LoadStoreOp.token_bytes`
+# and as `packed_token_ids` in the scheduler adapter, where older versions take
+# `token_ids` lists.
+_LMCACHE_PACKS_TOKEN_IDS = "token_bytes" in {f.name for f in fields(LoadStoreOp)}
+
+
+def _pack_token_ids(token_ids: Sequence[int]) -> bytes:
+    """Token IDs in LMCache's wire format: big-endian uint32, one word per
+    token, as `lmcache.v1.multiprocess.token_codec.pack_token_ids` produces.
+
+    A TokenBuffer is already native int32, so numpy reads it as one block and
+    byte-swaps it, with no Python int per token.
+    """
+    return np.asarray(token_ids).astype(">u4").tobytes()
+
+
+def _make_load_store_op(token_ids: Sequence[int], **kwargs: Any) -> LoadStoreOp:
+    if _LMCACHE_PACKS_TOKEN_IDS:
+        return LoadStoreOp(token_bytes=_pack_token_ids(token_ids), **kwargs)
+    return LoadStoreOp(token_ids=list(token_ids), **kwargs)
+
+
+def _token_ids_kwargs(token_ids: Sequence[int]) -> dict[str, Any]:
+    """Token IDs as keyword arguments for the LMCache scheduler adapter."""
+    if _LMCACHE_PACKS_TOKEN_IDS:
+        return {"packed_token_ids": _pack_token_ids(token_ids)}
+    return {"token_ids": list(token_ids)}
+
+
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -60,7 +89,6 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.kv_cache_utils import BlockHash
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -190,9 +218,9 @@ class LMCacheMPRequestTracker:
 
     request_id: str
 
-    # Read-only lists to track the token ids and block hashes
-    all_token_ids: ConstantList[int]
-    block_hashes: ConstantList["BlockHash"]
+    # The request's own TokenBuffer, which grows as it generates. Read-only
+    # here; kept unwrapped so it can be packed for LMCache as one block.
+    all_token_ids: list[int]
 
     # Block ids and hashes will be updated at update_states_after_alloc and
     # during the generation
@@ -219,8 +247,7 @@ class LMCacheMPRequestTracker:
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
-        self.all_token_ids = request.all_token_ids
-        self.block_hashes = ConstantList(request.block_hashes)
+        self.all_token_ids = request._all_token_ids
         self.allocated_block_ids = []
         self.num_stored_blocks = 0
         self.num_vllm_hit_blocks = 0
@@ -274,7 +301,6 @@ class LMCacheMPRequestTracker:
         return (
             f"LMCacheMPRequestTracker(request_id={self.request_id}, "
             f"num_tokens={len(self.all_token_ids)}, "
-            f"num_block_hashes={len(self.block_hashes)}, "
             f"num_allocated_blocks={len(self.allocated_block_ids)}, "
             f"num_stored_blocks={self.num_stored_blocks}, "
             f"vllm_hit_blocks={self.num_vllm_hit_blocks}, "
@@ -286,7 +312,7 @@ class LMCacheMPRequestTracker:
         return self.__repr__()
 
 
-@dataclass
+@dataclass(slots=True)
 class LMCacheMPRequestMetadata:
     request_id: str
     direction: Literal["STORE", "RETRIEVE"]
@@ -307,7 +333,7 @@ class LMCacheMPRequestMetadata:
             vllm_block_size: the block size used in vLLM
 
         """
-        # Store the blocks that has block hashes
+        # Store full blocks
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
@@ -333,7 +359,7 @@ class LMCacheMPRequestMetadata:
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
         min_available_blocks = min(
-            len(tracker.block_hashes),
+            len(tracker.all_token_ids) // vllm_block_size,
             len(tracker.allocated_block_ids),
             computed_blocks,
         )
@@ -346,9 +372,8 @@ class LMCacheMPRequestMetadata:
             block_ids = tracker.allocated_block_ids[start:end]
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
-            token_ids = list(tracker.all_token_ids)
-            op = LoadStoreOp(
-                token_ids=token_ids,
+            op = _make_load_store_op(
+                tracker.all_token_ids,
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
@@ -395,15 +420,14 @@ class LMCacheMPRequestMetadata:
             "The number of LMCache hit blocks should be a multiple of the "
             "number of blocks in a lmcache chunk. "
         )
-        assert len(tracker.block_hashes) >= end, (
-            "The number of block hashes should be greater than or equal to the "
+        assert len(tracker.all_token_ids) // vllm_block_size >= end, (
+            "The number of full blocks should be greater than or equal to the "
             "number of LMCache hit blocks. "
         )
         if end > start:
             block_ids = tracker.allocated_block_ids[start:end]
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
-            token_ids = list(tracker.all_token_ids)
 
             # Compute how many tokens at the start of the retrieve range
             # overlap with APC-shared blocks. The server must skip writing
@@ -413,8 +437,8 @@ class LMCacheMPRequestMetadata:
             apc_overlap_blocks = tracker.num_vllm_hit_blocks - start
             skip_first_n_tokens = apc_overlap_blocks * vllm_block_size
 
-            op = LoadStoreOp(
-                token_ids=token_ids,
+            op = _make_load_store_op(
+                tracker.all_token_ids,
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
@@ -469,6 +493,12 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     """
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
 
     @classmethod
     def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
@@ -766,7 +796,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=list(request.all_token_ids),
+            **_token_ids_kwargs(tracker.all_token_ids),
             cache_salt=tracker.cache_salt,
         )
 
@@ -866,7 +896,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 
                 if free_end > 0:
                     self.scheduler_adapter.free_lookup_locks(
-                        token_ids=list(tracker.all_token_ids),
+                        **_token_ids_kwargs(tracker.all_token_ids),
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
@@ -1111,7 +1141,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
                     new_block_ids=list(tracker.allocated_block_ids),
-                    new_token_ids=list(tracker.all_token_ids[:total_tokens]),
+                    new_token_ids=tracker.all_token_ids[:total_tokens],
                 )
             )
 
@@ -1133,7 +1163,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             num_new_blocks = len(new_block_ids)
             start_token = (total_blocks - num_new_blocks) * self.vllm_block_size
             end_token = total_blocks * self.vllm_block_size
-            new_token_ids = list(tracker.all_token_ids[start_token:end_token])
+            new_token_ids = tracker.all_token_ids[start_token:end_token]
             records.append(
                 RequestAllocationRecord(
                     req_id=request_id,
