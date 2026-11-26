@@ -256,6 +256,18 @@ impl EngineCoreLlm {
         Err(Error::PromptLogprobsUnsupported { parameter })
     }
 
+    /// Reject a `thinking_token_budget` when an engine cannot enforce it, as
+    /// Python's `InputProcessor` does without an enabled reasoning config.
+    fn check_thinking_token_budget_supported(
+        &self,
+        params: &EngineCoreSamplingParams,
+    ) -> Result<()> {
+        if params.thinking_token_budget.is_some() && !self.client.supports_thinking_token_budget() {
+            return Err(Error::ThinkingTokenBudgetUnsupported);
+        }
+        Ok(())
+    }
+
     /// Reject a request whose multimodal items can't fit the engine's encoder
     /// cache together, when the engine must encode them all in one step.
     fn check_mm_embeds_fit(&self, mm_features: Option<&MmFeatures>) -> Result<()> {
@@ -300,6 +312,7 @@ impl EngineCoreLlm {
         n: NonZeroU32,
     ) -> Result<Vec<GenerateOutputStream>> {
         self.check_prompt_logprobs_supported(&req.sampling_params)?;
+        self.check_thinking_token_budget_supported(&req.sampling_params)?;
         self.check_mm_embeds_fit(req.mm_features.as_ref())?;
 
         // Clamp the request's stream interval to the frontend-level one, like

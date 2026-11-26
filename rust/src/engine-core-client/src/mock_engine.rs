@@ -82,6 +82,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         config_hash: None,
         enable_expert_parallel: false,
         supports_prompt_logprobs: true,
+        supports_thinking_token_budget: true,
         allow_missing_mm_embeddings: false,
         max_mm_embeds_per_request: None,
     }

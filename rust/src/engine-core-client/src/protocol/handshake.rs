@@ -149,6 +149,10 @@ pub struct EngineCoreReadyResponse {
     /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
     #[serde(default = "supports_prompt_logprobs_default")]
     pub supports_prompt_logprobs: bool,
+    /// Whether the engine enforces `thinking_token_budget`. `false` without an
+    /// enabled reasoning config (`--reasoning-parser` or `--reasoning-config`).
+    #[serde(default = "supports_thinking_token_budget_default")]
+    pub supports_thinking_token_budget: bool,
     /// Whether the engine accepts placeholder metadata without embedding tensors.
     #[serde(default)]
     pub allow_missing_mm_embeddings: bool,
@@ -160,6 +164,10 @@ pub struct EngineCoreReadyResponse {
 }
 
 fn supports_prompt_logprobs_default() -> bool {
+    true
+}
+
+fn supports_thinking_token_budget_default() -> bool {
     true
 }
 

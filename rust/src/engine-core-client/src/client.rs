@@ -596,6 +596,12 @@ impl EngineCoreClient {
         (self.engines.iter()).all(|engine| engine.ready_response.supports_prompt_logprobs)
     }
 
+    /// Whether every engine enforces `thinking_token_budget`, which needs an
+    /// enabled reasoning config.
+    pub fn supports_thinking_token_budget(&self) -> bool {
+        (self.engines.iter()).all(|engine| engine.ready_response.supports_thinking_token_budget)
+    }
+
     /// The tightest engine-reported limit on the encoder cache tokens a
     /// request's multimodal items may need together, if any engine has one.
     pub fn max_mm_embeds_per_request(&self) -> Option<u64> {
