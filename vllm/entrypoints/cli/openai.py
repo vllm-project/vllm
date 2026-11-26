@@ -45,10 +45,9 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     return model_name, openai_client
 
 
-def _print_chat_stream(stream, stats: bool = False) -> str:
+def _print_chat_stream(stream, start: float, stats: bool = False) -> str:
     output: str = ""
     in_reasoning: bool = False
-    start: float = time.perf_counter()
     ttft: float | None = None
     completion_tokens: int = 0
     for chunk in stream:
@@ -92,9 +91,8 @@ def _print_metrics(start: float, ttft: float | None, completion_tokens: int) -> 
     )
 
 
-def _print_completion_stream(stream, stats: bool = False) -> str:
+def _print_completion_stream(stream, start: float, stats: bool = False) -> str:
     output = ""
-    start = time.perf_counter()
     ttft: float | None = None
     completion_tokens = 0
     for chunk in stream:
@@ -127,10 +125,11 @@ def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
             break
         conversation.append({"role": "user", "content": input_message})
 
+        start = time.perf_counter()
         stream = client.chat.completions.create(
             model=model_name, messages=conversation, stream=True
         )
-        output = _print_chat_stream(stream)
+        output = _print_chat_stream(stream, start)
         conversation.append({"role": "assistant", "content": output})
 
 
@@ -188,10 +187,11 @@ class ChatCommand(CLISubcommand):
         if args.quick is not None:
             conversation.append({"role": "user", "content": args.quick})
 
+            start = time.perf_counter()
             stream = client.chat.completions.create(
                 messages=conversation, **create_kwargs
             )
-            output = _print_chat_stream(stream, stats)
+            output = _print_chat_stream(stream, start, stats)
             conversation.append({"role": "assistant", "content": output})
             return
 
@@ -203,10 +203,11 @@ class ChatCommand(CLISubcommand):
                 break
             conversation.append({"role": "user", "content": input_message})
 
+            start = time.perf_counter()
             stream = client.chat.completions.create(
                 messages=conversation, **create_kwargs
             )
-            output = _print_chat_stream(stream, stats)
+            output = _print_chat_stream(stream, start, stats)
             conversation.append({"role": "assistant", "content": output})
 
     @staticmethod
@@ -232,7 +233,10 @@ class ChatCommand(CLISubcommand):
         parser.add_argument(
             "--stats",
             action="store_true",
-            help="Print TTFT and TPS statistics after each response.",
+            help=(
+                "Print TTFT and TPS after each response, timed from the start "
+                "of the request."
+            ),
         )
         return parser
 
@@ -268,8 +272,9 @@ class CompleteCommand(CLISubcommand):
             kwargs["stream_options"] = {"include_usage": True}
 
         if args.quick is not None:
+            start = time.perf_counter()
             stream = client.completions.create(prompt=args.quick, **kwargs)
-            _print_completion_stream(stream, stats)
+            _print_completion_stream(stream, start, stats)
             return
 
         print("Please enter prompt to complete:")
@@ -278,8 +283,9 @@ class CompleteCommand(CLISubcommand):
                 input_prompt = input("> ")
             except EOFError:
                 break
+            start = time.perf_counter()
             stream = client.completions.create(prompt=input_prompt, **kwargs)
-            _print_completion_stream(stream, stats)
+            _print_completion_stream(stream, start, stats)
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -300,7 +306,10 @@ class CompleteCommand(CLISubcommand):
         parser.add_argument(
             "--stats",
             action="store_true",
-            help="Print TTFT and TPS statistics after each response.",
+            help=(
+                "Print TTFT and TPS after each response, timed from the start "
+                "of the request."
+            ),
         )
         return parser
 
