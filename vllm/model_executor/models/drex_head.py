@@ -68,4 +68,35 @@ def read_pointer_scores(
     if any(not 0 <= position < length for position in opt_positions):
         return empty
     positions = torch.tensor(opt_positions, device=hidden_states.device)
+    # The backbone runs bf16 while the trained head stays fp32.
+    hidden_states = hidden_states.to(head.q.weight.dtype)
     return head(hidden_states[decide_position], hidden_states[positions])
+
+
+def scores_for_pooling(
+    hidden_states: torch.Tensor,
+    opt_positions: list[int] | None,
+    decide_position: int | None,
+    use_activation: bool | None,
+    head: PointerHead,
+) -> torch.Tensor:
+    """Read one row's scores and apply the requested activation.
+
+    Drex is served with ``use_activation=False`` so the strategy owns the
+    softmax; ``None``/``True`` applies it here, matching the pooling contract.
+
+    Args:
+        hidden_states: Row hidden states, shape `[seq, hidden]`.
+        opt_positions: Row indices of the ``</opt>`` tokens, one per option.
+        decide_position: Row index of the ``<decide>`` token.
+        use_activation: Whether to softmax the scores.
+        head: The pointer head.
+
+    Returns:
+        One score per option, shape `[K]`, softmaxed unless disabled.
+
+    """
+    logits = read_pointer_scores(
+        hidden_states, opt_positions, decide_position, head
+    ).float()
+    return logits if use_activation is False else logits.softmax(dim=-1)

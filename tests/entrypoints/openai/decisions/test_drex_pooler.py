@@ -108,6 +108,43 @@ def test_read_pointer_scores_length_tracks_options(options):
     assert got.shape == (options,)
 
 
+def test_read_pointer_scores_casts_bf16_hidden_states():
+    torch.manual_seed(4)
+    head = _random_head(8, 4)
+    assert head.q.weight.dtype == torch.float32
+    hidden_states = torch.randn(4, 8).to(torch.bfloat16)
+
+    got = drex_head.read_pointer_scores(hidden_states, [0, 2], 3, head)
+
+    want = _reference_scores(
+        head, hidden_states[3].float(), hidden_states[[0, 2]].float()
+    )
+    assert got.dtype == torch.float32
+    np.testing.assert_allclose(got.detach().numpy(), want, rtol=1e-5, atol=1e-5)
+
+
+def test_scores_for_pooling_applies_softmax_unless_disabled():
+    torch.manual_seed(5)
+    head = _random_head(8, 4)
+    hidden_states = torch.randn(5, 8)
+
+    raw = drex_head.scores_for_pooling(hidden_states, [1, 4], 3, False, head)
+    activated = drex_head.scores_for_pooling(hidden_states, [1, 4], 3, None, head)
+
+    assert raw.shape == (2,)
+    torch.testing.assert_close(activated, raw.softmax(dim=-1))
+    torch.testing.assert_close(activated.sum(), torch.tensor(1.0))
+
+
+def test_scores_for_pooling_keeps_missing_markers_empty():
+    head = _random_head(8, 4)
+    hidden_states = torch.randn(3, 8)
+
+    got = drex_head.scores_for_pooling(hidden_states, [], 2, None, head)
+
+    assert got.shape == (0,)
+
+
 @pytest.mark.parametrize(
     "opt_positions,decide_position",
     [
