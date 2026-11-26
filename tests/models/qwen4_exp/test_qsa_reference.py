@@ -1346,7 +1346,7 @@ def test_qsa_sparse_paged_attention_correctness(
 @pytest.mark.parametrize(
     "num_query_heads,num_kv_heads", [(24, 2), (12, 1), (6, 1), (3, 1)]
 )
-@pytest.mark.parametrize("num_requests", [20, 100])
+@pytest.mark.parametrize("num_requests", [1, 4, 20, 100])
 def test_qsa_fp8_kernel_correctness(
     num_query_heads: int, num_kv_heads: int, num_requests: int
 ) -> None:
@@ -1446,7 +1446,7 @@ def test_qsa_fp8_kernel_correctness(
 
 
 @requires_qsa_kernels
-# 33 FP8 rows x 2 KV heads cross the Blackwell FP8 decode-kernel threshold.
+# Physical indices bypass the logical-index Blackwell FP8 decode kernel.
 @pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "large-fp8"])
 def test_qsa_attention_consumes_hisparse_physical_indices(fp8: bool) -> None:
     """Resolved HiSparse rows bypass the logical block table on padded pages."""
