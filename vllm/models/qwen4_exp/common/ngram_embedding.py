@@ -53,7 +53,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
 from vllm.models.deepseek_v41.common.engram import DPSharedEngramStorage
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
@@ -194,7 +194,9 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
 class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
     """Quantization interface shared by resident and pinned PLE tables."""
 
-    # PLE post-load processing only validates scales in their current storage.
+    supports_pre_processed_weights: bool = True
+
+    # Scale validation and UVA binding both operate on the final storage.
     requires_device_loading: bool = False
 
     @staticmethod
@@ -304,7 +306,16 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         )
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
-        """Bind disk-offloaded tables once every checkpoint shard is loaded."""
+        """Bind embedding views to the final table storage."""
+        if (
+            isinstance(layer, Qwen4ExpPLEPinnedHostEmbedding)
+            and is_weights_pre_processed()
+        ):
+            if layer.weight.numel() and not layer.weight.is_pinned():
+                raise ValueError(
+                    "A cached host PLE table must be pinned for UVA lookup."
+                )
+            layer._uva_weight = get_accelerator_view_from_cpu_tensor(layer.weight)
         if isinstance(layer, Qwen4ExpPLEEmbedding):
             layer.bind_file_shards()
 
@@ -425,6 +436,8 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     the activation dtype, before the ETP reduction.
     """
 
+    _uva_weight_scale: torch.Tensor
+
     def create_weights(
         self,
         layer: Qwen4ExpPLEEmbedding,
@@ -481,6 +494,13 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale_2 == sentinel):
             raise ValueError("NVFP4 PLE checkpoint is missing its global scale")
+        if (
+            isinstance(layer, Qwen4ExpPLEPinnedHostEmbedding)
+            and is_weights_pre_processed()
+        ):
+            self._uva_weight_scale = get_accelerator_view_from_cpu_tensor(
+                layer.weight_scale
+            )
         super().process_weights_after_loading(layer)
 
     def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
@@ -703,7 +723,8 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             data_parallel_rank=data_parallel_rank,
             reduce_results=reduce_results,
         )
-        self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
+        if not self.weight.is_meta:
+            self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetch_buffer: torch.Tensor | None = None
         self._prefetch_alloc_lock = threading.Lock()
@@ -717,7 +738,11 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         embedding_dim: int,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Allocate the complete PLE weight directly in pinned CPU memory."""
+        """Allocate pinned host storage, or meta storage during IPC construction."""
+        if torch.get_default_device().type == "meta":
+            return torch.empty(
+                num_embeddings, embedding_dim, dtype=dtype, device="meta"
+            )
         return torch.empty(
             num_embeddings,
             embedding_dim,
