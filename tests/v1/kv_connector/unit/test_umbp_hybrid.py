@@ -950,6 +950,9 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         assert [block.ref_cnt for block in sources] == [0, 0]
         for cache in caches.values():
             cache.zero_()
+        # Core leaves no write to an asynchronous load's blocks queued on the
+        # caller stream, which the transfer is not ordered behind.
+        torch.accelerator.synchronize()
 
         request.request_id = "replay"
         assert scheduler.get_num_new_matched_tokens(request, 0) == (12, True)

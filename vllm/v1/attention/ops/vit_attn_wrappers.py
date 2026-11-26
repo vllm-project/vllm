@@ -17,6 +17,7 @@ import einops
 import torch
 import torch.nn.functional as F
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -44,6 +45,8 @@ def flash_attn_maxseqlen_wrapper(
 
         if not current_platform.is_rocm() and fa_version is not None:
             kwargs["fa_version"] = fa_version
+        if fa_version == 3 and envs.VLLM_BATCH_INVARIANT:
+            kwargs["num_splits"] = 1
 
     q_len = q.size(1)
     if cu_seqlens is None:
