@@ -17,6 +17,7 @@ use crate::error::{
     Error, Result, bail_invalid_continue_final_message, invalid_chat_template_kwargs,
 };
 use crate::event::{AssistantContentBlock, AssistantMessage};
+use crate::multimodal::InputAudioFormat;
 use crate::{AssistantMessageExt, EffortValue};
 
 /// Role label for one text-only chat message.
@@ -54,7 +55,9 @@ pub enum ChatContentPart {
     /// One `input_audio` content block carrying base64-encoded audio bytes.
     InputAudio {
         data: String,
-        format: Option<String>,
+        /// `None` when the caller did not name the container (gRPC render), so
+        /// the media connector detects it from the bytes.
+        format: Option<InputAudioFormat>,
         uuid: Option<String>,
     },
     /// One audio URL/data URL content block.
@@ -95,7 +98,7 @@ impl ChatContentPart {
     }
 
     /// Construct one base64-encoded input-audio content part.
-    pub fn input_audio(data: impl Into<String>, format: Option<String>) -> Self {
+    pub fn input_audio(data: impl Into<String>, format: Option<InputAudioFormat>) -> Self {
         Self::InputAudio {
             data: data.into(),
             format,
