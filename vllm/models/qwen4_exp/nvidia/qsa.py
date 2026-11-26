@@ -590,8 +590,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
             and supports_dtype
-            # Select on the checkpoint's RoPE layout, never on text-only mode:
-            # a language-model-only worker keeps the checkpoint's M-RoPE.
             and (not mrope_section or supports_mrope)
         )
 
