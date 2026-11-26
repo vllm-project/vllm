@@ -292,6 +292,7 @@ class Scheduler(SchedulerInterface):
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
         self.grammar_compile_error_reqs: dict[str, RequestError] = {}
+        self.request_errors: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
         self._ec_metadata_resolver: PlaceholderMetadataResolver | None = None
 
@@ -301,6 +302,26 @@ class Scheduler(SchedulerInterface):
         mm_budget = (
             MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
         )
+        self.mm_budget = mm_budget
+
+        if (
+            self.scheduler_config.disable_chunked_mm_input
+            and not self.is_encoder_decoder
+            and mm_budget is not None
+            and mm_budget.mm_max_placeholder_spans is not None
+        ):
+            max_placeholder_span = max(mm_budget.mm_max_placeholder_spans.values())
+            max_req_budget = self.max_request_token_budget
+            if max_placeholder_span > max_req_budget:
+                limit_name = self.max_request_token_budget_limit_name
+                logger.warning(
+                    "Chunked MM input disabled and maximum profiled placeholder span "
+                    "(%d) exceeds %s (%d). Requests with large multimodal inputs "
+                    "will be rejected at runtime.",
+                    max_placeholder_span,
+                    limit_name,
+                    max_req_budget,
+                )
 
         # NOTE: Text-only encoder-decoder models are implemented as
         # multi-modal models for convenience
@@ -2244,6 +2265,35 @@ class Scheduler(SchedulerInterface):
                 and (num_computed_tokens + num_new_tokens)
                 < (start_pos + num_encoder_tokens)
             ):
+                remaining_item_tokens = (start_pos + num_encoder_tokens) - max(
+                    num_computed_tokens, start_pos
+                )
+                max_request_budget = self.max_request_token_budget
+                if remaining_item_tokens > max_request_budget:
+                    limit_name = self.max_request_token_budget_limit_name
+                    logger.error(
+                        "Request %s input %d requires %d tokens for its multimodal "
+                        "placeholder span, which exceeds %s (%d) "
+                        "with disable_chunked_mm_input=True. Failing the request.",
+                        request.request_id,
+                        i,
+                        remaining_item_tokens,
+                        limit_name,
+                        max_request_budget,
+                    )
+                    self.encoder_cache_mismatch_reqs.add(request.request_id)
+                    self.request_errors[request.request_id] = RequestError(
+                        code="validation_error",
+                        message=(
+                            f"Multimodal placeholder span "
+                            f"({remaining_item_tokens} tokens) "
+                            f"exceeds {limit_name} "
+                            f"({max_request_budget}) "
+                            "with disable_chunked_mm_input=True."
+                        ),
+                    )
+                    return [], 0, encoder_compute_budget, [], []
+
                 if num_computed_tokens < start_pos:
                     # Account for EAGLE shift when rolling back to avoid
                     # encoder cache miss. This ensures the scheduled range
@@ -2723,6 +2773,8 @@ class Scheduler(SchedulerInterface):
 
         request_errors = self.grammar_compile_error_reqs
         self.grammar_compile_error_reqs = {}
+        request_errors.update(self.request_errors)
+        self.request_errors.clear()
         error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
@@ -3337,6 +3389,30 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         self._free_request_blocks(request)
         del self.requests[request.request_id]
+
+    @property
+    def max_request_token_budget(self) -> int:
+        spec = self.vllm_config.speculative_config
+        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        return min(
+            self.max_num_scheduled_tokens,
+            self.scheduler_config.max_num_batched_tokens - draft_slots,
+        )
+
+    @property
+    def max_request_token_budget_limit_name(self) -> str:
+        spec = self.vllm_config.speculative_config
+        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        batch_limit = self.scheduler_config.max_num_batched_tokens - draft_slots
+        if batch_limit < self.max_num_scheduled_tokens:
+            if draft_slots > 0:
+                return "max_num_batched_tokens minus draft slots"
+            return "max_num_batched_tokens"
+        return (
+            "max_num_scheduled_tokens"
+            if self.scheduler_config.max_num_scheduled_tokens is not None
+            else "max_num_batched_tokens"
+        )
 
     @property
     def pause_state(self) -> PauseState:

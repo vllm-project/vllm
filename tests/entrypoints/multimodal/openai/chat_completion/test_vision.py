@@ -94,6 +94,57 @@ def test_processor_only_cache_eviction_preserves_chat_logprobs():
         )
 
 
+def test_no_mm_input_chunking_oversized_request_returns_400_and_recovers():
+    """An oversized multimodal item under --disable-chunked-mm-input must return
+    HTTP 400 (BadRequestError) rather than deadlocking the engine, and subsequent
+    valid requests against the same server must succeed."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    image = Image.new("RGB", (112, 112), "red")
+    url = encode_image_url(image)
+    args = [
+        "--disable-chunked-mm-input",
+        "--max-num-batched-tokens",
+        "2048",
+        "--max-num-scheduled-tokens",
+        "500",  # LLaVA image placeholder is 576 tokens > 500
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--limit-mm-per-prompt",
+        '{"image": 1}',
+    ]
+    with (
+        RemoteOpenAIServer(model, args) as server,
+        server.get_client() as client,
+    ):
+        # 1. Oversized image request must return HTTP 400 Bad Request
+        with pytest.raises(openai.BadRequestError) as exc_info:
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe this image."},
+                            {"type": "image_url", "image_url": {"url": url}},
+                        ],
+                    }
+                ],
+                max_tokens=5,
+            )
+        assert exc_info.value.status_code == 400
+        assert "exceeds max_num_scheduled_tokens" in str(exc_info.value)
+
+        # 2. Subsequent valid text request against the same server must succeed
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Hello, how are you?"}],
+            max_tokens=5,
+        )
+        assert response.choices[0].message.content is not None
+        assert len(response.choices[0].message.content) > 0
+
+
 # Required terms for beam search validation
 # Each entry is a list of term groups - ALL groups must match
 # Each group is a list of alternatives - at least ONE term in the group must appear
