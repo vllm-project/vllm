@@ -3,7 +3,8 @@
 
 import itertools
 import math
-from collections.abc import Iterable, Mapping, Sequence
+import typing
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 import torch
@@ -12,14 +13,15 @@ from transformers import BatchFeature
 from transformers.activations import ACT2FN
 from transformers.models.lfm2_vl import Lfm2VlProcessor
 from transformers.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfig
-from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
-    Lfm2VlImageProcessorFast,
+from transformers.models.lfm2_vl.image_processing_lfm2_vl import (
+    Lfm2VlImageProcessor,
     find_closest_aspect_ratio,
     round_by_factor,
 )
+from typing_extensions import Buffer
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -33,6 +35,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -66,24 +69,12 @@ from .utils import (
 from .vision import is_vit_use_data_parallel
 
 
-def _pad_cumulative_seqlens_buffer(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-) -> None:
-    n = src.shape[0]
-    dst.zero_()
-    dst[:n].copy_(src)
-    if n < dst.shape[0]:
-        dst[n:] = src[-1]
-
-
 class Lfm2VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Number of images in the prompt
-        - bn: Batch size * number of images
-        - d: Number of dimensions
-        - fd: Number of features per dimension
+    """Dimensions:
+    - b: Number of images in the prompt
+    - bn: Batch size * number of images
+    - d: Number of dimensions
+    - fd: Number of features per dimension
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -102,7 +93,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs):
         return self.ctx.get_hf_processor(Lfm2VlProcessor, **kwargs)
 
-    def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessorFast:
+    def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -211,7 +202,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         processor: Lfm2VlProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int, int]:
-        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+        image_processor: Lfm2VlImageProcessor = processor.image_processor
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
@@ -229,7 +220,17 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "max_image_tokens", image_processor.max_image_tokens
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        use_thumbnail = mm_kwargs.get("use_thumbnail", image_processor.use_thumbnail)
+        assert isinstance(downsample_factor, int)
+        assert isinstance(encoder_patch_size, int)
+        assert isinstance(max_pixels_tolerance, int | float)
+        assert isinstance(min_tiles, int)
+        assert isinstance(max_tiles, int)
+        assert isinstance(max_image_tokens, int)
+        assert isinstance(tile_size, int)
 
+        if not mm_kwargs.get("do_image_splitting", image_processor.do_image_splitting):
+            min_tiles = max_tiles = 1
         do_image_splitting = not min_tiles == max_tiles == 1
         is_image_large = self._is_image_too_large(
             height=image_height,
@@ -252,7 +253,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         else:
             grid_width = grid_height = total_patches = 1
 
-        if grid_width * grid_height != 1:  # Thumbnail
+        if use_thumbnail and grid_width * grid_height != 1:
             total_patches += 1
 
         return grid_width, grid_height, total_patches
@@ -294,7 +295,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         )
         tile_img_placeholder = grid_placeholder + (image_token * num_tokens_per_tile)
 
-        grid_w, grid_h, _ = self._get_image_feature_grid_size(
+        grid_w, grid_h, total_patches = self._get_image_feature_grid_size(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
@@ -308,7 +309,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
                 for j in range(grid_w)
             ]
 
-            if num_thumbnail_tokens > 0:
+            if total_patches > grid_w * grid_h:  # Thumbnail
                 tiles_placeholder.append(
                     image_thumbnail_token + (image_token * num_thumbnail_tokens)
                 )
@@ -327,7 +328,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         processor: Lfm2VlProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int]:
-        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+        image_processor: Lfm2VlImageProcessor = processor.image_processor
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
@@ -337,6 +338,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "encoder_patch_size", image_processor.encoder_patch_size
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        assert isinstance(downsample_factor, int)
+        assert isinstance(encoder_patch_size, int)
+        assert isinstance(tile_size, int)
 
         thumbnail_height_patches = int(spatial_shapes[-1][0].item())
         thumbnail_width_patches = int(spatial_shapes[-1][1].item())
@@ -375,26 +379,22 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 
 
 class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -525,6 +525,7 @@ class Lfm2VLMultiModalProjector(nn.Module):
 
         Returns:
             projected_packed: (total_projected_tokens, text_hidden_size)
+
         """
         assert spatial_shapes.device.type == "cpu", (
             "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
@@ -654,6 +655,7 @@ class Lfm2VLForConditionalGeneration(
         Returns:
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_language_config = vllm_config.model_config.hf_config.text_config
@@ -672,6 +674,7 @@ class Lfm2VLForConditionalGeneration(
         super().__init__()
         config: Lfm2VlConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
         vision_config = config.vision_config
         quant_config = vllm_config.quant_config
 
@@ -857,9 +860,6 @@ class Lfm2VLForConditionalGeneration(
                 "gather_idx",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={
-                "cu_seqlens": _pad_cumulative_seqlens_buffer,
-            },
         )
 
     def get_max_frames_per_video(self) -> int:
@@ -915,6 +915,14 @@ class Lfm2VLForConditionalGeneration(
             "min_image_tokens",
             getattr(self.config, "min_image_tokens", None) or 64,
         )
+        if not isinstance(
+            value,
+            (str, Buffer, typing.SupportsInt, typing.SupportsIndex),
+        ):
+            raise TypeError(
+                "int() argument must be a string, a bytes-like object "
+                f"or a real number, not '{type(value).__name__}'"
+            )
         return max(1, int(value))
 
     def _get_lfm2vl_item_tile_slices(
@@ -1125,6 +1133,7 @@ class Lfm2VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1253,21 +1262,20 @@ class Lfm2VLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         downsample_factor = self.config.downsample_factor
-
-        return num_image_tokens * downsample_factor**2
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        downsample_factor = self.config.downsample_factor
-
-        return num_vision_tokens // downsample_factor**2
+        return num_mm_embeds * downsample_factor**2, num_mm_embeds

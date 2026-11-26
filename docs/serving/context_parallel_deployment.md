@@ -16,9 +16,36 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### DeepSeek-V4.1-Flash on ROCm
+
+ROCm supports eager prefill context parallelism for the text-only
+DeepSeek-V4.1-Flash model:
+
+```bash
+VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
+  --language-model-only \
+  --tensor-parallel-size 2 \
+  --prefill-context-parallel-size 2 \
+  --no-enable-prefix-caching \
+  --enforce-eager
+```
+
+This configuration requires PP=DP=DCP=1 and does not support microbatching,
+speculative decoding, KV transfer, prefix caching, MegaMoE, or the ROCm
+monokernel. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.
+
+`engine_client.vllm_config.cache_config.effective_attention_block_size` reports the
+initialized full-attention block size in tokens, including DCP: a physical block of
+16 tokens with DCP=4 represents 64 tokens. The same value is available through
+gRPC `Control.GetServerInfo.effective_attention_block_size`. Physical block-size
+fields retain their existing meaning. The new value is unavailable (`None` in
+Python, absent in gRPC) if there is no common full-attention size, the scheduler
+does not expose it, or an older engine omits it. gRPC also omits the value when
+engine replicas disagree. Partial cache events carry their own actual size.
 
 For a model with `H` kv-heads, a request with `T` tokens in the context needs to store `H * T` key/value tensors in the KV cache.
 

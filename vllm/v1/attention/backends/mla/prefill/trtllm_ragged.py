@@ -22,6 +22,17 @@ if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
 
 
+def is_cute_dsl_mla_prefill_supported(
+    qk_head_dim: int, v_head_dim: int, query_dtype: torch.dtype
+) -> bool:
+    # FlashInfer has no public compatibility API; replace these checks when available.
+    return (
+        query_dtype in (torch.float16, torch.bfloat16, torch.float8_e4m3fn)
+        and (qk_head_dim, v_head_dim) in ((128, 128), (192, 128))
+        and (qk_head_dim != 192 or query_dtype == torch.float8_e4m3fn)
+    )
+
+
 class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
     """TRT-LLM Ragged backend for MLA prefill."""
 
@@ -43,8 +54,11 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         return "TRTLLM_RAGGED"
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
-        return device_capability.major == 10
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
+        return device_capability is not None and device_capability.major == 10
 
     @classmethod
     def is_available(cls) -> bool:
@@ -76,21 +90,46 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
         )
-        (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
-            (
-                (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
-                torch.uint8,
-            ),
+        self._context_backend = vllm_config.attention_config.trtllm_ragged_backend
+        self._workspace_spec = (
+            (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
+            torch.uint8,
         )
+        # Reserve capacity without retaining a view: a retained view would pin
+        # the old buffer when another user grows the shared workspace.
+        current_workspace_manager().get_simultaneous(self._workspace_spec)
 
     def prepare_metadata(
         self,
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
         super().prepare_metadata(prefill_metadata)
+        (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
+            self._workspace_spec
+        )
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
+        query_lens_cpu = prefill_metadata.query_lens_cpu
+        if query_lens_cpu is None:
+            raise ValueError("TRTLLM ragged prefill requires CPU query lengths")
+        if query_lens_cpu.device.type != "cpu":
+            raise ValueError("TRTLLM ragged prefill query lengths must be on CPU")
+        if query_lens_cpu.ndim != 1 or query_lens_cpu.numel() == 0:
+            raise ValueError(
+                "TRTLLM ragged prefill requires a non-empty 1D query-length tensor"
+            )
+        min_query_len = int(torch.min(query_lens_cpu).item())
+        if min_query_len < 0:
+            raise ValueError("TRTLLM ragged prefill query lengths must be non-negative")
+        self._has_active_rows = min_query_len > 0
+        if not self._has_active_rows:
+            has_mixed_rows = bool(torch.any(query_lens_cpu > 0).item())
+            if has_mixed_rows:
+                raise ValueError(
+                    "TRTLLM ragged prefill contains mixed active and empty query "
+                    f"rows: query_lens={query_lens_cpu.tolist()}"
+                )
 
     def supports_out(self) -> bool:
         # Output head dim is v.shape[-1] == v_head_dim, so `out` is unpadded.
@@ -116,8 +155,21 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
                 dtype=self._prefill_metadata.output_dtype,
             )
 
+        if not self._has_active_rows:
+            out.zero_()
+            if return_softmax_lse:
+                lse = torch.empty(
+                    self.num_heads,
+                    q.shape[0],
+                    dtype=torch.float32,
+                    device=q.device,
+                )
+                return out, lse.fill_(-float("inf"))
+            return out
+
         ret = trtllm_ragged_attention_deepseek(
-            query=q,
+            # The kernel reads the query as packed, ignoring its strides
+            query=q.contiguous(),
             key=k,
             value=v,
             workspace_buffer=self._workspace_buffer,
@@ -135,6 +187,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             is_causal=True,
             return_lse=return_softmax_lse,
             out=out,
+            skip_all_rows_active_check=True,
         )
 
         if isinstance(ret, tuple):
@@ -152,6 +205,21 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
+        if not chunk.all_rows_active:
+            raise ValueError(
+                "TRTLLM ragged context prefill contains an empty query or KV row"
+            )
+
+        if self._context_backend == "cute-dsl":
+            if not is_cute_dsl_mla_prefill_supported(q.shape[-1], v.shape[-1], q.dtype):
+                raise ValueError(
+                    "CuTe DSL context prefill does not support "
+                    f"Q/K head dimension {q.shape[-1]}, "
+                    f"V head dimension {v.shape[-1]}, and query dtype {q.dtype}."
+                )
+            # Generic MLA supplies V as a projection slice; CuTe requires packed V.
+            v = v.contiguous()
+
         if out is None:
             out = torch.empty(
                 q.shape[0],
@@ -162,7 +230,8 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             )
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
-            query=q,
+            # The kernel reads the query as packed, ignoring its strides
+            query=q.contiguous(),
             key=k,
             value=v,
             workspace_buffer=self._workspace_buffer,
@@ -178,8 +247,10 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             cum_seq_lens_kv=chunk.cu_seq_lens,
             enable_pdl=False,
             is_causal=False,
+            backend=self._context_backend,
             return_lse=True,
             out=out,
+            skip_all_rows_active_check=True,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)

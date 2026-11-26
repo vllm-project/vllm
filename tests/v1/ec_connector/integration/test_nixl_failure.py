@@ -1,0 +1,291 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""NIXL request failure isolation with real E/PD servers and an injected NACK.
+
+Requires two CUDA GPUs and NIXL. Set MODEL to override the small default model.
+"""
+
+import asyncio
+import copy
+import json
+import os
+import uuid
+from pathlib import Path
+
+import aiohttp
+import msgspec
+import pytest
+import zmq
+import zmq.asyncio
+from PIL import Image
+
+from examples.disaggregated.disaggregated_encoder.disagg_epd_proxy import (
+    rewrite_for_decode,
+)
+from tests.utils import RemoteOpenAIServer
+from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
+    XferAck,
+    XferReq,
+    XferStatus,
+)
+from vllm.multimodal.utils import encode_image_url
+from vllm.platforms import current_platform
+
+MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
+DEFAULT_EC_CPU_BYTES = 64 << 20
+
+
+def _server(role: str, cpu_bytes: int = DEFAULT_EC_CPU_BYTES) -> RemoteOpenAIServer:
+    devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")
+    common = [
+        "--host",
+        "127.0.0.1",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "4096",
+        "--max-num-seqs",
+        "4",
+        "--gpu-memory-utilization",
+        "0.7",
+        "--no-enable-prefix-caching",
+    ]
+
+    config = json.dumps(
+        {
+            "ec_connector": "ECCPUConnector",
+            "ec_role": role,
+            "ec_connector_extra_config": {
+                "ec_enable_nixl": True,
+                "ec_cpu_bytes": cpu_bytes,
+            },
+        }
+    )
+    producer = role == "ec_producer"
+    role_args = (
+        ["--mm-encoder-only", "--disable-hybrid-kv-cache-manager"]
+        if producer
+        else ["--enable-mm-embeds"]
+    )
+    return RemoteOpenAIServer(
+        MODEL,
+        common + role_args + ["--ec-transfer-config", config],
+        env_dict={"CUDA_VISIBLE_DEVICES": devices[0 if producer else 1]},
+    )
+
+
+@pytest.fixture(scope="module")
+def encoder(request):
+    pytest.importorskip("nixl")
+    if not current_platform.is_cuda() or current_platform.device_count() < 2:
+        pytest.skip("Requires two CUDA GPUs")
+    with _server("ec_producer") as probe:
+        if getattr(request, "param", None) != "eviction":
+            yield probe
+            return
+        cpu_bytes = 2 * asyncio.run(_entry_size(probe))
+
+    with _server("ec_producer", cpu_bytes) as server:
+        yield server
+
+
+@pytest.fixture(scope="module")
+def consumer(request, encoder):
+    cpu_bytes = DEFAULT_EC_CPU_BYTES
+    if getattr(request, "param", None) == "eviction":
+        cpu_bytes = 2 * asyncio.run(_entry_size(encoder))
+
+    with _server("ec_consumer", cpu_bytes) as server:
+        yield server
+
+
+async def _post(session, server, body):
+    async with session.post(server.url_for("v1/chat/completions"), json=body) as r:
+        return r.status, await r.json()
+
+
+async def _encode(session, encoder):
+    image = Image.open(Path(__file__).with_name("hato.jpg")).convert("RGB")
+    image.thumbnail((224, 224))
+    item_uuid = uuid.uuid4().hex  # Avoid both EC and processor cache hits.
+    body = {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": encode_image_url(image)},
+                        "uuid": item_uuid,
+                    },
+                    {"type": "text", "text": "Describe the image briefly."},
+                ],
+            }
+        ],
+        "max_tokens": 16,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    status, result = await _post(session, encoder, body)
+    assert status == 200, result
+    params = result["ec_transfer_params"]
+    assert len(params) == 1, params
+    ((mm_hash, handle),) = params.items()
+    assert handle["metadata"] and handle["peer_host"] and handle["size_bytes"] > 0
+    rewritten = rewrite_for_decode(
+        body,
+        {
+            0: [
+                {
+                    "metadata": handle["metadata"],
+                    "modality": "image",
+                    "mm_hash": mm_hash,
+                    "transfer_id": None,
+                }
+            ]
+        },
+    )
+    assert rewritten["messages"][0]["content"][0]["type"] == "image_embeds"
+    for request in (body, rewritten):
+        request["ec_transfer_params"] = {mm_hash: copy.deepcopy(handle)}
+    return body, rewritten, mm_hash
+
+
+async def _entry_size(encoder) -> int:
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        _, probe, mm_hash = await _encode(session, encoder)
+    return probe["ec_transfer_params"][mm_hash]["size_bytes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_image", [False, True], ids=["metadata-only", "pixels"])
+async def test_missing_remote_encoding_is_request_scoped(
+    encoder, consumer, local_image
+):
+    """A terminal NACK must preserve local fallback and subsequent serving."""
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        original, rewritten, mm_hash = await _encode(session, encoder)
+        request = original if local_image else rewritten
+
+        # Keep the real encoder's shape/metadata; replace only the control peer.
+        # The socket stays bound until completion, so no port or timing race is
+        # needed to make the consumer receive NACK_MISSING.
+        with zmq.asyncio.Context() as ctx, ctx.socket(zmq.ROUTER) as router:
+            router.setsockopt(zmq.LINGER, 0)
+            port = router.bind_to_random_port("tcp://127.0.0.1")
+            request["ec_transfer_params"][mm_hash].update(
+                peer_host="127.0.0.1", peer_port=port
+            )
+
+            async def reject_read():
+                identity, delimiter, payload = await router.recv_multipart()
+                req = msgspec.msgpack.decode(payload, type=XferReq)
+                assert req.mm_hash == mm_hash
+                ack = XferAck(
+                    mm_hash=req.mm_hash,
+                    status=XferStatus.NACK_MISSING,
+                    session_id=req.session_id,
+                )
+                await router.send_multipart(
+                    [identity, delimiter, msgspec.msgpack.encode(ack)]
+                )
+
+            rejection = asyncio.create_task(asyncio.wait_for(reject_read(), 30))
+            try:
+                status, result = await _post(session, consumer, request)
+                # A frontend rejection must not count as successful injection.
+                await rejection
+            finally:
+                rejection.cancel()
+                await asyncio.gather(rejection, return_exceptions=True)
+
+        if local_image:
+            assert status == 200, result
+            assert result["choices"][0]["message"]["content"], result
+        else:
+            assert status == 500, result
+            assert result["error"]["type"] == "InternalServerError", result
+
+        async with session.get(consumer.url_for("health")) as health:
+            assert health.status == 200, "The failed read killed EngineCore"
+        # A fresh metadata-only image must cross the real NIXL data path after
+        # the fault, not just pass a frontend health check or hit a local cache.
+        _, healthy, _ = await _encode(session, encoder)
+        status, result = await _post(session, consumer, healthy)
+        assert status == 200, result
+        assert result["choices"][0]["message"]["content"], result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consumer", ["eviction"], indirect=True)
+async def test_runner_hit_survives_cpu_eviction_and_missing_producer(encoder, consumer):
+    """A metadata-only repeat uses runner embeddings without a remote read."""
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        _, request, mm_hash = await _encode(session, encoder)
+        status, result = await _post(session, consumer, request)
+        assert status == 200, result
+
+        # Two fresh identities displace the first entry in the consumer CPU tier.
+        for _ in range(2):
+            _, filler, _ = await _encode(session, encoder)
+            status, result = await _post(session, consumer, filler)
+            assert status == 200, result
+
+        with zmq.asyncio.Context() as ctx, ctx.socket(zmq.ROUTER) as router:
+            router.setsockopt(zmq.LINGER, 0)
+            port = router.bind_to_random_port("tcp://127.0.0.1")
+            request["ec_transfer_params"][mm_hash].update(
+                peer_host="127.0.0.1", peer_port=port
+            )
+            reads = []
+
+            async def reject_read():
+                identity, delimiter, payload = await router.recv_multipart()
+                req = msgspec.msgpack.decode(payload, type=XferReq)
+                reads.append(req.mm_hash)
+                ack = XferAck(
+                    mm_hash=req.mm_hash,
+                    status=XferStatus.NACK_MISSING,
+                    session_id=req.session_id,
+                )
+                await router.send_multipart(
+                    [identity, delimiter, msgspec.msgpack.encode(ack)]
+                )
+
+            rejection = asyncio.create_task(reject_read())
+            try:
+                status, result = await _post(session, consumer, request)
+            finally:
+                rejection.cancel()
+                await asyncio.gather(rejection, return_exceptions=True)
+            assert reads == [], "A runner cache hit contacted the producer"
+            assert status == 200, result
+            assert result["choices"][0]["message"]["content"], result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoder", ["eviction"], indirect=True)
+async def test_producer_republishes_runner_hit_after_cpu_eviction(encoder, consumer):
+    """A fresh consumer can fetch a repeated image after producer CPU eviction."""
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        original, rewritten, mm_hash = await _encode(session, encoder)
+
+        # Two fresh identities displace the first entry in the producer CPU tier.
+        for _ in range(2):
+            await _encode(session, encoder)
+
+        original.pop("ec_transfer_params")
+        status, result = await _post(session, encoder, original)
+        assert status == 200, result
+        handle = result["ec_transfer_params"][mm_hash]
+        assert handle["metadata"] and handle.get("peer_host"), result
+        rewritten["ec_transfer_params"] = {mm_hash: handle}
+
+        status, result = await _post(session, consumer, rewritten)
+        assert status == 200, result
+        assert result["choices"][0]["message"]["content"], result

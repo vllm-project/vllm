@@ -57,8 +57,7 @@ bytestr: TypeAlias = bytes | bytearray | memoryview | zmq.Frame
 class OOBTensorConsumer(ABC):
     @abstractmethod
     def __call__(self, tensor: torch.Tensor) -> dict | None:
-        """
-        Called with tensors for the current message.
+        """Called with tensors for the current message.
         Returns None to reject the tensor (falls back to regular serialization),
         otherwise a dict with arbitrary placeholder data to be included
         in the serialized message.
@@ -142,7 +141,7 @@ class MsgpackEncoder:
     By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
 
-    When a ``oob_tensor_consumer`` is provided, tensors (CUDA and CPU) will be
+    When a `oob_tensor_consumer` is provided, tensors (CUDA and CPU) will be
     offered to it for out-of-band handling.
     """
 
@@ -316,7 +315,7 @@ class MsgpackDecoder:
     Note that unlike vanilla `msgspec` Decoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
 
-    ``oob_tensor_provider`` must be used when an OOBTensorConsumer is used on the
+    `oob_tensor_provider` must be used when an OOBTensorConsumer is used on the
     encoder side.
     """
 
@@ -489,8 +488,7 @@ def run_method(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> Any:
-    """
-    Run a method of an object with the given arguments and keyword arguments.
+    """Run a method of an object with the given arguments and keyword arguments.
     If the method is string, it will be converted to a method using getattr.
     If the method is serialized bytes and will be deserialized using
     cloudpickle.
@@ -511,13 +509,13 @@ def run_method(
 
 
 class PydanticMsgspecMixin:
-    """Make a ``msgspec.Struct`` compatible with Pydantic for both
+    """Make a `msgspec.Struct` compatible with Pydantic for both
     **validation** (JSON/dict -> Struct) and **serialization**
     (Struct -> JSON-safe dict).
 
-    Subclasses may set ``__pydantic_msgspec_exclude__`` (a ``set[str]``)
+    Subclasses may set `__pydantic_msgspec_exclude__` (a `set[str]`)
     to list non-underscore field names that should also be stripped from
-    serialized output.  Fields whose names start with ``_`` are always
+    serialized output.  Fields whose names start with `_` are always
     excluded automatically.
     """
 
@@ -528,14 +526,13 @@ class PydanticMsgspecMixin:
     def __get_pydantic_core_schema__(
         cls, source_type: Any, handler: GetCoreSchemaHandler
     ) -> core_schema.CoreSchema:
-        """
-        Make msgspec.Struct compatible with Pydantic, respecting defaults.
+        """Make msgspec.Struct compatible with Pydantic, respecting defaults.
         Handle JSON=>msgspec.Struct. Used when exposing msgspec.Struct to the
         API as input or in `/docs`. Note this is cached by Pydantic and not
         called on every validation.
         """
         msgspec_fields = {f.name: f for f in msgspec.structs.fields(source_type)}
-        type_hints = get_type_hints(source_type)
+        type_hints = get_type_hints(source_type, include_extras=True)
 
         # Build the Pydantic typed_dict_field for each msgspec field
         fields = {}
@@ -608,9 +605,9 @@ class PydanticMsgspecMixin:
     @staticmethod
     def _serialize_msgspec(value: Any) -> Any:
         """Serialize a msgspec.Struct to a JSON-compatible dict, stripping
-        private (``_``-prefixed) and explicitly excluded fields.
+        private (`_`-prefixed) and explicitly excluded fields.
 
-        Uses ``msgspec.to_builtins`` which respects ``omit_defaults=True``,
+        Uses `msgspec.to_builtins` which respects `omit_defaults=True`,
         so only fields that differ from their declared defaults are included.
         """
         raw = msgspec.to_builtins(value)

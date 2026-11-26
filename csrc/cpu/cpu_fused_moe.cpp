@@ -136,60 +136,67 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
   }();
 
   // allocate buffers
-  int32_t common_buffer_offset = 0;
-  int32_t w13_thread_buffer_offset = 0;
-  int32_t ws_thread_buffer_offset = 0;
+  // Sizes/offsets below are byte counts across the whole (token_num *
+  // topk_num) batch, which for large hidden sizes and batch sizes can
+  // exceed INT32_MAX. Use int64_t throughout to avoid silently wrapping
+  // into a negative size that gets sign-extended into a huge value when
+  // passed to ScratchPadManager::realloc(size_t).
+  int64_t common_buffer_offset = 0;
+  int64_t w13_thread_buffer_offset = 0;
+  int64_t ws_thread_buffer_offset = 0;
 
   // common buffers
-  const int32_t token_num_per_group_buffer_size =
+  const int64_t token_num_per_group_buffer_size =
       cpu_utils::round_up<64>(expert_num * sizeof(int32_t));
-  const int32_t token_num_per_group_buffer_offset = common_buffer_offset;
+  const int64_t token_num_per_group_buffer_offset = common_buffer_offset;
   common_buffer_offset += token_num_per_group_buffer_size;
 
-  const int32_t cu_token_num_per_group_buffer_size =
+  const int64_t cu_token_num_per_group_buffer_size =
       cpu_utils::round_up<64>((expert_num + 1) * sizeof(int32_t));
-  const int32_t cu_token_num_per_group_buffer_offset = common_buffer_offset;
+  const int64_t cu_token_num_per_group_buffer_offset = common_buffer_offset;
   common_buffer_offset += cu_token_num_per_group_buffer_size;
 
-  const int32_t expand_token_id_buffer_size =
-      cpu_utils::round_up<64>(token_num * topk_num * sizeof(int32_t));
-  const int32_t expand_token_id_buffer_offset = common_buffer_offset;
+  const int64_t expand_token_id_buffer_size = cpu_utils::round_up<64>(
+      static_cast<int64_t>(token_num) * topk_num * sizeof(int32_t));
+  const int64_t expand_token_id_buffer_offset = common_buffer_offset;
   common_buffer_offset += expand_token_id_buffer_size;
 
-  const int32_t expand_token_id_index_buffer_size =
-      cpu_utils::round_up<64>(token_num * topk_num * sizeof(int32_t));
-  const int32_t expand_token_id_index_buffer_offset = common_buffer_offset;
+  const int64_t expand_token_id_index_buffer_size = cpu_utils::round_up<64>(
+      static_cast<int64_t>(token_num) * topk_num * sizeof(int32_t));
+  const int64_t expand_token_id_index_buffer_offset = common_buffer_offset;
   common_buffer_offset += expand_token_id_index_buffer_size;
 
-  const int32_t w13_gemm_output_buffer_size = cpu_utils::round_up<64>(
-      token_num * topk_num * (output_size_13 / 2) * sizeof(scalar_t));
-  const int32_t w13_gemm_output_buffer_offset = common_buffer_offset;
+  const int64_t w13_gemm_output_buffer_size =
+      cpu_utils::round_up<64>(static_cast<int64_t>(token_num) * topk_num *
+                              (output_size_13 / 2) * sizeof(scalar_t));
+  const int64_t w13_gemm_output_buffer_offset = common_buffer_offset;
   common_buffer_offset += w13_gemm_output_buffer_size;
 
-  const int32_t w2_gemm_output_buffer_size = cpu_utils::round_up<64>(
-      token_num * topk_num * output_size_2 * sizeof(float));
-  const int32_t w2_gemm_output_buffer_offset = common_buffer_offset;
+  const int64_t w2_gemm_output_buffer_size =
+      cpu_utils::round_up<64>(static_cast<int64_t>(token_num) * topk_num *
+                              output_size_2 * sizeof(float));
+  const int64_t w2_gemm_output_buffer_offset = common_buffer_offset;
   common_buffer_offset += w2_gemm_output_buffer_size;
 
   // w13 GEMM thread buffers
-  const int32_t w13_input_buffer_offset = w13_thread_buffer_offset;
+  const int64_t w13_input_buffer_offset = w13_thread_buffer_offset;
   w13_thread_buffer_offset += w13_input_buffer_size;
 
-  const int32_t w13_output_buffer_size = cpu_utils::round_up<64>(
+  const int64_t w13_output_buffer_size = cpu_utils::round_up<64>(
       gemm_m_tile_size * w13_n_tile_size * sizeof(float));
-  const int32_t w13_output_buffer_offset = w13_thread_buffer_offset;
+  const int64_t w13_output_buffer_offset = w13_thread_buffer_offset;
   w13_thread_buffer_offset += w13_output_buffer_size;
 
-  const int32_t w2_input_buffer_offset = w13_thread_buffer_offset;
+  const int64_t w2_input_buffer_offset = w13_thread_buffer_offset;
   w13_thread_buffer_offset += w2_input_buffer_size;
 
   // Weighted sum thread buffer
-  const int32_t ws_output_buffer_size =
+  const int64_t ws_output_buffer_size =
       cpu_utils::round_up<64>(output_size_2 * sizeof(float));
-  const int32_t ws_output_buffer_offset = ws_thread_buffer_offset;
+  const int64_t ws_output_buffer_offset = ws_thread_buffer_offset;
   ws_thread_buffer_offset += ws_output_buffer_size;
 
-  const int32_t buffer_size =
+  const int64_t buffer_size =
       common_buffer_offset +
       std::max(w13_thread_buffer_offset, ws_thread_buffer_offset) * thread_num;
   cpu_utils::ScratchPadManager::get_scratchpad_manager()->realloc(buffer_size);

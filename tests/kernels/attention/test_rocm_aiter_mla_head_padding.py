@@ -249,6 +249,18 @@ def test_is_valid_num_heads():
     assert not AiterMLAHelper.is_valid_num_heads(129)
 
 
+def test_fp8_prefill_rejects_head_counts_padding_doubles():
+    # Kimi-K2.x at TP8 (8 heads/rank) must fall back to the bf16 prefill, while
+    # decode still accepts it.
+    for n in range(1, 9):
+        assert not AiterMLAHelper.is_valid_fp8_prefill_num_heads(n)
+        assert AiterMLAHelper.is_valid_num_heads(n)
+    # Kimi-K3 at TP8 (12 heads/rank) and aligned counts keep the FP8 prefill.
+    for n in (9, 12, 15, 16, 24, 32, 64, 128, 144):
+        assert AiterMLAHelper.is_valid_fp8_prefill_num_heads(n)
+    assert not AiterMLAHelper.is_valid_fp8_prefill_num_heads(129)
+
+
 def test_nondivisor_and_multitoken_never_use_gluon():
     # Non-divisor decode always takes the asm path (12 heads/rank at TP8).
     assert not AiterMLAHelper.use_gluon_decode(12, 1, "auto")
@@ -324,7 +336,9 @@ def test_h12_aiter_mla_decode_matches_reference():
 
     impl = object.__new__(AiterMLAImpl)
     impl.num_heads = NUM_HEADS
+    impl.dcp_world_size = 1
     impl.kv_lora_rank = KV_LORA_RANK
+    impl.qk_rope_head_dim = QK_ROPE_HEAD_DIM
     impl.scale = SCALE
     impl.kv_cache_dtype = "auto"
 

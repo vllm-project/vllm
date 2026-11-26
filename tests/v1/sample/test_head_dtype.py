@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for running the generation lm_head in fp32 via ``head_dtype``.
+"""Tests for running the generation lm_head in fp32 via `head_dtype`.
 
 An fp32 head lets rollout logits match a trainer that computes the lm_head in
 fp32, which is required for RL training-inference consistency.
@@ -16,7 +16,9 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 
 
 class _FakeLmHead:
@@ -32,10 +34,17 @@ class _FakeLmHead:
         self.tp_size = 1
 
 
+def _fake_lm_head(
+    weight: torch.Tensor, quantized: bool = False, shard_indices: object | None = None
+) -> VocabParallelEmbedding:
+    # The dtype tests only need the projection fields, not distributed setup.
+    return _FakeLmHead(weight, quantized, shard_indices)  # type: ignore[return-value]
+
+
 def _build_processor(vocab_size: int) -> LogitsProcessor:
     lp = LogitsProcessor(vocab_size)
     # The TP gather is orthogonal to the dtype behavior under test.
-    lp._gather_logits = lambda logits: logits
+    lp._gather_logits = lambda logits: logits  # type: ignore[method-assign]
     return lp
 
 
@@ -47,8 +56,9 @@ def test_fp32_head_runs_projection_in_fp32(default_vllm_config):
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
 
-    logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+    logits = lp._get_logits(hidden_states, _fake_lm_head(weight), None)
 
+    assert logits is not None
     assert logits.dtype == torch.float32
     assert torch.isfinite(logits).all()
     expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
@@ -66,8 +76,9 @@ def test_non_fp32_head_dtype_uses_cast_path(default_vllm_config):
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
 
-    logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+    logits = lp._get_logits(hidden_states, _fake_lm_head(weight), None)
 
+    assert logits is not None
     assert logits.dtype == torch.float16
     expected = torch.nn.functional.linear(hidden_states.half(), weight.half())
     torch.testing.assert_close(logits, expected)
@@ -82,7 +93,7 @@ def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
 
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
-    lm_head = _FakeLmHead(weight)
+    lm_head = _fake_lm_head(weight)
 
     with mock.patch.object(
         lm_head.quant_method,
@@ -94,44 +105,75 @@ def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
         logits = lp._get_logits(hidden_states, lm_head, None)
 
     apply_mock.assert_called_once()
+    assert logits is not None
     assert logits.dtype == torch.bfloat16
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Exercises the torch.mm(out_dtype=...) device fast path, "
-    "available on CUDA and ROCm.",
+    "available on CUDA, ROCm and XPU.",
 )
 def test_fp32_head_uses_mm_fast_path_on_device(default_vllm_config):
     # On ROCm, current_platform.is_cuda() is False, so this previously fell
     # through to the cast path (F.linear) instead of torch.mm(out_dtype=...),
     # even though ROCm supports the out_dtype mm via its non-Lt GEMM path.
+    # XPU previously fell through the same way.
     from unittest import mock
 
     vocab_size, hidden_size, num_tokens = 64, 16, 4
     lp = _build_processor(vocab_size)
     lp.head_dtype = torch.float32
 
+    device = current_platform.device_type
     hidden_states = torch.randn(
-        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=device
     )
-    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device=device)
 
     with mock.patch(
         "vllm.model_executor.layers.logits_processor.F.linear"
     ) as linear_mock:
-        logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+        logits = lp._get_logits(hidden_states, _fake_lm_head(weight), None)
 
     linear_mock.assert_not_called()
+    assert logits is not None
     assert logits.dtype == torch.float32
     expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
     torch.testing.assert_close(logits, expected)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Measures device memory."
+)
+def test_soft_cap_holds_one_logits_sized_tensor(default_vllm_config):
+    """The soft cap runs in place: a second logits-sized tensor in every step
+    can exceed the torch memory cap of an extensible KV cache."""
+    vocab_size, hidden_size, num_tokens = 262144, 16, 64
+    lp = LogitsProcessor(vocab_size, soft_cap=30.0)
+
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device="cuda")
+    # Also warms up the GEMM, whose one-time workspace would count in the peak.
+    expected = torch.nn.functional.linear(hidden_states, weight)
+    expected = torch.tanh(expected / lp.soft_cap) * lp.soft_cap
+
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
+    logits = lp(_fake_lm_head(weight), hidden_states)
+    peak = torch.accelerator.max_memory_allocated() - allocated
+
+    assert logits is not None
+    assert torch.equal(logits, expected)
+    assert peak < 1.5 * logits.nbytes
+
+
 def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
     lp = _build_processor(64)
     lp.head_dtype = torch.float32
-    lm_head = _FakeLmHead(torch.randn(64, 16, dtype=torch.bfloat16), quantized=True)
+    lm_head = _fake_lm_head(torch.randn(64, 16, dtype=torch.bfloat16), quantized=True)
 
     with pytest.raises(ValueError, match="unquantized"):
         lp._get_logits(torch.randn(4, 16, dtype=torch.bfloat16), lm_head, None)
@@ -197,7 +239,7 @@ def test_get_top_tokens_honors_head_dtype(default_vllm_config):
 
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
-    lm_head = _FakeLmHead(
+    lm_head = _fake_lm_head(
         weight,
         shard_indices=types.SimpleNamespace(
             num_org_vocab_padding=0, org_vocab_start_index=0
@@ -209,6 +251,43 @@ def test_get_top_tokens_honors_head_dtype(default_vllm_config):
         dim=-1
     )
     assert torch.equal(top, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Measures device memory."
+)
+def test_get_top_tokens_holds_one_logits_sized_tensor(default_vllm_config):
+    """The local-argmax path applies soft cap and scale in place: extra
+    logits-sized tensors in every draft step can exceed the torch memory cap
+    of an extensible KV cache."""
+    import types
+
+    vocab_size, hidden_size, num_tokens = 262144, 16, 64
+    lp = LogitsProcessor(vocab_size, scale=2.0, soft_cap=30.0)
+
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device="cuda")
+    lm_head = _fake_lm_head(
+        weight,
+        shard_indices=types.SimpleNamespace(
+            num_org_vocab_padding=0, org_vocab_start_index=0
+        ),
+    )
+    # Also warms up the GEMM, whose one-time workspace would count in the peak.
+    expected = torch.nn.functional.linear(hidden_states, weight)
+    expected = torch.tanh(expected / lp.soft_cap) * lp.soft_cap * lp.scale
+
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
+    top = lp.get_top_tokens(lm_head, hidden_states)
+    peak = torch.accelerator.max_memory_allocated() - allocated
+
+    # The cap ties nearby logits in bf16, so compare the selected values.
+    selected = expected.gather(-1, top.unsqueeze(-1)).squeeze(-1)
+    assert torch.equal(selected, expected.max(dim=-1).values)
+    assert peak < 1.5 * expected.nbytes
 
 
 @pytest.mark.core_model
@@ -236,7 +315,9 @@ def test_fp32_head_e2e_no_nan():
 
     for output in outputs:
         for completion in output.outputs:
+            assert completion.logprobs is not None
             for token_id, position in zip(completion.token_ids, completion.logprobs):
+                assert position is not None
                 # The sampled token survived filtering, so its logprob is finite.
                 assert math.isfinite(position[token_id].logprob)
                 # No returned logprob is NaN.

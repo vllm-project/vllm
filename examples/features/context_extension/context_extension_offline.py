@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script demonstrates how to extend the context length
+"""This script demonstrates how to extend the context length
 of a Qwen model using the YARN method (rope_parameters)
 and run a simple chat example.
 

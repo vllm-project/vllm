@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Test for the fix in PR #29987: Eagerly abort cancelled final-step requests.
+"""Test for the fix in PR #29987: Eagerly abort cancelled final-step requests.
 
 This test verifies that when a request is aborted during its final execution
 step (when it would naturally complete), it is properly marked as aborted
@@ -52,8 +51,7 @@ class DummyKVConnectorMetadata(KVConnectorMetadata):
 
 
 class DummyKVConnector(KVConnectorBase_V1):
-    """
-    Dummy KV connector that captures request finish statuses to a file.
+    """Dummy KV connector that captures request finish statuses to a file.
     This is used to verify the fix - without the fix, a request aborted
     during its final step would be captured as FINISHED_LENGTH_CAPPED
     instead of FINISHED_ABORTED.
@@ -70,6 +68,7 @@ class DummyKVConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         # Get the status file path from extra config
+        assert vllm_config.kv_transfer_config is not None
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
         self.status_file = extra_config.get("status_file")
         # Log that we were initialized
@@ -144,8 +143,7 @@ KVConnectorFactory.register_connector(
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.asyncio
 async def test_abort_during_final_step(async_scheduling: bool):
-    """
-    Test that a request aborted during its final execution step is treated as
+    """Test that a request aborted during its final execution step is treated as
     aborted rather than completed.
 
     This test:
@@ -165,7 +163,6 @@ async def test_abort_during_final_step(async_scheduling: bool):
     With the fix, _process_aborts_queue() runs before update_from_output(), so the
     abort takes precedence and the KV connector sees FINISHED_ABORTED.
     """
-
     # Create three temporary files:
     # 1. ready_file: deleted by execute_model to signal it has started
     # 2. block_file: execute_model waits for this to be deleted

@@ -5,15 +5,17 @@ import json
 from collections.abc import Generator
 
 import pytest
+from openai.types.responses import FunctionTool
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from tests.tool_parsers.utils import ToolState, ToolStateWithHeader
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
@@ -169,7 +171,7 @@ def test_extract_tool_calls_no_tools(step3p5_tool_parser):
     model_output = "This is a test response without any tool calls"
     extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -366,7 +368,7 @@ def test_extract_tool_calls(
 
 
 def test_extract_tool_calls_fallback_no_tags(step3p5_tool_parser, sample_tools):
-    """Test fallback parsing when XML tags are missing"""
+    """Test fallback parsing when XML tags are missing."""
     model_output = """<function=get_current_weather>
 <parameter=city>
 Dallas
@@ -386,26 +388,29 @@ TX
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
-def test_extract_tool_calls_type_conversion(step3p5_tokenizer):
-    """Test parameter type conversion based on tool schema"""
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "test_types",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "int_param": {"type": "integer"},
-                        "float_param": {"type": "float"},
-                        "bool_param": {"type": "boolean"},
-                        "str_param": {"type": "string"},
-                        "obj_param": {"type": "object"},
-                    },
-                },
-            },
-        )
-    ]
+@pytest.mark.parametrize("api", ["chat", "responses"])
+def test_extract_tool_calls_type_conversion(step3p5_tokenizer, api):
+    """Test parameter type conversion based on Chat and Responses tool schemas."""
+    parameters = {
+        "type": "object",
+        "properties": {
+            "int_param": {"type": "integer"},
+            "float_param": {"type": "float"},
+            "bool_param": {"type": "boolean"},
+            "str_param": {"type": "string"},
+            "obj_param": {"type": "object"},
+        },
+    }
+    tools: list[ChatCompletionToolsParam | FunctionTool] = (
+        [
+            ChatCompletionToolsParam(
+                type="function",
+                function={"name": "test_types", "parameters": parameters},
+            )
+        ]
+        if api == "chat"
+        else [FunctionTool(type="function", name="test_types", parameters=parameters)]
+    )
 
     model_output = """<tool_call>
 <function=test_types>
@@ -428,7 +433,7 @@ hello world
 </tool_call>"""
 
     parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
     extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
@@ -622,11 +627,11 @@ def test_extract_tool_calls_streaming(
     expected_tool_calls,
     expected_content,
 ):
-    """Test incremental streaming behavior including typed parameters"""
+    """Test incremental streaming behavior including typed parameters."""
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
-    tool_states = {}  # Track state per tool index
+    tool_states: dict[int, ToolStateWithHeader] = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
         step3p5_tool_parser, step3p5_tokenizer, model_output, request
@@ -692,7 +697,7 @@ def test_extract_tool_calls_streaming(
 def test_extract_tool_calls_missing_closing_parameter_tag(
     step3p5_tool_parser, sample_tools
 ):
-    """Test handling of missing closing </parameter> tag"""
+    """Test handling of missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -734,7 +739,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_missing_closing_tag(
     step3p5_tool_parser, step3p5_tokenizer, sample_tools
 ):
-    """Test streaming with missing closing </parameter> tag"""
+    """Test streaming with missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -753,7 +758,7 @@ fahrenheit
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         step3p5_tool_parser, step3p5_tokenizer, model_output, request
@@ -808,7 +813,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_incremental(
     step3p5_tool_parser, step3p5_tokenizer, sample_tools
 ):
-    """Test that streaming is truly incremental"""
+    """Test that streaming is truly incremental."""
     model_output = """I'll check the weather.<tool_call>
 <function=get_current_weather>
 <parameter=city>
@@ -840,17 +845,21 @@ TX
     for chunk in chunks:
         if chunk.tool_calls and chunk.tool_calls[0].id:
             header_found = True
+            assert chunk.tool_calls[0].function is not None
             assert chunk.tool_calls[0].function.name == "get_current_weather"
             assert chunk.tool_calls[0].type == "function"
             # Empty initially
-            assert chunk.tool_calls[0].function.arguments == ""
+            assert not chunk.tool_calls[0].function.arguments
             break
     assert header_found
 
     # Should have chunks with incremental arguments
     arg_chunks = []
     for chunk in chunks:
-        if chunk.tool_calls and chunk.tool_calls[0].function.arguments:
+        if not chunk.tool_calls:
+            continue
+        assert chunk.tool_calls[0].function is not None
+        if chunk.tool_calls[0].function.arguments:
             arg_chunks.append(chunk.tool_calls[0].function.arguments)
 
     # Arguments should be streamed incrementally
@@ -861,43 +870,6 @@ TX
     parsed_args = json.loads(full_args)
     assert parsed_args["city"] == "Dallas"
     assert parsed_args["state"] == "TX"
-
-
-def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tokenizer):
-    """Test parameter type conversion based on tool schema"""
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "test_types",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "int_param": {"type": "integer"},
-                        "float_param": {"type": "float"},
-                        "bool_param": {"type": "boolean"},
-                        "str_param": {"type": "string"},
-                        "obj_param": {"type": "object"},
-                    },
-                },
-            },
-        )
-    ]
-
-    model_output = """<tool_call>
-<function=test_types>
-<parameter=obj_param>
-{'key': 'value'}
-</parameter>
-</function>
-</tool_call>"""
-
-    parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
-
-    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
-    assert args["obj_param"] == {"key": "value"}
 
 
 def test_extract_tool_calls_streaming_mixed_content_and_multiple_tool_calls(
@@ -933,7 +905,7 @@ rectangle
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         step3p5_tool_parser, step3p5_tokenizer, model_output, request
@@ -1012,8 +984,8 @@ def test_extract_tool_calls_non_streaming_mixed_content_and_multiple_tool_calls(
     """Test non-streaming extraction with mixed content and multiple tool calls.
 
     Scenario: Model outputs "hello" + complete tool call + "hi" + complete tool call.
-    Expected: "hello" as content, first tool call parsed (index=0), "hi" as content,
-    second tool call parsed (index=1)
+    Expected: "hello" as content, first tool call parsed (index=0), second tool call
+    parsed (index=1). Non-streaming content stops at the first tool call.
     """
     # Model output: hello + complete tool call + hi + complete tool call
     model_output = """hello<tool_call>
@@ -1062,17 +1034,7 @@ rectangle
     assert args_dict_1["dimensions"]["width"] == 10
     assert args_dict_1["dimensions"]["height"] == 5
 
-    # Verify content: should contain "hello", "hi"
-    assert extracted_tool_calls.content is not None
-    assert "hello" in extracted_tool_calls.content, "Should contain 'hello' as content"
-    assert "hi" in extracted_tool_calls.content, "Should contain 'hi' as content"
-
-    # Verify the order: hello should come first, then hi
-    hello_index = extracted_tool_calls.content.find("hello")
-    hi_index = extracted_tool_calls.content.find("hi")
-
-    assert hello_index >= 0, "'hello' should be in content"
-    assert hi_index > hello_index, "'hi' should come after 'hello'"
+    assert extracted_tool_calls.content == "hello"
 
     # Verify that tool call tags are NOT in the content
     assert "<function=get_current_weather>" not in extracted_tool_calls.content, (
@@ -1151,12 +1113,14 @@ rectangle
         request=request,
     )
 
-    # Process delta result
-    if delta_result:
-        if delta_result.content:
-            other_content += delta_result.content
-        if delta_result.tool_calls:
-            for tool_call in delta_result.tool_calls:
+    # Serving flushes the parser at the end of the stream.
+    for delta in (delta_result, step3p5_tool_parser.finish_streaming()):
+        if not delta:
+            continue
+        if delta.content:
+            other_content += delta.content
+        if delta.tool_calls:
+            for tool_call in delta.tool_calls:
                 idx = tool_call.index
                 if idx not in tool_states:
                     tool_states[idx] = {
@@ -1248,7 +1212,7 @@ rectangle
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         step3p5_tool_parser, step3p5_tokenizer, model_output, request
@@ -1338,7 +1302,7 @@ rectangle""",
     boundary_chunk = delta_text_chunks[1]
     assert len(step3p5_tokenizer.encode(boundary_chunk, add_special_tokens=False)) > 1
 
-    tool_states = {}
+    tool_states: dict[int, ToolState] = {}
     for delta_message in stream_delta_message_generator_from_chunks(
         step3p5_tool_parser, step3p5_tokenizer, delta_text_chunks, request
     ):

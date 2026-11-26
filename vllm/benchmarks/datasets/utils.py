@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Shared utilities for benchmark dataset sampling.
-"""
+"""Shared utilities for benchmark dataset sampling."""
 
 import logging
 import math
@@ -21,10 +19,10 @@ RangeRatio = float | dict[str, float]
 def _resolve_range_ratios(
     range_ratio: RangeRatio,
 ) -> tuple[float, float]:
-    """Return ``(input_range_ratio, output_range_ratio)`` from *range_ratio*.
+    """Return `(input_range_ratio, output_range_ratio)` from *range_ratio*.
 
     *range_ratio* is either a single float (used for both input and output)
-    or a dict with ``"input"`` and ``"output"`` keys.
+    or a dict with `"input"` and `"output"` keys.
     """
     if isinstance(range_ratio, dict):
         try:
@@ -46,20 +44,20 @@ def get_sampling_params(
     output_len: int,
     tokenizer: TokenizerLike,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Sample per-request input/output token lengths and vocab offsets.
+    """Sample per-request input/output token lengths and vocab offsets.
 
     Lengths are drawn uniformly from integer ranges around the configured
-    means, controlled by *range_ratio*.  It may be a single ``float``
-    (applied to both input and output) or a ``dict`` with ``"input"`` and
-    ``"output"`` keys for independent control.
+    means, controlled by *range_ratio*.  It may be a single `float`
+    (applied to both input and output) or a `dict` with `"input"` and
+    `"output"` keys for independent control.
 
-    Tokenizer special tokens are subtracted from ``input_len`` before
+    Tokenizer special tokens are subtracted from `input_len` before
     computing the sampling interval.
 
     Returns:
-        (input_lens, output_lens, offsets) – three 1-D ``np.ndarray`` of
-        shape ``(num_requests,)``.
+        (input_lens, output_lens, offsets) – three 1-D `np.ndarray` of
+        shape `(num_requests,)`.
+
     """
     input_range_ratio, output_range_ratio = _resolve_range_ratios(range_ratio)
 

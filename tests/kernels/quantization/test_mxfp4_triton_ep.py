@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests that triton_kernel_moe_forward correctly applies expert_map
+"""Tests that triton_kernel_moe_forward correctly applies expert_map
 remapping when expert parallelism (EP) is enabled.
 
 When expert_map is provided, global expert IDs are remapped to local IDs

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
@@ -14,8 +14,7 @@ if TYPE_CHECKING:
 
 
 class GptOssReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for GptOss model.
+    """Reasoning parser for GptOss model.
 
     The GptOss model uses harmony to extract reasoning content and this parser
     is only used for detecting the end of the reasoning content.

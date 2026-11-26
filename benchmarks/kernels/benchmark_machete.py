@@ -56,7 +56,7 @@ def terse_type_name(dt):
     }[dt]
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkTensors:
     w_ref: torch.Tensor
     a: torch.Tensor
@@ -70,7 +70,7 @@ class BenchmarkTensors:
     w_tok_s: torch.Tensor | None
 
 
-@dataclass
+@dataclass(slots=True)
 class TypeConfig:
     act_type: torch.dtype
     weight_type: ScalarType
@@ -210,7 +210,7 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
         w_zp = torch.empty(0, dtype=torch.int, device=device)
     else:
         w_zp = marlin_zero_points(
-            bt.w_g_zp, bt.w_ref.shape[0], bt.w_ref.shape[1], bt.wtype.size_bits
+            bt.w_g_zp, bt.w_g_zp.shape[0], bt.w_ref.shape[1], bt.wtype.size_bits
         )
 
     if bt.group_size is None:
@@ -220,10 +220,8 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
             bt.w_g_s, bt.w_ref.shape[0], bt.w_ref.shape[1], bt.group_size
         )
 
-    sort_indices = torch.empty(0, dtype=torch.int, device=device)
-    g_idx = torch.empty(0, dtype=torch.int, device=device)
     w_q = ops.gptq_marlin_repack(
-        bt.w_q, sort_indices, bt.w_ref.shape[0], bt.w_ref.shape[1], bt.wtype.size_bits
+        bt.w_q, bt.w_ref.shape[0], bt.w_ref.shape[1], bt.wtype.size_bits
     )
 
     if bt.a.dtype.is_floating_point:
@@ -237,17 +235,13 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
             b_q_weight=w_q,
             b_bias=None,
             b_scales=w_s,
-            a_scales=None,
             global_scale=None,
             b_zeros=w_zp,
-            g_idx=g_idx,
-            perm=sort_indices,
             workspace=workspace.scratch,
             b_q_type=bt.wtype,
             size_m=bt.a.shape[0],
             size_n=bt.w_ref.shape[1],
             size_k=bt.w_ref.shape[0],
-            is_k_full=True,
             is_zp_float=False,
         )
     else:
@@ -657,7 +651,7 @@ Benchmark Machete GEMM.
     )
     parser.add_argument(
         "--group-zero-type",
-        type=to_torch_dtype,
+        action=ToTorchDtype,
         choices=["bfloat16", "float16"],
     )
     parser.add_argument(

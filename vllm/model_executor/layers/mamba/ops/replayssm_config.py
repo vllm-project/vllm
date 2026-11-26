@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Launch-config selection for the ReplaySSM Mamba2 output_only decode kernel.
+"""Launch-config selection for the ReplaySSM decode kernels (Mamba2
+output_only and GDN).
 
-Mirrors ``mamba_ssm.py``: a hard-coded heuristic per kernel, plus an
-``override`` context manager for benchmarks/tests/config sweeps. Hardware is
+Mirrors `mamba_ssm.py`: a hard-coded heuristic per kernel, plus an
+`override` context manager for benchmarks/tests/config sweeps. Hardware is
 auto-detected (Blackwell vs not) so call sites need not thread it through.
 """
 
 import functools
-from contextlib import contextmanager
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -26,20 +26,6 @@ def _is_blackwell() -> bool:
 _overrides: dict[str, tuple] = {}
 
 
-@contextmanager
-def override_replayssm_config(kernel: str, config: tuple):
-    """Pin ``kernel``'s launch config for the duration of the context."""
-    prev = _overrides.get(kernel)
-    _overrides[kernel] = config
-    try:
-        yield
-    finally:
-        if prev is None:
-            _overrides.pop(kernel, None)
-        else:
-            _overrides[kernel] = prev
-
-
 def _dstate_tile(dstate: int, tile: int) -> int:
     return max(16, min(tile, triton.next_power_of_2(dstate)))
 
@@ -52,15 +38,30 @@ def _mamba2_output_only(dstate, L, is_blackwell):
     return 16, 1, _dstate_tile(dstate, 64), _dstate_tile(dstate, 128), 2
 
 
-def get_replayssm_config(kernel: str, **shape) -> tuple:
-    """Return the launch config for ``kernel`` (override > tuned default).
+# Longer GDN rings spill registers and replay more than the skipped state
+# store saves: on B200 the decode step is slower than the baseline from L = 64.
+GDN_MAX_BUFFER_LEN = 32
 
-    kernel: "mamba2_output_only". ``shape`` carries the keying dims (dstate;
-    ``L`` for the buffer length, default 16); hardware is auto-detected.
+
+def _gdn_decode(is_blackwell):
+    # (block_v, num_warps, num_stages, nk); serving-batch optimum per device.
+    if is_blackwell:
+        return 128, 1, 3, 4
+    return 64, 1, 3, 2
+
+
+def get_replayssm_config(kernel: str, **shape) -> tuple:
+    """Return the launch config for `kernel` (override > tuned default).
+
+    kernel: "mamba2_output_only" or "gdn_decode". `shape` carries the keying
+    dims (dstate; `L` for the buffer length, default 16); hardware is
+    auto-detected.
     """
     if kernel in _overrides:
         return _overrides[kernel]
     bw = _is_blackwell()
     if kernel == "mamba2_output_only":
         return _mamba2_output_only(shape["dstate"], shape.get("L", 16), bw)
+    if kernel == "gdn_decode":
+        return _gdn_decode(bw)
     raise ValueError(f"unknown ReplaySSM kernel config key: {kernel}")

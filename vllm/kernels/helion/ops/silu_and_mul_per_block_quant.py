@@ -96,7 +96,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
          pick the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
     """
-
     if not config_keys:
         return None
 
@@ -137,17 +136,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     )
     _pick_cache[cache_key] = result
     return result
-
-
-def fake_impl(
-    out: torch.Tensor,  # [num_tokens, intermediate_size]
-    input: torch.Tensor,  # [num_tokens, 2 * intermediate_size]
-    scales: torch.Tensor,  # [num_tokens, groups_per_row]
-    group_size: int,
-    scale_ub: torch.Tensor | None = None,  # scalar tensor
-    is_scale_transposed: bool = False,
-) -> None:
-    return
 
 
 def baseline(
@@ -193,7 +181,6 @@ def baseline(
     mutates_args=["out", "scales"],
     config_picker=pick_config,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],

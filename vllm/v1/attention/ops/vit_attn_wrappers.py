@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file contains ops for ViT attention to be compatible with torch.compile
+"""This file contains ops for ViT attention to be compatible with torch.compile
 as there are operations here not supported by torch.compile (for instance,
 `.item()` in flash attention)
 
@@ -18,6 +17,7 @@ import einops
 import torch
 import torch.nn.functional as F
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -45,6 +45,8 @@ def flash_attn_maxseqlen_wrapper(
 
         if not current_platform.is_rocm() and fa_version is not None:
             kwargs["fa_version"] = fa_version
+        if fa_version == 3 and envs.VLLM_BATCH_INVARIANT:
+            kwargs["num_splits"] = 1
 
     q_len = q.size(1)
     if cu_seqlens is None:
@@ -59,6 +61,15 @@ def flash_attn_maxseqlen_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    supports_out = not current_platform.is_rocm()
+    if supports_out:
+        if current_platform.is_cuda() and torch.cuda.is_current_stream_capturing():
+            # workaround for encoder CUDA-graph replay paddings with NaNs edge case
+            kwargs["out"] = torch.zeros(
+                q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device
+            )
+        else:
+            kwargs["out"] = torch.empty_like(q, memory_format=torch.contiguous_format)
     output = flash_attn_varlen_func(
         q,
         k,
@@ -72,6 +83,8 @@ def flash_attn_maxseqlen_wrapper(
         softmax_scale=scale,
         **kwargs,
     )
+    if not supports_out:
+        output = output.contiguous()
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
     return context_layer
 
@@ -87,7 +100,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -157,6 +170,7 @@ def triton_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 
@@ -173,14 +187,16 @@ def triton_attn_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    output = torch.empty_like(q)
+    output = torch.empty_like(q, memory_format=torch.contiguous_format)
+    if sequence_lengths is None:
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     context_attention_fwd(
         q,
         k,
         v,
         output,
         b_start_loc=cu_seqlens[:-1],
-        b_seq_len=cu_seqlens[1:] - cu_seqlens[:-1],
+        b_seq_len=sequence_lengths,
         max_input_len=max_seqlen,
         is_causal=False,
         sliding_window_q=None,
@@ -200,8 +216,9 @@ def triton_attn_wrapper_fake(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -219,6 +236,7 @@ def vit_triton_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.triton_attn_wrapper(
         q,
@@ -228,6 +246,7 @@ def vit_triton_attn_wrapper(
         scale,
         cu_seqlens,
         max_seqlen,
+        sequence_lengths,
     )
 
 
@@ -238,14 +257,21 @@ def apply_sdpa(
     scale: float | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    """
-    Input shape:
+    """Input shape:
     (batch_size x seq_len x num_heads x head_size)
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-    output = F.scaled_dot_product_attention(
-        q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
-    )
+    if current_platform.is_zen_cpu() and hasattr(torch.ops.zentorch, "zentorch_sdpa"):
+        # Schema: (query, key, value, dropout_p=0., is_causal=False, *,
+        # attn_mask=None, scale=None) -> (attention, logsumexp).
+        # No enable_gqa: GQA is inferred from key.size(1) vs query.size(1).
+        output, _ = torch.ops.zentorch.zentorch_sdpa(
+            q, k, v, dropout_p=0.0, is_causal=False, scale=scale
+        )
+    else:
+        output = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
+        )
     output = einops.rearrange(output, "b h s d -> b s h d ")
     return output
 
@@ -268,7 +294,7 @@ def torch_sdpa_wrapper(
         v = v.contiguous()
 
     if cu_seqlens is None:
-        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa)
+        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa).contiguous()
 
     outputs = []
 
@@ -289,11 +315,11 @@ def torch_sdpa_wrapper_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: float | None,
-    cu_seqlens: torch.Tensor | None,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -355,6 +381,11 @@ def flashinfer_wrapper(
     with gpu_sync_allowed():
         max_seqlen = max_seqlen.item()
 
+    output_buffer = torch.empty_like(
+        q,
+        dtype=o_data_type,
+        memory_format=torch.contiguous_format,
+    )
     output, _ = cudnn_batch_prefill_with_kv_cache(
         q,
         k,
@@ -375,6 +406,7 @@ def flashinfer_wrapper(
         k_scale=k_scale,
         v_scale=v_scale,
         o_data_type=o_data_type,
+        out=output_buffer,
     )
 
     if is_reshaped:
@@ -397,7 +429,11 @@ def vit_flashinfer_wrapper_fake(
     v_scale: torch.Tensor | None = None,
     o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q, dtype=o_data_type or q.dtype)
+    return torch.empty_like(
+        q,
+        dtype=o_data_type,
+        memory_format=torch.contiguous_format,
+    )
 
 
 direct_register_custom_op(

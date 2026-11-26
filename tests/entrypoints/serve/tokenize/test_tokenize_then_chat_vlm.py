@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Regression test: calling ``/tokenize`` with multimodal data followed by
-``/v1/chat/completions`` with the same data must not cause an error.
+"""Regression test: calling `/tokenize` with multimodal data followed by
+`/v1/chat/completions` with the same data must not cause an error.
 
-Ensures that the ``/tokenize`` endpoint does not pollute internal caches
+Ensures that the `/tokenize` endpoint does not pollute internal caches
 (e.g. multimodal feature caches) and that a subsequent
-``/v1/chat/completions`` request with the same multimodal payload
+`/v1/chat/completions` request with the same multimodal payload
 completes successfully.
 """
 
@@ -53,7 +52,6 @@ async def test_tokenize_then_chat_completion_with_image(
 ):
     """Tokenize a multimodal message, then send the same message to chat
     completions.  The chat completion must succeed (not 500)."""
-
     image_url = local_asset_server.url_for("stop_sign.jpg")
     messages = [
         {

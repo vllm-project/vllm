@@ -1,0 +1,169 @@
+meta:
+  title: "NVIDIA Nemotron-Nano-12B-v2-VL"
+  slug: "nemotron-nano-12b-v2-vl"
+  provider: "NVIDIA"
+  description: "NVIDIA Nemotron-Nano 12B vision-language model with video support and Efficient Video Sampling (EVS)"
+  date_added: 2025-10-31
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  related_recipes:
+    - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  hardware:
+    h100: verified
+    b200: verified
+
+model:
+  model_id: "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
+  min_vllm_version: "0.11.1"
+  architecture: dense
+  parameter_count: "12B"
+  active_parameters: "12B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+  base_env:
+    VLLM_VIDEO_LOADER_BACKEND: "opencv"
+
+features:
+  video_compression:
+    description: "Efficient Video Sampling (EVS) prunes video tokens; 0.75 means 75% pruning"
+    args:
+      - "--video-pruning-rate"
+      - "0.75"
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 29
+    description: "BF16 weights on 1 GPU"
+
+  fp8:
+    model_id: "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8"
+    precision: fp8
+    vram_minimum_gb: 14
+    description: "FP8 weights on 1 GPU"
+
+  nvfp4:
+    model_id: "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-NVFP4-QAD"
+    precision: nvfp4
+    vram_minimum_gb: 8
+    description: "NVFP4 (QAD) weights for Blackwell"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Nemotron-Nano-12B-v2-VL is a vision-language model with image and video support. It
+  includes Efficient Video Sampling (EVS) to prune video tokens and reduce compute. The
+  model is available in BF16, FP8, and NVFP4 (QAD) precisions.
+
+  ## Prerequisites
+
+  - Hardware: 1x GPU (A100/H100/B200, etc.)
+  - vLLM: 0.11.0 does NOT include this model; use latest nightly or install from source
+  - DGX Spark: use `nvcr.io/nvidia/vllm:25.12.post1-py3`
+
+  ### Install vLLM
+
+  ```bash
+  docker pull vllm/vllm-openai:nightly-8bff831f0aa239006f34b721e63e1340e3472067
+  # or for DGX Spark:
+  docker pull nvcr.io/nvidia/vllm:25.12.post1-py3
+  ```
+
+  ## Launch command
+
+  ```bash
+  export VLLM_VIDEO_LOADER_BACKEND=opencv
+  export CHECKPOINT_PATH="nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
+  export CUDA_VISIBLE_DEVICES=0
+
+  python3 -m vllm.entrypoints.openai.api_server \
+    --model ${CHECKPOINT_PATH} \
+    --trust-remote-code \
+    --media-io-kwargs '{"video": {"fps": 2, "num_frames": 128}}' \
+    --max-model-len 131072 \
+    --data-parallel-size 1 \
+    --port 5566 \
+    --allowed-local-media-path / \
+    --video-pruning-rate 0.75 \
+    --served-model-name "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
+  ```
+
+  Flags:
+  - `--max-model-len`: reduce for shorter contexts to save memory
+  - `--allowed-local-media-path <root>`: limit local-file access
+  - `--video-pruning-rate <0..1>`: EVS compression; higher prunes more video tokens
+
+  ## Client Usage
+
+  Describe a video:
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:5566/v1", api_key="<ignored>")
+  completion = client.chat.completions.create(
+      model="nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "text", "text": "Describe the video."},
+              {"type": "video_url", "video_url": {"url": "file:///path/to/video.mp4"}},
+          ],
+      }],
+  )
+  print(completion.choices[0].message.content)
+  ```
+
+  ## Offline / LLM API
+
+  ```python
+  from vllm import LLM, SamplingParams
+
+  llm = LLM(
+      "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+      trust_remote_code=True,
+      max_model_len=2**17,
+      allowed_local_media_path="/",
+      video_pruning_rate=0.75,
+      media_io_kwargs=dict(video=dict(fps=2, num_frames=128)),
+  )
+  ```
+
+  ## Troubleshooting
+
+  - Set `VLLM_VIDEO_LOADER_BACKEND=opencv` (required for video inputs).
+  - OOM: lower `--max-model-len` or increase `--video-pruning-rate`.
+
+  ## References
+
+  - [Nemotron-Nano-12B-v2-VL-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16)
+  - [Nemotron-Nano-12B-v2-VL-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8)
+  - [Nemotron-Nano-12B-v2-VL-NVFP4-QAD](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-NVFP4-QAD)
+  - [EVS paper](https://arxiv.org/abs/2510.14624)
