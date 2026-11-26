@@ -1011,17 +1011,33 @@ def fused_q(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse the MQA-query and indexer-query RoPE/quantization.
 
+    All input tensors must have unit inner stride (`stride(-1) == 1`); outer
+    strides may be non-contiguous (e.g. column slices such as `kw[:, head_dim:]`
+    or split Q projections).
+
     Returns `(index_q_fp8, index_weights_out, mqa_q)`. When `quantize_mqa`
     is True (FlashInfer sparse, fp8 query) `mqa_q` is a single fp8 tensor
     packing `[ql_nope; q_pe]`. When False (FlashMLA sparse, bf16 query) it is
     the RoPE'd `q_pe` in bf16; the caller pairs it with `ql_nope` as the
     `(ql_nope, q_pe)` tuple the backend expects.
     """
-    assert positions.ndim == 1
+    assert positions.ndim == 1 and positions.stride(-1) == 1, (
+        f"positions must be 1D with unit stride, got shape={positions.shape}, "
+        f"stride={positions.stride()}"
+    )
     assert positions.dtype == torch.int64
-    assert q_pe.ndim == 3
-    assert q_pe_cos_sin_cache.ndim == 2
-    assert ql_nope.ndim == 3
+    assert q_pe.ndim == 3 and q_pe.stride(-1) == 1, (
+        f"q_pe must be 3D with unit inner stride, got shape={q_pe.shape}, "
+        f"stride={q_pe.stride()}"
+    )
+    assert q_pe_cos_sin_cache.ndim == 2 and q_pe_cos_sin_cache.stride(-1) == 1, (
+        "q_pe_cos_sin_cache must be 2D with unit inner stride, got "
+        f"shape={q_pe_cos_sin_cache.shape}, stride={q_pe_cos_sin_cache.stride()}"
+    )
+    assert ql_nope.ndim == 3 and ql_nope.stride(-1) == 1, (
+        f"ql_nope must be 3D with unit inner stride, got shape={ql_nope.shape}, "
+        f"stride={ql_nope.stride()}"
+    )
     assert ql_nope.shape[:2] == q_pe.shape[:2]
     assert q_scale.dtype == torch.float32 and q_scale.numel() == 1
     num_tokens = positions.shape[0]
@@ -1035,9 +1051,23 @@ def fused_q(
         index_q = _dummy((1, 1, 1), q_pe.dtype, q_pe.device)
         index_q_cos_sin_cache = q_pe_cos_sin_cache
         index_weights = _dummy((1, 1), torch.float32, q_pe.device)
-    assert index_q is not None and index_q.ndim == 3
-    assert index_q_cos_sin_cache is not None
-    assert index_weights is not None
+    assert index_q is not None and index_q.ndim == 3 and index_q.stride(-1) == 1, (
+        "index_q must be 3D with unit inner stride"
+    )
+    assert (
+        index_q_cos_sin_cache is not None
+        and index_q_cos_sin_cache.ndim == 2
+        and index_q_cos_sin_cache.stride(-1) == 1
+    ), "index_q_cos_sin_cache must be 2D with unit inner stride"
+    assert (
+        index_weights is not None
+        and index_weights.ndim == 2
+        and index_weights.stride(-1) == 1
+    ), (
+        "index_weights must be 2D with unit inner stride, got "
+        f"shape={None if index_weights is None else index_weights.shape}, "
+        f"stride={None if index_weights is None else index_weights.stride()}"
+    )
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
     # fused_q is shared with the ROCm path, and the CuTeDSL module imports

@@ -415,6 +415,106 @@ def test_fused_q_kernel_guards_fp8_dtypes_under_quantize_mqa():
     )
 
 
+def test_fused_q_validates_unit_inner_stride(monkeypatch):
+    """Regression test: `_fused_q_kernel` reads `index_weights` (and other
+    inputs) with unit inner stride, so `fused_q` must fail fast on non-unit
+    inner strides while accepting non-contiguous row-strided column slices like
+    `kw[:, head_dim:]`.
+    """
+    num_tokens, num_q_heads, rope_dim, kv_lora_rank = 4, 8, 64, 512
+    num_idx_heads, idx_head_dim = 16, 128
+
+    positions = torch.arange(num_tokens, dtype=torch.int64)
+    q_pe = torch.randn(num_tokens, num_q_heads, rope_dim, dtype=torch.bfloat16)
+    ql_nope = torch.randn(num_tokens, num_q_heads, kv_lora_rank, dtype=torch.bfloat16)
+    cos_sin = torch.randn(32, rope_dim, dtype=torch.float32)
+    index_q = torch.randn(num_tokens, num_idx_heads, idx_head_dim, dtype=torch.bfloat16)
+    q_scale = torch.tensor([1.0], dtype=torch.float32)
+
+    # Non-unit inner stride on index_weights (stride=(32, 2)) must fail fast.
+    strided_weights = torch.randn(num_tokens, num_idx_heads * 2, dtype=torch.float32)[
+        :, ::2
+    ]
+    assert strided_weights.stride(-1) == 2
+    with pytest.raises(AssertionError, match="index_weights.*unit inner stride"):
+        dsv32_kernels.fused_q(
+            positions,
+            q_pe,
+            cos_sin,
+            index_q,
+            cos_sin,
+            ql_nope,
+            q_scale,
+            strided_weights,
+            idx_head_dim**-0.5,
+            num_idx_heads**-0.5,
+            has_indexer=True,
+            quantize_mqa=False,
+        )
+
+    # Transposed index_weights (stride=(1, num_tokens)) must also fail fast.
+    transposed_weights = torch.randn(num_idx_heads, num_tokens, dtype=torch.float32).T
+    assert transposed_weights.stride(-1) == num_tokens
+    with pytest.raises(AssertionError, match="index_weights.*unit inner stride"):
+        dsv32_kernels.fused_q(
+            positions,
+            q_pe,
+            cos_sin,
+            index_q,
+            cos_sin,
+            ql_nope,
+            q_scale,
+            transposed_weights,
+            idx_head_dim**-0.5,
+            num_idx_heads**-0.5,
+            has_indexer=True,
+            quantize_mqa=False,
+        )
+
+    # Non-contiguous column slice (kw[:, head_dim:], stride=(144, 1)) is valid.
+    kw = torch.randn(num_tokens, idx_head_dim + num_idx_heads, dtype=torch.bfloat16)
+    col_slice_weights = kw[:, idx_head_dim:]
+    assert col_slice_weights.stride() == (idx_head_dim + num_idx_heads, 1)
+
+    launched: dict[str, object] = {}
+
+    class _StubKernel:
+        def __getitem__(self, grid):
+            def _launch(*args, **kwargs):
+                launched["grid"] = grid
+                launched["args"] = args
+                launched["kwargs"] = kwargs
+
+            return _launch
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(dsv32_kernels, "_fused_q_kernel", _StubKernel())
+    monkeypatch.setattr(
+        dsv32_kernels.triton,
+        "next_power_of_2",
+        lambda n: 1 << (n - 1).bit_length(),
+        raising=False,
+    )
+
+    _, iw_out, _ = dsv32_kernels.fused_q(
+        positions,
+        q_pe,
+        cos_sin,
+        index_q,
+        cos_sin,
+        ql_nope,
+        q_scale,
+        col_slice_weights,
+        idx_head_dim**-0.5,
+        num_idx_heads**-0.5,
+        has_indexer=True,
+        quantize_mqa=False,
+    )
+    assert launched["grid"] == (num_tokens, 3, num_idx_heads)
+    assert iw_out.shape == (num_tokens, num_idx_heads)
+    assert iw_out.stride(-1) == 1
+
+
 def test_triton_mla_sparse_kernels_pass_loge2_as_constexpr():
     """Regression test: `@triton.jit` kernels must receive `LOGE2` as a
     `tl.constexpr` parameter rather than reading a Python module global.
