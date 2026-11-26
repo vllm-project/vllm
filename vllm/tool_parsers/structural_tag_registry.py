@@ -293,7 +293,7 @@ def _empty_call_kind(schema: Any) -> Literal["only", "optional"] | None:
         and not schema.get("patternProperties")
         and schema.get("additionalProperties") in (None, False)
     ):
-        return "only"
+        return "only" if _accepts_empty_object(schema) else None
     if _accepts_empty_object(schema):
         return "optional"
     return None

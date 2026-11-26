@@ -2518,6 +2518,25 @@ def test_qwen_xml_empty_call_preserves_parameter_constraints(model: str):
         req_grammar, "<tool_call>\n<function=get_weather>\n</function>\n</tool_call>"
     )
 
+    const_tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "set_mode",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "const": {"mode": "auto"},
+            },
+        },
+    )
+    const_grammar = Grammar.from_structural_tag(
+        get_model_structural_tag(model, [const_tool], "required", reasoning=False)
+    )
+    assert not _is_grammar_accept_string(
+        const_grammar, "<tool_call>\n<function=set_mode>\n</function>\n</tool_call>"
+    )
+
 
 def test_qwen_xml_empty_call_non_strict_reasoning_and_single_call():
     """Non-strict/omitted schemas, reasoning, and parallel_tool_calls=false work."""
