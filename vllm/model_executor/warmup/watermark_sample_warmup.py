@@ -87,12 +87,9 @@ def watermark_sample_warmup(worker: Worker) -> None:
     model_config = worker.vllm_config.model_config
     device = worker.device
     try:
-        keys = _philox_sampler_keys(sampler.watermarker)
         watermarker = sampler.watermarker
-        synthid_text = (
-            watermarker if isinstance(watermarker, SynthIDTextWatermarker) else None
-        )
-        if not keys and synthid_text is None:
+        keys = _philox_sampler_keys(watermarker)
+        if not keys and not isinstance(watermarker, SynthIDTextWatermarker):
             return
 
         # The sampler passes model-dtype logits through when no logits
@@ -144,7 +141,7 @@ def watermark_sample_warmup(worker: Worker) -> None:
             logits = torch.zeros(
                 (_NUM_WARMUP_TOKENS, vocab_size), dtype=dtype, device=device
             )
-            if synthid_text is not None:
+            if isinstance(watermarker, SynthIDTextWatermarker):
                 from vllm.v1.worker.gpu.sample.synthid_text import synthid_text_sample
 
                 # ``SynthIDTextWatermarker.sample`` launches the kernel only with
@@ -152,8 +149,8 @@ def watermark_sample_warmup(worker: Worker) -> None:
                 synthid_text_sample(
                     logits,
                     contexts,
-                    synthid_text.prf.key,
-                    synthid_text.depth,
+                    watermarker.prf.key,
+                    watermarker.depth,
                     use_fp64=sampler.use_fp64_gumbel,
                     **sampling_state,
                 )

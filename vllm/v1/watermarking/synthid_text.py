@@ -9,6 +9,7 @@ import torch
 
 from vllm.config.watermarking import derive_watermark_key
 from vllm.v1.watermarking.detector import WatermarkDetector
+from vllm.v1.watermarking.gumbel import _validate_context_width
 from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.watermarker import (
     RandomSampler,
@@ -54,6 +55,7 @@ def _validate_depth(depth: int) -> None:
 class SynthIDTextWatermarker(Watermarker):
     def __init__(self, key: int, context_width: int = 4, depth: int = 30) -> None:
         _validate_depth(depth)
+        _validate_context_width(context_width)
         self.prf = PhiloxPRF(derive_watermark_key(key, b"synthid_text"))
         self.depth = depth
         self._context_width = context_width

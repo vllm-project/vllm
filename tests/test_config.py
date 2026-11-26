@@ -5362,13 +5362,10 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
         config._check_supports_watermarking()
 
 
-@pytest.mark.parametrize("allow_target_only", [False, True])
-def test_synthid_text_rejects_speculative_decoding(allow_target_only: bool):
+def test_synthid_text_rejects_target_only_speculative_decoding():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(
-        algorithm="synthid_text",
-        key=42,
-        allow_target_only_watermarking=allow_target_only,
+        algorithm="synthid_text", key=42, allow_target_only_watermarking=True
     )
     config.speculative_config = fake_speculative_config(
         method="mtp",

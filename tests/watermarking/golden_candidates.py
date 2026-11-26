@@ -103,6 +103,7 @@ class WatermarkingSchemeConfig:
     generation_deduplicate_contexts_max_history: int | None = 8192
     detection_deduplicate_contexts: bool = True
     p_value_threshold: float = 0.01
+    depth: int = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +180,7 @@ def _create_synthid_text_detector(
         context_width=config.context_width,
         p_value_threshold=config.p_value_threshold,
         deduplicate_contexts=config.detection_deduplicate_contexts,
+        depth=config.depth,
     )
 
 
@@ -355,6 +357,7 @@ class WatermarkingCandidate:
                 self.scheme_config.generation_deduplicate_contexts_max_history
             ),
             prf=self.prf,
+            depth=self.scheme_config.depth,
         )
 
     def _detector(self) -> WatermarkDetector:
