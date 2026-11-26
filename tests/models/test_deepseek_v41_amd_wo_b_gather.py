@@ -424,6 +424,16 @@ def test_the_copy_is_not_built(monkeypatch, case):
     assert build() is None
 
 
+@pytest.mark.parametrize("local_width", [96, 128, 512])
+def test_gather_requires_aligned_local_scale_rows(monkeypatch, local_width):
+    build, attn, _, _, copy = _copy_builder(monkeypatch)
+    attn.n_groups = 2  # one group per TP rank
+    attn.o_lora_rank = local_width
+    # Three scale bytes cannot be viewed as bf16. Four can, but AITER
+    # requires a 16-byte row to gather along the feature dimension.
+    assert build() is (copy if local_width == 512 else None)
+
+
 @pytest.mark.parametrize(
     ("match_mode", "wo_b_name", "other_name"),
     [

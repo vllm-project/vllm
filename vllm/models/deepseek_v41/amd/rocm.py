@@ -801,6 +801,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def _make_wo_b_full(self, vllm_config: VllmConfig) -> ReplicatedLinear | None:
         tp_size = get_tensor_model_parallel_world_size()
         self._wo_b_gather_min_rows = _wo_b_gather_min_rows(tp_size)
+        input_size = self.n_groups * self.o_lora_rank
         if not (
             tp_size in (2, 4)
             and _ON_GFX950
@@ -810,6 +811,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             and vllm_config.lora_config is None
             and not self.use_pcp
             and self._o_proj_block_size == 32
+            # AITER gathers 16-byte-aligned rows, including the E8M0 scale
+            # row with one byte for every 32 local input channels.
+            and (input_size // tp_size) % (32 * 16) == 0
             # Both microbatches must make the same all-reduce hand-offs.
             and not vllm_config.parallel_config.use_ubatching
             and vllm_config.scheduler_config.max_num_batched_tokens
@@ -830,7 +834,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         ):
             return None
         wo_b_full = ReplicatedLinear(
-            self.n_groups * self.o_lora_rank,
+            input_size,
             self.hidden_size,
             bias=False,
             quant_config=vllm_config.quant_config,
