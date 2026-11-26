@@ -1216,7 +1216,11 @@ def test_default_cudagraph_capture_size_respects_platform_ceiling(
         default_max_graph_size,
     )
     widest_uniform_decode = max_num_seqs * decode_query_len
-    assert compilation_config.max_cudagraph_capture_size == token_grid_max
+    if max_num_seqs * 2 < widest_uniform_decode <= token_grid_max:
+        # Trimmed default: the widest graph is the widest verify batch.
+        assert compilation_config.max_cudagraph_capture_size == widest_uniform_decode
+    else:
+        assert compilation_config.max_cudagraph_capture_size == token_grid_max
     assert (
         compilation_config.max_cudagraph_capture_size
         == compilation_config.cudagraph_capture_sizes[-1]
@@ -1224,6 +1228,133 @@ def test_default_cudagraph_capture_size_respects_platform_ceiling(
     assert (
         widest_uniform_decode in compilation_config.cudagraph_capture_sizes
     ) is widest_is_captured
+
+
+def _resolve_default_sizes(
+    max_num_seqs: int,
+    num_speculative_tokens: int,
+    mode: CUDAGraphMode = CUDAGraphMode.FULL_AND_PIECEWISE,
+    performance_mode: str | None = None,
+    **kwargs,
+) -> MagicMock:
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=num_speculative_tokens,
+        max_num_batched_tokens=8192,
+        compilation_config=CompilationConfig(cudagraph_mode=mode, **kwargs),
+    )
+    config.performance_mode = performance_mode
+    VllmConfig._set_cudagraph_sizes(config)
+    return config
+
+
+@pytest.mark.usefixtures("off_sm100")
+@pytest.mark.parametrize(
+    ("max_num_seqs", "num_speculative_tokens", "trimmed"),
+    [(64, 7, True), (128, 3, True), (256, 3, False), (64, 0, False)],
+)
+def test_default_verify_grid_trimmed_when_shared_grid_covers_decode(
+    max_num_seqs, num_speculative_tokens, trimmed
+):
+    """When the shared grid already covers every uniform verify batch, decode
+    graphs take the request grid (plus the shared grid's counts up to 8) and
+    token-keyed graphs stop at the non-speculative ceiling, apart from the
+    decode graphs' token counts above it. Otherwise the shared grid is kept."""
+    from vllm.config.compilation import decode_cudagraph_capture_grid
+
+    cc = _resolve_default_sizes(max_num_seqs, num_speculative_tokens).compilation_config
+    prefill = cc.prefill_cudagraph_capture_token_sizes
+    decode = cc.decode_cudagraph_capture_request_sizes
+    if not trimmed:
+        assert cc.max_prefill_cudagraph_capture_tokens == min(
+            max_num_seqs * (1 + num_speculative_tokens) * 2, 512
+        )
+        return
+    no_spec = _resolve_default_sizes(max_num_seqs, 0).compilation_config
+    q, ceiling = 1 + num_speculative_tokens, 2 * max_num_seqs
+    # Up to the ceiling: the non-speculative sizes, plus any uniform decode
+    # token counts the shared grid appends.
+    no_spec_sizes = set(no_spec.prefill_cudagraph_capture_token_sizes)
+    low = {s for s in prefill if s <= ceiling}
+    assert no_spec_sizes <= low
+    assert all(s in no_spec_sizes or s % q == 0 for s in low)
+    assert [s for s in prefill if s > ceiling] == [
+        n * q for n in decode if n * q > ceiling
+    ]
+    grid = decode_cudagraph_capture_grid(max_num_seqs)
+    assert set(grid) <= set(decode)
+    assert all(n <= 8 or n in grid for n in decode)
+    assert decode[-1] == max_num_seqs
+    if q == 8:
+        # The shared grid has every request count up to 8 at this width.
+        assert set(range(1, 9)) <= set(decode)
+
+
+@pytest.mark.usefixtures("off_sm100")
+@pytest.mark.parametrize(
+    "mode",
+    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL, CUDAGraphMode.FULL_AND_PIECEWISE],
+)
+def test_trimmed_verify_grid_keeps_a_graph_for_every_verify_batch(monkeypatch, mode):
+    """With one routine for all batches (PIECEWISE or FULL, set by the user or
+    by a later downgrade for the attention backend), uniform verify batches
+    take token-keyed graphs, so the trimmed grid must still hold one for every
+    batch up to `max_num_seqs` requests."""
+    from vllm.v1.worker.gpu import cudagraph_utils
+
+    monkeypatch.setattr(
+        cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        cudagraph_utils.current_platform, "get_global_graph_pool", lambda: object()
+    )
+    max_num_seqs, q = 64, 8
+    config = _resolve_default_sizes(max_num_seqs, q - 1)
+    config.model_config.max_model_len = 32768
+    config.cache_config = SimpleNamespace(use_kda_recoverssm=False)
+    manager = cudagraph_utils.CudaGraphManager(
+        vllm_config=config,
+        device=torch.device("cpu"),
+        cudagraph_mode=mode,
+        decode_query_lens={q: max_num_seqs},
+    )
+    manager._graphs_captured = True
+    for n in range(1, max_num_seqs + 1):
+        desc = manager.dispatch(
+            num_reqs=n, num_tokens=n * q, uniform_token_count=q, num_active_loras=0
+        )
+        assert desc.cg_mode != CUDAGraphMode.NONE, n
+        assert desc.num_tokens >= n * q
+
+
+@pytest.mark.usefixtures("off_sm100")
+@pytest.mark.parametrize(
+    ("kwargs", "performance_mode"),
+    [
+        ({"decode_cudagraph_capture_request_sizes": [1, 2, 4, 8, 16, 32, 64]}, None),
+        ({"max_decode_cudagraph_capture_requests": 32}, None),
+        ({"prefill_cudagraph_capture_token_sizes": [8, 64, 256, 512]}, None),
+        ({}, "interactivity"),
+    ],
+)
+def test_verify_grid_not_trimmed_with_explicit_sizes_or_interactivity(
+    kwargs, performance_mode
+):
+    """Explicit split sizes on either side, or interactivity mode, keep main's
+    grid on the side left to the defaults."""
+    cc = _resolve_default_sizes(
+        64, 7, performance_mode=performance_mode, **kwargs
+    ).compilation_config
+    shared_decode = list(range(1, 32)) + list(range(32, 65, 2))
+    if "prefill_cudagraph_capture_token_sizes" in kwargs:
+        assert cc.decode_cudagraph_capture_request_sizes == shared_decode
+    else:
+        assert cc.max_prefill_cudagraph_capture_tokens == 512
+        assert len(cc.prefill_cudagraph_capture_token_sizes) >= 51
+    if performance_mode == "interactivity":
+        assert cc.decode_cudagraph_capture_request_sizes == shared_decode
 
 
 @pytest.mark.usefixtures("off_sm100")

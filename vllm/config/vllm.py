@@ -2797,6 +2797,36 @@ class VllmConfig:
             compilation_config.max_decode_cudagraph_capture_tokens = (
                 defaults.max_decode_tokens
             )
+        # When the shared grid already covers every uniform verify batch, it
+        # gives about one decode graph per request count and a mixed graph for
+        # every token size up to max_num_seqs * q * 2. Each graph costs device
+        # memory, so trim both: decode graphs on the request grid (keeping the
+        # shared grid's counts up to 8, where a padded request costs a whole
+        # verify width), and token-keyed graphs up to the non-speculative
+        # ceiling plus every decode graph's token count, which a uniform verify
+        # batch takes when one routine runs all batches (PIECEWISE or FULL,
+        # also after a later downgrade for the attention backend).
+        verify_query_len = next(iter(target_query_lens), 1)
+        trimmed_decode_sizes: list[int] | None = None
+        if (
+            not legacy_sizes
+            and not uses_split_sizes
+            and defaults.max_prefill_tokens is None
+            and self.performance_mode != "interactivity"
+            and len(target_query_lens) == 1
+            and verify_query_len > 1
+            and shared_max is not None
+            and verify_query_len * max_num_seqs <= shared_max
+        ):
+            shared_decode_sizes = {
+                min(cdiv(s, verify_query_len), max_num_seqs) for s in shared_sizes
+            }
+            trimmed_decode_sizes = sorted(
+                {
+                    *current_platform.get_decode_cudagraph_capture_grid(max_num_seqs),
+                    *(n for n in shared_decode_sizes if n <= 8),
+                }
+            )
 
         def explicit(
             sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
@@ -2832,6 +2862,11 @@ class VllmConfig:
                 ),
                 prefill_limit,
             )
+        elif trimmed_decode_sizes is not None:
+            prefill_max = min(2 * max_num_seqs, defaults.legacy_max_tokens)
+            decode_tokens = (n * verify_query_len for n in trimmed_decode_sizes)
+            prefill_sizes = [s for s in shared_sizes if s <= prefill_max]
+            prefill_sizes += [t for t in decode_tokens if t > prefill_max]
         else:
             prefill_sizes = list(shared_sizes)
 
@@ -2853,6 +2888,10 @@ class VllmConfig:
             decode_sizes = validate_cudagraph_capture_grid(
                 current_platform.get_decode_cudagraph_capture_grid(decode_limit),
                 decode_limit,
+            )
+        elif trimmed_decode_sizes is not None:
+            decode_sizes = validate_cudagraph_capture_grid(
+                trimmed_decode_sizes, max_num_seqs
             )
         else:
             # The request counts each target query length rounds the shared sizes
