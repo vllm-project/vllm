@@ -301,6 +301,7 @@ class Scheduler(SchedulerInterface):
         mm_budget = (
             MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
         )
+        self._pending_preemptions = 0
 
         # NOTE: Text-only encoder-decoder models are implemented as
         # multi-modal models for convenience
@@ -1865,7 +1866,11 @@ class Scheduler(SchedulerInterface):
         return new_block_ids_to_zero or None
 
     def _preempt_request(
-        self, request: Request, timestamp: float, drop_stale_output: bool = False
+        self,
+        request: Request,
+        timestamp: float,
+        drop_stale_output: bool = False,
+        count_preemption: bool = True,
     ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
@@ -1904,6 +1909,8 @@ class Scheduler(SchedulerInterface):
         request.num_output_placeholders = 0
         request.num_output_placeholder_steps = 0
         request.num_preemptions += 1
+        if count_preemption:
+            self._pending_preemptions += 1
         if self.collect_stats:
             self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -2847,10 +2854,18 @@ class Scheduler(SchedulerInterface):
                 cudagraph_stats,
                 perf_stats,
                 ec_connector_stats=ec_connector_stats,
+                consume_preemptions=True,
             )
         ) is not None:
-            # Return stats to only one of the front-ends.
-            if (eco := next(iter(engine_core_outputs.values()), None)) is None:
+            # Return stats to only one of the front-ends. When preemption-rate
+            # overload gating is enabled, route consistently to client 0 so
+            # multi-frontend deployments do not split preemption deltas across
+            # separate sliding windows; client 0 broadcasts the overload
+            # deadline to all front-ends via SharedAdmissionStats.
+            if self.scheduler_config.max_preemption_rate is not None:
+                if (eco := engine_core_outputs.get(0)) is None:
+                    engine_core_outputs[0] = eco = EngineCoreOutputs()
+            elif (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
@@ -3497,7 +3512,12 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
-                self._preempt_request(request, timestamp, drop_stale_output=True)
+                self._preempt_request(
+                    request,
+                    timestamp,
+                    drop_stale_output=True,
+                    count_preemption=False,
+                )
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
         if reset_running_requests and not reset_successful:
@@ -3559,9 +3579,23 @@ class Scheduler(SchedulerInterface):
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
         ec_connector_stats: ECConnectorStats | None = None,
+        consume_preemptions: bool = False,
     ) -> SchedulerStats | None:
+        num_preemptions = self._pending_preemptions
+        if consume_preemptions:
+            self._pending_preemptions = 0
+        num_running, num_waiting = self.get_request_counts()
+        num_deferred = len(self.deferred_waiting)
         if not self.collect_stats:
-            return None
+            if self.scheduler_config.max_preemption_rate is None:
+                return None
+            return SchedulerStats(
+                num_running_reqs=num_running,
+                num_waiting_reqs=num_waiting - num_deferred,
+                num_skipped_waiting_reqs=num_deferred,
+                kv_cache_usage=self.kv_cache_manager.usage,
+                num_preemptions=num_preemptions,
+            )
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
         connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -3580,8 +3614,6 @@ class Scheduler(SchedulerInterface):
         ec_connector_stats_payload = (
             ec_connector_stats.data if ec_connector_stats else None
         )
-        num_running, num_waiting = self.get_request_counts()
-        num_deferred = len(self.deferred_waiting)
         num_preempted_reqs, self._num_preempted_reqs = self._num_preempted_reqs, 0
         queued_workload = None
         if self.queued_workload_tally is not None:
@@ -3593,6 +3625,7 @@ class Scheduler(SchedulerInterface):
             num_preempted_reqs=num_preempted_reqs,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
+            num_preemptions=num_preemptions,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,

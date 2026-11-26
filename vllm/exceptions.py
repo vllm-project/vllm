@@ -217,3 +217,19 @@ class EngineFaultedError(GracefulHTTPError):
             "Please try again later or on a different instance.",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )
+
+
+class PreemptionOverloadError(GracefulHTTPError):
+    """Raised when KV cache preemption rate exceeds the admission limit.
+
+    Returns HTTP 503 (Service Unavailable) so that load balancers and
+    upstream gateways can throttle or route away from the instance.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "The engine is experiencing high KV cache preemption pressure "
+            "and cannot accept new requests. Please try again later or on a "
+            "different instance.",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )

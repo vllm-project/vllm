@@ -34,6 +34,7 @@ from vllm.entrypoints.serve.exception_handling.error_response import (
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
+    PreemptionOverloadError,
     QueueOverflowError,
     VLLMError,
 )
@@ -43,8 +44,13 @@ from vllm.utils.argparse_utils import human_readable_int
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.output_processor import (
+    PREEMPTION_PRESSURE_MIN_KV_USAGE,
+    OutputProcessor,
+    _PreemptionWindowState,
+)
 from vllm.v1.metrics.loggers import StatLoggerManager
+from vllm.v1.metrics.stats import SchedulerStats
 
 _ADMISSION_METRIC_MODEL = "admission-metric-test"
 _ADMISSION_LOGGER = "vllm.v1.engine.async_llm"
@@ -66,8 +72,11 @@ def _make_req_state(prompt_len: int, is_prefilling: bool = True):
 def _make_async_llm(
     max_num_queued_reqs: int | None = None,
     max_num_queued_tokens: int | None = None,
+    max_preemption_rate: float | None = None,
     num_unfinished: int = 0,
     num_queued_tokens: int = 0,
+    preemption_overloaded: bool = False,
+    preemption_rate: float = 0.0,
 ) -> AsyncLLM:
     """Create a bare AsyncLLM with just the attributes needed for scheduling."""
     llm = AsyncLLM.__new__(AsyncLLM)
@@ -75,10 +84,14 @@ def _make_async_llm(
     llm.scheduler_config = SimpleNamespace(
         max_num_queued_reqs=max_num_queued_reqs,
         max_num_queued_tokens=max_num_queued_tokens,
+        max_preemption_rate=max_preemption_rate,
     )
     llm.output_processor = MagicMock()
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
+    llm.output_processor.is_preemption_overloaded.return_value = preemption_overloaded
+    llm.output_processor.get_preemption_rate_per_min.return_value = preemption_rate
+    llm.output_processor.get_preemption_overload_remaining_s.return_value = 0.0
     llm.logger_manager = None
     llm.admission_stats = None
     return llm
@@ -587,3 +600,325 @@ def test_human_readable_int_parses_notation(input_str: str, expected: int):
 def test_human_readable_int_rejects_invalid(invalid: str):
     with pytest.raises((argparse.ArgumentTypeError, ValueError)):
         human_readable_int(invalid)
+
+
+# ---------------------------------------------------------------------------
+# KV preemption rate overload admission control
+# ---------------------------------------------------------------------------
+
+
+def test_preemption_overload_error_maps_to_503():
+    err = PreemptionOverloadError()
+    assert err.http_status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert isinstance(err, GracefulHTTPError)
+    assert isinstance(err, VLLMError)
+    resp = create_error_response(err)
+    assert resp.error.code == HTTPStatus.SERVICE_UNAVAILABLE.value
+    assert resp.error.type == HTTPStatus.SERVICE_UNAVAILABLE.phrase
+    assert "preemption" in resp.error.message.lower()
+
+
+def test_scheduler_config_preemption_rate_fields_and_validation():
+    default_cfg = _make_scheduler_config()
+    assert default_cfg.max_preemption_rate is None
+    assert default_cfg.preemption_window_seconds == 60.0
+
+    explicit_cfg = _make_scheduler_config(
+        max_preemption_rate=12.0,
+        preemption_window_seconds=30.0,
+    )
+    assert explicit_cfg.max_preemption_rate == 12.0
+    assert explicit_cfg.preemption_window_seconds == 30.0
+
+    for bad in (
+        {"max_preemption_rate": 0.0},
+        {"max_preemption_rate": -1.0},
+        {"preemption_window_seconds": 0.0},
+    ):
+        with pytest.raises(ValidationError):
+            _make_scheduler_config(**bad)
+
+
+def test_output_processor_preemption_rate_window_and_recovery():
+    op = OutputProcessor(
+        None,
+        collect_stats=False,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=30.0,
+    )
+    op.request_states["req-1"] = _make_req_state(100)
+
+    # 3 preemptions over 30s = 6/min (< 10/min) -> not overloaded.
+    op.update_scheduler_stats(
+        SchedulerStats(
+            num_running_reqs=2,
+            num_waiting_reqs=1,
+            kv_cache_usage=0.9,
+            num_preemptions=3,
+        ),
+        now=100.0,
+    )
+    assert op.get_preemption_rate_per_min(now=100.0) == pytest.approx(6.0)
+    assert not op.is_preemption_overloaded(now=100.0)
+
+    # +3 more preemptions within 30s -> 12/min >= 10/min under pressure -> overloaded.
+    op.update_scheduler_stats(
+        SchedulerStats(
+            num_running_reqs=2,
+            num_waiting_reqs=1,
+            kv_cache_usage=0.9,
+            num_preemptions=3,
+        ),
+        now=110.0,
+    )
+    assert op.get_preemption_rate_per_min(now=110.0) == pytest.approx(12.0)
+    assert op.is_preemption_overloaded(now=110.0)
+
+    # First batch expires at t=131.0 -> rate drops to 6/min -> auto-recovers.
+    assert op.get_preemption_rate_per_min(now=131.0) == pytest.approx(6.0)
+    assert not op.is_preemption_overloaded(now=131.0)
+
+
+def test_output_processor_preemption_overload_clears_when_idle():
+    op = OutputProcessor(
+        None,
+        collect_stats=False,
+        max_preemption_rate=5.0,
+        preemption_window_seconds=60.0,
+    )
+    op.request_states["req-1"] = _make_req_state(100)
+    op.update_scheduler_stats(
+        SchedulerStats(
+            num_running_reqs=1,
+            num_waiting_reqs=1,
+            kv_cache_usage=0.8,
+            num_preemptions=6,
+        ),
+        now=100.0,
+    )
+    assert op.is_preemption_overloaded(now=100.0)
+
+    # Once local requests finish, overload clears immediately to avoid deadlock.
+    op.request_states.clear()
+    assert not op.is_preemption_overloaded(now=101.0)
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_preemption_overload_propagates_across_workers(monkeypatch):
+    clock = {"now": 100.0}
+    monkeypatch.setattr(
+        "vllm.v1.engine.output_processor.time.monotonic", lambda: clock["now"]
+    )
+    server_0, server_1 = _make_shared_stats()
+    server_0.set_num_requests(2)
+
+    op0 = OutputProcessor(
+        None,
+        collect_stats=False,
+        admission_stats=server_0,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=30.0,
+    )
+    op1 = OutputProcessor(
+        None,
+        collect_stats=False,
+        admission_stats=server_1,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=30.0,
+    )
+
+    op0.update_scheduler_stats(
+        SchedulerStats(
+            num_running_reqs=2,
+            num_waiting_reqs=1,
+            kv_cache_usage=0.9,
+            num_preemptions=6,
+        ),
+        now=100.0,
+    )
+    assert op0.is_preemption_overloaded(now=100.0)
+    # Worker 1 has empty local history, yet sees shared overload without clobbering it.
+    assert op1.is_preemption_overloaded(now=105.0)
+    assert op0.is_preemption_overloaded(now=105.0)
+
+    clock["now"] = 105.0
+    llm1 = _make_async_llm(max_preemption_rate=10.0)
+    llm1.admission_stats = server_1
+    llm1.output_processor = op1
+    with pytest.raises(PreemptionOverloadError):
+        llm1.check_admission()
+
+    # Window decays even if worker 0 receives no calls -> worker 1 observes expiry.
+    clock["now"] = 131.0
+    assert not op1.is_preemption_overloaded(now=131.0)
+    llm1.check_admission()
+    assert not op0.is_preemption_overloaded(now=131.0)
+
+
+def test_admission_preemption_overload_rejects_active_and_allows_idle():
+    llm_active = _make_async_llm(
+        num_unfinished=3,
+        max_preemption_rate=10.0,
+        preemption_overloaded=True,
+        preemption_rate=24.0,
+    )
+    _attach_prometheus_logger(llm_active)
+    with pytest.raises(PreemptionOverloadError):
+        llm_active.check_admission()
+    assert _admission_rejection_count("max_preemption_rate") == 1
+
+    llm_idle = _make_async_llm(
+        num_unfinished=0,
+        max_preemption_rate=10.0,
+        preemption_overloaded=True,
+        preemption_rate=24.0,
+    )
+    llm_idle.check_admission()
+
+
+def test_output_processor_preemption_window_exact_boundary_and_pressure_threshold():
+    op = OutputProcessor(
+        None,
+        collect_stats=False,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=30.0,
+    )
+    op.request_states["req-1"] = _make_req_state(100)
+
+    # Below PREEMPTION_PRESSURE_MIN_KV_USAGE with no waiting reqs -> not under pressure.
+    op.update_scheduler_stats(
+        SchedulerStats(
+            num_running_reqs=1,
+            num_waiting_reqs=0,
+            kv_cache_usage=PREEMPTION_PRESSURE_MIN_KV_USAGE - 0.01,
+            num_preemptions=6,
+        ),
+        now=100.0,
+    )
+    assert not op.is_preemption_overloaded(now=100.0)
+
+    # At PREEMPTION_PRESSURE_MIN_KV_USAGE -> under pressure and overloaded.
+    op.update_scheduler_stats(
+        SchedulerStats(
+            num_running_reqs=1,
+            num_waiting_reqs=0,
+            kv_cache_usage=PREEMPTION_PRESSURE_MIN_KV_USAGE,
+            num_preemptions=0,
+        ),
+        now=105.0,
+    )
+    assert op.is_preemption_overloaded(now=129.999)
+    # Exact boundary ts == event_ts + window (100.0 + 30.0 = 130.0) clears overload.
+    assert not op.is_preemption_overloaded(now=130.0)
+
+
+def test_output_processor_preemption_overload_until_raises_on_inconsistent_state():
+    op = OutputProcessor(
+        None,
+        collect_stats=False,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=30.0,
+    )
+    bad_state = _PreemptionWindowState(window_preemptions=10)
+    with pytest.raises(RuntimeError, match="out of sync"):
+        op._preemption_overload_until(bad_state)
+
+
+@pytest.mark.parametrize("hot_first", [True, False])
+def test_output_processor_dp_healthy_rank_does_not_clear_hot_rank_overload(
+    hot_first: bool,
+):
+    """A healthy DP rank update must never clear another hot rank's overload."""
+    op = OutputProcessor(
+        None,
+        collect_stats=False,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=60.0,
+    )
+    op.request_states["req-1"] = _make_req_state(100)
+
+    hot_stats = SchedulerStats(
+        num_running_reqs=8,
+        num_waiting_reqs=4,
+        kv_cache_usage=0.9,
+        num_preemptions=12,
+    )
+    healthy_stats = SchedulerStats(
+        num_running_reqs=1,
+        num_waiting_reqs=0,
+        kv_cache_usage=0.1,
+        num_preemptions=0,
+    )
+
+    if hot_first:
+        op.update_scheduler_stats(hot_stats, now=100.0, engine_index=0)
+        assert op.is_preemption_overloaded(now=100.0)
+        op.update_scheduler_stats(healthy_stats, now=100.01, engine_index=1)
+    else:
+        op.update_scheduler_stats(healthy_stats, now=100.0, engine_index=1)
+        assert not op.is_preemption_overloaded(now=100.0)
+        op.update_scheduler_stats(hot_stats, now=100.01, engine_index=0)
+
+    assert op.is_preemption_overloaded(now=105.0)
+    assert op.get_preemption_rate_per_min(now=105.0) == pytest.approx(12.0)
+
+    # Once hot rank 0 itself drains below pressure, overload clears cleanly.
+    op.update_scheduler_stats(healthy_stats, now=110.0, engine_index=0)
+    assert not op.is_preemption_overloaded(now=110.0)
+
+
+@pytest.mark.skip_global_cleanup
+def test_non_client_zero_reports_shared_overload_remaining_with_zero_local_rate():
+    """Non-client-0 servers see no local rate but expose the shared deadline."""
+    server_0, server_1 = _make_shared_stats()
+    op0 = OutputProcessor(
+        None,
+        collect_stats=False,
+        admission_stats=server_0,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=60.0,
+    )
+    op1 = OutputProcessor(
+        None,
+        collect_stats=False,
+        admission_stats=server_1,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=60.0,
+    )
+    op0.update_scheduler_stats(
+        SchedulerStats(
+            num_running_reqs=4,
+            num_waiting_reqs=2,
+            kv_cache_usage=0.9,
+            num_preemptions=12,
+        ),
+        now=100.0,
+    )
+
+    assert op1.is_preemption_overloaded(now=110.0)
+    assert op1.get_preemption_rate_per_min(now=110.0) == 0.0
+    # Deadline is the first event + window (100 + 60) -> 50s remaining at t=110.
+    assert op1.get_preemption_overload_remaining_s(now=110.0) == pytest.approx(50.0)
+    assert op0.get_preemption_overload_remaining_s(now=110.0) == pytest.approx(50.0)
+    assert op1.get_preemption_overload_remaining_s(now=170.0) == 0.0
+
+
+def test_local_overload_remaining_without_shared_stats():
+    op = OutputProcessor(
+        None,
+        collect_stats=False,
+        max_preemption_rate=10.0,
+        preemption_window_seconds=60.0,
+    )
+    op.request_states["req-1"] = _make_req_state(100)
+    assert op.get_preemption_overload_remaining_s(now=100.0) == 0.0
+    op.update_scheduler_stats(
+        SchedulerStats(
+            num_running_reqs=2,
+            num_waiting_reqs=1,
+            kv_cache_usage=0.9,
+            num_preemptions=12,
+        ),
+        now=100.0,
+    )
+    assert op.get_preemption_overload_remaining_s(now=130.0) == pytest.approx(30.0)

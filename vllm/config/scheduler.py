@@ -241,6 +241,17 @@ class SchedulerConfig:
     of requests when GPU memory is scarce. Must be in the range [0.0, 1.0); 0.0
     (the default) disables the watermark."""
 
+    max_preemption_rate: float | None = Field(default=None, gt=0.0)
+    """Maximum allowed KV preemption rate (preemptions per minute) before
+    frontend request admission temporarily rejects new requests with
+    `PreemptionOverloadError`. Set to `None` to disable.
+    """
+
+    preemption_window_seconds: float = Field(default=60.0, gt=0.0)
+    """Sliding window duration in seconds used to compute the KV preemption
+    rate for `max_preemption_rate`.
+    """
+
     prefill_schedule_interval: int = Field(default=1, ge=1)
     """Only admit prefill once every N engine steps, leaving the steps in
     between to decode alone. 1 (the default) admits prefill on every step.

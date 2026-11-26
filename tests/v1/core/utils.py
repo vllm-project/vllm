@@ -98,6 +98,8 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    max_preemption_rate: float | None = None,
+    collect_stats: bool = True,
     encoder_cache_size: int | None = None,
     enable_logging_iteration_details: bool = False,
 ) -> Scheduler | AsyncScheduler:
@@ -151,6 +153,7 @@ def create_scheduler(
         cache_aware_admission_threshold=cache_aware_admission_threshold,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
+        max_preemption_rate=max_preemption_rate,
         policy=scheduling_policy,
     )
     # Cache config, optionally force APC
@@ -257,7 +260,7 @@ def create_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
-        collect_stats=True,
+        collect_stats=collect_stats,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     return scheduler

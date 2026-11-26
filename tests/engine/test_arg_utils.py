@@ -1233,3 +1233,25 @@ def test_get_batch_defaults_gb10_stays_on_small_tier(
     tokens, seqs = EngineArgs.get_batch_defaults(1)
     assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
     assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs
+
+
+def test_preemption_rate_cli_args():
+    """Verify preemption rate CLI args propagate to SchedulerConfig."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--max-preemption-rate",
+            "15.5",
+            "--preemption-window-seconds",
+            "30",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.max_preemption_rate == 15.5
+    assert engine_args.preemption_window_seconds == 30.0
+    vllm_config = engine_args.create_engine_config()
+    sched_cfg = vllm_config.scheduler_config
+    assert sched_cfg.max_preemption_rate == 15.5
+    assert sched_cfg.preemption_window_seconds == 30.0
