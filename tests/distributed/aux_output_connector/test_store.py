@@ -118,7 +118,7 @@ class _SchedulerRequest:
     finished: bool = False
     sampling_params: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(
-            aux_prompt_start=0, routed_experts_prompt_start=0, return_aux_outputs=True
+            aux_prompt_start=0, routed_experts_prompt_start=0
         )
     )
 
@@ -451,37 +451,6 @@ def test_worker_ignores_cudagraph_query_padding():
 
     np.testing.assert_array_equal(output["first"].rows, logical[:1])
     np.testing.assert_array_equal(output["second"].rows, logical[1:])
-    worker.close()
-
-
-def test_worker_skips_requests_without_aux_outputs():
-    worker = _make_worker(2)
-    logical = np.arange(3 * 3 * 2, dtype=np.uint8).reshape(3, 3, 2)
-    metadata = _metadata(0, [_request_metadata("recorded", 0, 1, 0, [])], {})
-
-    output = _process_output(
-        worker,
-        metadata,
-        logical,
-        ["skipped", "recorded"],
-        np.zeros(2, dtype=np.int32),
-        token_starts=(0, 0),
-        num_tokens=(2, 1),
-    )
-
-    assert output.keys() == {"recorded"}
-    np.testing.assert_array_equal(output["recorded"].rows, logical[2:])
-    worker.close()
-
-
-def test_worker_skips_snapshot_without_aux_outputs_requests():
-    worker = _make_worker(1)
-    worker._capturer = Mock()
-    worker.begin_step(_metadata(0, [], {}).metadata)
-
-    batch = _input_batch(["skipped"], np.array([0]), np.array([0, 4]))
-    assert worker.prepare_output(batch) is None
-    worker._capturer.snapshot_routing_data.assert_not_called()
     worker.close()
 
 
@@ -1531,7 +1500,6 @@ def _scheduler_request(
         sampling_params=SimpleNamespace(
             aux_prompt_start=prompt_start,
             routed_experts_prompt_start=0,
-            return_aux_outputs=True,
         ),
     )
 

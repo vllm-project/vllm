@@ -7,7 +7,7 @@ vllm serve Qwen/Qwen3-30B-A3B --enable-return-routed-experts
 # offline: LLM("Qwen/Qwen3-30B-A3B", enable_return_routed_experts=True)
 ```
 
-The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-output-config '{"enable_return_routed_experts": true, "max_bytes": N}'`). Requests can opt out with [`return_aux_outputs`](#return_aux_outputs).
+The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-output-config '{"enable_return_routed_experts": true, "max_bytes": N}'`). There is no per-request on/off switch.
 
 ## Requirements
 
@@ -48,7 +48,7 @@ restorer; the existing buffer-write semantics are unchanged.
 - **Layer visits.** For most models a token visits each decoder layer once: `num_layer_visits` is `num_hidden_layers` and the layer axis is indexed by layer id. A loop transformer (Inkling 2 loop checkpoints) runs its core layers once per pass, so the axis follows `layer_visit_ids`: the prelude layers, every core layer of pass 0, of pass 1, and so on, then the coda. `loop_num_passes` is set for the engine, not per request: every request, and every object a namespace request writes, has the same number of visits, and objects written with a different pass count do not match the rows of this engine.
 - **Rows:** row `i` is position `aux_prompt_start + i` of `prompt_token_ids + output_token_ids`.
 - **dtype:** `uint8` for at most 256 experts, else `uint16`; logical expert IDs.
-- Filled only when the request finishes. `None` if the flag is off, the request set `return_aux_outputs=False`, or the request aborted before any forward pass.
+- Filled only when the request finishes. `None` if the flag is off or the request aborted before any forward pass.
 
 ```python
 import base64, io
@@ -60,19 +60,6 @@ experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
 ## `aux_prompt_start`
 
 Per-request, default `0`: drops the rows of the first N prompt positions (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it inside `sampling_params` on `/inference/v1/generate` or as `SamplingParams(aux_prompt_start=...)`. `routed_experts_prompt_start` is a deprecated alias, and the only form `/v1/*completions` accept (top-level) until a later change forwards `aux_prompt_start` there: it logs a warning once, and a request whose two values disagree (0 counts as unset) is rejected.
-
-## `return_aux_outputs`
-
-Per-request, default `true`. Set it to `false` for requests that don't need RL auxiliary outputs, such as evaluation traffic on a server that also serves rollouts. Such a request gets no `routed_experts` and no `sampling_mask`, and vLLM does not store its routing. Logprobs are unaffected: request them or not with `logprobs`, `logprob_token_ids` and `prompt_logprobs` as usual. Pass it inside `sampling_params` on `/inference/v1/generate` or as `SamplingParams(return_aux_outputs=False)`.
-
-The opt-out removes the per-request work; the batch-wide work stays as long as the server flags are on:
-
-| Output | Skipped for an opted-out request | Still paid |
-| --- | --- | --- |
-| `routed_experts` | Recording and storing its routing rows, keeping them for cached blocks, and returning them. A step with no recording request skips the routing copy to the host entirely. | Routing capture on the GPU for the whole batch, and the host copy of the whole batch when any request in the step records. |
-| `sampling_mask` | Extracting, packing and returning its mask. | Mask computation for the whole batch and the PyTorch sampling path; the request still needs `temperature > 0` and `top_k > 0`. |
-
-Opted-out requests share the prefix cache with every other request. The KV blocks they compute have no stored routing, so a request that records routing recomputes from the first such block.
 
 ## Row storage
 
@@ -147,7 +134,7 @@ vllm serve <model> --aux-output-config \
 
 Send `aux_namespace` inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(aux_namespace=..., aux_prompt_start=...)` offline:
 
-- **Namespace.** Chosen per rollout as in [choosing a namespace](#choosing-a-namespace). A namespace is any non-empty string; `/` nests one in another for release. A namespace request is rejected with `n > 1`, with `stop` strings (use `stop_token_ids`), with `return_aux_outputs=False`, and as a streaming-input request.
+- **Namespace.** Chosen per rollout as in [choosing a namespace](#choosing-a-namespace). A namespace is any non-empty string; `/` nests one in another for release. A namespace request is rejected with `n > 1`, with `stop` strings (use `stop_token_ids`), and as a streaming-input request.
 - **Response.** The final output carries `aux_objects`: `[key, start, end]` entries, the rows of positions `[start, end)` being the first `end - start` rows of object `key`. They cover `[aux_prompt_start, num_tokens - 1)`, the prefix-cache hits included.
 - **Turns.** Send `aux_prompt_start = min(positions held, longest common token prefix of the new prompt and the held tokens, prompt length - 1)`, and splice each listing onto the trajectory with the earlier copy winning ([turns and splicing](../../design/rl_aux_output.md#turns-and-splicing)).
 - **Reading.** `object_store.read_aux_rows(store, keys, "routed_experts")` from `vllm.distributed.aux_output_connector`, with `store = object_store.create_aux_object_store("mooncake", {"config_path": ...})`, reads the objects in order and concatenates their rows. Writes have no barrier: wait for a training batch's keys no shorter than the write deadline, 80% of `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`; a key still missing then is lost, and the samples that need it are masked.

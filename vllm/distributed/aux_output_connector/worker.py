@@ -232,8 +232,6 @@ class AuxOutputWorkerConnector:
             return None
 
         request_ids = list(input_batch.req_ids)
-        if not any(request_id in self._requests for request_id in request_ids):
-            return None
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
         pending_output = PendingAuxOutput(
@@ -249,8 +247,7 @@ class AuxOutputWorkerConnector:
             )
             self._pending_outputs.append(pending_output)
             for request_id in pending_output.request_ids:
-                if (state := self._requests.get(request_id)) is None:
-                    continue
+                state = self._requests[request_id]
                 state.pending_outputs += 1
                 if state.run is not None:
                     pending_output.runs[request_id] = state.run
@@ -270,8 +267,7 @@ class AuxOutputWorkerConnector:
             finally:
                 self._pending_outputs.remove(pending)
                 for request_id in pending.request_ids:
-                    if (state := self._requests.get(request_id)) is None:
-                        continue
+                    state = self._requests[request_id]
                     state.pending_outputs -= 1
                     if state.pending_outputs == 0 and state.finished:
                         teardown.append(request_id)
@@ -313,12 +309,11 @@ class AuxOutputWorkerConnector:
             num_rejected.tolist(),
             strict=True,
         ):
-            if (state := self._requests.get(request_id)) is None:
-                continue
             request_num_tokens = end - start
             assert request_num_tokens > 0, (
                 "auxiliary output request token count must be positive"
             )
+            state = self._requests[request_id]
 
             # Capture precedes speculative acceptance, so discard the rejected
             # suffix. Batch boundaries still span the full executed range.

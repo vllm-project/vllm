@@ -14,7 +14,6 @@ from vllm.distributed.aux_output_connector.connector import (
     check_aux_output_config,
     retained_objects,
 )
-from vllm.distributed.aux_output_connector.params import skips_aux_outputs
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -2671,11 +2670,7 @@ class Scheduler(SchedulerInterface):
 
             if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
-                if (
-                    new_token_ids
-                    and sampling_masks is not None
-                    and not skips_aux_outputs(request.sampling_params)
-                ):
+                if new_token_ids and sampling_masks is not None:
                     new_sampling_mask = sampling_masks.slice_request(
                         req_index, len(new_token_ids)
                     )

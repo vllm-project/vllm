@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import uuid
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import chain, islice
@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 import vllm.envs as envs
-from vllm.distributed.aux_output_connector.params import skips_aux_outputs
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     get_routed_experts_bytes_per_token,
 )
@@ -175,18 +174,11 @@ class AuxOutputSchedulerConnector:
             OrderedDict()
         )
         self._loading: dict[str, set[ExternalBlockHash]] = {}
-        # KV blocks whose rows are not all here: loaded without rows, computed
-        # from mid-block on, or computed by an opted-out request. Any other
-        # cached GPU block has rows.
+        # KV blocks whose rows are not all here: loaded without rows, or
+        # computed from mid-block on. Any other cached GPU block has rows.
         self._rowless: dict[ExternalBlockHash, BlockHash] = {}
         # First token each active request computes here.
         self._computed_from: dict[str, int] = {}
-        # Per active opted-out request: KV blocks checked, the last one's hash,
-        # whether it was scheduled since its lookup, and the blocks it computes,
-        # held so their marks and rows outlive pruning until it finishes.
-        self._skip_marked: dict[str, tuple[int, BlockHash | None, bool]] = {}
-        self._skip_rowless: dict[str, list[ExternalBlockHash]] = {}
-        self._skip_held: Counter[ExternalBlockHash] = Counter()
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
@@ -215,9 +207,6 @@ class AuxOutputSchedulerConnector:
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             request = requests[request_id]
-            if self._skips(request):
-                self._mark_rowless(request)
-                continue
             if (namespace := self._namespace(request)) is not None:
                 self._run_namespace(request, namespace)
                 continue
@@ -379,9 +368,6 @@ class AuxOutputSchedulerConnector:
         return min(start, request.num_prompt_tokens)
 
     def max_cache_hit(self, request: Request) -> int:
-        if self._skips(request):
-            self._mark_rowless(request, lookup=True)
-            return request.num_tokens - 1
         if self._namespace(request) is not None:
             return request.num_tokens - 1
         num_blocks = 0
@@ -398,8 +384,6 @@ class AuxOutputSchedulerConnector:
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
-        if self._skips(request):
-            return num_external
         num_hit = num_local + num_external
         if self._namespace(request) is not None:
             hashed = len(request.block_hashes) * self._hash_block_size
@@ -418,7 +402,7 @@ class AuxOutputSchedulerConnector:
         return num_external
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
-        if self._skips(request) or self._namespace(request) is not None:
+        if self._namespace(request) is not None:
             return
         blocks = islice(
             self._kv_blocks(request.block_hashes), cdiv(num_tokens, self._block_size)
@@ -428,24 +412,17 @@ class AuxOutputSchedulerConnector:
     def _release_unheld(self) -> None:
         loading = set().union(*self._loading.values())
         if len(self._rowless) > self._capacity:
-            # An opted-out request may cache its marked blocks only later.
             self._rowless = {
                 block: block_hash
                 for block, block_hash in self._rowless.items()
-                if block in loading
-                or block in self._skip_held
-                or self._gpu_cached(block_hash)
+                if block in loading or self._gpu_cached(block_hash)
             }
         excess = len(self._kv_cached) - self._capacity
         if excess <= 0:
             return
         victims = []
         for block, keys in self._kv_cached.items():
-            if (
-                block not in loading
-                and block not in self._skip_held
-                and not self._gpu_cached(keys[-1])
-            ):
+            if block not in loading and not self._gpu_cached(keys[-1]):
                 victims.append(block)
                 if len(victims) == excess:
                     break
@@ -468,10 +445,6 @@ class AuxOutputSchedulerConnector:
         output: dict[str, AuxRequestOutput] | None,
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
-        if self._skips(request):
-            # Its new tokens can complete a block before the next schedule caches it.
-            self._mark_rowless(request)
-            return None
         if self._namespace(request) is not None:
             return None
         request_id = request.request_id
@@ -514,9 +487,6 @@ class AuxOutputSchedulerConnector:
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
-        # A session can change return_aux_outputs between chunks: drop all state.
-        self._skip_marked.pop(request_id, None)
-        self._drop_skip_holds(request_id)
         if self._namespace(request) is not None:
             self._finish_namespace(request)
             return
@@ -528,8 +498,6 @@ class AuxOutputSchedulerConnector:
             )
             del self._sent_hash_counts[request_id]
         computed_from = self._computed_from.pop(request_id, request.num_tokens)
-        if self._skips(request):
-            return
         num_blocks = request.num_computed_tokens // self._block_size
         blocks = islice(self._kv_blocks(request.block_hashes), num_blocks)
         for index, (block, keys) in enumerate(blocks):
@@ -543,56 +511,6 @@ class AuxOutputSchedulerConnector:
                 self._kv_cached[block] = keys
                 self._retained_hashes.extend(keys)
         self._release_unheld()
-
-    def _mark_rowless(self, request: Request, lookup: bool = False) -> None:
-        """Mark the KV blocks an opted-out request computes as rowless and hold
-        them; blocks whose rows are kept here are held without a mark."""
-        request_id = request.request_id
-        step = self._block_size // self._hash_block_size
-        hashes = request.block_hashes
-        num_checked, last, scheduled = self._skip_marked.get(
-            request_id, (0, None, True)
-        )
-        start = num_checked
-        if lookup:
-            # A lookup is not an admission: recheck from the start.
-            self._drop_skip_holds(request_id)
-            start = 0
-        elif not scheduled:
-            # The first scheduled step knows the real hit.
-            start = request.num_computed_tokens // self._block_size
-        elif num_checked and (
-            len(hashes) < num_checked * step or hashes[num_checked * step - 1] != last
-        ):
-            # A session turn rewrote hashes: recheck from the start.
-            self._drop_skip_holds(request_id)
-            start = 0
-        held = self._skip_rowless.setdefault(request_id, [])
-        hit = lookup
-        for block, keys in self._kv_blocks(hashes[start * step :]):
-            hit = hit and self._gpu_cached(keys[-1]) is not None
-            if hit:
-                continue
-            if block not in self._kv_cached:
-                self._rowless[block] = keys[-1]
-            held.append(block)
-            self._skip_held[block] += 1
-        num_blocks = len(hashes) // step
-        self._skip_marked[request_id] = (
-            num_blocks,
-            hashes[num_blocks * step - 1] if num_blocks else None,
-            not lookup,
-        )
-
-    def _drop_skip_holds(self, request_id: str) -> None:
-        for block in self._skip_rowless.pop(request_id, ()):
-            self._skip_held[block] -= 1
-            if not self._skip_held[block]:
-                del self._skip_held[block]
-
-    @staticmethod
-    def _skips(request: Request) -> bool:
-        return skips_aux_outputs(request.sampling_params)
 
     def loads_failed(self, request_ids: set[str]) -> None:
         """Requests about to end with an error because KV they hold failed to
@@ -678,6 +596,3 @@ class AuxOutputSchedulerConnector:
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()
         self._rowless.clear()
-        self._skip_marked.clear()
-        self._skip_rowless.clear()
-        self._skip_held.clear()

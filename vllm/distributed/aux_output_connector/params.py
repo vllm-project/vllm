@@ -53,13 +53,6 @@ def prepare_aux_request(
     return aux_namespace_cache_salt(key_prefix, namespace, cache_salt)
 
 
-def skips_aux_outputs(params: SamplingParams | None) -> bool:
-    """Whether a request opted out of its auxiliary outputs. The KV blocks it
-    computes hold no routed experts: a request that records them computes
-    those blocks again."""
-    return params is not None and not params.return_aux_outputs
-
-
 def verify_aux_namespace(params: SamplingParams) -> None:
     """Check `aux_namespace` and the rules of a request with one. Called
     once the request's parameters are final. Its objects are under
@@ -74,8 +67,6 @@ def verify_aux_namespace(params: SamplingParams) -> None:
         reason = "does not support stop strings; use stop_token_ids"
     elif params.n > 1:
         reason = "does not support n > 1"
-    elif not params.return_aux_outputs:
-        reason = "does not support return_aux_outputs=False"
     else:
         return
     raise VLLMValidationError(
