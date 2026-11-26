@@ -701,6 +701,7 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
     impl = sparse_mod.ROCMAiterMLASparseImpl.__new__(sparse_mod.ROCMAiterMLASparseImpl)
     impl.kv_cache_dtype = "auto"
     impl.num_heads = 4
+    impl.kv_lora_rank = 512
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
     impl.owns_indexer = True
     impl.index_epoch = 0
@@ -715,6 +716,8 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
         paged_kv_indices=torch.zeros(8, dtype=torch.int32),
         block_size=1,
         topk_tokens=4,
+        num_prefills=2,
+        num_decodes=2,
     )
     query = torch.zeros(2, 4, 576, dtype=torch.bfloat16)
     captured = {}
@@ -750,6 +753,7 @@ def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache
     impl = sparse_mod.ROCMAiterMLASparseImpl.__new__(sparse_mod.ROCMAiterMLASparseImpl)
     impl.kv_cache_dtype = kv_cache_dtype
     impl.num_heads = 4
+    impl.kv_lora_rank = 512
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
     impl.owns_indexer = True
     impl.index_epoch = 0
@@ -764,6 +768,8 @@ def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache
         paged_kv_indices=torch.zeros(8, dtype=torch.int32),
         block_size=1,
         topk_tokens=4,
+        num_prefills=2,
+        num_decodes=2,
     )
     query = torch.zeros(2, 4, 576, dtype=torch.bfloat16)
     kv_cache = torch.zeros(1, 1, 576, dtype=torch.uint8)

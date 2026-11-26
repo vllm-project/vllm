@@ -237,25 +237,20 @@ def merge_dcp_scores(
 
 def _use_rocm_sparse_triton(
     *,
-    kv_cache_dtype: str,
     head_size: int,
     kv_lora_rank: int,
     num_prefills: int,
     num_decodes: int,
-    num_decode_tokens: int,
-    max_query_len: int,
 ) -> bool:
-    """Select the rope-free BF16 path not supported by AITER sparse MLA.
+    """Select the rope-free path not supported by AITER sparse MLA.
 
     The ragged Triton kernel indexes metadata per query token, so multi-token
     speculative verification rows have the same capability requirements as
-    plain decode rows.
+    plain decode rows. It also dequantizes FP8 KV in registers. AITER's
+    precompiled kernels assume a 576-element DeepSeek row (512 latent + 64
+    RoPE), so they cannot serve a 512-element NoPE row.
     """
-    return (
-        not kv_cache_dtype.startswith("fp8")
-        and head_size == kv_lora_rank
-        and (num_prefills > 0 or num_decodes > 0)
-    )
+    return head_size == kv_lora_rank and (num_prefills > 0 or num_decodes > 0)
 
 
 def _use_triton_long_bf16_prefill(
@@ -817,7 +812,6 @@ class ROCMAiterMLASparseMetadataBuilder(
         num_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs].item())
         num_decodes = metadata.num_decodes
         num_prefills = metadata.num_prefills
-        num_decode_tokens = metadata.num_decode_tokens
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
         seg_lengths = np.diff(starts[: num_reqs + 1])
         req_id_per_token = np.repeat(
@@ -878,13 +872,10 @@ class ROCMAiterMLASparseMetadataBuilder(
         # fingerprint those CPU-side and skip the launch when nothing changed.
         head_size = self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim
         use_triton_sparse = _use_rocm_sparse_triton(
-            kv_cache_dtype=self.kv_cache_dtype,
             head_size=head_size,
             kv_lora_rank=self.mla_dims.kv_lora_rank,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
-            num_decode_tokens=num_decode_tokens,
-            max_query_len=common_attn_metadata.max_query_len,
         )
         work_meta_data = None
         work_indptr = None
@@ -1202,13 +1193,10 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             triton_sink_fallback
             or triton_prefill_fallback
             or _use_rocm_sparse_triton(
-                kv_cache_dtype=self.kv_cache_dtype,
                 head_size=q.shape[-1],
                 kv_lora_rank=self.kv_lora_rank,
                 num_prefills=attn_metadata.num_prefills,
                 num_decodes=attn_metadata.num_decodes,
-                num_decode_tokens=attn_metadata.num_decode_tokens,
-                max_query_len=attn_metadata.max_query_len,
             )
         ):
             output = torch.empty(
@@ -1226,6 +1214,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             is_mxfp4 = self.kv_cache_dtype == "mxfp4_mla"
             row_width = mxfp4_row_bytes(self.kv_lora_rank) if is_mxfp4 else q.shape[-1]
             kv = kv_c_and_k_pe_cache.view(-1, 1, row_width)
+            # A device tensor, not layer._k_scale_float: an in-place weight
+            # reload rewrites the tensor, which a captured HIP graph still reads.
+            kv_scale = layer._k_scale if self.kv_cache_dtype.startswith("fp8") else None
             decode_num_splits = (
                 rocm_sparse_decode_bf16_num_splits(
                     num_tokens,
@@ -1248,6 +1239,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
                     num_splits=decode_num_splits,
+                    kv_scale=kv_scale,
                     kv_cache_dtype=self.kv_cache_dtype,
                 )
             else:
@@ -1264,6 +1256,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     output=output,
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
+                    kv_scale=kv_scale,
                     kv_cache_dtype=self.kv_cache_dtype,
                 )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
@@ -1458,9 +1451,24 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         # fp32 scales + bf16 rope); only the Triton sparse MLA kernel reads it,
         # and it wants a bf16 query.
         fp8_ds_mla_cache = self.kv_cache_dtype == "fp8_ds_mla"
+        head_size = sum(t.shape[-1] for t in q) if isinstance(q, tuple) else q.shape[-1]
+        # The AITER sparse MLA opt-in takes precedence and reads FP8 Q. fp8_ds_mla
+        # has its own branch below and never reads the NoPE geometry route.
+        use_triton_sparse = (
+            not fp8_ds_mla_cache
+            and not self.use_aiter_sparse_mla
+            and _use_rocm_sparse_triton(
+                head_size=head_size,
+                kv_lora_rank=self.kv_lora_rank,
+                num_prefills=attn_metadata.num_prefills,
+                num_decodes=attn_metadata.num_decodes,
+            )
+        )
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            if fp8_attention and not fp8_ds_mla_cache:
+            # FP8 Q is an AITER asm input convention. The Triton NoPE path
+            # consumes model-dtype Q and dequantizes only the KV cache.
+            if fp8_attention and not fp8_ds_mla_cache and not use_triton_sparse:
                 q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
                     ql_nope, q_pe, layer._q_scale
                 )
@@ -1617,7 +1625,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         # write the latent and rope to kv cache
         if fp8_attention:
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
-            if q.dtype != current_platform.fp8_dtype():
+            if not use_triton_sparse and q.dtype != current_platform.fp8_dtype():
                 original_q_shape = q.shape
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
                 q = q.view(original_q_shape)
