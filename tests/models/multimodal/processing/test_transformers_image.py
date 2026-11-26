@@ -264,14 +264,10 @@ def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
     info = mm_processor.info
     image = ImageAsset("cherry_blossom").pil_image
 
-    hf_processor = info.get_hf_processor()
-    prompt_ids = info.get_tokenizer().encode(
-        prompt, **info.default_tok_params.get_encode_kwargs()
-    )
     hf_ids = info.ctx.call_hf_processor(
-        hf_processor,
-        dict(text=hf_processor.decode(prompt_ids), images=[image]),
-        dict(truncation=False, add_special_tokens=False),
+        info.get_hf_processor(),
+        dict(text=prompt, images=[image]),
+        dict(truncation=False),
     )["input_ids"][0].tolist()
 
     result = mm_processor(
