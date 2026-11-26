@@ -59,44 +59,6 @@ from .passes.pass_manager import PostGradPassManager
 logger = init_logger(__name__)
 
 
-def make_copy_and_call(
-    sym_tensor_indices: list[int],
-    input_buffers: list[torch.Tensor | None],
-    callable_fn: Callable[..., Any],
-) -> Callable[..., Any]:
-    """Create a wrapper that copies inputs to static buffers before calling.
-
-    This is used for cudagraph input copying where we need to copy dynamic
-    tensors to static buffers before invoking the compiled graph.
-
-    Args:
-        sym_tensor_indices: Indices of tensors with symbolic shapes
-        input_buffers: List of static buffers (can contain None for lazy init)
-        callable_fn: The compiled function to call
-
-    Returns:
-        A wrapper function that copies inputs and calls the compiled function
-
-    """
-
-    def copy_and_call(*args: Any) -> Any:
-        list_args = list(args)
-        for i, index in enumerate(sym_tensor_indices):
-            runtime_tensor = list_args[index]
-            runtime_shape = runtime_tensor.shape[0]
-
-            # lazy initialization of buffer on first call
-            if input_buffers[i] is None:
-                input_buffers[i] = runtime_tensor.clone()
-
-            static_tensor = input_buffers[i][:runtime_shape]  # type: ignore[index]
-            static_tensor.copy_(runtime_tensor)
-            list_args[index] = static_tensor
-        return callable_fn(*list_args)
-
-    return copy_and_call
-
-
 def make_compiler(
     compilation_config: CompilationConfig, *, use_aot_compile: bool
 ) -> CompilerInterface:
@@ -1293,51 +1255,13 @@ class VllmBackend:
             execution_code, submod_callables, submod_names, consts
         )
 
-        if (
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            or not self.compilation_config.cudagraph_copy_inputs
-        ):
-            return VllmSerializableFunction(
-                graph_to_serialize,
-                example_inputs,
-                self.prefix,
-                runtime_callable,
-                is_encoder=self.is_encoder,
-                vllm_backend=self,
-                execution_code=execution_code,
-                submod_names=submod_names,
-                consts=consts,
-            )
-
-        # index of tensors that have symbolic shapes (batch size)
-        # for weights and static buffers, they will have concrete shapes.
-        # symbolic shape only happens for input tensors.
-        from torch.fx.experimental.symbolic_shapes import is_symbolic
-
-        sym_tensor_indices = [
-            i
-            for i, x in enumerate(fake_args)
-            if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
-            and any(is_symbolic(d) for d in x.size())
-        ]
-
-        # compiler managed cudagraph input buffers
-        # we assume the first run with symbolic shapes
-        # has the maximum size among all the tensors
-        copy_and_call = make_copy_and_call(
-            sym_tensor_indices,
-            [example_inputs[x].clone() for x in sym_tensor_indices],
-            runtime_callable,
-        )
-
         return VllmSerializableFunction(
             graph_to_serialize,
             example_inputs,
             self.prefix,
-            copy_and_call,
+            runtime_callable,
             is_encoder=self.is_encoder,
             vllm_backend=self,
-            sym_tensor_indices=sym_tensor_indices,
             execution_code=execution_code,
             submod_names=submod_names,
             consts=consts,
