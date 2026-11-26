@@ -15,6 +15,7 @@ if not (
     current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(90)
     or current_platform.is_device_capability_family(120)
+    or current_platform.is_device_capability_family(110)
 ):
     pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
 
@@ -29,6 +30,53 @@ from vllm.models.inkling2.nvidia.ops.dspark import (  # noqa: E402
 )
 
 DEVICE = "cuda"
+
+
+@pytest.mark.parametrize("rows,n,k", [(1, 257, 256), (8, 4096, 2304), (64, 513, 256)])
+def test_int8_draft_projection_preserves_bias_and_refill(rows, n, k):
+    """Quantized copies keep target weights intact and graph addresses stable."""
+    from vllm.models.inkling2.nvidia.ops.gemv_q8 import gemv_q8, quantize_rows
+
+    generator = torch.Generator().manual_seed(110)
+    weight = torch.randn(n, k, generator=generator).bfloat16().to(DEVICE) * 0.01
+    original = weight.clone()
+    x = torch.randn(rows, k * 2, generator=generator).bfloat16().to(DEVICE)[:, ::2]
+    bias = torch.randn(n, generator=generator).bfloat16().to(DEVICE)
+    copies = quantize_rows(weight)
+    addresses = tuple(t.data_ptr() for t in copies)
+    torch.testing.assert_close(weight, original, atol=0, rtol=0)
+    weight.mul_(0.5)
+    copies = quantize_rows(weight, copies)
+    assert tuple(t.data_ptr() for t in copies) == addresses
+    q, scales = copies
+    for b in (None, bias):
+        actual = gemv_q8(x, q, scales, bias=b)
+        expected = (x.float() @ q.float().T) * scales
+        if b is not None:
+            expected += b.float()
+        torch.testing.assert_close(
+            actual, expected.bfloat16(), atol=0.0078125, rtol=0.01
+        )
+
+
+def test_int8_draft_projection_replays_refreshed_weights():
+    from vllm.models.inkling2.nvidia.ops.gemv_q8 import gemv_q8, quantize_rows
+
+    weight = torch.zeros(257, 256, dtype=torch.bfloat16, device=DEVICE)
+    copies = quantize_rows(weight)
+    x = torch.ones(8, 256, dtype=torch.bfloat16, device=DEVICE)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        gemv_q8(x, *copies)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        actual = gemv_q8(x, *copies)
+    weight.fill_(0.125)
+    quantize_rows(weight, copies)
+    graph.replay()
+    torch.testing.assert_close(actual, torch.full_like(actual, 32), atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("rows,taps,width", [(1, 3, 128), (17, 8, 4608)])

@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from transformers.configuration_utils import PreTrainedConfig
 
@@ -195,6 +195,8 @@ class Inkling2MMConfig(PreTrainedConfig):
         text_config: dict[str, Any] | Inkling2ModelConfig | None = None,
         vision_config: dict[str, Any] | None = None,
         tie_word_embeddings: bool = False,
+        dspark_weight_quantization: Literal["int8"] | None = None,
+        dspark_quantize_layers: bool = True,
         **kwargs: Any,
     ) -> None:
         self.text_config = (
@@ -216,6 +218,8 @@ class Inkling2MMConfig(PreTrainedConfig):
                 f"[{self.architecture!r}], got {architectures!r}"
             )
         self.vision_config = vision_config
+        self.dspark_weight_quantization = dspark_weight_quantization
+        self.dspark_quantize_layers = dspark_quantize_layers
         # The checkpoint's unembedding runs in BF16 with an FP32 output.
         kwargs.setdefault("head_dtype", "float32")
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
@@ -245,8 +249,16 @@ class Inkling2DSparkConfig(PreTrainedConfig):
         *,
         block_size: int = 8,
         target_layer_ids: list[int] | None = None,
+        draft_weight_quantization: Literal["int8"] | None = None,
+        draft_quantize_layers: bool = True,
         **kwargs,
     ) -> None:
+        if draft_weight_quantization not in (None, "int8"):
+            raise ValueError(
+                "Inkling2 draft_weight_quantization must be null or 'int8'"
+            )
+        self.draft_weight_quantization = draft_weight_quantization
+        self.draft_quantize_layers = draft_quantize_layers
         # Not stored as ``block_size``: vLLM DSpark would take that as the
         # number of speculative tokens, but the block holds an anchor plus
         # block_size - 1 masks, each predicting the token at its own position.
@@ -280,6 +292,8 @@ class Inkling2DSparkConfig(PreTrainedConfig):
             for k, v in mtp_config.items()
             if k not in ("torch_dtype", "dtype", "architectures")
         }
+        draft["draft_weight_quantization"] = config.dspark_weight_quantization
+        draft["draft_quantize_layers"] = config.dspark_quantize_layers
         features = draft.get("target_layer_ids", [])
         if (
             len(features) < 2

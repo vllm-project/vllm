@@ -289,9 +289,10 @@ steps:
     - >-
       pytest -v -s
       models/inkling2/test_core_ops.py
+      models/inkling2/test_dspark.py
       models/inkling2/test_moe.py
       models/inkling2/test_model.py
-      -k 'humming or sm12x or loop_norm or conv_mix'
+      -k 'humming or sm12x or loop_norm or conv_mix or int8'
 
 # Disabled until the gguf installation is locked.
 # - label: ":nvidia: (B200) Flint"
