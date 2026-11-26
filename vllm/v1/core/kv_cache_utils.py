@@ -1060,7 +1060,9 @@ def generate_lookahead_block_hash_extra_keys(
 
 
 def get_max_concurrency_for_kv_cache_config(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    num_step_rows: int | None = None,
 ) -> float:
     """Get the maximum concurrency for the given KV cache configuration.
 
@@ -1069,11 +1071,27 @@ def get_max_concurrency_for_kv_cache_config(
     the per-request total is the sum over groups.
 
     Host groups use a separate pool; the smaller concurrency limit applies.
+
+    With dynamic speculative blocks a recurrent request holds a state block per
+    draft its step verifies, so `num_step_rows`, the rows per request (root
+    included) of a step at max_num_seqs, prices its drafts; None prices them all.
     """
+    from vllm.v1.core.sched.utils import supports_dynamic_spec_blocks
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    step_drafts = None
+    if num_step_rows is not None and supports_dynamic_spec_blocks(
+        vllm_config, kv_cache_config.has_mamba_layers
+    ):
+        step_drafts = num_step_rows - 1
     num_blocks_per_request = 0
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
         required = group.max_allocated_blocks_per_request(vllm_config)
+        if step_drafts is not None and issubclass(group.manager_cls, MambaManager):
+            params = group.manager_config.params
+            assert isinstance(params, MambaManager.Params)
+            required -= max(params.num_speculative_blocks - step_drafts, 0)
         if group.host_resident:
             host_blocks_per_request += required
         else:
@@ -1105,12 +1123,14 @@ def generate_scheduler_kv_cache_config(
 
 
 def get_kv_cache_capacity(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    num_step_rows: int | None = None,
 ) -> tuple[int, float]:
     """Get the group-aware KV cache token capacity and max concurrency."""
     max_model_len = vllm_config.model_config.max_model_len
     max_concurrency = get_max_concurrency_for_kv_cache_config(
-        vllm_config, kv_cache_config
+        vllm_config, kv_cache_config, num_step_rows
     )
     return int(max_concurrency * max_model_len), max_concurrency
 
@@ -1121,10 +1141,14 @@ def _kv_cache_device_name(vllm_config: VllmConfig) -> str:
 
 
 def update_kv_cache_capacity(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    num_step_rows: int | None = None,
 ) -> None:
     """Store and log the resolved KV cache capacity."""
-    num_tokens, max_concurrency = get_kv_cache_capacity(vllm_config, kv_cache_config)
+    num_tokens, max_concurrency = get_kv_cache_capacity(
+        vllm_config, kv_cache_config, num_step_rows
+    )
     vllm_config.cache_config.kv_cache_size_tokens = num_tokens
     vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
     max_model_len = vllm_config.model_config.max_model_len

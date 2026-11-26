@@ -115,7 +115,11 @@ from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
-from vllm.v1.spec_decode.resources import SpecResources, adapt_spec_resources
+from vllm.v1.spec_decode.resources import (
+    SpecResources,
+    adapt_spec_resources,
+    deliver_startup_facts,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -372,12 +376,6 @@ class EngineCore:
                 if participating
                 else [g.block_size for g in kv_cache_groups]
             )
-        # With an extensible KV cache, `num_blocks` is the reserved capacity
-        # until the post-warmup measurement below.
-        extensible = vllm_config.cache_config.enable_extensible_kv_cache
-        if kv_cache_groups and not extensible:
-            update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
-
         vllm_config.validate_block_size()
 
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
@@ -403,12 +401,25 @@ class EngineCore:
         compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             compilation_times = self.model_executor.compile_or_warm_up_model()
+        # After warmup, which times the rounds, and before the capacity, which
+        # prices the speculator's rows per request of a full batch.
+        num_step_rows = deliver_startup_facts(
+            vllm_config, self.spec_resources, self.model_executor.collective_rpc
+        )
+        # With an extensible KV cache, `num_blocks` is the reserved capacity
+        # until the post-warmup measurement below.
+        extensible = vllm_config.cache_config.enable_extensible_kv_cache
+        if kv_cache_groups and not extensible:
+            update_kv_cache_capacity(
+                vllm_config, scheduler_kv_cache_config, num_step_rows=num_step_rows
+            )
         if extensible:
             num_blocks = finalize_extensible_kv_cache(
                 vllm_config,
                 kv_cache_configs,
                 scheduler_kv_cache_config,
                 compilation_times,
+                num_step_rows=num_step_rows,
             )
             max_model_len = vllm_config.model_config.max_model_len
             if max_model_len != max_model_len_after:

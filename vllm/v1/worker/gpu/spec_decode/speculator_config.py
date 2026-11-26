@@ -22,8 +22,10 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.spec_decode.resources import (
         BudgetView,
+        RoundTiming,
         SpecCapabilities,
         SpecResources,
+        StartupFacts,
     )
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
@@ -190,6 +192,27 @@ class SpeculatorConfig:
         if caps.plan_kind == "chain":
             return replace(declared, max_branching=1)
         return declared
+
+    round_timing: "RoundTiming | None" = None
+    """The decode rounds the workers time after graph capture for
+    `StartupFacts.timed_rounds`; None (the default) times none."""
+
+    def on_startup_facts(self, facts: "StartupFacts") -> int | None:
+        """Called once at startup in the engine core process, after warmup and
+        before the scheduler is built, with what startup settled: the resources
+        the workers run with, `max_num_seqs` and the rounds asked for by
+        `round_timing`. The same record stays readable afterwards as
+        `self.spec_config.startup_facts`, also from the scheduler's config.
+
+        Returns the rows per request, root included, that `candidate_budget`
+        gives a step of `max_num_seqs` requests, in
+        `[1, num_speculative_tokens + 1]`, which the startup KV cache
+        concurrency prices; None prices every draft. The default returns the
+        Dynamic SD schedule's rows, else None.
+        """
+        if not self.spec_config.uses_dynamic_speculative_decoding():
+            return None
+        return self._dynamic_sd_schedule(facts.max_num_seqs)[facts.max_num_seqs] + 1
 
     def candidate_budget(self, view: "BudgetView") -> int:
         """The rows per request, root included, that the drafts proposed after

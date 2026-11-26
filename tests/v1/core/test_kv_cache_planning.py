@@ -2340,6 +2340,37 @@ def test_finalize_extensible_kv_cache_keeps_measured_count():
     assert vllm_config.cache_config.num_gpu_blocks == 997
 
 
+def test_finalize_extensible_kv_cache_prices_the_step_rows(monkeypatch):
+    """The capacity line after warmup prices the speculator's rows per request
+    of a step at max_num_seqs."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [new_kv_cache_group(["layer.0"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=spec.page_size_bytes * 100
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+    calls = []
+    monkeypatch.setattr(
+        kv_cache_planning,
+        "update_kv_cache_capacity",
+        lambda *args, **kwargs: calls.append(kwargs),
+    )
+    kv_cache_planning.finalize_extensible_kv_cache(
+        vllm_config,
+        [config],
+        scheduler_config,
+        [CompilationTimes(0.0, 0.0, num_kv_blocks=90)],
+        num_step_rows=3,
+    )
+    assert calls == [{"num_step_rows": 3}]
+
+
 def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
     """With `--max-model-len auto`, the context length fitted to the reserved
     capacity is fitted again to the count measured after warmup, instead of

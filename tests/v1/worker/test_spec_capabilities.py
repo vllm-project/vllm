@@ -36,11 +36,15 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.spec_decode.resources import (
+    RoundTiming,
     SpecCapabilities,
     SpecLayerKind,
     SpecLimit,
     SpecResources,
+    StartupFacts,
+    TimedRound,
     adapt_spec_resources,
+    deliver_startup_facts,
     resolve_spec_resources,
 )
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -442,18 +446,163 @@ def test_adapts_only_branching_resources(tree):
         calls.append(method)
         return [_CHAIN] if method == "get_spec_capabilities" else None
 
-    effective = adapt_spec_resources(
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(speculator_config=config),
-            scheduler_config=SimpleNamespace(max_num_seqs=8),
-        ),
-        collective_rpc,
-    )
+    effective = adapt_spec_resources(_vllm_config(config), collective_rpc)
     if not tree:
         assert calls == [] and effective is None
         return
     assert calls == ["get_spec_capabilities", "set_spec_resources"]
     assert effective == replace(config.resources(8), max_branching=1)
+
+
+_ROUNDS = (
+    TimedRound(
+        num_drafts=0,
+        num_reqs=8,
+        context_len=0,
+        seconds=0.01,
+        spread=1e-4,
+        num_samples=3,
+    ),
+    TimedRound(
+        num_drafts=3,
+        num_reqs=8,
+        context_len=0,
+        seconds=0.02,
+        spread=2e-4,
+        num_samples=3,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "tree, reported, lowered",
+    [
+        (False, [_CHAIN], False),
+        (True, [_CHAIN], True),
+        (True, [_TREE], False),
+        (True, [], False),
+    ],
+    ids=["chain", "lowered", "tree-kept", "no-reports"],
+)
+@pytest.mark.parametrize("rows", [None, 2])
+def test_delivers_the_startup_facts_once(tree, reported, lowered, rows, monkeypatch):
+    """After warmup the speculator config learns, once and on one record, the
+    resources the workers run with (adapted or as declared) and rank 0's timed
+    rounds; the engine keeps the record on the speculative config, and the
+    config's answer is the rows per request of a step at max_num_seqs."""
+    config = _TreeConfig() if tree else _speculative_config().speculator_config
+    delivered: list[StartupFacts] = []
+
+    def on_startup_facts(facts):
+        delivered.append(facts)
+        return rows
+
+    monkeypatch.setattr(config, "on_startup_facts", on_startup_facts)
+    calls = []
+
+    def collective_rpc(method, args=()):
+        calls.append(method)
+        if method == "get_spec_capabilities":
+            return reported
+        return [_ROUNDS, ()] if method == "get_timed_rounds" else None
+
+    vllm_config = _vllm_config(config)
+    effective = adapt_spec_resources(vllm_config, collective_rpc)
+    assert delivered == [] and "get_timed_rounds" not in calls
+    step_rows = deliver_startup_facts(vllm_config, effective, collective_rpc)
+    declared = config.resources(8)
+    want = replace(declared, max_branching=1) if lowered else declared
+    facts = StartupFacts(resources=want, max_num_seqs=8, timed_rounds=_ROUNDS)
+    assert delivered == [facts]
+    assert vllm_config.speculative_config.startup_facts == facts
+    assert effective == (want if tree and reported else None)
+    assert step_rows == rows
+    assert calls.count("get_timed_rounds") == 1
+
+
+def test_delivers_nothing_without_speculation():
+    vllm_config = SimpleNamespace(speculative_config=None)
+    assert deliver_startup_facts(vllm_config, None, lambda *_, **__: 1 / 0) is None
+
+
+@pytest.mark.parametrize("rows", [0, 5])
+def test_refuses_step_rows_outside_the_drafts(rows, monkeypatch):
+    """The rows include the root and at most num_speculative_tokens drafts."""
+    config = _speculative_config().speculator_config
+    monkeypatch.setattr(config, "on_startup_facts", lambda _: rows)
+    with pytest.raises(ValueError, match=r"\[1, 4\]"):
+        deliver_startup_facts(_vllm_config(config), None, lambda *_, **__: [()])
+
+
+@pytest.mark.parametrize(
+    "schedule, rows",
+    [(None, None), ([(1, 4, 3), (5, 8, 1)], 2), ([(1, 8, 3)], 4)],
+    ids=["fixed", "dynamic-sd", "dynamic-sd-flat"],
+)
+def test_default_step_rows_follow_the_dynamic_sd_schedule(schedule, rows):
+    """By default a Dynamic SD schedule's drafts at max_num_seqs price the
+    startup KV cache; a fixed budget leaves every draft priced."""
+    config = fake_speculative_config(
+        SpeculatorConfig,
+        num_speculative_tokens=3,
+        enable_adaptive_verification=False,
+        num_speculative_tokens_per_batch_size=schedule,
+        uses_dynamic_speculative_decoding=lambda: schedule is not None,
+    ).speculator_config
+    facts = StartupFacts(resources=config.resources(8), max_num_seqs=8)
+    assert facts.timed_rounds == ()
+    assert config.on_startup_facts(facts) == rows
+
+
+def test_speculators_time_no_rounds_by_default():
+    assert SpeculatorConfig.round_timing is None
+
+
+def test_the_scheduler_reads_the_record_from_its_own_config():
+    """The scheduler, built after delivery, derives its own speculator config;
+    it reads the same record through the shared speculative config."""
+    from vllm.config import SpeculativeConfig
+
+    spec = SpeculativeConfig(method="ngram", num_speculative_tokens=3)
+    assert spec.startup_facts is None
+    vllm_config = SimpleNamespace(
+        speculative_config=spec, scheduler_config=SimpleNamespace(max_num_seqs=8)
+    )
+    deliver_startup_facts(vllm_config, None, lambda *_, **__: [_ROUNDS])
+    scheduler_side = spec.speculator_config
+    assert scheduler_side is not spec.speculator_config
+    assert scheduler_side.spec_config.startup_facts.timed_rounds == _ROUNDS
+    assert "startup_facts" not in repr(spec)
+
+
+def test_round_timing_points():
+    """Each draft count from 0 to K at the powers of two up to max_num_reqs and
+    max_num_reqs itself, each capped to the token budget, at each context."""
+    timing = RoundTiming(repeats=2)
+    assert timing.points(3, max_num_reqs=6, max_num_tokens=16) == [
+        (k, n, 0)
+        for k, sizes in enumerate([(1, 2, 4, 6), (1, 2, 4, 6), (1, 2, 4, 5), (1, 2, 4)])
+        for n in sizes
+    ]
+    timing = RoundTiming(repeats=2, context_lens=(0, 512))
+    assert timing.points(0, max_num_reqs=2, max_num_tokens=16) == [
+        (0, 1, 0),
+        (0, 1, 512),
+        (0, 2, 0),
+        (0, 2, 512),
+    ]
+
+
+def test_round_timing_needs_a_timed_replay():
+    with pytest.raises(ValueError, match="repeats"):
+        RoundTiming(repeats=0)
+
+
+def _vllm_config(speculator_config):
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(speculator_config=speculator_config),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+    )
 
 
 def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():

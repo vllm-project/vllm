@@ -25,7 +25,11 @@ from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
-    from vllm.v1.spec_decode.resources import SpecCapabilities, SpecResources
+    from vllm.v1.spec_decode.resources import (
+        SpecCapabilities,
+        SpecResources,
+        TimedRound,
+    )
 else:
     SchedulerOutput = object
     GrammarOutput = object
@@ -127,6 +131,11 @@ class WorkerBase:
         `initialize_from_config`; None when the worker does not report it (the
         engine core then keeps the declared resources)."""
         return None
+
+    def get_timed_rounds(self) -> "tuple[TimedRound, ...]":
+        """The decode rounds this rank timed after graph capture
+        (`SpeculatorConfig.round_timing`); empty when it timed none."""
+        return ()
 
     def set_spec_resources(self, resources: "SpecResources") -> None:
         """Run speculation with the engine core's effective resources (before

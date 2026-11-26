@@ -185,7 +185,11 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.spec_decode.resources import SpecCapabilities, SpecResources
+    from vllm.v1.spec_decode.resources import (
+        SpecCapabilities,
+        SpecResources,
+        TimedRound,
+    )
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
@@ -1012,6 +1016,9 @@ class Worker(WorkerBase):
     def set_spec_resources(self, resources: "SpecResources") -> None:
         if self.get_spec_capabilities() is not None:
             self.model_runner.set_spec_resources(resources)
+
+    def get_timed_rounds(self) -> "tuple[TimedRound, ...]":
+        return getattr(self.model_runner, "timed_rounds", ())
 
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
         # Every rank must reach the same decision: one that keeps the feature

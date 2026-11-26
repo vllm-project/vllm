@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import math
 from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
@@ -13,6 +14,7 @@ import torch
 
 import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+import vllm.v1.worker.gpu_worker as gpu_worker_module
 from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import (
     AttentionConfig,
@@ -39,7 +41,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
 )
-from vllm.v1.worker.gpu.async_utils import async_copy_to_np
+from vllm.v1.spec_decode.resources import RoundTiming, TimedRound
+from vllm.v1.worker.gpu.async_utils import StepTimingSample, async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
@@ -461,6 +464,9 @@ def _make_capture_runner(
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
+    runner.speculative_config = SimpleNamespace(
+        speculator_config=SimpleNamespace(round_timing=None)
+    )
     runner.spec_round = None
     runner.adaptive_verification = None
     runner.model = None
@@ -580,6 +586,187 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
 
     assert runner.capture_model(profile_only=profile_only) == 0
     assert curves == ([] if profile_only else [[]])
+
+
+@pytest.mark.parametrize("profile_only", [False, True])
+def test_capture_model_times_the_startup_rounds_after_capture(
+    monkeypatch, profile_only
+):
+    """The startup rounds are timed once the drafter's graphs are captured,
+    inside the free-memory window that releases their activations; the
+    memory-profiling pass skips them."""
+    runner = _make_capture_runner(monkeypatch, captured=True)
+    order: list[str] = []
+    runner.speculator = SimpleNamespace(capture=lambda: order.append("capture"))
+    monkeypatch.setattr(runner, "draft_context", contextlib.nullcontext)
+    monkeypatch.setattr(runner, "time_startup_rounds", lambda: order.append("time"))
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+    )
+    monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
+
+    runner.capture_model(profile_only=profile_only)
+
+    assert order == (["capture"] if profile_only else ["capture", "time"])
+
+
+class _FakeStepTiming:
+    """Times the i-th dummy run in `collect` at 2 ms per token + i ms, and 1 ms
+    to draft."""
+
+    def __init__(self):
+        self.samples: list | None = None
+
+    @contextlib.contextmanager
+    def collect(self):
+        self.samples = []
+        try:
+            yield self.samples
+        finally:
+            self.samples = None
+
+    def time(self, num_tokens: int, num_reqs: int) -> None:
+        if self.samples is not None:
+            self.samples.append(
+                StepTimingSample(
+                    2.0 * num_tokens + len(self.samples),
+                    1.0,
+                    num_tokens,
+                    num_reqs,
+                    True,
+                )
+            )
+
+
+def _make_round_timing_runner(monkeypatch, round_timing, use_pp=False):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.speculative_config = SimpleNamespace(
+        speculator_config=SimpleNamespace(round_timing=round_timing)
+    )
+    runner.num_speculative_steps = 1
+    runner.max_num_reqs = 2
+    runner.max_num_tokens = 8
+    runner.use_pp = use_pp
+    runner.timed_rounds = ()
+    runner.step_timing = _FakeStepTiming()
+    runs: list[tuple[int, dict]] = []
+
+    def _dummy_run(num_tokens, **kwargs):
+        runs.append((num_tokens, kwargs))
+        runner.step_timing.time(
+            num_tokens, num_tokens // (kwargs["num_draft_tokens"] + 1)
+        )
+
+    monkeypatch.setattr(runner, "_dummy_run", _dummy_run)
+    return runner, runs
+
+
+def test_time_startup_rounds(monkeypatch):
+    """One untimed and `repeats` timed rounds per (draft count, requests,
+    context); each row holds the mean and sample standard deviation of the
+    timed rounds' target plus drafter time."""
+    runner, runs = _make_round_timing_runner(monkeypatch, RoundTiming(repeats=2))
+
+    runner.time_startup_rounds()
+
+    points = [(0, 1), (0, 2), (1, 1), (1, 2)]
+    assert runs == [
+        (
+            n * (k + 1),
+            dict(
+                uniform_decode=True,
+                num_draft_tokens=k,
+                context_len=0,
+                skip_eplb=True,
+            ),
+        )
+        for k, n in points
+        for _ in range(3)
+    ]
+    assert runner.timed_rounds == tuple(
+        TimedRound(k, n, 0, (2.0 * n * (k + 1) + 1.5) / 1e3, math.sqrt(0.5) / 1e3, 2)
+        for k, n in points
+    )
+
+
+@pytest.mark.parametrize(
+    "round_timing, use_pp",
+    [(None, False), (RoundTiming(), True)],
+    ids=["not-asked", "pipeline-parallel"],
+)
+def test_time_startup_rounds_runs_none(monkeypatch, round_timing, use_pp):
+    runner, runs = _make_round_timing_runner(monkeypatch, round_timing, use_pp)
+    runner.time_startup_rounds()
+    assert runs == [] and runner.timed_rounds == ()
+
+
+def test_dummy_run_at_a_draft_count(monkeypatch):
+    """A uniform decode dummy run at draft count K verifies K + 1 rows per
+    request and proposes K drafts, as a served step at that draft count."""
+    scheduled, proposed = [], []
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_num_tokens = 64
+    runner.max_num_reqs = 8
+    runner.max_model_len = 1024
+    runner.decode_query_len = 4
+    runner.lora_config = None
+    runner.is_first_pp_rank = True
+    runner.is_last_pp_rank = True
+    runner.kv_connector = Mock()
+    runner.model = None
+    runner.device = "cpu"
+    runner.step_timing = model_runner_module.StepTimingCollector()
+    runner.eplb = SimpleNamespace(step=lambda **_: None)
+    runner.req_states = SimpleNamespace(
+        last_sampled_tokens=None, next_prefill_tokens=None
+    )
+    runner.sampler = SimpleNamespace(
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(gpu=None), seeds=SimpleNamespace(gpu=None)
+        )
+    )
+    runner.speculator = SimpleNamespace(
+        supports_mm_inputs=False,
+        propose=lambda **kwargs: proposed.append(kwargs["num_speculative_tokens"]),
+    )
+    monkeypatch.setattr(runner, "draft_context", contextlib.nullcontext)
+
+    def execute_model(scheduler_output, **kwargs):
+        num_tokens = list(scheduler_output.num_scheduled_tokens.values())
+        scheduled.append(num_tokens)
+        runner.execute_model_state = SimpleNamespace(
+            input_batch=SimpleNamespace(
+                num_reqs=len(num_tokens),
+                num_tokens=sum(num_tokens),
+                idx_mapping=None,
+                logits_indices=slice(None),
+            ),
+            attn_metadata=None,
+            slot_mappings_by_layer=None,
+            hidden_states=torch.zeros(sum(num_tokens), 2),
+            aux_hidden_states=None,
+            dp_sync_state=None,
+        )
+
+    runner.execute_model = execute_model
+
+    runner._dummy_run(6, uniform_decode=True, num_draft_tokens=1)
+    runner._dummy_run(8, uniform_decode=True)
+
+    assert scheduled == [[2, 2, 2], [4, 4]]
+    assert proposed == [1, None]
+
+
+def test_workers_report_their_timed_rounds():
+    rounds = (TimedRound(0, 1, 0, 0.001, 1e-5, 3),)
+    worker = SimpleNamespace(model_runner=SimpleNamespace(timed_rounds=rounds))
+    assert gpu_worker_module.Worker.get_timed_rounds(worker) == rounds
+    worker = SimpleNamespace(model_runner=SimpleNamespace())
+    assert gpu_worker_module.Worker.get_timed_rounds(worker) == ()
 
 
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])

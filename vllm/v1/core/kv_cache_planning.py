@@ -1737,11 +1737,13 @@ def finalize_extensible_kv_cache(
     kv_cache_configs: list[KVCacheConfig],
     scheduler_kv_cache_config: KVCacheConfig,
     compilation_times: list["CompilationTimes"],
+    num_step_rows: int | None = None,
 ) -> int:
     """Settle the KV cache size from the memory workers measured after warmup.
 
     Every rank must agree on one block count, so the minimum becomes the
     scheduler's num_blocks; the caller commits it on the workers.
+    `num_step_rows` is as in `get_max_concurrency_for_kv_cache_config`.
     """
     # No measurements: the elastic-EP scale-up path skips warmup. Elastic EP
     # leaves the extensible KV cache off, so this branch is not reached; it
@@ -1773,5 +1775,7 @@ def finalize_extensible_kv_cache(
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
     if scheduler_kv_cache_config.kv_cache_groups:
-        update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
+        update_kv_cache_capacity(
+            vllm_config, scheduler_kv_cache_config, num_step_rows=num_step_rows
+        )
     return num_blocks

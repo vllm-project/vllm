@@ -27,6 +27,7 @@ from vllm.transformers_utils.config import get_hf_text_config, iter_rope_paramet
 from vllm.transformers_utils.repo_utils import get_subfolder_path
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.spec_decode.resources import StartupFacts
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
     SpeculatorConfig,
     get_custom_speculator_config_class,
@@ -531,6 +532,11 @@ class SpeculativeConfig:
         default=None, init=False, repr=False
     )
     """Resolved redundant expert count used for the draft's EPLB config."""
+    startup_facts: SkipValidation[StartupFacts | None] = field(
+        default=None, init=False, repr=False
+    )
+    """What startup settled for speculation (`SpeculatorConfig.on_startup_facts`);
+    None until the engine core delivers it after warmup."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""
@@ -811,6 +817,7 @@ class SpeculativeConfig:
             "fly_window_size",
             "fly_entropy_threshold",
             "fly_entropy_top_k",
+            "startup_facts",
         }
         factors = get_compile_factors(self, ignored_factors)
         # Eagle3 and extract_hidden_states affect the computation graph because

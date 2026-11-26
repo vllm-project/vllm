@@ -18,6 +18,7 @@ instead of embedding feature-specific logic directly.
 
 import functools
 import gc
+import math
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -91,7 +92,11 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     ModelRunnerOutput,
 )
-from vllm.v1.spec_decode.resources import SpecResources, validate_effective_resources
+from vllm.v1.spec_decode.resources import (
+    SpecResources,
+    TimedRound,
+    validate_effective_resources,
+)
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
@@ -352,6 +357,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner: PoolingRunner | None = None
 
         self.step_timing = StepTimingCollector()
+        # Rounds timed after capture (`time_startup_rounds`).
+        self.timed_rounds: tuple[TimedRound, ...] = ()
         self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -929,8 +936,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
         num_active_loras: int | None = None,
+        num_draft_tokens: int | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """A forward and `propose` on dummy requests. With `uniform_decode`,
+        each request verifies `num_draft_tokens + 1` rows and the drafter
+        proposes `num_draft_tokens` drafts, as a served step at that draft
+        count; None runs the speculator's K."""
         if skip_attn and not is_profile:
             raise ValueError(
                 "skip_attn must only be True for initial memory profiling."
@@ -943,8 +955,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # would exceed the token budget.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
-            num_reqs = num_tokens // self.decode_query_len
-            assert num_tokens % self.decode_query_len == 0
+            query_len = (
+                self.decode_query_len
+                if num_draft_tokens is None
+                else num_draft_tokens + 1
+            )
+            num_reqs = num_tokens // query_len
+            assert num_tokens % query_len == 0
         elif self.speculator is not None:
             assert self.speculative_config is not None
             num_reqs = min(
@@ -1064,6 +1081,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn_for_dummy_run=skip_attn,
                     mm_inputs=mm_inputs,
                     is_profile=is_profile,
+                    num_speculative_tokens=num_draft_tokens,
                 )
             self.step_timing.drafter_end()
 
@@ -1228,9 +1246,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.speculator is not None:
                         with self.draft_context():
                             self.speculator.capture()
+                    if self.speculator is not None and not profile_only:
+                        self.time_startup_rounds()
                     if self.adaptive_verification is not None and not profile_only:
                         self.profile_adaptive_verification()
-                        # Release the profiling runs' activations, or the
+                    if not profile_only:
+                        # Release the timed runs' activations, or the
                         # allocator cache is counted as graph memory below.
                         torch.accelerator.empty_cache()
                     self.kv_connector.reset_capture_state()
@@ -1268,6 +1289,54 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 self._dummy_run(**batch, skip_eplb=True)
         self.adaptive_verification.set_initial_cost_curves(timings)
+
+    @torch.inference_mode()
+    def time_startup_rounds(self) -> None:
+        """Time the decode rounds the speculator config asks for
+        (`SpeculatorConfig.round_timing`), after graph capture, into
+        `timed_rounds`."""
+        assert self.speculative_config is not None
+        timing = self.speculative_config.speculator_config.round_timing
+        if timing is None:
+            return
+        if self.use_pp:
+            # Only the last stage proposes, so no stage times a whole round.
+            logger.info("Skipping startup round timing, which needs one PP stage.")
+            return
+        rounds = []
+        start = time.perf_counter()
+        for num_drafts, num_reqs, context_len in timing.points(
+            self.num_speculative_steps, self.max_num_reqs, self.max_num_tokens
+        ):
+            batch = dict(
+                num_tokens=num_reqs * (num_drafts + 1),
+                uniform_decode=True,
+                num_draft_tokens=num_drafts,
+                context_len=context_len,
+                skip_eplb=True,
+            )
+            self._dummy_run(**batch)
+            with self.step_timing.collect() as samples:
+                for _ in range(timing.repeats):
+                    self._dummy_run(**batch)
+            ms = [s.forward_ms + s.drafter_ms for s in samples]
+            rounds.append(
+                TimedRound(
+                    num_drafts,
+                    num_reqs,
+                    context_len,
+                    float(np.mean(ms)) / 1e3,
+                    float(np.std(ms, ddof=1)) / 1e3 if len(ms) > 1 else math.nan,
+                    len(ms),
+                )
+            )
+        self.timed_rounds = tuple(rounds)
+        logger.info(
+            "Timed %d startup rounds (%d dummy runs) in %.2f secs",
+            len(rounds),
+            len(rounds) * (timing.repeats + 1),
+            time.perf_counter() - start,
+        )
 
     def _remove_request(self, req_id: str) -> bool:
         # Call model_state.remove_request *before* req_states.remove_request

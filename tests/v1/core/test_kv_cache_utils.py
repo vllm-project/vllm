@@ -73,6 +73,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
+    MambaManager,
     SinkFullAttentionManager,
     get_kv_cache_kind,
 )
@@ -1798,6 +1799,43 @@ def test_get_max_concurrency_for_kv_cache_config():
     ) == get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_uniform_group
     )
+
+
+@pytest.mark.parametrize(
+    "adaptive_verification, num_step_rows, drafts_held",
+    [(False, None, 15), (False, 4, 3), (False, 16, 15), (True, 4, 15)],
+    ids=["reserve", "step-rows", "all-rows", "adaptive-verification"],
+)
+def test_max_concurrency_prices_the_drafts_of_a_full_batch_step(
+    adaptive_verification, num_step_rows, drafts_held
+):
+    """With dynamic speculative blocks a recurrent request holds one state block
+    per draft its step verifies, so the rows per request of a step at
+    max_num_seqs price it; without them it holds every draft."""
+    state = MambaManager.layer_config(
+        MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,)),
+        num_speculative_blocks=15,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroup.from_layers({"state": state})],
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        kv_transfer_config=None,
+        speculative_config=SimpleNamespace(
+            enable_adaptive_verification=adaptive_verification
+        ),
+    )
+    concurrency = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config, num_step_rows=num_step_rows
+    )
+    assert concurrency == 128 / (1 + drafts_held)
+    assert get_kv_cache_capacity(
+        vllm_config, kv_cache_config, num_step_rows=num_step_rows
+    ) == (int(concurrency * 8192), concurrency)
 
 
 def test_allocate_with_lookahead():
