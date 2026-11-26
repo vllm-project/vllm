@@ -3205,6 +3205,33 @@ async fn render_chat(
         .into_inner()
 }
 
+/// `parameters_json` must be a JSON object or `null`, as the HTTP tool DTO
+/// requires.
+#[tokio::test]
+async fn render_chat_rejects_non_object_tool_parameters() {
+    let service = render_service();
+    for parameters_json in [r#""schema""#, "[]", "1", "true"] {
+        let mut chat = weather_chat_request();
+        chat.tools[0].parameters_json = parameters_json.to_string();
+        let status = service
+            .render_chat(tonic::Request::new(pb::RenderChatRequest {
+                chat: Some(chat),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("non-object parameters_json should be rejected");
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "{parameters_json}"
+        );
+    }
+
+    let mut chat = weather_chat_request();
+    chat.tools[0].parameters_json = "null".to_string();
+    render_chat(&service, chat).await;
+}
+
 #[tokio::test]
 async fn render_chat_returns_rendered_prompt_and_reasoning_gate() {
     let rendered = render_chat(&render_service(), weather_chat_request()).await;

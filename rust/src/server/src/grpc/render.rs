@@ -441,7 +441,18 @@ fn part_from_proto(part: pb::ChatContentPart) -> Result<ChatContentPart, Status>
         },
         Some(Part::InputAudio(audio)) => ChatContentPart::InputAudio {
             data: audio.data,
-            format: audio.format,
+            // gRPC render has always matched the name case-insensitively; only
+            // the HTTP routes follow OpenAI's lowercase schema.
+            format: audio
+                .format
+                .map(|format| {
+                    format.parse().map_err(|_| {
+                        Status::invalid_argument(format!(
+                            "unsupported input_audio format `{format}`; expected `wav` or `mp3`"
+                        ))
+                    })
+                })
+                .transpose()?,
             uuid: audio.uuid,
         },
         None => return Err(Status::invalid_argument("chat content part is required")),
@@ -458,20 +469,22 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
     tools
         .into_iter()
         .map(|tool| {
+            // A JSON schema object or `null`, as the HTTP tool DTO accepts.
             let parameters = if tool.parameters_json.is_empty() {
-                serde_json::Value::Null
+                None
             } else {
-                serde_json::from_str(&tool.parameters_json).map_err(|error| {
-                    Status::invalid_argument(format!(
-                        "invalid parameters_json for tool `{}`: {error}",
-                        tool.name
-                    ))
-                })?
+                serde_json::from_str::<Option<serde_json::Map<_, _>>>(&tool.parameters_json)
+                    .map_err(|error| {
+                        Status::invalid_argument(format!(
+                            "invalid parameters_json for tool `{}`: {error}",
+                            tool.name
+                        ))
+                    })?
             };
             Ok(ChatTool {
                 name: tool.name,
                 description: tool.description,
-                parameters,
+                parameters: parameters.map_or(serde_json::Value::Null, serde_json::Value::Object),
                 strict: tool.strict,
                 defer_loading: tool.defer_loading,
             })
@@ -483,17 +496,9 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 // Errors
 // ========================================================================================
 
-/// Media that cannot be fetched or preprocessed is still treated as the
-/// request's fault on gRPC render (aligning with HTTP's client/server split is
-/// tracked as a follow-up).
 fn chat_error_to_status(error: vllm_chat::Error) -> Status {
     let message = error.to_report_string();
-    if error.kind().is_invalid_request()
-        || matches!(
-            error,
-            vllm_chat::Error::Multimodal(_) | vllm_chat::Error::Media(_)
-        )
-    {
+    if error.kind().is_invalid_request() {
         Status::invalid_argument(message)
     } else if error.is_unavailable() {
         Status::unavailable(message)
@@ -521,21 +526,57 @@ mod tests {
     use std::time::Duration;
 
     use llm_multimodal::MediaConnectorError;
+    use vllm_chat::InputAudioFormat;
 
     use super::*;
 
-    /// A media fetch that failed on the host's side is still treated as
-    /// `INVALID_ARGUMENT` on gRPC render; HTTP routes distinguish client vs
-    /// server media faults.
+    /// Render answers a chat error like the chat routes: media the request
+    /// got wrong is `INVALID_ARGUMENT`, a media host that timed out is this
+    /// side's trouble.
     #[test]
-    fn media_fetch_timeout_is_invalid_argument() {
-        let error = vllm_chat::Error::from(MediaConnectorError::Timeout {
-            url: "https://example.com/a.png".to_string(),
-            budget: Duration::from_secs(5),
-        });
-        assert_eq!(
-            chat_error_to_status(error).code(),
-            tonic::Code::InvalidArgument
-        );
+    fn chat_errors_map_to_status_like_the_chat_routes() {
+        let errors = [
+            vllm_chat::Error::from(MediaConnectorError::DataUrl("missing comma".to_string())),
+            vllm_chat::Error::from(MediaConnectorError::Timeout {
+                url: "https://example.com/a.png".to_string(),
+                budget: Duration::from_secs(5),
+            }),
+        ];
+        let codes = errors
+            .into_iter()
+            .map(|error| chat_error_to_status(error).code())
+            .collect::<Vec<_>>();
+        assert_eq!(codes, [tonic::Code::InvalidArgument, tonic::Code::Internal]);
+    }
+
+    #[test]
+    fn input_audio_format_is_optional_but_must_name_wav_or_mp3() {
+        let part = |format: Option<&str>| pb::ChatContentPart {
+            part: Some(pb::chat_content_part::Part::InputAudio(
+                pb::ChatInputAudio {
+                    data: "dGVzdA==".to_string(),
+                    format: format.map(str::to_string),
+                    uuid: None,
+                },
+            )),
+        };
+        for (format, expected) in [
+            (None, None),
+            (Some("wav"), Some(InputAudioFormat::Wav)),
+            (Some("MP3"), Some(InputAudioFormat::Mp3)),
+        ] {
+            let ChatContentPart::InputAudio { format, .. } =
+                part_from_proto(part(format)).expect("valid input_audio part")
+            else {
+                panic!("expected an input_audio part");
+            };
+            assert_eq!(format, expected);
+        }
+        for format in ["flac", ""] {
+            assert_eq!(
+                part_from_proto(part(Some(format))).unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+        }
     }
 }

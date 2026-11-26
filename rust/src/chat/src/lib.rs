@@ -24,7 +24,7 @@ pub use event::{
 };
 use futures::{StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
-pub use multimodal::{mm_request_span, mm_timing_layer};
+pub use multimodal::{InputAudioFormat, mm_request_span, mm_timing_layer};
 use output::apply_output_grammar;
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
@@ -255,6 +255,12 @@ impl ChatRequestProcessor {
     /// fill-in-the-middle prompt text, or `None` if the model has none.
     pub fn render_completion_suffix(&self, prompt: &str, suffix: &str) -> Option<String> {
         self.backend.chat_renderer().render_completion_suffix(prompt, suffix)
+    }
+
+    /// Render one request's chat template, without media, tokenization or
+    /// validation. Rendering blocks, so call it off the async workers.
+    pub fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        self.backend.chat_renderer().render(request)
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
