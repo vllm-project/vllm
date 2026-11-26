@@ -852,8 +852,8 @@ def _histogram(
             x_next = tl.load(
                 row_ptr + idx + BLOCK, mask=idx + BLOCK < hi, other=-float("inf")
             )
-            # Finite as the gather bins them (NaN in the last bin).
-            counts += tl.histogram(_bin(x, top, scale, BINS), BINS, mask=~(x < LOWEST))
+            # Finite as the gather bins them (NaN below the floor, as -inf).
+            counts += tl.histogram(_bin(x, top, scale, BINS), BINS, mask=x >= LOWEST)
         if use_k:
             _track_tail(row_ptr, tail_row, top, scale, lo, hi, BINS, BLOCK)
     else:
@@ -926,9 +926,10 @@ def _span(span_row, row_max, first, BIN_SCALE: tl.constexpr):
 
 @triton.jit
 def _span_bin(x, top, floor, scale, BINS: tl.constexpr):
-    """Bin of a logit in a span: -1 above it, BINS + 1 below it (BINS is no bin)."""
+    """Bin of a logit in a span: -1 above it, BINS + 1 below it or NaN (BINS is no
+    bin)."""
     b = _bin(x, top, scale, BINS)
-    return tl.where(x > top, -1, tl.where(x < floor, BINS + 1, b))
+    return tl.where(x > top, -1, tl.where(x >= floor, b, BINS + 1))
 
 
 @triton.jit(noinline=True)

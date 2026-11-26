@@ -930,6 +930,21 @@ class TestTritonTopkTopp:
         )
         _assert_exact_filter(source, actual, k, p)
 
+    @pytest.mark.parametrize("k_below_finite", [-40, 0, 1, 10])
+    def test_exact_nan_with_large_k(self, k_below_finite):
+        """NaN orders as -inf, also when the k cut is among the lowest finite logits."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab = 32000
+        source = torch.randn(8, vocab, generator=self.generator) * 10
+        source[:, ::640] = float("nan")
+        k = torch.full((8,), vocab - 50 - k_below_finite, dtype=torch.int32)
+        actual = apply_top_k_top_p_triton(source.clone(), k, None)
+        source, actual = (
+            t.masked_fill(t.isnan(), float("-inf")) for t in (source, actual)
+        )
+        _assert_exact_filter(source, actual, k, None)
+
     def test_exact_nucleus_past_a_refined_pick(self):
         """A top-p-only nucleus of ~120 tokens over 300 near-tied maxima (one per
         supergroup of 256), each with a runner-up in another group. The tier refines
