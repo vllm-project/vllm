@@ -8,7 +8,13 @@ Contributed by hclsys in #68387; it fails when the learnable sink is dropped.
 import pytest
 import torch
 
-from vllm.models.hy_v4_flash.nvidia.sm120 import FlashSM120Impl
+from vllm.config import CacheConfig
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.models.hy_v4_flash.nvidia.sm120 import (
+    FlashSM120Impl,
+    FlashSM120SparseBackend,
+)
 from vllm.platforms import current_platform
 
 
@@ -41,6 +47,30 @@ def _unpack_fp8_ds_mla(rows: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _sm120_impl(heads: int, topk: int, sinks: torch.Tensor) -> FlashSM120Impl:
+    """The impl a Hy4-flash sparse layer builds, with Hy4-flash's MLA dimensions."""
+    nope, rope, v_dim, kv_lora_rank = 192, 64, 256, 512
+    layer = MLAAttention(
+        num_heads=heads,
+        scale=(kv_lora_rank + rope) ** -0.5,
+        qk_nope_head_dim=nope,
+        qk_rope_head_dim=rope,
+        v_head_dim=v_dim,
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        kv_b_proj=ColumnParallelLinear(
+            kv_lora_rank, heads * (nope + v_dim), bias=False
+        ),
+        cache_config=CacheConfig(cache_dtype="fp8_ds_mla"),
+        attn_backend=FlashSM120SparseBackend,
+        use_sparse=True,
+        topk_indices_buffer=torch.empty(64, topk, dtype=torch.int32, device="cuda"),
+        sinks=sinks,
+    )
+    assert isinstance(layer.impl, FlashSM120Impl)
+    return layer.impl
+
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(120),
     reason="FlashInfer SM120 sparse MLA kernel",
@@ -49,7 +79,7 @@ def _unpack_fp8_ds_mla(rows: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("topk", [512, 2048])
 @pytest.mark.parametrize("num_tokens", [1, 32])
 def test_sm120_flash_impl_applies_the_sink_on_gpu(
-    heads: int, topk: int, num_tokens: int
+    dist_init, default_vllm_config, heads: int, topk: int, num_tokens: int
 ) -> None:
     torch.manual_seed(0)
     dev = torch.device("cuda")
@@ -66,12 +96,7 @@ def test_sm120_flash_impl_applies_the_sink_on_gpu(
     # Large enough to move the output well past the tolerance.
     sinks = torch.randn(heads, device=dev) * 2.0 + 6.0
 
-    impl = object.__new__(FlashSM120Impl)
-    impl.num_heads, impl.kv_lora_rank = heads, 512
-    impl.qk_nope_head_dim, impl.qk_rope_head_dim = 512, 64
-    impl.scale, impl.kv_scale_format = 576**-0.5, "pow2_fp32"
-    impl._workspace_buffer = None
-    impl.sinks = sinks
+    impl = _sm120_impl(heads, topk, sinks)
     out = impl._run_mqa_kernel(q, rows.view(num_blocks, block_size, 656), indices)
 
     # Reference: softmax over the selected keys plus one sink logit per head.
