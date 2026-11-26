@@ -375,5 +375,5 @@ def test_per_image_rows_stay_with_their_image(model, image_sizes, key, rows):
         hf_processor_mm_kwargs={},
     )
 
-    items = result["mm_kwargs"]["image"]
+    items = result["mm_kwargs"].require_data()["image"]
     assert [len(torch.atleast_1d(item[key].data)) for item in items] == rows

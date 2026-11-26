@@ -1117,8 +1117,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "molmo2":
             # Earlier Molmo2 processors offset pooling indices across a call's items
-            # (huggingface/transformers#51309)
-            params = inspect.signature(self.model.get_image_features).parameters
+            # (huggingface/transformers#51309); huggingface/transformers#50733 moves the
+            # image getter's arguments to `get_image_embeddings`
+            getter = getattr(
+                self.model, "get_image_embeddings", self.model.get_image_features
+            )
+            params = inspect.signature(getter).parameters
             if "image_num_crops" not in params:
                 raise ImportError(
                     "Transformers modeling backend requires a Transformers version "
@@ -1655,8 +1659,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
         # `get_rope_index` doesn't always accept arbitrary `kwargs`
         if not hasattr(self, "_get_rope_index_kwarg_names"):
-            import inspect
-
             params = inspect.signature(self.model.get_rope_index).parameters
             self._get_rope_index_kwarg_names = (
                 None
