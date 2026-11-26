@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import math
 from collections.abc import Awaitable
 from http import HTTPStatus
 from typing import TypeVar
@@ -26,7 +27,7 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob, PromptLogprobs
+from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.metrics.stats import RequestStateStats
@@ -382,16 +383,31 @@ def completion_top_logprobs_limit(
     return max(logprobs + 1, 0)
 
 
+def clamp_logprob(logprob: float) -> float:
+    """Floor a logprob for JSON responses: non-finite values and values below
+    `-9999.0` become `-9999.0`.
+
+    `max(nan, -9999.0)` is NaN in Python and `max(inf, -9999.0)` is `inf`;
+    either fails `JSONResponse` or serializes as `null`.
+    """
+    return -9999.0 if not math.isfinite(logprob) else max(logprob, -9999.0)
+
+
 def clamp_prompt_logprobs(
     prompt_logprobs: PromptLogprobs | None,
 ) -> PromptLogprobs | None:
     if prompt_logprobs is None:
         return prompt_logprobs
 
+    if isinstance(prompt_logprobs, FlatLogprobs):
+        prompt_logprobs.logprobs = [
+            clamp_logprob(lp) for lp in prompt_logprobs.logprobs
+        ]
+        return prompt_logprobs
+
     for logprob_dict in prompt_logprobs:
         if logprob_dict is None:
             continue
         for logprob_values in logprob_dict.values():
-            if logprob_values.logprob == float("-inf"):
-                logprob_values.logprob = -9999.0
+            logprob_values.logprob = clamp_logprob(logprob_values.logprob)
     return prompt_logprobs

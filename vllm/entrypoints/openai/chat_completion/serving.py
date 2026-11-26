@@ -23,6 +23,7 @@ from vllm.entrypoints.generate.base.serving import (
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
+    clamp_logprob,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -1226,7 +1227,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         return_as_token_id=should_return_as_token_id,
                     )
                 ),
-                logprob=max(p[1].logprob, -9999.0),
+                logprob=clamp_logprob(p[1].logprob),
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
             for p in itertools.islice(
@@ -1282,7 +1283,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             tokenizer,
                             should_return_as_token_id,
                         ),
-                        logprob=max(step_token.logprob, -9999.0),
+                        logprob=clamp_logprob(step_token.logprob),
                         bytes=(
                             None
                             if step_decoded is None

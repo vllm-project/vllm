@@ -2614,3 +2614,35 @@ async def test_streaming_parallel_tool_calls(
         if event.type == "response.output_item.done"
     ] == args[:num_calls]
     assert [item.arguments for item in events[-1].response.output] == args[:num_calls]
+
+
+def test_create_response_logprobs_clamps_nonfinite_values() -> None:
+    """Responses output logprobs clamp `nan` and `±inf` to `-9999.0` so JSON
+    serialization does not fail."""
+    import json
+
+    serving = _make_serving_instance()
+    tokenizer = MagicMock()
+    tokenizer.convert_ids_to_tokens.side_effect = lambda tid: f"tok_{tid}"
+    logprobs = [
+        {
+            1: SampleLogprob(logprob=float("nan"), rank=0, decoded_token="a"),
+            2: SampleLogprob(logprob=float("-inf"), rank=1, decoded_token="b"),
+            3: SampleLogprob(logprob=float("inf"), rank=2, decoded_token="c"),
+            4: SampleLogprob(logprob=-0.5, rank=3, decoded_token="d"),
+        }
+    ]
+    result = serving._create_response_logprobs(
+        token_ids=[1],
+        logprobs=logprobs,
+        tokenizer=tokenizer,
+        top_logprobs=4,
+    )
+    assert result[0].logprob == -9999.0
+    assert [tp.logprob for tp in result[0].top_logprobs] == [
+        -9999.0,
+        -9999.0,
+        -9999.0,
+        -0.5,
+    ]
+    json.dumps([item.model_dump() for item in result], allow_nan=False)

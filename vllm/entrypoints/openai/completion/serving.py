@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
+    clamp_logprob,
     clamp_prompt_logprobs,
     completion_top_logprobs_limit,
     format_token_id_placeholder,
@@ -791,7 +792,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     logprobs=logprobs,
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
-                    prompt_logprobs=final_res.prompt_logprobs,
+                    prompt_logprobs=prompt_logprobs,
                     prompt_token_ids=(
                         prompt_token_ids if request.return_token_ids else None
                     ),
@@ -914,7 +915,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     tokenizer,
                     return_as_token_id=should_return_as_token_id,
                 )
-                token_logprob = max(step_token.logprob, -9999.0)
+                token_logprob = clamp_logprob(step_token.logprob)
 
                 out_tokens.append(token)
                 out_token_logprobs.append(token_logprob)
@@ -925,14 +926,14 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # 893ba52242dbd5387a97b96444ee1c742cfce9bd/openapi.yaml#L7153)
                 out_top_logprobs.append(
                     {
-                        # Convert float("-inf") to the
+                        # Convert non-finite logprobs to the
                         # JSON-serializable float that OpenAI uses
                         self._get_decoded_token(
                             top_lp[1],
                             top_lp[0],
                             tokenizer,
                             return_as_token_id=should_return_as_token_id,
-                        ): max(top_lp[1].logprob, -9999.0)
+                        ): clamp_logprob(top_lp[1].logprob)
                         for top_lp in itertools.islice(
                             step_top_logprobs.items(),
                             completion_top_logprobs_limit(

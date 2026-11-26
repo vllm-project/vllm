@@ -4,7 +4,6 @@
 
 import asyncio
 import itertools
-import math
 import time
 from collections.abc import AsyncGenerator, Callable
 from collections.abc import Sequence as GenericSequence
@@ -24,6 +23,7 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
+    clamp_logprob,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -118,15 +118,6 @@ async def _close_result_generator(
         logger.exception("Failed to abort request %s.", request_id)
 
 
-def _clamp_logprob(logprob: float) -> float:
-    """The OpenAI shapes' floor for a logprob: `-inf` and NaN become `-9999.0`.
-
-    `max(nan, -9999.0)` is NaN in Python, so NaN needs its own check; NaN
-    would otherwise fail `JSONResponse` or reach the client as `null`.
-    """
-    return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
-
-
 def _logprob_token(
     token_id: int, logprob: Logprob | None, tokenizer: TokenizerLike | None
 ) -> tuple[str, list[int] | None]:
@@ -149,7 +140,7 @@ def _top_logprob(
 ) -> ChatCompletionLogProb:
     token, token_bytes = _logprob_token(token_id, logprob, tokenizer)
     return ChatCompletionLogProb(
-        token=token, logprob=_clamp_logprob(logprob.logprob), bytes=token_bytes
+        token=token, logprob=clamp_logprob(logprob.logprob), bytes=token_bytes
     )
 
 
@@ -1061,7 +1052,7 @@ class ServingTokens(GenerateBaseServing):
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=token,
-                        logprob=_clamp_logprob(step_token.logprob),
+                        logprob=clamp_logprob(step_token.logprob),
                         bytes=token_bytes,
                         top_logprobs=[
                             _top_logprob(top_id, logprob, tokenizer)
@@ -1107,12 +1098,12 @@ class ServingTokens(GenerateBaseServing):
                 logprobs_content.append(
                     GenerateLogProbsContent(
                         token_id=token_id,
-                        logprob=_clamp_logprob(step_token.logprob),
+                        logprob=clamp_logprob(step_token.logprob),
                         rank=step_token.rank or None,
                         top_logprobs=[
                             GenerateLogProb(
                                 token_id=top_token_id,
-                                logprob=_clamp_logprob(top_logprob.logprob),
+                                logprob=clamp_logprob(top_logprob.logprob),
                                 rank=top_logprob.rank or None,
                             )
                             for top_token_id, top_logprob in step_top_logprobs.items()

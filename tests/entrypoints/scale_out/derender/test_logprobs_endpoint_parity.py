@@ -11,7 +11,10 @@ token outside the top k, where chat keeps k entries and completions k + 1; the
 greedy end-to-end parity tests never produce that case.
 """
 
+import json
+
 import pytest
+from fastapi.responses import JSONResponse
 
 from tests.entrypoints.openai.chat_completion.test_serving_chat import (
     _build_mock_engine,
@@ -20,11 +23,17 @@ from tests.entrypoints.openai.chat_completion.test_serving_chat import (
 from tests.entrypoints.openai.completion.test_completion_error import (
     _build_serving_completion,
 )
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateLogProbs
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
-from vllm.logprobs import append_logprobs_for_next_position
+from vllm.logprobs import (
+    Logprob,
+    append_logprobs_for_next_position,
+    create_prompt_logprobs,
+)
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.online_derenderer import (
     _chat_top_logprobs_limit,
     _completion_top_logprobs_limit,
@@ -210,3 +219,83 @@ def test_completion_position_without_logprobs_stays_none(
     )
     assert derendered.top_logprobs == coupled.top_logprobs
     assert derendered.top_logprobs[3] is None
+
+
+def test_nonfinite_logprobs_clamp_and_serialize_across_endpoints(
+    tokenizer, vocab_ids, serving_chat, serving_completion
+):
+    """Non-finite output and prompt logprobs (`nan`, `-inf`, `+inf`) clamp to
+    `-9999.0` on coupled chat/completion paths just like generate + derender,
+    so `JSONResponse` never fails with `Out of range float values`."""
+    t0, t1, t2 = vocab_ids[:3]
+    decoded = convert_ids_list_to_tokens(tokenizer, [t0, t1, t2])
+    dicts = [
+        {
+            t0: Logprob(float("nan"), rank=0, decoded_token=decoded[0]),
+            t1: Logprob(float("-inf"), rank=1, decoded_token=decoded[1]),
+            t2: Logprob(float("inf"), rank=2, decoded_token=decoded[2]),
+        },
+        {
+            t1: Logprob(-10000.0, rank=1, decoded_token=decoded[1]),
+            t0: Logprob(-0.25, rank=2, decoded_token=decoded[0]),
+        },
+    ]
+    token_ids = [t0, t1]
+
+    coupled_chat = serving_chat._create_chat_logprobs(
+        token_ids=token_ids,
+        top_logprobs=dicts,
+        tokenizer=tokenizer,
+        num_output_top_logprobs=2,
+    )
+    generated = _generate(token_ids, dicts)
+    derendered_chat = _resolve_logprobs(generated, tokenizer, top_limit=2)
+    assert coupled_chat.model_dump() == derendered_chat.model_dump()
+    JSONResponse(content=coupled_chat.model_dump())
+
+    prompt_lp = create_prompt_logprobs(flat_logprobs=True)
+    append_logprobs_for_next_position(
+        prompt_lp,
+        [t1, t0],
+        [float("nan"), float("-inf")],
+        [decoded[1], decoded[0]],
+        1,
+        1,
+    )
+    req_output = RequestOutput(
+        request_id="req-nonfinite",
+        prompt="hi",
+        prompt_token_ids=[t0, t1],
+        prompt_logprobs=prompt_lp,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="".join(decoded[:2]),
+                token_ids=token_ids,
+                cumulative_logprob=None,
+                logprobs=dicts,
+                finish_reason="stop",
+            )
+        ],
+        finished=True,
+    )
+    comp_resp = serving_completion.request_output_to_completion_response(
+        [req_output],
+        CompletionRequest(model=MODEL_NAME, prompt="hi", logprobs=2, prompt_logprobs=1),
+        "req-nonfinite",
+        0,
+        MODEL_NAME,
+        tokenizer,
+        RequestResponseMetadata(request_id="req-nonfinite"),
+    )
+    derendered_comp = _convert_chat_logprobs_to_completion_logprobs(
+        _resolve_logprobs(generated, tokenizer, top_limit=3),
+        generated,
+    )
+    choice = comp_resp.choices[0]
+    assert choice.logprobs.model_dump() == derendered_comp.model_dump()
+    assert choice.prompt_logprobs is not None
+    assert choice.prompt_logprobs[1][t1].logprob == -9999.0
+    assert choice.prompt_logprobs[1][t0].logprob == -9999.0
+    body = bytes(JSONResponse(content=comp_resp.model_dump()).body)
+    json.loads(body)
