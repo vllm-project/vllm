@@ -797,6 +797,10 @@ class MergedColumnParallelLinearVariableSliceWithShardedLoRA(
         model_config: PreTrainedConfig | None = None,
         decorate: bool = True,
     ) -> bool:
+        # _mcp_apply all-gathers over the TP group, which mixes up results
+        # for replicated layers (e.g. ranks may hold different tokens).
+        if getattr(source_layer, "disable_tp", False):
+            return False
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
             source_layer=source_layer,

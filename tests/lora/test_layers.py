@@ -1321,6 +1321,21 @@ def test_merged_column_parallel_variable_slice(
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
+def test_fully_sharded_variable_slice_skips_replicated_layer(
+    default_vllm_config, dist_init
+) -> None:
+    """The fully-sharded path all-gathers over the TP group, which is wrong for
+    replicated layers, so they stay unwrapped as on main."""
+    linear = MergedColumnParallelLinear(
+        64, [16, 16, 16], bias=False, params_dtype=torch.float16, disable_tp=True
+    )
+    lora_config = LoRAConfig(
+        max_loras=1, max_lora_rank=8, fully_sharded_loras=True, lora_dtype=torch.float16
+    )
+
+    assert from_layer(linear, 1, lora_config, ["a", "b", "c"]) is linear
+
+
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 @pytest.mark.parametrize("replicated", [False, True])
 @pytest.mark.parametrize("partial_adapter", [False, True])
