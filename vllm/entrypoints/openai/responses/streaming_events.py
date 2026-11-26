@@ -80,7 +80,9 @@ from vllm.entrypoints.openai.responses.utils import (
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
     extend_custom_tool_input_prefix,
+    make_tool_search_call,
     resolve_responses_tool_call_name,
+    tool_search_names,
 )
 from vllm.logprobs import LogprobsOnePosition
 from vllm.outputs import CompletionOutput
@@ -840,6 +842,7 @@ class SimpleStreamingState:
     tool_call_namespace: str | None = None
     tool_call_index: int | None = None
     tool_call_is_custom: bool = False
+    tool_call_is_tool_search: bool = False
     tool_call_payload: str = ""
     # End of the custom-tool arguments decoded into tool_call_payload, or -1
     # once they need a full decode.
@@ -1066,21 +1069,30 @@ def emit_simple_tool_call_open(
     namespace: str | None = None,
     is_custom: bool = False,
     call_id: str | None = None,
+    is_tool_search: bool = False,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.TOOL_CALL
-    state.current_item_id = (
-        f"ctc_{random_uuid()}" if is_custom else f"fc_{random_uuid()}"
-    )
+    if is_tool_search:
+        state.current_item_id = f"tsc_{random_uuid()}"
+    elif is_custom:
+        state.current_item_id = f"ctc_{random_uuid()}"
+    else:
+        state.current_item_id = f"fc_{random_uuid()}"
     state.tool_call_id = call_id or make_tool_call_id()
     state.tool_call_name = name
     state.tool_call_namespace = namespace
     state.tool_call_index = index
     state.tool_call_is_custom = is_custom
+    state.tool_call_is_tool_search = is_tool_search
     state.tool_call_payload = ""
     state.tool_call_payload_end = 0
     state.accumulated_text = ""
     item: ResponseOutputItem
-    if is_custom:
+    if is_tool_search:
+        item = make_tool_search_call(
+            state.tool_call_id, "", "in_progress", item_id=state.current_item_id
+        )
+    elif is_custom:
         item = ResponseCustomToolCall(
             type="custom_tool_call",
             id=state.current_item_id,
@@ -1149,6 +1161,10 @@ def emit_simple_tool_call_delta(
     delta: str,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
+    if state.tool_call_is_tool_search:
+        # There is no delta event for tool_search_call arguments; they are
+        # sent in full with the item's done event.
+        return []
     if state.tool_call_is_custom:
         return _emit_custom_tool_input_delta(state, _custom_tool_input_prefix(state))
     return [
@@ -1168,7 +1184,15 @@ def emit_simple_tool_call_done(
 ) -> list[StreamingResponsesResponse]:
     events: list[StreamingResponsesResponse]
     item: ResponseOutputItem
-    if state.tool_call_is_custom:
+    if state.tool_call_is_tool_search:
+        events = []
+        item = make_tool_search_call(
+            state.tool_call_id,
+            state.accumulated_text,
+            status,
+            item_id=state.current_item_id,
+        )
+    elif state.tool_call_is_custom:
         payload = decode_custom_tool_input(state.accumulated_text)
         events = _emit_custom_tool_input_delta(state, payload)
         events.append(
@@ -1218,6 +1242,7 @@ def emit_simple_tool_call_done(
     state.output_index += 1
     state.tool_call_namespace = None
     state.tool_call_is_custom = False
+    state.tool_call_is_tool_search = False
     state.current_state = _StateType.NONE
     return events
 
@@ -1302,6 +1327,7 @@ class SimpleStreamingEventProcessor:
         self.state = state or SimpleStreamingState()
         self.tool_call_name_map = build_responses_tool_call_name_map(tools)
         self.custom_tool_names = custom_tool_names(tools)
+        self.tool_search_names = tool_search_names(tools)
         self.output_items: list[ResponseOutputItem] = []
 
     def resolve_target_state(
@@ -1376,6 +1402,7 @@ class SimpleStreamingEventProcessor:
                 call_name.namespace,
                 call_name.name in self.custom_tool_names,
                 tool_call.id,
+                tool_call.function.name in self.tool_search_names,
             )
         return handlers.open_fn(self.state)
 

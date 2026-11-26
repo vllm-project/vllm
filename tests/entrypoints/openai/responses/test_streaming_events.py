@@ -7,9 +7,12 @@ import random
 import pytest
 from openai.types.responses import (
     CustomTool,
+    NamespaceTool,
     ResponseCustomToolCall,
     ResponseFunctionWebSearch,
     ResponseStreamEvent,
+    ResponseToolSearchCall,
+    ToolSearchTool,
 )
 from openai_harmony import Message, Role
 from pydantic import TypeAdapter
@@ -367,3 +370,73 @@ class TestCustomToolStreaming:
         assert delta.delta == "hello"  # full authoritative resend, not a dropped suffix
         assert done_input == "hello"
         assert events[-1].item.input == "hello"
+
+
+class TestToolSearchStreaming:
+    def test_tool_search_call_events(self):
+        processor = SimpleStreamingEventProcessor(
+            tools=[ToolSearchTool(type="tool_search", execution="client")]
+        )
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[_make_tool_call(0, name="tool_search", arguments='{"qu')]
+            ),
+        )
+        events += _run_through_processor(
+            processor,
+            DeltaMessage(tool_calls=[_make_tool_call(0, arguments='ery": "jira"}')]),
+        )
+        events += processor.close_current()
+
+        # The SDK has no argument delta event for tool_search_call.
+        assert [e.type for e in events] == [
+            "response.output_item.added",
+            "response.output_item.done",
+        ]
+        added, done = events[0].item, events[1].item
+        assert isinstance(added, ResponseToolSearchCall)
+        assert added.status == "in_progress"
+        assert isinstance(done, ResponseToolSearchCall)
+        assert (done.status, done.execution) == ("completed", "client")
+        assert done.arguments == {"query": "jira"}
+        assert (added.id, added.call_id) == (done.id, done.call_id)
+        assert done.id.startswith("tsc_")
+
+    def test_namespace_function_named_tool_search_stays_a_function_call(self):
+        processor = SimpleStreamingEventProcessor(
+            tools=[
+                ToolSearchTool(type="tool_search", execution="client"),
+                NamespaceTool(
+                    type="namespace",
+                    name="catalog",
+                    description="Catalog",
+                    tools=[
+                        {
+                            "type": "function",
+                            "name": "tool_search",
+                            "parameters": {"type": "object"},
+                        }
+                    ],
+                ),
+            ]
+        )
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[
+                    _make_tool_call(0, name="catalog__tool_search", arguments="{}")
+                ]
+            ),
+        )
+        events += _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[_make_tool_call(1, name="tool_search", arguments="{}")]
+            ),
+        )
+        events += processor.close_current()
+
+        done = [e.item for e in events if e.type == "response.output_item.done"]
+        assert [item.type for item in done] == ["function_call", "tool_search_call"]
+        assert (done[0].namespace, done[0].name) == ("catalog", "tool_search")

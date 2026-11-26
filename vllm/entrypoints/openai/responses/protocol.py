@@ -32,6 +32,8 @@ from openai.types.responses import (
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
     ResponseTextConfig,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
@@ -51,10 +53,12 @@ from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
+    BaseModel,
     BeforeValidator,
     FailFast,
     Field,
     PrivateAttr,
+    TypeAdapter,
     ValidationError,
     field_serializer,
     field_validator,
@@ -177,6 +181,9 @@ def _default_input_image_details(value: Any) -> Any:
     return {**value, "content": new_content} if changed else value
 
 
+RESPONSES_TOOL_ADAPTER: TypeAdapter[Tool] = TypeAdapter(Tool)
+
+
 def _tool_field(tool: Any, field: str) -> Any:
     return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
 
@@ -246,6 +253,173 @@ def _merge_additional_tools(tools: list[Any], added: list[Any]) -> list[Any]:
                     namespaced[k] = (index, len(merged[index]["tools"]))
                 merged[index]["tools"].append(namespaced_tool)
     return merged
+
+
+def _hoist_additional_tools_items(data: dict[str, Any]) -> dict[str, Any]:
+    """See `ResponsesRequest.hoist_additional_tools_items`. Once the items are
+    gone this does nothing, so it can run more than once."""
+    input_data = data.get("input")
+    if not isinstance(input_data, list):
+        return data
+
+    remaining_input = []
+    additional_tools = []
+    for item in input_data:
+        if not (isinstance(item, dict) and item.get("type") == "additional_tools"):
+            remaining_input.append(item)
+            continue
+        item_tools = item.get("tools")
+        if not isinstance(item_tools, list):
+            raise VLLMValidationError(
+                "`additional_tools` input items must contain a `tools` list.",
+                parameter="input",
+            )
+        additional_tools.extend(item_tools)
+
+    if len(remaining_input) == len(input_data):
+        return data
+    data["input"] = remaining_input
+    tools = data.get("tools")
+    # A non-list `tools` is left to field validation, which rejects it. The
+    # items still leave `input`, so an openai SDK without the
+    # `additional_tools` input type adds no errors of its own to that one.
+    if isinstance(tools, list | None):
+        data["tools"] = _merge_additional_tools(tools or [], additional_tools)
+    return data
+
+
+def _as_dict(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(exclude_none=True)
+    return value
+
+
+def _tool_keys(tools: list[Any]) -> set[tuple]:
+    """(type, namespace, name) of each named tool, namespace members included."""
+    keys: set[tuple] = set()
+    for tool in tools:
+        name = _tool_field(tool, "name")
+        if _tool_field(tool, "type") == "namespace":
+            for member in _tool_field(tool, "tools") or []:
+                keys.add(
+                    (_tool_field(member, "type"), name, _tool_field(member, "name"))
+                )
+        else:
+            keys.add((_tool_field(tool, "type"), None, name))
+    return keys
+
+
+def _called_names(tools: list[Any]) -> set[str]:
+    """The names the model calls `tools` by (`<namespace>__<name>` for
+    namespace members)."""
+    from vllm.tool_parsers.utils import flat_namespace_tool_name
+
+    names: set[str] = set()
+    for tool in tools:
+        name = _tool_field(tool, "name")
+        if not isinstance(name, str):
+            continue
+        if _tool_field(tool, "type") != "namespace":
+            names.add(name)
+            continue
+        for member in _tool_field(tool, "tools") or []:
+            member_name = _tool_field(member, "name")
+            if isinstance(member_name, str):
+                names.add(flat_namespace_tool_name(name, member_name))
+    return names
+
+
+def _undeclared_tools(tools: list[Any], loaded: list[Any]) -> list[Any]:
+    """The tools in `loaded` that `tools` does not declare yet.
+
+    Only functions, custom tools and namespaces of them can be loaded; other
+    tool types are ignored. A tool counts as declared when the model would
+    call a declared tool by the same name, whatever its type, so a loaded tool
+    never shadows a declared one or the `tool_search` function. A namespace
+    that is already declared keeps its own fields and only gains its
+    undeclared tools.
+    """
+    from vllm.tool_parsers.utils import (
+        TOOL_SEARCH_LOADABLE_TYPES,
+        TOOL_SEARCH_TOOL_NAME,
+        flat_namespace_tool_name,
+    )
+
+    declared = _called_names(tools) | {TOOL_SEARCH_TOOL_NAME}
+    # (type, namespace, name) of each loaded name, so two different loaded
+    # tools cannot share a name either. A repeat of the same tool is kept; the
+    # merge keeps its latest definition.
+    loaded_keys: dict[str, tuple] = {}
+
+    def is_new(key: tuple, called_name: str) -> bool:
+        if called_name in declared:
+            return False
+        return loaded_keys.setdefault(called_name, key) == key
+
+    namespaces = {
+        _tool_field(tool, "name"): tool
+        for tool in tools
+        if _tool_field(tool, "type") == "namespace"
+    }
+    added: list[Any] = []
+    for tool in map(_as_dict, loaded):
+        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+            continue
+        tool_type, name = tool.get("type"), tool["name"]
+        if tool_type not in TOOL_SEARCH_LOADABLE_TYPES:
+            continue
+        if tool_type != "namespace":
+            if is_new((tool_type, None, name), name):
+                added.append(tool)
+            continue
+        members = [
+            member
+            for member in map(_as_dict, tool.get("tools") or [])
+            if isinstance(member, dict)
+            and member.get("type") in ("function", "custom")
+            and isinstance(member.get("name"), str)
+            and is_new(
+                (member["type"], name, member["name"]),
+                flat_namespace_tool_name(name, member["name"]),
+            )
+        ]
+        if not members:
+            continue
+        namespace = _as_dict(namespaces.get(name, tool))
+        added.append({**namespace, "tools": members})
+    return added
+
+
+def _without_tools(tools: list[Any], hidden: set[tuple]) -> list[Any]:
+    """`tools` without the tools whose (type, namespace, name) is in `hidden`.
+
+    A namespace left with no tools is dropped.
+    """
+    if not hidden:
+        return tools
+    kept: list[Any] = []
+    for tool in tools:
+        name = _tool_field(tool, "name")
+        if _tool_field(tool, "type") != "namespace":
+            if (_tool_field(tool, "type"), None, name) not in hidden:
+                kept.append(tool)
+            continue
+        members = _tool_field(tool, "tools") or []
+        visible = [
+            member
+            for member in members
+            if (_tool_field(member, "type"), name, _tool_field(member, "name"))
+            not in hidden
+        ]
+        if len(visible) == len(members):
+            kept.append(tool)
+        elif visible:
+            kept.append(
+                tool.model_copy(update={"tools": visible})
+                if isinstance(tool, BaseModel)
+                else {**tool, "tools": visible}
+            )
+    return kept
 
 
 def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
@@ -618,6 +792,22 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     """Parser-derived constraints that preserve the public request's text metadata."""
 
+    _tool_search_tools: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    """Tools that tool search loaded and `tools` did not declare.
+
+    They are merged into `tools`, so the tool parser and the tool-call grammar
+    know them, but are left out of the chat template's tool list (see
+    `template_tools`). The model sees their schemas in the tool messages.
+    """
+
+    def template_tools(self) -> list[Tool]:
+        """`tools` as the chat template should list them.
+
+        Tools that only tool search loaded are left out, so the start of the
+        prompt, and with it the prompt cache, stays the same across searches.
+        """
+        return _without_tools(self.tools, _tool_keys(self._tool_search_tools))
+
     _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "temperature": 1.0,
         "top_p": 1.0,
@@ -810,6 +1000,18 @@ class ResponsesRequest(OpenAIBaseModel):
                 return data
 
         processed_input = []
+        # call_ids that tool_search_outputs give explicitly, and the other
+        # tool_search_calls not answered yet, oldest first, for outputs that
+        # have no call_id.
+        answered_search_calls: set[str] = {
+            item["call_id"]
+            for item in input_data
+            if isinstance(item, dict)
+            and item.get("type") == "tool_search_output"
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"]
+        }
+        pending_search_calls: list[str] = []
         for item in input_data:
             normalized_item = cls._normalize_openresponses_input_item(item)
 
@@ -819,7 +1021,14 @@ class ResponsesRequest(OpenAIBaseModel):
 
             item_type = normalized_item.get("type")
 
-            if item_type == "function_call":
+            if item_type in ("tool_search_call", "tool_search_output"):
+                processed_input.append(
+                    cls._parse_tool_search_item(
+                        normalized_item, answered_search_calls, pending_search_calls
+                    )
+                )
+
+            elif item_type == "function_call":
                 try:
                     processed_input.append(ResponseFunctionToolCall(**normalized_item))
                 except ValidationError:
@@ -860,6 +1069,45 @@ class ResponsesRequest(OpenAIBaseModel):
 
         data["input"] = processed_input
         return data
+
+    @staticmethod
+    def _parse_tool_search_item(
+        item: dict[str, Any], answered_calls: set[str], pending_calls: list[str]
+    ) -> ResponseToolSearchCall | ResponseToolSearchOutputItem:
+        """Parse a tool_search_call / tool_search_output input item into its SDK
+        model, filling the fields the spec makes optional.
+
+        A call without `call_id` uses its `id`. An output without `call_id`
+        answers the oldest call that no output answers by `call_id` and no
+        earlier output answered, so the replayed tool calls and tool messages
+        share ids.
+        """
+        filled = {key: value for key, value in item.items() if value is not None}
+        filled.setdefault("execution", "client")
+        filled.setdefault("status", "completed")
+        model: type[ResponseToolSearchCall | ResponseToolSearchOutputItem]
+        if item["type"] == "tool_search_call":
+            model = ResponseToolSearchCall
+            filled.setdefault("id", f"tsc_{random_uuid()}")
+            filled.setdefault("call_id", filled["id"])
+            if filled["call_id"] not in answered_calls:
+                pending_calls.append(filled["call_id"])
+        else:
+            model = ResponseToolSearchOutputItem
+            filled.setdefault("id", f"tso_{random_uuid()}")
+            if "call_id" not in filled:
+                filled["call_id"] = (
+                    pending_calls.pop(0) if pending_calls else filled["id"]
+                )
+        try:
+            return model(**filled)
+        except ValidationError as e:
+            error = e.errors()[0]
+            location = ".".join(str(part) for part in error["loc"])
+            raise VLLMValidationError(
+                f"Invalid {item['type']} input item at {location!r}: {error['msg']}",
+                parameter="input",
+            ) from e
 
     @staticmethod
     def _normalize_openresponses_input_item(item: Any) -> Any:
@@ -981,6 +1229,66 @@ class ResponsesRequest(OpenAIBaseModel):
 
         return data
 
+    @model_validator(mode="after")
+    def check_tool_search_tools(self):
+        from vllm.tool_parsers.utils import (
+            TOOL_SEARCH_TOOL_NAME,
+            is_client_tool_search,
+        )
+
+        search_tools = [tool for tool in self.tools if tool.type == "tool_search"]
+        if len(search_tools) > 1:
+            raise VLLMValidationError(
+                "Only one tool_search tool is allowed.", parameter="tools"
+            )
+        if any(is_client_tool_search(tool) for tool in search_tools) and any(
+            tool.type in ("function", "custom") and tool.name == TOOL_SEARCH_TOOL_NAME
+            for tool in self.tools
+        ):
+            raise VLLMValidationError(
+                f"A tool named {TOOL_SEARCH_TOOL_NAME!r} conflicts with the "
+                "tool_search tool.",
+                parameter="tools",
+            )
+        return self
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def add_tools_loaded_by_tool_search(cls, data, handler):
+        """Add tools that `tool_search_output` input items loaded to `tools`.
+
+        The model sees the loaded schemas in the tool message rendered for
+        each item. A loaded tool that `tools` already declares (typically a
+        deferred one) keeps its declaration. An undeclared one is added to
+        `tools`, so that the tool parser and grammar know it, and recorded in
+        `_tool_search_tools`, so that the chat template does not list it.
+        Either way the template's tool list does not change across searches.
+
+        Pydantic runs `wrap` validators before every `before` validator, so
+        `additional_tools` items are hoisted here first, and the tools they
+        declare count as declared.
+        """
+        added: list[Any] = []
+        if isinstance(data, dict):
+            data = _hoist_additional_tools_items(data)
+            input_data = data.get("input")
+            tools = data.get("tools")
+            if isinstance(input_data, list) and isinstance(tools, list | None):
+                loaded = [
+                    tool
+                    for item in input_data
+                    if _tool_field(item, "type") == "tool_search_output"
+                    and isinstance(_tool_field(item, "tools"), list)
+                    for tool in _tool_field(item, "tools")
+                ]
+                added = _undeclared_tools(tools or [], loaded)
+                if added:
+                    data["tools"] = _merge_additional_tools(tools or [], added)
+        request = handler(data)
+        if added:
+            request._tool_search_tools = added
+        return request
+
     @model_validator(mode="before")
     @classmethod
     def hoist_additional_tools_items(cls, data):
@@ -996,34 +1304,7 @@ class ResponsesRequest(OpenAIBaseModel):
         """
         if not isinstance(data, dict):
             return data
-        input_data = data.get("input")
-        if not isinstance(input_data, list):
-            return data
-
-        remaining_input = []
-        additional_tools = []
-        for item in input_data:
-            if not (isinstance(item, dict) and item.get("type") == "additional_tools"):
-                remaining_input.append(item)
-                continue
-            item_tools = item.get("tools")
-            if not isinstance(item_tools, list):
-                raise VLLMValidationError(
-                    "`additional_tools` input items must contain a `tools` list.",
-                    parameter="input",
-                )
-            additional_tools.extend(item_tools)
-
-        if len(remaining_input) == len(input_data):
-            return data
-        data["input"] = remaining_input
-        tools = data.get("tools")
-        # A non-list `tools` is left to field validation, which rejects it. The
-        # items still leave `input`, so an openai SDK without the
-        # `additional_tools` input type adds no errors of its own to that one.
-        if isinstance(tools, list | None):
-            data["tools"] = _merge_additional_tools(tools or [], additional_tools)
-        return data
+        return _hoist_additional_tools_items(data)
 
 
 class ResponsesResponse(OpenAIBaseModel):
@@ -1159,7 +1440,8 @@ class ResponsesResponse(OpenAIBaseModel):
             else ResponsesRequest.model_fields["parallel_tool_calls"].default,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
-            tools=request.tools,
+            # The declared tools, without the ones only tool search loaded.
+            tools=request.template_tools(),
             top_p=sampling_params.top_p,
             background=request.background,
             max_output_tokens=sampling_params.max_tokens,

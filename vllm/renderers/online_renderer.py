@@ -38,6 +38,7 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
+    has_tool_search_output,
 )
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -64,6 +65,11 @@ from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
     has_non_text_content,
+)
+from vllm.renderers.hf import (
+    HfRenderer,
+    resolve_chat_template,
+    resolve_chat_template_content_format,
 )
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -380,15 +386,27 @@ class OnlineRenderer:
             )
 
         tool_dicts = construct_tool_dicts(
-            request.tools,
+            request.template_tools(),
             request.tool_choice,
             exclude_tools_when_tool_choice_none=(
                 self.exclude_tools_when_tool_choice_none
             ),
         )
+        # Reference only functions the template is given (none when tools are
+        # excluded for tool_choice="none").
+        tool_reference_names = None
+        if (
+            tool_dicts
+            and has_tool_search_output(request.input)
+            and self._renders_tool_reference(tool_dicts)
+        ):
+            tool_reference_names = frozenset(
+                tool["function"]["name"] for tool in tool_dicts
+            )
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
+            tool_reference_names=tool_reference_names,
             prev_msg=list(previous_messages) if previous_messages is not None else None,
             prev_response_output=(
                 list(previous_response_outputs)
@@ -408,6 +426,34 @@ class OnlineRenderer:
             skip_mm_cache=skip_mm_cache,
         )
         return self._responses_render_result(messages, engine_inputs)
+
+    def _renders_tool_reference(self, tool_dicts: list[dict[str, Any]]) -> bool:
+        """Whether the chat template renders `tool_reference` content parts.
+
+        Same check as for templates such as GLM-5.3's, which print each
+        referenced tool's definition from `tools`. The parts must also reach
+        the template: the "string" content format turns them into plain text.
+        Renderers that do not apply a Jinja chat template get schema lines.
+        """
+        renderer = self.renderer
+        if not isinstance(renderer, HfRenderer) or renderer.tokenizer is None:
+            return False
+        chat_template = resolve_chat_template(
+            renderer.tokenizer,
+            self.chat_template,
+            tool_dicts,
+            model_config=self.model_config,
+        )
+        if chat_template is None or "tool_reference" not in chat_template:
+            return False
+        content_format = resolve_chat_template_content_format(
+            self.chat_template,
+            tool_dicts,
+            self.chat_template_content_format,
+            renderer.tokenizer,
+            model_config=self.model_config,
+        )
+        return content_format != "string"
 
     def _render_responses_with_harmony(
         self,

@@ -18,6 +18,7 @@ from openai.types.responses import (
     NamespaceTool,
     ToolChoiceCustom,
     ToolChoiceFunction,
+    ToolSearchTool,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
 from partial_json_parser.core.options import Allow
@@ -63,6 +64,37 @@ def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
         "name": tool.name,
         "description": tool.description,
         "parameters": custom_tool_parameters(),
+    }
+
+
+# Name of the function a client-executed `tool_search` tool is shown as.
+TOOL_SEARCH_TOOL_NAME = "tool_search"
+# Tool types a `tool_search_output` can load; others are ignored.
+TOOL_SEARCH_LOADABLE_TYPES = frozenset({"function", "custom", "namespace"})
+
+
+def is_client_tool_search(tool: Any) -> bool:
+    return isinstance(tool, ToolSearchTool) and tool.execution == "client"
+
+
+def tool_search_as_function_dict(tool: ToolSearchTool) -> dict[str, Any]:
+    """The function shim a client-executed `tool_search` tool is shown as."""
+    return {
+        "type": "function",
+        "name": TOOL_SEARCH_TOOL_NAME,
+        "description": tool.description
+        or "Search for tools that are not loaded yet and load the matching ones.",
+        "parameters": tool.parameters
+        or {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search the available tools for.",
+                }
+            },
+            "required": ["query"],
+        },
     }
 
 
@@ -217,7 +249,8 @@ def get_function_tools(
     This is the single source for both the chat template's tool list and the
     tools a tool-call grammar constrains, so the two cannot drift apart.
     Namespace functions are flattened to `<namespace>__<name>`; custom tools
-    become a single-string function shim. Other Responses tool types are never
+    become a single-string function shim, and a client-executed `tool_search`
+    tool becomes a `tool_search` function. Other Responses tool types are never
     rendered for the model and are dropped.
     """
     function_tools: list[ChatCompletionToolsParam | FunctionTool] = []
@@ -238,6 +271,10 @@ def get_function_tools(
         elif isinstance(tool, CustomTool):
             function_tools.append(
                 FunctionTool.model_validate(custom_tool_as_function_dict(tool))
+            )
+        elif is_client_tool_search(tool):
+            function_tools.append(
+                FunctionTool.model_validate(tool_search_as_function_dict(tool))
             )
         elif isinstance(tool, (FunctionTool, ChatCompletionToolsParam)):
             function_tools.append(tool)
@@ -340,7 +377,7 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool, ToolSearchTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return (params or {}).get("properties", {})
@@ -361,7 +398,7 @@ def find_tool_name(
     if not tools:
         return False
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool, ToolSearchTool)):
             for name, _ in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return True
