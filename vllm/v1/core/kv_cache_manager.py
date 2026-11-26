@@ -203,6 +203,15 @@ class KVCacheManager:
             if isinstance(manager, FullAttentionManager)
             and manager.block_size == hash_block_size
         ]
+        # Alignment of the prefix-cached Mamba states, or None without one.
+        self.state_checkpoint_alignment = next(
+            (
+                manager.cache_hit_alignment_tokens
+                for manager in self.coordinator.single_type_managers
+                if isinstance(manager, MambaManager) and manager.prefix_caching
+            ),
+            None,
+        )
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -929,14 +938,13 @@ class KVCacheManager:
         tokens leaves prefix-cached (the boundary a later request can hit),
         or 0 if no group prefix-caches recurrent states at block boundaries.
         Accounts for the hash lookahead."""
-        for mgr in self.coordinator.single_type_managers:
-            if isinstance(mgr, MambaManager) and mgr.prefix_caching:
-                return get_reusable_prefix_length(
-                    num_tokens,
-                    num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
-                    alignment_tokens=mgr.cache_hit_alignment_tokens,
-                )
-        return 0
+        if self.state_checkpoint_alignment is None:
+            return 0
+        return get_reusable_prefix_length(
+            num_tokens,
+            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+            alignment_tokens=self.state_checkpoint_alignment,
+        )
 
     def take_boundary_state_offloads(
         self,

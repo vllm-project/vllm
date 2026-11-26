@@ -416,17 +416,7 @@ class NixlBaseConnectorScheduler:
         )
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
-        has_align_group = self.vllm_config.cache_config.enable_prefix_caching and any(
-            isinstance(g.manager_config.params, MambaManager.Params)
-            and g.manager_config.params.enable_prefix_caching
-            for g in self.kv_cache_config.kv_cache_groups
-        )
-        if has_align_group:
-            self._kv_cache_manager = kv_cache_manager
-            logger.info(
-                "P/D prefills stop at Mamba checkpoint boundaries; the "
-                "decoder recomputes the prompt tail."
-            )
+        self._kv_cache_manager = kv_cache_manager
 
     def _ssm_checkpoint_cut(self, num_prompt_tokens: int) -> int:
         """The Mamba checkpoint a local prefill of the full prompt would
