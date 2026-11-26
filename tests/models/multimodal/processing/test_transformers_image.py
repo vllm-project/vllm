@@ -315,3 +315,30 @@ def test_nested_image_fields_split_per_image():
         assert isinstance(pixel_values, torch.Tensor)
         assert isinstance(num_image_patches, torch.Tensor)
         assert pixel_values.shape[1] == int(num_image_patches)
+
+
+def test_per_image_and_per_token_rows_split_per_image():
+    """Molmo2 returns one row of `image_grids` per image and one row of
+    `image_token_pooling` per image token, beside `pixel_values` rows per crop. Two
+    two-crop images also give `image_grids` as many columns as there are crops."""
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model="allenai/Molmo2-8B", model_impl="transformers")
+    )
+    image = ImageAsset("cherry_blossom").pil_image
+    result = mm_processor(
+        prompt="<|image|><|image|>",
+        mm_items=mm_processor.info.parse_mm_data(
+            {"image": [image.resize((100, 120)), image.resize((130, 100))]}
+        ),
+        hf_processor_mm_kwargs={},
+    )
+
+    items = result["mm_kwargs"]["image"]
+    assert len(items) == 2
+    for item, placeholder in zip(items, result["mm_placeholders"]["image"]):
+        assert item is not None
+        assert placeholder.is_embed is not None
+        image_grids = item["image_grids"].data
+        assert isinstance(image_grids, torch.Tensor)
+        assert tuple(image_grids.shape) == (4,)
+        assert len(item["image_token_pooling"].data) == int(placeholder.is_embed.sum())

@@ -601,13 +601,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         return owned
 
-    def _get_slice_dim(self, data: Any, total_rows: int) -> int:
+    def _get_slice_dim(self, data: torch.Tensor, total_rows: int) -> int:
         """Which dimension of a field holds the rows belonging to each item.
 
         Some processors (e.g., Idefics3) return image fields with a leading batch
-        dimension, putting the rows one dimension further in.
+        dimension, putting the rows one dimension further in. A 2-D field's columns
+        are features (e.g., Molmo2's grids and pooling indices).
         """
-        if not isinstance(data, torch.Tensor) or data.ndim < 2:
+        if data.ndim < 3:
             return 0
         if data.shape[0] != total_rows and data.shape[1] == total_rows:
             return 1
@@ -630,7 +631,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         modalities = [m for m, size in sizes.items() if size is not None]
 
         # Keys we wrote ourselves, rather than ones a sub-processor produced
-        own_keys = {*_MODALITY_SIZE_KEYS.values(), "num_video_tokens"} | {
+        own_keys = {
+            *_MODALITY_SIZE_KEYS.values(),
+            "num_image_tokens",
+            "num_video_tokens",
+        } | {
             f"{modality}_replacement_{suffix}"
             for modality in modalities
             for suffix in ("ids", "sizes")
@@ -710,28 +715,32 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         total = int(sizes.sum())
         dim = self._get_slice_dim(data, total)
-        if modality != "video":
-            return MultiModalFieldConfig.flat_from_sizes(modality, sizes, dim=dim)
-
         rows = data.shape[dim]
-        if rows == len(sizes):
-            return MultiModalFieldConfig.batched("video")
+        # Rows matching both items and patches: videos stay batched, images flat
+        if rows == len(sizes) and (modality == "video" or rows != total):
+            return MultiModalFieldConfig.batched(modality)
         if rows == total:
-            return MultiModalFieldConfig.flat_from_sizes("video", sizes, dim=dim)
-        num_frames = hf_inputs.get("num_frames_per_video")
+            return MultiModalFieldConfig.flat_from_sizes(modality, sizes, dim=dim)
+        num_frames = (
+            hf_inputs.get("num_frames_per_video") if modality == "video" else None
+        )
         if num_frames is not None and rows == int(num_frames.sum()):
-            return MultiModalFieldConfig.flat_from_sizes("video", num_frames, dim=dim)
-        # VideoLLaMA3's compression mask has one row per token the processor counts
-        num_video_tokens = hf_inputs["num_video_tokens"]
-        if rows == int(num_video_tokens.sum()):
+            return MultiModalFieldConfig.flat_from_sizes(modality, num_frames, dim=dim)
+        # Molmo2's token pooling and VideoLLaMA3's compression mask have one row per
+        # token the processor counts
+        num_tokens = hf_inputs[f"num_{modality}_tokens"]
+        if rows == int(num_tokens.sum()):
+            return MultiModalFieldConfig.flat_from_sizes(modality, num_tokens, dim=dim)
+        # A lone item owns every row (Molmo2 takes one video per prompt)
+        if len(sizes) == 1:
             return MultiModalFieldConfig.flat_from_sizes(
-                "video", num_video_tokens, dim=dim
+                modality, torch.tensor([rows]), dim=dim
             )
         # NOTE: Any other layout would need a per-model guess, which we'd like to avoid
         raise ValueError(
             f"{type(self.info.get_hf_processor()).__name__} returned {rows} row(s) of "
-            f"`{key}` for {len(sizes)} video(s) with {total} patch(es), so the rows "
-            "cannot be attributed to a video."
+            f"`{key}` for {len(sizes)} {modality}(s) with {total} patch(es), so the "
+            "rows cannot be attributed to an item."
         )
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -1076,6 +1085,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
                     hf_inputs, hf_data, len(seqs)
                 )
+                hf_inputs["num_image_tokens"] = _count_embed_tokens(
+                    seqs, self.info._get_placeholder_id("image")
+                )
             elif modality == "audio":
                 hf_inputs["num_audio_tokens"] = _count_embed_tokens(
                     seqs, self.info._get_placeholder_id("audio")
@@ -1100,6 +1112,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        if vllm_config.model_config.hf_config.model_type == "molmo2":
+            # Earlier Molmo2 processors offset pooling indices across a call's items
+            self.check_version("5.25.0.dev0", "Molmo2")
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
         self._init_deepstack(vllm_config)
