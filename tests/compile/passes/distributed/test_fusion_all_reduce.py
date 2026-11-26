@@ -293,18 +293,18 @@ class TestAllReduceGemmaRMSNormStaticQuantFP8Model(
 class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
     """Exercises the new ROCm AITER AR+RMS+per-group-FP8-quant patterns.
 
-    Four ``rms_norm`` sites that together hit every pattern registered by
-    ``RocmAiterAllReduceFusionPass`` for the per-group FP8 quant path:
+    Four `rms_norm` sites that together hit every pattern registered by
+    `RocmAiterAllReduceFusionPass` for the per-group FP8 quant path:
 
-    * ``norm[0]``: ``all_reduce -> rms_norm -> group_fp8_quant`` (no residual)
-      -> ``AiterAllreduceFusedRMSNormGroupQuantFP8Pattern``
-    * ``norm[1]``: ``all_reduce -> fused_add_rms_norm -> group_fp8_quant``
-      (single ``rms`` consumer)
-      -> ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern``
-    * ``norm[2..3]``: ``all_reduce -> fused_add_rms_norm
-      -> (group_fp8_quant + rocm_unquantized_gemm)`` (two ``rms`` consumers,
+    * `norm[0]`: `all_reduce -> rms_norm -> group_fp8_quant` (no residual)
+      -> `AiterAllreduceFusedRMSNormGroupQuantFP8Pattern`
+    * `norm[1]`: `all_reduce -> fused_add_rms_norm -> group_fp8_quant`
+      (single `rms` consumer)
+      -> `AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`
+    * `norm[2..3]`: `all_reduce -> fused_add_rms_norm
+      -> (group_fp8_quant + rocm_unquantized_gemm)` (two `rms` consumers,
       modeling the DSv3.2 indexer fan-out)
-      -> ``AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern``
+      -> `AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern`
 
     Each site starts from the same bf16 activation and is returned separately.
     This avoids compounding four quantize/dequantize errors while still testing
@@ -392,12 +392,12 @@ class TestAiterAllReduceGemmaRMSNormGroupQuantFP8Model(
 ):
     """Gemma norms feeding the per-group FP8 quant sites.
 
-    The fused AR+RMS+quant op has no ``gemma_norm`` mode, so these sites must
-    keep matching the quant-fused patterns with the pre-added ``1 + weight``.
+    The fused AR+RMS+quant op has no `gemma_norm` mode, so these sites must
+    keep matching the quant-fused patterns with the pre-added `1 + weight`.
     The Gemma AR+RMS-only patterns match a prefix of the same subgraph, so if
     they were registered ahead of the quant-fused ones they would consume the
-    ``all_reduce`` and strand ``rocm_aiter_group_fp8_quant`` as a separate
-    kernel -- which the ``fully_replaced=True`` check below would catch.
+    `all_reduce` and strand `rocm_aiter_group_fp8_quant` as a separate
+    kernel -- which the `fully_replaced=True` check below would catch.
     """
 
     def __init__(
@@ -657,9 +657,7 @@ def all_reduce_fusion_pass_on_test_model(
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
     model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
-    vllm_config.model_config = ModelConfig(
-        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
-    )
+    vllm_config.model_config = ModelConfig(model=model_name, dtype=dtype, seed=42)
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
         all_reduce_fusion_pass = (
@@ -742,18 +740,18 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
     test_model_cls: type[torch.nn.Module],
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Sibling of ``test_all_reduce_fusion_pass_replace`` for the new
+    """Sibling of `test_all_reduce_fusion_pass_replace` for the new
     ROCm AITER AR+RMS+per-group-FP8-quant fusion patterns.
 
-    Validates the three new ``VllmPatternReplacement`` patterns added to
-    ``RocmAiterAllReduceFusionPass``:
+    Validates the three new `VllmPatternReplacement` patterns added to
+    `RocmAiterAllReduceFusionPass`:
 
-    * ``AiterAllreduceFusedRMSNormGroupQuantFP8Pattern`` (no-residual)
-    * ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`` (with-residual,
-      single ``rms`` consumer)
-    * ``AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern`` (with-
+    * `AiterAllreduceFusedRMSNormGroupQuantFP8Pattern` (no-residual)
+    * `AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern` (with-residual,
+      single `rms` consumer)
+    * `AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern` (with-
       residual, DSv3.2 indexer fan-out; parametrized over
-      ``rocm_aiter_group_fp8_quant``
+      `rocm_aiter_group_fp8_quant`
       producer).
 
     Parametrized over plain and Gemma norms: the Gemma AR+RMS-only patterns
@@ -846,9 +844,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
     vllm_config.parallel_config.rank = local_rank
 
     model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
-    vllm_config.model_config = ModelConfig(
-        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
-    )
+    vllm_config.model_config = ModelConfig(model=model_name, dtype=dtype, seed=42)
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
         all_reduce_fusion_pass = RocmAiterAllReduceFusionPass(vllm_config)

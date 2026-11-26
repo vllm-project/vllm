@@ -263,8 +263,7 @@ def run_siglip(client: OpenAI, model: str):
     """Start the server using:
 
     vllm serve google/siglip-base-patch16-224 \
-        --runner pooling \
-        --chat-template template_basic.jinja
+        --runner pooling
     """
     response = create_chat_embeddings(
         client,

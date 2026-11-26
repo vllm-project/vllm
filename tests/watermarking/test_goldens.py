@@ -51,8 +51,9 @@ def test_golden_fixture_guards(goldens: dict[str, dict]):
 
 
 def test_resolved_records_every_watermark_config_field():
+    # Each candidate records its key; key_file only says where a key is read from.
     assert {field.name for field in dataclasses.fields(WatermarkConfig)} == (
-        set(WATERMARK_CONFIG_FIELDS) | {"key"}
+        set(WATERMARK_CONFIG_FIELDS) | {"key", "key_file"}
     )
 
 
@@ -66,8 +67,10 @@ def test_watermarking_candidate_golden(candidate, goldens: dict[str, dict]):
 
     assert not differences, "\n".join(
         [
-            f"{candidate.id}: golden drift "
-            f"(tolerance {GOLDEN_FLOAT_RTOL:g} on score and p_value)",
+            (
+                f"{candidate.id}: golden drift "
+                f"(tolerance {GOLDEN_FLOAT_RTOL:g} on score and p_value)"
+            ),
             *differences,
         ]
     )

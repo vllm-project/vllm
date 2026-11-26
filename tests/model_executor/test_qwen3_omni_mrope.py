@@ -37,12 +37,12 @@ AUDIO_START_TOKEN_ID = 300
 AUDIO_END_TOKEN_ID = 301
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyVisionConfig:
     spatial_merge_size: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyConfig:
     position_id_per_seconds: int = 25
     vision_config: DummyVisionConfig = dataclasses.field(
@@ -52,7 +52,7 @@ class DummyConfig:
 
 def make_model() -> Qwen3OmniMoeThinkerForConditionalGeneration:
     model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
-        Qwen3OmniMoeThinkerForConditionalGeneration
+        Qwen3OmniMoeThinkerForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
     )
     model.config = DummyConfig()
     return model

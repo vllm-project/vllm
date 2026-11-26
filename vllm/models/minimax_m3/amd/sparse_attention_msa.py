@@ -126,7 +126,6 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         kv_cache: torch.Tensor,
         output: torch.Tensor,
         *,
-        query_fp8: torch.Tensor | None = None,
         decode_sparse_table: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         from vllm.models.minimax_m3.amd.ops.sparse_pa import (

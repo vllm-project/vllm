@@ -7,7 +7,7 @@ from typing import cast
 from starlette.datastructures import State
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.launchers.cli_args import resolve_default_chat_template_kwargs
+from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -65,7 +65,9 @@ async def init_app_state(
     state.vllm_config = vllm_config
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)
-    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(
+        args, tokenizer_mode=vllm_config.model_config.tokenizer_mode
+    )
     state.tool_server = (
         await init_tool_server(args) if "generate" in supported_tasks else None
     )
@@ -99,6 +101,7 @@ async def init_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer.warmup()
@@ -110,13 +113,16 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
+        response_role=args.response_role,
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
 
     state.serving_tokenization = ServingTokenization(
@@ -127,6 +133,7 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
+        max_tokenize_tokens=args.max_tokenize_tokens,
     )
 
     if "generate" in supported_tasks:

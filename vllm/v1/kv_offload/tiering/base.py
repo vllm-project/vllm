@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Abstract interfaces and data types for the secondary tiering layer."""
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
@@ -22,6 +23,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
 )
@@ -38,6 +40,14 @@ if TYPE_CHECKING:
 JobId = int
 
 TIER_LABEL = "tier"
+
+
+@dataclass(slots=True)
+class SecondaryTierRequestContext(RequestOffloadingContext):
+    """Per-request offloading preferences of a secondary tier."""
+
+    # Whether newly stored primary chunks are cascaded to this tier.
+    receives_stores: bool = True
 
 
 class TieringOffloadingMetrics:
@@ -66,9 +76,11 @@ class TieringOffloadingMetrics:
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
+    DEFERRED_RELEASE_CHUNKS = "vllm:kv_offload_tiering_deferred_release_chunks"
+    DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferJob:
     """Metadata for an in-flight async transfer job."""
 
@@ -80,7 +92,7 @@ class TransferJob:
     submit_time: float = field(default_factory=time.monotonic)
 
 
-@dataclass
+@dataclass(slots=True)
 class JobResult:
     """Result of an async transfer job."""
 
@@ -93,6 +105,13 @@ class JobResult:
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
     transfer_bytes: int | None = None
+    # Only applicable to failed promotion jobs. Set when the tier's I/O may
+    # still write into the primary chunks of the failed keys: the manager fails
+    # those keys now but defers releasing their chunks to the free pool until
+    # the tier sets the event. The tier may set it from any thread, once its
+    # I/O can no longer touch those chunks; the manager applies the release on
+    # its own polling path.
+    deferred_release: threading.Event | None = None
 
 
 class ParentManager(ABC):
@@ -174,12 +193,18 @@ class SecondaryTierManager(ABC):
     # the tier tolerates those calls off the scheduler thread.
     tolerates_off_thread_polling: ClassVar[bool] = False
 
+    # Direction(s) in which this tier may transfer data. The default keeps an
+    # instance built without __init__ (a stub, a test double) readable as
+    # readwrite instead of raising; __init__ overrides it from config.
+    access_mode: OffloadAccessMode = OffloadAccessMode.READWRITE
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
         backpressure_detector: BackpressureDetector | None = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ) -> None:
         """Args:
         offloading_spec: Offloading configuration.
@@ -187,6 +212,9 @@ class SecondaryTierManager(ABC):
         tier_type: Tier type identifier, set by SecondaryTierFactory
             from the registered tier type.
         backpressure_detector: Optional `BackpressureDetector`.
+        access_mode: Direction(s) in which this tier may transfer data. The
+            tiering manager skips stores to a tier whose access_mode cannot
+            write, and lookups of a tier whose access_mode cannot read.
 
         """
         self._offloading_spec = offloading_spec
@@ -198,6 +226,7 @@ class SecondaryTierManager(ABC):
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self._bp_detector = backpressure_detector
+        self.access_mode: OffloadAccessMode = OffloadAccessMode.from_config(access_mode)
 
     @property
     def block_size_bytes(self) -> int:
@@ -233,7 +262,7 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
+          - `job_metadata.chunk_ids` are valid primary-tier slots, pinned
             (ref-counted) for the duration of the transfer.
 
         The implementation is responsible for:
@@ -242,7 +271,7 @@ class SecondaryTierManager(ABC):
           3. Allocating space in this tier
           4. Submitting the async transfer (read from primary via chunk_ids)
 
-        Report completion via ``get_finished_jobs()``.
+        Report completion via `get_finished_jobs()`.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
@@ -261,13 +290,13 @@ class SecondaryTierManager(ABC):
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
+          - `job_metadata.chunk_ids` are allocated primary-tier slots
             ready to receive data.
 
         The implementation must copy data from this tier into the
-        primary-tier slots identified by ``chunk_ids``.
+        primary-tier slots identified by `chunk_ids`.
 
-        Report completion via ``get_finished_jobs()``.
+        Report completion via `get_finished_jobs()`.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
@@ -302,34 +331,23 @@ class SecondaryTierManager(ABC):
         """Take KV events for storage state owned by this tier."""
         return ()
 
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark chunks as recently used for eviction policy.
-
-        Args:
-            keys: Offload keys to mark as recently used.
-            req_context: Per-request context.
-
-        """
-        return
-
-    @abstractmethod
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         """Called when a new request is first seen by the scheduler.
 
-        Returns a RequestOffloadingContext expressing this tier's preference
+        Returns a SecondaryTierRequestContext expressing this tier's preference
         for how chunks should be offloaded for this request.
 
         Args:
             req_context: Per-request context.
 
         """
-        pass
+        return SecondaryTierRequestContext()
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Called when a request has finished.
 
         By the time this is called, all per-request calls for this request
-        (submit_store, submit_load, touch) have already been issued, and none
+        (submit_store, submit_load) have already been issued, and none
         will follow. Note this does NOT imply the tier's transfers have
         completed: jobs already submitted may still be in flight and will
         report via get_finished_jobs(). This is the right place to release
@@ -384,6 +402,10 @@ class SecondaryTierManager(ABC):
         would corrupt either the primary memoryview or the secondary backing
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
+
+        Likewise, every `JobResult.deferred_release` event must be set
+        before this returns, so the tier must bound how long it can defer a
+        release.
         """
         pass
 

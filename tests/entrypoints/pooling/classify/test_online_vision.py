@@ -10,7 +10,7 @@ from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.entrypoints.pooling.classify.protocol import ClassificationResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
 
-MODEL_NAME = "muziyongshixin/Qwen2.5-VL-7B-for-VideoCls"
+MODEL_NAME = "vllm-project/Qwen2.5-VL-7B-for-VideoCls"
 MAXIMUM_VIDEOS = 1
 
 HF_OVERRIDES = {"architectures": ["Qwen2_5_VLForSequenceClassification"]}

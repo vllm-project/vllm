@@ -27,12 +27,10 @@ import typing
 from collections.abc import Callable, Iterable, MutableSequence, Sequence
 from itertools import islice
 
-import regex as re
 import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -47,28 +45,38 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    get_pp_missing_layer_names,
+    compute_skip_topk_layers,
+    copy_pp_buffers,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_topk_buffers,
+)
+from vllm.models.hy_v4.weight_utils import (
+    HYV4_MLP_MAPPER,
+    HYV4_PACKED_MODULES_MAPPING,
+    HYV4_WEIGHTS_MAPPER,
+    remap_block_fp8_scale,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from ..nvidia.attention import (
-    HYV4MLAAttention,
-    compute_skip_topk_layers,
-    is_skip_topk_indexer_weight,
-)
-from ..nvidia.hc import HYV4HCHeadLayer, HYV4HCLayer
+from ..common.mrope import set_token_rope
 from ..nvidia.moe import HYV4FeedForward, HYV4MoEFused
+from .aiter_mla_sparse import warn_if_aiter_triton_sparse_mla_disabled
+from .attention import (
+    HYV4MLAAttention,
+    is_skip_topk_indexer_weight,
+    sparse_layer_ids,
+)
+from .hc import HYV4HCHeadLayer, HYV4HCLayer
+from .triton_ihc import triton_ihc_post_pre_rms_norm, triton_ihc_supported
 
 logger = init_logger(__name__)
 
@@ -86,10 +94,13 @@ def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
 class HYV4DecoderLayer(nn.Module):
     """One HY V4 decoder layer: MLA attention plus a dense or MoE MLP.
 
-    When``config.enable_ihc`` is set the layer runs on ``hc_mult`` residual
+    When`config.enable_ihc` is set the layer runs on `hc_mult` residual
     channels and each sub-block is wrapped by an `HYV4HCLayer` boundary;
     otherwise it uses the standard single-stream residual.
     """
+
+    attention_cls = HYV4MLAAttention
+    feed_forward_cls = HYV4FeedForward
 
     def __init__(
         self,
@@ -108,7 +119,7 @@ class HYV4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        self.self_attn = HYV4MLAAttention(
+        self.self_attn = self.attention_cls(
             vllm_config=vllm_config,
             config=config,
             hidden_size=self.hidden_size,
@@ -127,7 +138,7 @@ class HYV4DecoderLayer(nn.Module):
         )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         if config.mlp_layer_types[layer_idx] == "dense":
-            self.mlp = HYV4FeedForward(
+            self.mlp = self.feed_forward_cls(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -192,15 +203,35 @@ class HYV4DecoderLayer(nn.Module):
         hidden_states = self.hc_attn_layer.prepare_input(hidden_states)
         hidden_states, post_gates, residual = self.hc_attn_layer.pre(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        attention_output = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states = self.hc_attn_layer.post(hidden_states, residual, post_gates)
-
-        hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
-        hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        can_fuse_ihc_post_pre_rms_norm = (
+            triton_ihc_supported(attention_output)
+            and self.hc_attn_layer.hc_post.hpc_op is None
+            and self.hc_mlp_layer.hc_pre.hpc_op is None
+        )
+        if can_fuse_ihc_post_pre_rms_norm:
+            hidden_states, post_gates, residual = triton_ihc_post_pre_rms_norm(
+                attention_output,
+                residual,
+                post_gates,
+                self.hc_mlp_layer.hc_pre.hc_fn.weight,
+                self.hc_mlp_layer.hc_pre.hc_scale,
+                self.hc_mlp_layer.hc_pre.hc_base,
+                self.post_attention_layernorm.weight,
+                self.hc_mlp_layer.hc_pre.magnitude,
+                self.hc_mlp_layer.hc_pre.hc_eps,
+                self.hc_mlp_layer.hc_pre.layernorm_epsilon,
+            )
+        else:
+            hidden_states = self.hc_attn_layer.post(
+                attention_output, residual, post_gates
+            )
+            hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
+            hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
+            hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.hc_mlp_layer.post(hidden_states, residual, post_gates)
 
@@ -208,9 +239,10 @@ class HYV4DecoderLayer(nn.Module):
         return hidden_states, None
 
 
-@support_torch_compile
 class HYV4Model(nn.Module):
     """HY V4 backbone."""
+
+    decoder_layer_cls: type[HYV4DecoderLayer] = HYV4DecoderLayer
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -223,6 +255,10 @@ class HYV4Model(nn.Module):
         self.num_redundant_experts = eplb_config.num_redundant_experts
         self.device = current_platform.device_type
         self.vocab_size = config.vocab_size
+        self.dfly_enabled = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "dfly"
+        )
         self.is_sparse = hasattr(config, "index_topk")
         if self.is_sparse:
             self.topk_indices_buffer = torch.empty(
@@ -248,7 +284,7 @@ class HYV4Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: HYV4DecoderLayer(
+            lambda prefix: self.decoder_layer_cls(
                 config=config,
                 vllm_config=vllm_config,
                 cache_config=cache_config,
@@ -262,6 +298,9 @@ class HYV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, sparse_layer_ids(config)
+        )
         if self.enable_ihc:
             # iHC head layer: merge the residual channels into one stream.
             if get_pp_group().is_last_rank:
@@ -276,13 +315,15 @@ class HYV4Model(nn.Module):
                 self.hc_head = PPMissingLayer()
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states"], config.hc_mult * config.hidden_size
+                    ["hidden_states"],
+                    config.hc_mult * config.hidden_size,
+                    self.pp_buffers,
                 )
             )
         else:
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states", "residual"], config.hidden_size
+                    ["hidden_states", "residual"], config.hidden_size, self.pp_buffers
                 )
             )
 
@@ -318,6 +359,9 @@ class HYV4Model(nn.Module):
         self.num_redundant_experts = example_layer.n_redundant_experts
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.dfly_enabled:
+            # Preserve -1 in the original batch for forced draft rejection.
+            input_ids = input_ids.clamp_min(0)
         return self.embed_tokens(input_ids)
 
     def update_physical_experts_metadata(
@@ -373,17 +417,28 @@ class HYV4Model(nn.Module):
             # previous PP stage is reshaped back to 3D by the first layer's
             # prepare_input, and residual is unused.
             residual = None if self.enable_ihc else intermediate_tensors["residual"]
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
+
+        if self.start_layer < self.end_layer:
+            set_token_rope(
+                self.layers[self.start_layer].self_attn.rotary_emb,
+                positions,
+                hidden_states,
+            )
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
+            buffers = {k: v[: positions.shape[0]] for k, v in self.pp_buffers.items()}
             if self.enable_ihc:
                 # hidden_states is [num_tokens, hc, h]; flatten the channel dim
                 # for PP transfer (matches the 2D receive buffer).
-                return IntermediateTensors({"hidden_states": hidden_states.flatten(1)})
+                return IntermediateTensors(
+                    {"hidden_states": hidden_states.flatten(1), **buffers}
+                )
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {"hidden_states": hidden_states, "residual": residual, **buffers}
             )
         if self.enable_ihc:
             hidden_states = self.hc_head(hidden_states)
@@ -419,208 +474,109 @@ class HYV4Model(nn.Module):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
-        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         skip_topk_layers = compute_skip_topk_layers(self.config)
-
-        # Must not be cached on `self`: `process_weights_after_loading` swaps in
-        # kernel-specific expert weights via `replace_parameter`, and a cache
-        # outliving this call would pin the pre-shuffle storage (OOM on large
-        # MoE) and make a later reload target orphaned tensors.
+        # Reload may replace parameters with kernel-specific tensors.
         params_dict = dict(self.named_parameters())
-        # Split per-expert mapping (V3 style): experts.0.gate_proj.weight
-        split_expert_params_mapping = self.get_expert_mapping()
-        loaded_params: set[str] = set()
-
+        expert_mapping = self.get_expert_mapping()
         base_layer = (
             "base_layer." if any(".base_layer." in name for name in params_dict) else ""
         )
-        # Fused expert mapping: experts.gate_up_proj (all experts in one tensor).
-        # The packed weights are owned by the RoutedExperts submodule, so the
-        # targets are experts.routed_experts.[base_layer.]w{13,2}_weight.
-        fused_expert_prefix = f".experts.routed_experts.{base_layer}"
-        fused_expert_params_mapping = [
-            (f"{fused_expert_prefix}w13_weight", ".experts.gate_up_proj", 0, "w1"),
-            (f"{fused_expert_prefix}w2_weight", ".experts.down_proj", 0, "w2"),
-        ]
-        num_experts = getattr(self.config, "num_experts", 0)
+        expert_prefix = f".experts.routed_experts.{base_layer}"
+        fused_mapping = (
+            (".experts.gate_up_proj", f"{expert_prefix}w13_weight", ("w1", "w3")),
+            (".experts.down_proj", f"{expert_prefix}w2_weight", ("w2",)),
+        )
+        loaded_params: set[str] = set()
 
-        def _should_skip_missing_param(param_name: str) -> bool:
-            # Sparse checkpoints may contain indexer weights for layers that
-            # fall back to dense MLA on unsupported GPUs.
-            return ".indexer." in param_name
-
-        def _is_split_expert_weight(weight_name: str) -> bool:
-            """Whether this weight is in split (per-expert) format."""
-            # Split format: mlp.experts.<id>.gate_proj.weight
-            return bool(re.search(r"\.experts\.\d+\.", weight_name))
-
-        def _is_fused_expert_weight(weight_name: str) -> bool:
-            """Whether this weight is in fused (all-experts-packed) format."""
-            return ".experts.gate_up_proj" in weight_name or (
-                ".experts.down_proj" in weight_name
-                and not _is_split_expert_weight(weight_name)
-            )
-
-        for name, loaded_weight in weights:
+        for name, weight in HYV4_WEIGHTS_MAPPER.apply(weights):
             if is_skip_topk_indexer_weight(name, skip_topk_layers):
-                continue
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
                 continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
-            # Names and stacked shard ids are normalized upstream by
-            # AutoWeightsLoader, through quant_config.get_cache_scale_mapper()
-            # and hf_to_vllm_mapper.
-            stacked_shard_id = getattr(loaded_weight, "shard_id", None)
-            if ".indexer.wk." in name:
-                name = name.replace(".indexer.wk.", ".indexer.wk_weights_proj.")
-                stacked_shard_id = 0
-            # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
 
-            # Determine per-weight whether this is fused or split format.
-            is_fused_expert = _is_fused_expert_weight(name)
-            expert_params_mapping = (
-                fused_expert_params_mapping
-                if is_fused_expert
-                else split_expert_params_mapping
-            )
+            fused = next((entry for entry in fused_mapping if entry[0] in name), None)
+            if fused is not None:
+                source, target, shards = fused
+                target = name.replace(source, target)
+                if is_pp_missing_parameter(target, self):
+                    continue
+                pieces = weight.chunk(2, dim=-2) if len(shards) == 2 else (weight,)
+                # Load every shard, even if an earlier one is not local.
+                successes = [
+                    self.load_fused_expert_weights(
+                        target, params_dict, piece, shard, self.config.num_experts
+                    )
+                    for shard, piece in zip(shards, pieces)
+                ]
+                if all(successes):
+                    loaded_params.add(target)
+                continue
 
-            is_expert_weight = False
-            loaded_expert_param_names: set[str] = set()
-            for mapping in expert_params_mapping:
-                param_name, weight_name, expert_id, shard_id = mapping
+            is_expert = False
+            for param_name, weight_name, expert_id, shard_id in expert_mapping:
                 if weight_name not in name:
                     continue
-
-                # This is an expert weight and must not be attempted as any
-                # other kind of weight later on.
-                is_expert_weight = True
-
-                # Do not modify `name`: the loop may continue past this point.
-                name_mapped = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name_mapped, self):
+                is_expert = True
+                target = name.replace(weight_name, param_name)
+                if is_pp_missing_parameter(target, self):
                     continue
-                if is_fused_expert:
-                    if "experts.gate_up_proj" in name:
-                        chunks = loaded_weight.chunk(2, dim=-2)
-                        success_w1 = self.load_fused_expert_weights(
-                            name_mapped, params_dict, chunks[0], "w1", num_experts
-                        )
-                        success_w3 = self.load_fused_expert_weights(
-                            name_mapped, params_dict, chunks[1], "w3", num_experts
-                        )
-                        success = success_w1 and success_w3
-                    else:
-                        success = self.load_fused_expert_weights(
-                            name_mapped,
-                            params_dict,
-                            loaded_weight,
-                            shard_id,
-                            num_experts,
-                        )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    # Split per-expert format (V3 style).
-                    if name_mapped not in params_dict:
-                        if _should_skip_missing_param(name_mapped):
-                            continue
+                if target not in params_dict:
+                    if ".indexer." not in target:
                         logger.warning_once(
-                            "Skipping unknown checkpoint weight: %s",
-                            name_mapped,
+                            "Skipping unknown checkpoint weight: %s", target
                         )
-                        continue
-                    param = params_dict[name_mapped]
-                    # Ask the weight loader whether it succeeded, otherwise we
-                    # may skip experts that have other available replicas.
-                    weight_loader: Callable[..., typing.Any] = param.weight_loader
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                if success:
-                    if not is_fused_expert:
-                        loaded_expert_param_names.add(name_mapped)
-                        continue
-                    name = name_mapped
-                    break
+                    continue
+                param = params_dict[target]
+                if param.weight_loader(
+                    param,
+                    weight,
+                    target,
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                ):
+                    loaded_params.add(target)
+                # Continue through all physical replicas of this logical expert.
+            if is_expert or is_pp_missing_parameter(name, self):
+                continue
+
+            name, weight = remap_block_fp8_scale(name, weight, self.quant_config)
+
+            if name not in params_dict:
+                if ".indexer." not in name:
+                    logger.warning_once("Skipping unknown checkpoint weight: %s", name)
+                continue
+
+            param = params_dict[name]
+            loader: Callable[..., typing.Any] = getattr(
+                param, "weight_loader", default_weight_loader
+            )
+            stacked_shard = getattr(weight, "shard_id", None)
+            if stacked_shard is None:
+                loader(param, weight)
             else:
-                if loaded_expert_param_names:
-                    loaded_params.update(loaded_expert_param_names)
-                    continue
-                if is_expert_weight:
-                    # An expert weight that is not mapped to this rank.
-                    continue
-                if "gate.e_score_correction_bias" in name:
-                    name = name.replace("gate.e_score_correction_bias", "expert_bias")
-                if "router.gate." in name:
-                    name = name.replace("router.", "")
-                if "hc_fn" in name:
-                    name = name.replace("hc_fn", "hc_fn.weight")
-                if "hc_head_fn" in name:
-                    name = name.replace("hc_head_fn", "hc_head_fn.weight")
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                if name not in params_dict:
-                    if _should_skip_missing_param(name):
-                        continue
-                    logger.warning_once(
-                        "Skipping unknown checkpoint weight: %s",
-                        name,
-                    )
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                if stacked_shard_id is None:
-                    weight_loader(param, loaded_weight)
-                else:
-                    weight_loader(param, loaded_weight, stacked_shard_id)
+                loader(param, weight, stacked_shard)
             loaded_params.add(name)
 
         return loaded_params
 
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
-    hf_to_vllm_mapper = WeightsMapper(
+    model_cls = HYV4Model
+
+    hf_to_vllm_mapper = HYV4_MLP_MAPPER | WeightsMapper(
         orig_to_new_stacked={
             ".q_a_proj": (".fused_qkv_a_proj", 0),
             ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
-            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
-            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
-            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
-            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-            ".indexer.weights_proj.": (".indexer.wk_weights_proj.", 1),
         }
     )
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        # MLA runs both latent down-projections as one GEMM.
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-        # The indexer fuses wk and weights_proj into one GEMM.
-        "wk_weights_proj": ["wk", "weights_proj"],
-    }
+    packed_modules_mapping = HYV4_PACKED_MODULES_MAPPING
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        warn_if_aiter_triton_sparse_mla_disabled()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -632,7 +588,7 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
-        self.model = HYV4Model(
+        self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
@@ -685,7 +641,10 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         # MTP layers are loaded by the MTP head, not by the target model. They
         # appear as model.mtp_layers.<i>.* and as the layer ids past the backbone.
         mtp_start = self.config.num_hidden_layers
-        drop_prefixes: dict[str, str | None] = {"model.mtp_layers.": None}
+        drop_prefixes: dict[str, str | None] = {
+            "model.mtp_layers.": None,
+            "model.dfly_layers.": None,
+        }
         for i in range(getattr(self.config, "num_nextn_predict_layers", 0)):
             drop_prefixes[f"model.layers.{mtp_start + i}."] = None
         if self.config.tie_word_embeddings:

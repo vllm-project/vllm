@@ -1,28 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import functools
 import json
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.generate.base.protocol import StreamOptions
+from vllm.entrypoints.generate.base.protocol import DeltaMessage, StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    mm_hashes_from_engine_input,
     placeholder_ranges_from_engine_input,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     encode_mm_kwargs_item,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateDerenderStreamResponse,
     GenerateRequest,
     GenerateTextResponse,
     GenerateTokensResponse,
     MultiModalFeatures,
+    ParseContext,
     PlaceholderRangeInfo,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
@@ -37,6 +42,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.renderers import renderer_from_config
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -48,16 +54,17 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
     model = MODEL_NAME
+    served_model_name = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -83,17 +90,17 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockSchedulerConfig:
     max_num_seqs: int = 128
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -122,6 +129,7 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
         engine,
         models,
         online_renderer=online_renderer,
+        online_derenderer=MagicMock(spec=OnlineDerenderer),
         request_logger=None,
         **kwargs,
     )
@@ -214,12 +222,27 @@ def test_placeholder_ranges_from_engine_input():
 
     assert placeholders is not None
     assert [item.model_dump() for item in placeholders["image"]] == [
-        {"offset": 1, "length": 5},
-        {"offset": 8, "length": 2},
+        {"offset": 1, "length": 5, "is_embed": None},
+        {"offset": 8, "length": 2, "is_embed": None},
     ]
 
     text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
     assert placeholder_ranges_from_engine_input(text_only) is None
+
+
+def test_mm_hashes_from_engine_input():
+    engine_input: Any = {
+        "type": "multimodal",
+        "mm_hashes": {"image": ["img-0", "img-1"], "audio": ["aud-0"]},
+    }
+
+    assert mm_hashes_from_engine_input(engine_input) == {
+        "image": ["img-0", "img-1"],
+        "audio": ["aud-0"],
+    }
+
+    text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    assert mm_hashes_from_engine_input(text_only) is None
 
 
 @pytest.mark.asyncio
@@ -450,7 +473,7 @@ async def test_stream_reports_engine_stop_reason_on_final_chunk():
 async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output(
@@ -497,7 +520,7 @@ async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output(
 ):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output("req-1", token_ids=[10])
@@ -540,7 +563,7 @@ async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
 ):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
     result = _make_request_output(
         "req-1",
         token_ids=[10],
@@ -654,8 +677,10 @@ MM_ENGINE_INPUT: Any = {
     "type": "multimodal",
     "prompt_token_ids": [1, 2, 2, 2, 3],
     "mm_placeholders": {"image": [PlaceholderRange(offset=1, length=3)]},
+    "mm_hashes": {"image": ["content:image_A"]},
 }
-MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3}]}
+MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3, "is_embed": None}]}
+MM_HASHES = {"image": ["content:image_A"]}
 
 
 def _build_mm_serving_tokens(engine: AsyncLLM) -> ServingTokens:
@@ -697,10 +722,13 @@ async def test_non_stream_prompt_metadata_requires_return_token_ids(
     if return_token_ids:
         assert response.prompt_token_ids == [1, 2, 3]
         assert response.model_dump()["mm_placeholders"] == MM_PLACEHOLDERS
+        assert response.mm_hashes == MM_HASHES
     else:
         assert response.prompt_token_ids is None
         assert response.mm_placeholders is None
+        assert response.mm_hashes is None
         assert request._response_mm_placeholders is None
+        assert request._response_mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -726,6 +754,7 @@ async def test_non_stream_text_only_prompt_has_no_mm_placeholders():
     assert isinstance(response, GenerateTokensResponse)
     assert response.prompt_token_ids == [1, 2, 3]
     assert response.mm_placeholders is None
+    assert response.mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -752,6 +781,7 @@ async def test_non_stream_encoder_decoder_omits_mm_placeholders():
     assert isinstance(response, GenerateTokensResponse)
     assert response.prompt_token_ids == [1, 2, 3]
     assert response.mm_placeholders is None
+    assert response.mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -801,9 +831,11 @@ async def test_stream_prompt_metadata_lands_on_first_emitted_chunk():
     ]
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert data_chunks[0]["mm_placeholders"] == MM_PLACEHOLDERS
+    assert data_chunks[0]["mm_hashes"] == MM_HASHES
     for chunk in data_chunks[1:]:
         assert "prompt_token_ids" not in chunk
         assert "mm_placeholders" not in chunk
+        assert "mm_hashes" not in chunk
 
 
 @pytest.mark.asyncio
@@ -832,6 +864,7 @@ async def test_stream_omits_prompt_metadata_by_default():
     for chunk in data_chunks:
         assert "prompt_token_ids" not in chunk
         assert "mm_placeholders" not in chunk
+        assert "mm_hashes" not in chunk
 
 
 @pytest.mark.asyncio
@@ -859,6 +892,7 @@ async def test_stream_text_only_prompt_omits_mm_placeholders_key():
 
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert "mm_placeholders" not in data_chunks[0]
+    assert "mm_hashes" not in data_chunks[0]
 
 
 @pytest.mark.asyncio
@@ -889,6 +923,7 @@ async def test_stream_zero_token_completion_still_delivers_prompt_metadata():
     assert data_chunks[0]["choices"][0]["finish_reason"] == "stop"
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert data_chunks[0]["mm_placeholders"] == MM_PLACEHOLDERS
+    assert data_chunks[0]["mm_hashes"] == MM_HASHES
 
 
 @pytest.mark.asyncio
@@ -1561,3 +1596,407 @@ async def test_stream_text_mode_usage_chunk_echoes_output_mode():
     assert usage_chunk["output_mode"] == "text"
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["completion_tokens"] == 1
+
+
+class _StubParser:
+    """Echoes text as content. From the first "~" on it holds text back until
+    the finished step, like a parser buffering a partial tool call."""
+
+    def __init__(self, *args, **kwargs):
+        self.held = ""
+        self.history_tool_call_cnt = 0
+
+    def parse_delta(self, delta_text, finished=False, **kwargs):
+        if self.held or "~" in delta_text:
+            self.held += delta_text
+            if not finished:
+                return None
+            delta_text, self.held = self.held, ""
+        return DeltaMessage(content=delta_text)
+
+    def set_history_tool_call_count(self, count):
+        self.history_tool_call_cnt = count
+
+
+def _derender_serving(engine, parser_cls=_StubParser, **kwargs):
+    """Serving whose derenderer builds real stream processors around
+    `parser_cls`, or plain ones when it is None."""
+    serving = _build_serving_tokens(engine, **kwargs)
+    derenderer = serving.online_derenderer
+    derenderer.parser = parser_cls
+    derenderer.enable_auto_tools = False
+    derenderer.renderer = MagicMock()
+    derenderer.model_config = engine.model_config
+    derenderer.include_reasoning_tokens_details = False
+    for method in ("make_stream_processor", "stream_completion_tokens_details"):
+        setattr(
+            derenderer,
+            method,
+            functools.partial(getattr(OnlineDerenderer, method), derenderer),
+        )
+    return serving
+
+
+def _derender_request(parse_context=None, n=1, **kwargs):
+    return GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10, n=n),
+        model=MODEL_NAME,
+        stream=True,
+        output_mode="derender",
+        parse_context=parse_context or ParseContext(),
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_flushes_on_finish_only_output():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="a")
+        yield _make_request_output("req-1", token_ids=[11], text="~")
+        yield _make_request_output(
+            "req-1", token_ids=[], text="b", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+
+    parsed = await _collect_sse(await serving.serve_tokens(_derender_request()))
+    choices = [c["choices"][0] for c in parsed[:-1]]
+
+    assert {c["output_mode"] for c in parsed[:-1]} == {"derender"}
+    assert [c["delta"] for c in choices] == [
+        {"role": "assistant", "content": "a"},
+        {},
+        {"content": "~b"},
+    ]
+    assert [c["token_ids"] for c in choices] == [[10], [11], []]
+    assert [c["finish_reason"] for c in choices] == [None, None, "stop"]
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_abort_without_tokens_sends_empty_delta():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[], finish_reason="abort", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+
+    parsed = await _collect_sse(await serving.serve_tokens(_derender_request()))
+
+    assert len(parsed) == 2
+    assert parsed[0]["choices"][0]["delta"] == {"role": "assistant"}
+    assert parsed[0]["choices"][0]["finish_reason"] == "abort"
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_hidden_reasoning_drops_metadata():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            text="a",
+            logprobs=[{10: Logprob(logprob=-0.1)}],
+        )
+        yield _make_request_output(
+            "req-1",
+            token_ids=[11],
+            text="b",
+            finish_reason="stop",
+            finished=True,
+            logprobs=[{11: Logprob(logprob=-0.2)}],
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+    request = _derender_request(ParseContext(include_reasoning=False))
+    request.sampling_params.logprobs = 1
+
+    parsed = await _collect_sse(await serving.serve_tokens(request))
+
+    for chunk in parsed[:-1]:
+        choice = chunk["choices"][0]
+        assert choice["logprobs"] is None
+        assert choice["token_ids"] is None
+        assert choice["sampling_mask"] is None
+    assert parsed[0]["choices"][0]["delta"]["content"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_n2_has_independent_state():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="~a", index=0)
+        yield _make_request_output("req-1", token_ids=[20], text="x", index=1)
+        yield _make_request_output(
+            "req-1", token_ids=[11], text="b", index=0, finish_reason="stop"
+        )
+        yield _make_request_output(
+            "req-1", token_ids=[21], text="y", index=1, finish_reason="stop"
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+
+    parsed = await _collect_sse(await serving.serve_tokens(_derender_request(n=2)))
+    choices = [c["choices"][0] for c in parsed[:-1]]
+
+    # Choice 0 buffers, choice 1 doesn't, so each has its own parser.
+    assert [(c["index"], c["delta"]) for c in choices] == [
+        (0, {"role": "assistant"}),
+        (1, {"role": "assistant", "content": "x"}),
+        (0, {"content": "~ab"}),
+        (1, {"content": "y"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_without_parser_streams_text_as_content():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="a~")
+        yield _make_request_output(
+            "req-1", token_ids=[11], text="b", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, parser_cls=None)
+
+    parsed = await _collect_sse(await serving.serve_tokens(_derender_request()))
+    choices = [c["choices"][0] for c in parsed[:-1]]
+
+    assert [c["delta"] for c in choices] == [
+        {"role": "assistant", "content": "a~"},
+        {"content": "b"},
+    ]
+    assert [c["finish_reason"] for c in choices] == [None, "stop"]
+
+
+_THINK_END = 99
+
+
+class _ThinkingStubParser(_StubParser):
+    """Counts the tokens before `_THINK_END` as reasoning."""
+
+    def count_reasoning_tokens(self, token_ids):
+        token_ids = list(token_ids)
+        if _THINK_END in token_ids:
+            return token_ids.index(_THINK_END)
+        return len(token_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_details", [True, False])
+async def test_stream_derender_usage_sums_reasoning_tokens(include_details):
+    """Choice 0 closes its reasoning block mid-stream and choice 1 never does;
+    usage sums both, and omits the details without a reasoning parser."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10, 11], text="a", index=0)
+        yield _make_request_output("req-1", token_ids=[20, 21], text="x", index=1)
+        yield _make_request_output(
+            "req-1",
+            token_ids=[_THINK_END, 12],
+            text="b",
+            index=0,
+            finish_reason="stop",
+        )
+        yield _make_request_output(
+            "req-1", token_ids=[22], text="y", index=1, finish_reason="length"
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, parser_cls=_ThinkingStubParser)
+    serving.online_derenderer.include_reasoning_tokens_details = include_details
+    request = _derender_request(n=2, stream_options=StreamOptions(include_usage=True))
+
+    parsed = await _collect_sse(await serving.serve_tokens(request))
+    usage = parsed[-2]["usage"]
+
+    assert usage["completion_tokens"] == 7
+    expected = {"reasoning_tokens": 2 + 3} if include_details else None
+    assert usage.get("completion_tokens_details") == expected
+
+
+def test_make_stream_processor_seeds_history_tool_call_count():
+    """Without the seed, deterministic tool call IDs restart at 0."""
+    serving = _derender_serving(_mock_engine())
+
+    processor = serving.online_derenderer.make_stream_processor(
+        ParseContext().to_chat_request(), 3
+    )
+
+    assert processor.parser.history_tool_call_cnt == 3
+
+
+class _RejectingParser(_StubParser):
+    def __init__(self, *args, **kwargs):
+        raise ValueError("unsupported tools")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("parser_cls", "parse_context"),
+    [
+        pytest.param(
+            _StubParser,
+            ParseContext(
+                tool_choice={"type": "function", "function": {"name": "missing"}}
+            ),
+            id="named-tool-missing",
+        ),
+        pytest.param(_RejectingParser, ParseContext(), id="parser-rejects"),
+    ],
+)
+async def test_stream_derender_invalid_request_fails_before_engine(
+    parser_cls, parse_context
+):
+    engine = _mock_engine()
+    serving = _derender_serving(engine, parser_cls=parser_cls)
+
+    response = await serving.serve_tokens(_derender_request(parse_context))
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_requires_parse_context_with_parser():
+    engine = _mock_engine()
+    serving = _derender_serving(engine)
+    request = _derender_request()
+    request.parse_context = None
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "abort_error",
+    [None, RuntimeError("engine dead")],
+    ids=["abort-ok", "abort-fails"],
+)
+async def test_stream_derender_parser_failure_closes_generate(abort_error):
+    """`generate()` is closed in the background, so its abort neither delays
+    the error event and [DONE] nor loses them if it fails. Closing it aborts by
+    internal ID, sparing other requests that share the external ID."""
+    engine = _mock_engine()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+
+    class _RaisingParser(_StubParser):
+        def parse_delta(self, delta_text, finished=False, **kwargs):
+            raise RuntimeError("boom")
+
+    async def mock_generate(*args, **kwargs):
+        try:
+            yield _make_request_output("req-1", token_ids=[10], text="a")
+        except GeneratorExit:
+            await release.wait()
+            closed.set()
+            if abort_error is not None:
+                raise abort_error from None
+            raise
+
+    async def collect_chunks():
+        return [c async for c in await serving.serve_tokens(_derender_request())]
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, parser_cls=_RaisingParser)
+
+    with patch(
+        "vllm.entrypoints.scale_out.token_in_token_out.serving.logger"
+    ) as logger:
+        chunks = await asyncio.wait_for(collect_chunks(), timeout=5)
+        assert any('"code": 500' in c for c in chunks)
+        assert chunks[-1] == "data: [DONE]\n\n"
+
+        release.set()
+        await asyncio.wait_for(closed.wait(), timeout=5)
+
+    logged = [call.args[0] for call in logger.exception.call_args_list]
+    assert ("Failed to abort request %s." in logged) == (abort_error is not None)
+    engine.abort.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_chunk_has_no_null_delta_keys():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], text="a", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+
+    response = await serving.serve_tokens(_derender_request())
+    chunks = [c async for c in response]
+
+    assert '"delta":{"role":"assistant","content":"a"}' in chunks[0]
+    assert (
+        GenerateDerenderStreamResponse.model_validate_json(chunks[0][len("data: ") :])
+        .choices[0]
+        .delta.content
+        == "a"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_flag", [False, True])
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_stream_derender_logprob_request_override(server_flag, override):
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            text="é",
+            finish_reason="length",
+            finished=True,
+            logprobs=[
+                {
+                    10: Logprob(logprob=-0.5, decoded_token="é"),
+                    11: Logprob(logprob=-1.5, decoded_token="e"),
+                }
+            ],
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, return_tokens_as_token_ids=server_flag)
+    request = _derender_request(ParseContext(return_tokens_as_token_ids=override))
+    request.sampling_params.logprobs = 2
+    parsed = await _collect_sse(await serving.serve_tokens(request))
+
+    chunk = parsed[0]
+    assert chunk["output_mode"] == "derender"
+    choice = chunk["choices"][0]
+    assert choice["delta"]["content"] == "é"
+    entry = choice["logprobs"]["content"][0]
+    placeholders = server_flag if override is None else override
+    assert (entry["token"], entry["bytes"]) == (
+        ("token_id:10", None) if placeholders else ("é", [195, 169])
+    )
+    assert [(top["token"], top["bytes"]) for top in entry["top_logprobs"]] == (
+        [("token_id:10", None), ("token_id:11", None)]
+        if placeholders
+        else [("é", [195, 169]), ("e", [101])]
+    )

@@ -13,7 +13,14 @@ from vllm.distributed import get_etp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.abstract import (
+    MambaBase,
+    get_mamba_prefill_checkpoint_alignment,
+    get_mamba_prefill_checkpoint_grid,
+)
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -29,6 +36,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -124,7 +132,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     @classmethod
     def _nth_prime_after(cls, start: int, count: int) -> int:
-        """Return the ``count``-th prime strictly greater than ``start``."""
+        """Return the `count`-th prime strictly greater than `start`."""
         prime = int(start)
         for _ in range(count):
             candidate = prime + 1
@@ -242,7 +250,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        padded_vocab_size = round_up(total_vocab_size, divisor)
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         embedding_prefix = f"{prefix}.ngram_embedding"
@@ -280,9 +288,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             reduce_results=not self.use_reduce_scatter,
         )
         logger.info(
-            "Initialized AMD PLE embedding %s: quantization_method=%s, "
+            "Initialized AMD PLE embedding %s: "
+            "quantization_config=%s, quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
+            type(quant_config).__name__,
             type(embedding_quant_method).__name__,
             self.ngram_embedding.weight.dtype,
             self.ngram_embedding.weight.device,
@@ -440,6 +450,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self.conv_kernel_size = int(config.ple_conv_kernel_size)
         self.short_conv_dilation = int(config.ngram_size)
         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
+        # The conv window ending at a checkpoint is a copy of its last inputs.
+        self._checkpoint_exporter = MambaPrefillCheckpointExporter(
+            state_len=self.conv_state_len
+        )
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.activation = "silu"
         self.ple_embedding: nn.Module = Qwen4ExpNGramEmbedding(
@@ -514,6 +528,22 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             conv_kernel=self.conv_state_len + 1,
             num_spec=self.num_spec_tokens,
         )
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return 1 if self.cache_config.enable_prefix_caching else None
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        # The scheduler takes internal checkpoints only when every Mamba layer
+        # can export them.
+        if (
+            self.get_prefill_checkpoint_alignment() is None
+            or get_mamba_prefill_checkpoint_alignment(vllm_config) is None
+        ):
+            return None
+        grid = get_mamba_prefill_checkpoint_grid(vllm_config)
+        # Offsets are multiples of the grid, so the window holds only inputs.
+        assert grid >= self.conv_state_len
+        return grid
 
     def _short_conv_dilated_dispatch(
         self,
@@ -642,6 +672,15 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 has_initial_states=has_initial_states,
                 token_indices=token_indices_p,
             )
+            if metadata.checkpoint is not None:
+                assert metadata.non_spec_query_start_loc is not None
+                self._checkpoint_exporter.export(
+                    metadata.checkpoint,
+                    raw_qkv=inputs,
+                    conv_state=conv_state,
+                    cu_seqlens=metadata.non_spec_query_start_loc,
+                    token_indices=non_spec_token_indices,
+                )
         else:
             num_decode_rows = (
                 non_spec_token_indices.numel()
@@ -742,7 +781,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
-        gated_output, conv_input = ple_gate(
+        gated_output, conv_input = torch.ops.vllm.qwen4_exp_ple_gate(
             key,
             value,
             hidden_states,
@@ -810,7 +849,7 @@ def qwen4_exp_amd_ple_ngram_embedding(
 ) -> None:
     """Run the large PLE embedding lookup outside Inductor's FX graph.
 
-    Keeping the embedding weight in ``static_forward_context`` prevents AOT
+    Keeping the embedding weight in `static_forward_context` prevents AOT
     compile-time autotuning from materializing a synthetic copy of the weight.
     """
     layer = get_forward_context().no_compile_layers[layer_name]
@@ -846,6 +885,28 @@ def qwen4_exp_ple_short_conv(
 ) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
     layer._short_conv(inputs, residual, outer_residual)
+
+
+def _ple_gate_fake(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    hidden: torch.Tensor,
+    norm_key_w: torch.Tensor,
+    norm_query_w: torch.Tensor,
+    norm_conv_w: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the gate output shapes for AMD graph tracing."""
+    return torch.empty_like(hidden), torch.empty_like(hidden)
+
+
+# Keep the AMD gate opaque to Dynamo while reusing the shared Triton kernel.
+direct_register_custom_op(
+    op_name="qwen4_exp_ple_gate",
+    op_func=ple_gate,
+    mutates_args=[],
+    fake_impl=_ple_gate_fake,
+)
 
 
 direct_register_custom_op(

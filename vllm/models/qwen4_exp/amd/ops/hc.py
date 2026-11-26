@@ -27,7 +27,7 @@ def _grouped_gemma_rmsnorm_kernel(
 
     pid = tl.program_id(0)
     group_id = pid % NUM_GROUPS
-    row = pid // NUM_GROUPS
+    row = (pid // NUM_GROUPS).to(tl.int64)
 
     offs_g = tl.arange(0, BLOCK_SIZE)
     offsets = group_id * GROUP_DIM + offs_g
@@ -90,7 +90,7 @@ def _hc_silu_kernel(
 ) -> None:
     BLOCK_SIZE: tl.constexpr = triton.next_power_of_2(DIM)
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     offs = tl.arange(0, BLOCK_SIZE)
     mask = offs < DIM
 
@@ -137,7 +137,7 @@ def _hc_gate_mix_kernel(
 ) -> None:
     HC_DIM: tl.constexpr = DIM // HC
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     tile_id = tl.program_id(1)
     offs_inner = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs_inner < HC_DIM
@@ -202,7 +202,7 @@ def _hc_combine_kernel(
 ) -> None:
     HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     tile_id = tl.program_id(1)
 
     offs_inner = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -287,7 +287,7 @@ def _hc_combine_norm_kernel(
     NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
     NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     stream = tl.program_id(1)
     offs_hc = tl.arange(0, HC_PAD)
     mask_hc = offs_hc < HC

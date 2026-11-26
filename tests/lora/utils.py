@@ -54,7 +54,6 @@ class DummyLoRAManager:
         output_dim: int,
         rank=8,
         noop=False,
-        embeddings_tensor=None,
     ):
         lora = LoRALayerWeights(
             module_name,
@@ -62,7 +61,6 @@ class DummyLoRAManager:
             lora_alpha=1,
             lora_a=torch.rand([rank, input_dim], device=DEVICE_TYPE),
             lora_b=torch.rand([output_dim, input_dim], device=DEVICE_TYPE),
-            embeddings_tensor=embeddings_tensor,
         )
         self.set_module_lora(module_name, lora)
         return lora
@@ -104,7 +102,7 @@ def assert_close(a, b):
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
-@dataclass
+@dataclass(slots=True)
 class PunicaTensors:
     inputs_tensor: torch.Tensor
     lora_weights: torch.Tensor | list[torch.Tensor]

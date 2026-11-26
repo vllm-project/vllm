@@ -6,6 +6,7 @@ mod deepseek_v31;
 
 pub use deepseek_v3::DeepSeekV3ToolParser;
 pub use deepseek_v31::DeepSeekV31ToolParser;
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
 use winnow::prelude::*;
@@ -13,7 +14,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::utils::{JsonObjectScanState, parse_buffered_event, safe_text_len, take_json_object};
-use super::{Result, ToolCallDelta, ToolParserOutput};
+use super::{Result, ToolCallDelta, ToolParserError, ToolParserOutput};
 
 pub(super) const TOOL_CALLS_START: &str = "<｜tool▁calls▁begin｜>";
 pub(super) const TOOL_CALLS_END: &str = "<｜tool▁calls▁end｜>";
@@ -142,8 +143,8 @@ impl DeepSeekJsonToolParser {
         Ok(())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_deepseek_json_event(input, &mut self.mode, self.format)
@@ -161,10 +162,9 @@ impl DeepSeekJsonToolParser {
             DeepSeekJsonMode::Text => output.push_text(&self.buffer),
             DeepSeekJsonMode::ToolBlock | DeepSeekJsonMode::Done => {}
             DeepSeekJsonMode::Header | DeepSeekJsonMode::Arguments { .. } => {
-                return Err(parsing_failed!(
-                    "incomplete {} tool call",
-                    self.format.parser_name()
-                ));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: self.format.parser_name(),
+                });
             }
         }
         let _ = self.reset();

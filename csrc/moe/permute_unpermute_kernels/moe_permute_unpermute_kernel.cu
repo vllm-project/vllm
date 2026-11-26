@@ -171,6 +171,9 @@ __global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
 void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
                               const int* expert_map_ptr, int num_experts,
                               cudaStream_t stream) {
+  if (size == 0) {
+    return;
+  }
   int block = std::min(size, 1024);
   int grid = (size + block - 1) / block;
   int smem_size = (num_experts) * sizeof(int);

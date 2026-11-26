@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """O-projection producer for the split and fused AttnRes paths: 112 CTAs of 64 output
-rows. Each warp keeps ``rows`` 16-row weight tiles of one of ``4 * rows`` K parts in
+rows. Each warp keeps `rows` 16-row weight tiles of one of `4 * rows` K parts in
 registers (TP8 stages some K blocks in shared memory), runs BF16 MMA chains and the K
 parts are reduced in order. Weights load before the PDL wait; the split producer
-triggers its consumer right after it. With ``group_tiles`` the batch runs in groups of
+triggers its consumer right after it. With `group_tiles` the batch runs in groups of
 that many 8-token tiles: each group's x arrives through a double-buffered cp.async ring
 during the previous group's MMAs, and is reduced and published during the next one's.
-With ``twoshot`` the partial chunks go to their owners' receive slots instead (the
-first shot of ``common.twoshot``; args 2-4: receive view, owners' bases, rank).
-``OprojUmma`` is the tcgen05 engine of
+With `twoshot` the partial chunks go to their owners' receive slots instead (the
+first shot of `common.twoshot`; args 2-4: receive view, owners' bases, rank).
+`OprojUmma` is the tcgen05 engine of
 the same producer for B>8."""
 
 import cutlass
@@ -45,7 +45,7 @@ from ..common.twoshot import push
 
 
 def pack8(values, policy="plain"):
-    """Four BF16x2 words of ``values[0:8]``."""
+    """Four BF16x2 words of `values[0:8]`."""
     return tuple(
         pack_pair(values[2 * j], values[2 * j + 1], policy=policy) for j in range(4)
     )
@@ -74,7 +74,7 @@ class OprojProducer:
         self.chains = max(1, 4 // (rows * max(1, group_tiles)))
 
     def schedule(self, batches):
-        """(8-token tiles, tiles per group, groups) of ``batches`` tokens."""
+        """(8-token tiles, tiles per group, groups) of `batches` tokens."""
         tiles = (batches + 7) // 8
         per_group = self.group_tiles or tiles
         return tiles, per_group, (tiles + per_group - 1) // per_group
@@ -121,7 +121,7 @@ class OprojProducer:
 
     @cute.jit
     def stage_x(self, x, xs, first: Constexpr[int], buffer: Constexpr[int]):
-        """One cp.async group: x tokens [first, first + group) into ring ``buffer``."""
+        """One cp.async group: x tokens [first, first + group) into ring `buffer`."""
         tid, _, _ = cute.arch.thread_idx()
         chunks: Constexpr = self.k // 8
         count: Constexpr = min(x.shape[0] - first, self.group_tiles * 8)
@@ -142,8 +142,8 @@ class OprojProducer:
 
     @cute.jit
     def multiply(self, smem, wr, xr, first: Constexpr, buffer: Constexpr, M: Constexpr):
-        """FP32 chains of tokens [first, first + group); x from ``xr`` (registers) or
-        shared-memory rows (ring ``buffer``)."""
+        """FP32 chains of tokens [first, first + group); x from `xr` (registers) or
+        shared-memory rows (ring `buffer`)."""
         red, xs, staged = smem
         _, gt, _ = self.schedule(M)
         tiles: Constexpr = min(gt, (M - first + 7) // 8)
@@ -306,7 +306,7 @@ class OprojUmma(OprojProducer):
     stream 128B-swizzled W [64, 64] and x [N, 64] K blocks through a cp.async ring
     (W of the first stages before the PDL wait, the rest prefetched to L2), the MMA
     warp accumulates D [64, N] FP32 in TMEM with M=64 kind::f16 MMAs, and the loader
-    warps round D to BF16 and publish it like ``OprojProducer``."""
+    warps round D to BF16 and publish it like `OprojProducer`."""
 
     def __init__(self, k, *, twoshot=False, budget=184 * 1024):
         super().__init__(k, staged_blocks=0, twoshot=twoshot)
@@ -321,8 +321,8 @@ class OprojUmma(OprojProducer):
 
     @cute.jit
     def load(self, source, ring, rows: Constexpr, valid: Constexpr, row0, column):
-        """cp.async ``rows`` x 64 BF16 of ``source`` from (row0, column) into a K-major
-        128B-swizzled tile; rows >= ``valid`` are left alone. ``valid`` < 0: weights
+        """cp.async `rows` x 64 BF16 of `source` from (row0, column) into a K-major
+        128B-swizzled tile; rows >= `valid` are left alone. `valid` < 0: weights
         (evict-first, every row)."""
         tid, _, _ = cute.arch.thread_idx()
         for i in cutlass.range_constexpr((rows * 8 + 127) // 128):

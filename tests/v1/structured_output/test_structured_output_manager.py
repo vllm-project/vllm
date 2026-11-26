@@ -21,10 +21,12 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.parser.engine.parser_engine import ReasoningEnd
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend, OutlinesGrammar
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.request import get_structured_output_key
 
 TOKENIZER = "gpt2"
@@ -44,11 +46,11 @@ def tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlowCase:
-    """One validate -> bitmask -> accept -> post-accept bitmask scenario."""
+    """One bitmask -> accept -> post-accept bitmask scenario."""
 
-    raw_drafts: tuple[str, ...]
+    raw_drafts: tuple[str | int, ...]
     expected_row_pattern: str
     expected_reasoning: bool | None
     expect_terminated: bool
@@ -59,8 +61,9 @@ class FlowCase:
     xfail_guidance: str | None = None
 
 
-class MockReasoner:
+class MockReasoner(ReasoningParser):
     def __init__(self, tokenizer, marker: int | None = None):
+        super().__init__(tokenizer)
         self.marker = marker
 
     def is_reasoning_end(self, input_ids):
@@ -73,8 +76,8 @@ class MockReasoner:
 
 
 class MockEngineReasoner(ParserEngineReasoningAdapter):
-    """Ends reasoning implicitly on ``marker``, which is also content, and
-    explicitly on ``end_marker`` when one is given."""
+    """Ends reasoning implicitly on `marker`, which is also content, and
+    explicitly on `end_marker` when one is given."""
 
     def __init__(self, tokenizer, marker: int, end_marker: int | None = None):
         self.marker = marker
@@ -101,10 +104,14 @@ def _single_token(tokenizer, text: str) -> int:
     return token_ids[0]
 
 
-def _to_token_ids(tokenizer, texts: tuple[str, ...]) -> list[int]:
-    """Convert literal text (or EOS sentinel) to token IDs."""
+def _to_token_ids(tokenizer, texts: tuple[str | int, ...]) -> list[int]:
+    """Convert literal text, EOS, or speculative-padding tokens to IDs."""
     return [
-        tokenizer.eos_token_id if t == EOS else _single_token(tokenizer, t)
+        t
+        if isinstance(t, int)
+        else tokenizer.eos_token_id
+        if t == EOS
+        else _single_token(tokenizer, t)
         for t in texts
     ]
 
@@ -120,22 +127,17 @@ def _wait_for_grammar(request: Request) -> None:
         time.sleep(0.01)
 
 
-def _build_harness(
-    tokenizer,
-    backend: StructuredOutputsBackend,
-    prefix: str = "",
-    use_reasoner: bool = True,
-    reasoning_ended: bool | None = None,
+def _create_manager(
+    *,
     enable_in_reasoning: bool = False,
-    reasoning_parser_kwargs: dict | None = None,
-    structured_outputs: StructuredOutputsParams | None = None,
     num_spec_tokens: int = NUM_SPEC_TOKENS,
-) -> tuple[StructuredOutputManager, Request]:
+    use_reasoner: bool = True,
+) -> StructuredOutputManager:
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
         device_config=DeviceConfig(device="cpu"),
         structured_outputs_config=StructuredOutputsConfig(
-            backend=backend,
+            backend="auto",
             enable_in_reasoning=enable_in_reasoning,
         ),
         speculative_config=SpeculativeConfig(
@@ -148,17 +150,31 @@ def _build_harness(
     manager = StructuredOutputManager(vllm_config)
     if use_reasoner:
         manager.reasoner_cls = MockReasoner
+    return manager
 
+
+def _build_request(
+    manager: StructuredOutputManager,
+    tokenizer,
+    *,
+    request_id: str,
+    backend: StructuredOutputsBackend,
+    prefix: str = "",
+    reasoning_ended: bool | None = None,
+    reasoning_parser_kwargs: dict | None = None,
+    structured_outputs: StructuredOutputsParams | None = None,
+) -> Request:
     sampling_params = SamplingParams(
         structured_outputs=structured_outputs
         or StructuredOutputsParams(json=JSON_SCHEMA)
     )
-    sampling_params.structured_outputs._backend = backend  # type: ignore[union-attr]
+    assert sampling_params.structured_outputs is not None
+    sampling_params.structured_outputs._backend = backend
     sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
     prompt_ids = tokenizer.encode(prefix) if prefix else []
     request = Request(
-        request_id=f"{backend}-flow",
+        request_id=request_id,
         prompt_token_ids=prompt_ids,
         sampling_params=sampling_params,
         pooling_params=None,
@@ -166,19 +182,82 @@ def _build_harness(
         reasoning_parser_kwargs=reasoning_parser_kwargs,
     )
     manager.grammar_init(request)
-    _wait_for_grammar(request)
 
+    _wait_for_grammar(request)
     structured_req = request.structured_output_request
     assert request.prompt_token_ids is not None
     assert structured_req is not None
     grammar = structured_req.grammar
     assert grammar is not None and not isinstance(grammar, Exception)
-    if prompt_ids:
+    if request.prompt_token_ids:
         assert grammar.accept_tokens(
             request.request_id,
-            prompt_ids,
+            request.prompt_token_ids,
         )
+    return request
+
+
+def _build_harness(
+    tokenizer,
+    backend: StructuredOutputsBackend,
+    prefix: str = "",
+    use_reasoner: bool = True,
+    reasoning_ended: bool | None = None,
+    enable_in_reasoning: bool = False,
+    reasoning_parser_kwargs: dict | None = None,
+    structured_outputs: StructuredOutputsParams | None = None,
+    num_spec_tokens: int = NUM_SPEC_TOKENS,
+) -> tuple[StructuredOutputManager, Request]:
+    manager = _create_manager(
+        enable_in_reasoning=enable_in_reasoning,
+        num_spec_tokens=num_spec_tokens,
+        use_reasoner=use_reasoner,
+    )
+    request = _build_request(
+        manager,
+        tokenizer,
+        request_id=f"{backend}-flow",
+        backend=backend,
+        prefix=prefix,
+        reasoning_ended=reasoning_ended,
+        reasoning_parser_kwargs=reasoning_parser_kwargs,
+        structured_outputs=structured_outputs,
+    )
     return manager, request
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    ("raw_drafts", "expected_length"),
+    [
+        ((THINK_END, "1", "2", -1), 3),
+        ((THINK_END, "1", "z", "2"), 3),
+        (("1", "z", "2", -1), 3),
+        (("z", THINK_END, "1", "z", "2", -1), 4),
+    ],
+)
+def test_trim_spec_tokens_with_grammar(
+    tokenizer,
+    backend: StructuredOutputsBackend,
+    raw_drafts: tuple[str | int, ...],
+    expected_length: int,
+):
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={
+            "marker": _single_token(tokenizer, THINK_END),
+        },
+        structured_outputs=StructuredOutputsParams(regex=DIGITS_REGEX),
+    )
+
+    spec_tokens = _to_token_ids(tokenizer, raw_drafts)
+
+    # The reasoning marker makes the manager find the grammar boundary from
+    # the real request state instead of hard-coding a boundary in the test.
+    trimmed = manager.trim_spec_tokens(request, spec_tokens)
+    assert trimmed == spec_tokens[:expected_length]
 
 
 def _row_pattern(bitmask, masked_ids=()) -> str:
@@ -209,21 +288,15 @@ def _run_real_flow(
 ) -> None:
     assert len(expected_validated) <= len(raw_drafts)
 
-    validated = manager.validate_tokens(request, list(raw_drafts))
-    assert validated == expected_validated
-
-    padded = validated + [-1] * (len(raw_drafts) - len(validated))
     bitmask = manager.grammar_bitmask(
         requests={request.request_id: request},
         structured_output_request_ids=[request.request_id],
-        scheduled_spec_decode_tokens={request.request_id: padded},
+        scheduled_spec_decode_tokens={request.request_id: raw_drafts},
     )
     assert bitmask is not None
-    assert bitmask.shape[0] == len(raw_drafts) + 1
-    assert _row_pattern(bitmask, masked_ids or ()) == expected_row_pattern
-
-    # grammar_bitmask() must rollback any speculative state it advanced.
-    assert manager.validate_tokens(request, list(raw_drafts)) == expected_validated
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
+    row_pattern = _row_pattern(bitmask[: len(raw_drafts) + 1], masked_ids or ())
+    assert row_pattern == expected_row_pattern
 
     structured_req = request.structured_output_request
     assert structured_req is not None
@@ -236,8 +309,7 @@ def _run_real_flow(
     expected_post_accept_row = bitmask[len(expected_validated)].copy()
 
     # Mirror the scheduler flow: sampled tokens are appended before
-    # StructuredOutputManager.accept_tokens() trims them to the
-    # grammar-constrained suffix.
+    # StructuredOutputManager.accept_tokens() advances the grammar.
     request.append_output_token_ids(list(expected_validated))
     assert manager.accept_tokens(request, list(expected_validated))
 
@@ -247,7 +319,7 @@ def _run_real_flow(
         scheduled_spec_decode_tokens={},
     )
     assert post_accept_bitmask is not None
-    assert post_accept_bitmask.shape[0] == 1
+    assert post_accept_bitmask.shape[0] == NUM_SPEC_TOKENS + 1
     assert (post_accept_bitmask[0] == expected_post_accept_row).all()
     assert structured_req.reasoning_ended == expected_reasoning
     assert grammar.is_terminated() is expect_terminated
@@ -266,8 +338,9 @@ FLOW_CASES = [
     pytest.param(
         FlowCase(
             prefix='{"a"',
-            raw_drafts=(":", ' "', "b", '"}'),
-            expected_row_pattern="CCCCC",
+            raw_drafts=(":", ' "', "b", '"}', -1, -1),
+            expected_validated=(":", ' "', "b", '"}'),
+            expected_row_pattern="CCCCCUU",
             expected_reasoning=True,
             expect_terminated=False,
             reasoning_ended=True,
@@ -488,7 +561,6 @@ def test_reasoning_rows_mask_grammar_invalid_implicit_end(
     )
     manager.reasoner_cls = MockEngineReasoner
     drafts = _to_token_ids(tokenizer, raw_drafts)
-    assert manager.validate_tokens(request, drafts) == drafts
 
     bitmask = manager.grammar_bitmask(
         requests={request.request_id: request},
@@ -496,7 +568,7 @@ def test_reasoning_rows_mask_grammar_invalid_implicit_end(
         scheduled_spec_decode_tokens={request.request_id: drafts},
     )
     assert bitmask is not None
-    assert _row_pattern(bitmask, [marker]) == expected_row_pattern
+    assert _row_pattern(bitmask[: len(drafts) + 1], [marker]) == expected_row_pattern
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -560,19 +632,17 @@ def test_initial_constraint_activation(
             if reasoning_ended is not None
             else None
         },
+        num_spec_tokens=1,
     )
 
-    # "{" is valid JSON start; "z" is not. Truncation proves grammar is active.
     open_brace = _single_token(tokenizer, "{")
-    z = _single_token(tokenizer, "z")
-    assert manager.validate_tokens(request, [open_brace, z]) == [open_brace]
-
     bitmask = manager.grammar_bitmask(
         requests={request.request_id: request},
         structured_output_request_ids=[request.request_id],
-        scheduled_spec_decode_tokens={},
+        scheduled_spec_decode_tokens={request.request_id: [open_brace]},
     )
     assert bitmask is not None
+    assert _row_pattern(bitmask) == "CC"
     request.append_output_token_ids([open_brace])
     assert manager.accept_tokens(request, [open_brace])
 
@@ -583,7 +653,13 @@ def test_initial_constraint_activation(
         assert structured_req.reasoner is None
 
 
-@pytest.mark.parametrize("backend", REGEX_BACKENDS)
+@pytest.fixture
+def manager():
+    manager = _create_manager(use_reasoner=False)
+    yield manager
+    manager.clear_backend()
+
+
 @pytest.mark.parametrize(
     ("raw_drafts", "expected_validated", "expected_row_pattern", "terminated"),
     [
@@ -594,57 +670,38 @@ def test_initial_constraint_activation(
         pytest.param((EOS, "1"), (), "CUU", False, id="early_eos"),
     ],
 )
-def test_regex_flow(
+def test_mixed_backend_flows(
     tokenizer,
-    backend: StructuredOutputsBackend,
+    manager,
     raw_drafts: tuple[str, ...],
     expected_validated: tuple[str, ...] | None,
     expected_row_pattern: str,
     terminated: bool,
 ):
-    manager, request = _build_harness(
-        tokenizer,
-        backend,
-        use_reasoner=False,
-        structured_outputs=StructuredOutputsParams(regex=DIGITS_REGEX),
-    )
     validated = _to_token_ids(
         tokenizer, raw_drafts if expected_validated is None else expected_validated
     )
-    _run_real_flow(
-        manager,
-        request,
-        raw_drafts=_to_token_ids(tokenizer, raw_drafts),
-        expected_validated=validated,
-        expected_row_pattern=expected_row_pattern,
-        # accept_tokens() latches reasoning_ended once it accepts any token.
-        expected_reasoning=True if validated else None,
-        expect_terminated=terminated,
-    )
-
-
-@pytest.mark.parametrize("backend", REGEX_BACKENDS)
-def test_rejected_draft_keeps_later_rows_constrained(
-    tokenizer, backend: StructuredOutputsBackend
-):
-    """A draft the grammar rejects during bitmask fill must not unconstrain
-    the remaining rows or the bonus row."""
-    manager, request = _build_harness(
-        tokenizer,
-        backend,
-        use_reasoner=False,
-        structured_outputs=StructuredOutputsParams(regex=DIGITS_REGEX),
-    )
-    drafts = _to_token_ids(tokenizer, ("1", "z", "2"))
-    bitmask = manager.grammar_bitmask(
-        requests={request.request_id: request},
-        structured_output_request_ids=[request.request_id],
-        scheduled_spec_decode_tokens={request.request_id: drafts},
-    )
-    assert bitmask is not None
-    assert _row_pattern(bitmask) == "CCCC"
-    assert (bitmask[2] == bitmask[1]).all()
-    assert (bitmask[3] == bitmask[1]).all()
+    requests = [
+        _build_request(
+            manager,
+            tokenizer,
+            request_id=f"regex-{backend}",
+            backend=backend,
+            structured_outputs=StructuredOutputsParams(regex=DIGITS_REGEX),
+        )
+        for backend in REGEX_BACKENDS
+    ]
+    for request in requests:
+        _run_real_flow(
+            manager,
+            request,
+            raw_drafts=_to_token_ids(tokenizer, raw_drafts),
+            expected_validated=validated,
+            expected_row_pattern=expected_row_pattern,
+            # accept_tokens() latches reasoning_ended once it accepts any token.
+            expected_reasoning=True if validated else None,
+            expect_terminated=terminated,
+        )
 
 
 def test_outlines_termination(tokenizer):
@@ -693,6 +750,24 @@ def test_outlines_choice_with_non_bmp_characters(tokenizer):
     assert grammar.accept_tokens("", tokenizer.encode(choices[0]))
 
 
+def test_xgrammar_compiles_choice_without_rewrite(tokenizer):
+    """Frontends that skip Python request validation send `choice` as is."""
+    choices = ["yes", "no\nplease"]
+    backend = XgrammarBackend(
+        VllmConfig(), tokenizer=tokenizer, vocab_size=len(tokenizer)
+    )
+    request_type, grammar_spec = get_structured_output_key(
+        StructuredOutputsParams(choice=choices)
+    )
+
+    def accepts(text: str) -> bool:
+        grammar = backend.compile_grammar(request_type, grammar_spec)
+        return grammar.accept_tokens("", tokenizer.encode(text))
+
+    assert accepts(choices[1])
+    assert not accepts("maybe")
+
+
 def test_clear_backend_waits_for_running_grammar_and_cancels_pending(
     tokenizer, monkeypatch
 ):
@@ -701,15 +776,15 @@ def test_clear_backend_waits_for_running_grammar_and_cancels_pending(
     manager.executor.shutdown(wait=True)
     manager.executor = ThreadPoolExecutor(max_workers=1)
     started, release = Event(), Event()
-    assert manager.backend is not None
-    compile_grammar = manager.backend.compile_grammar
+    backend = manager.backends["xgrammar"]
+    compile_grammar = backend.compile_grammar
 
     def delayed_compile(*args, **kwargs):
         started.set()
         assert release.wait(MAX_WAIT_SECONDS)
         return compile_grammar(*args, **kwargs)
 
-    monkeypatch.setattr(manager.backend, "compile_grammar", delayed_compile)
+    monkeypatch.setattr(backend, "compile_grammar", delayed_compile)
     try:
         manager.grammar_init(request)
         assert request.structured_output_request is not None
@@ -732,7 +807,7 @@ def test_clear_backend_waits_for_running_grammar_and_cancels_pending(
         release.set()
         assert running.result(timeout=MAX_WAIT_SECONDS) is not None
         assert pending.cancelled()
-        assert manager.backend is None
+        assert not manager.backends
         manager.clear_backend()
     finally:
         release.set()
@@ -758,7 +833,7 @@ def test_clear_backend_without_grammar(skip_tokenizer_init, max_num_seqs):
     )
     manager.clear_backend()
     manager.clear_backend()
-    assert manager.backend is None
+    assert not manager.backends
     executors = []
     if not skip_tokenizer_init:
         executors.append(manager.executor)

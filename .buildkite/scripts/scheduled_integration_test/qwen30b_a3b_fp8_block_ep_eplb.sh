@@ -52,7 +52,6 @@ for BACK in "${BACKENDS[@]}"; do
     --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
     --data-parallel-size "${DATA_PARALLEL_SIZE}" \
     --enable-expert-parallel \
-    --trust-remote-code \
     --max-model-len 2048 \
     --port "$PORT" &
   SERVER_PID=$!

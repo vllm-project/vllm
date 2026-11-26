@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,7 +27,7 @@ logger = init_logger(__name__)
 NONES = itertools.repeat(None)
 
 
-@dataclass
+@dataclass(slots=True)
 class LogprobsProcessor:
     # Tokenizer for this request,
     # None if detokenization is disabled.
@@ -42,6 +41,8 @@ class LogprobsProcessor:
     num_prompt_logprobs: int | None
     # [num_scored_rows, num_token_ids], set once on the final prefill chunk.
     prompt_token_id_logprobs: np.ndarray | None = None
+    # False keeps sample logprobs without decoded token strings.
+    detokenize_sample_logprobs: bool = True
 
     @classmethod
     def from_new_request(
@@ -53,6 +54,12 @@ class LogprobsProcessor:
         assert sampling_params is not None
         num_logprobs = sampling_params.num_logprobs
         num_prompt_logprobs = sampling_params.prompt_logprobs
+        prompt_logprobs = None
+        if num_prompt_logprobs is not None:
+            prompt_logprobs = create_prompt_logprobs(sampling_params.flat_logprobs)
+            # Positions up to prompt_logprob_start are not scored.
+            for _ in range(sampling_params.prompt_logprob_start or 0):
+                prompt_logprobs.append(None)
         return cls(
             tokenizer=tokenizer,
             cumulative_logprob=(None if num_logprobs is None else 0.0),
@@ -61,13 +68,10 @@ class LogprobsProcessor:
                 if num_logprobs is None
                 else create_sample_logprobs(sampling_params.flat_logprobs)
             ),
-            prompt_logprobs=(
-                None
-                if num_prompt_logprobs is None
-                else create_prompt_logprobs(sampling_params.flat_logprobs)
-            ),
+            prompt_logprobs=prompt_logprobs,
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
+            detokenize_sample_logprobs=sampling_params._detokenize_logprobs,
         )
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
@@ -84,42 +88,18 @@ class LogprobsProcessor:
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
 
-        token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
-
-        for rank_np, logprobs_np, token_ids_np in zip(
-            ranks_lst, logprobs_lst, token_ids_lst
-        ):
-            rank = rank_np.tolist()
-            logprobs = logprobs_np.tolist()
-            token_ids = token_ids_np.tolist()
-            # Detokenize (non-incrementally).
-            decoded_tokens: list[str] | Iterable[None]
-            if self.tokenizer is None:
-                decoded_tokens = NONES
-            else:
-                decoded_tokens_list = convert_ids_list_to_tokens(
-                    self.tokenizer, token_ids
-                )
-                context_token_ids = self._get_sampled_context_ids(self.logprobs)
-                decoded_tokens = self._verify_tokens(
-                    decoded_tokens_list=decoded_tokens_list,
-                    tokens=token_ids,
-                    context_token_ids=context_token_ids,
-                )
-
-            # Sampler puts the sampled logprob in first.
-            sampled_token_logprob = logprobs[0]
+        token_ids, logprobs, ranks, _ = logprobs_lists
+        # Sampler puts the sampled logprob in first.
+        for sampled_token_logprob in logprobs[:, 0].tolist():
             self.cumulative_logprob += sampled_token_logprob
-
-            # Update with the Logprob container for this pos.
-            append_logprobs_for_next_position(
-                self.logprobs,
-                token_ids,
-                logprobs,
-                decoded_tokens,
-                rank,
-                self.num_logprobs,
-            )
+        self._append_rows(
+            self.logprobs,
+            self.num_logprobs,
+            token_ids,
+            logprobs,
+            ranks,
+            self.detokenize_sample_logprobs,
+        )
 
     def _update_prompt_logprobs(
         self,
@@ -137,56 +117,75 @@ class LogprobsProcessor:
         assert self.prompt_logprobs is not None
 
         token_ids, logprobs, ranks, *_ = prompt_logprobs_tensors
-
-        # Recover shapes.
-        num_prompt_tokens, num_logprobs = logprobs.shape
-
-        # Detokenize non-incrementally.
-        # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
-        all_decoded_tokens: list[str] | None = (
-            None
-            if self.tokenizer is None
-            else convert_ids_list_to_tokens(
-                self.tokenizer, token_ids.flatten().tolist()
-            )
+        self._append_rows(
+            self.prompt_logprobs,
+            self.num_prompt_logprobs,
+            token_ids.numpy(),
+            logprobs.numpy(),
+            ranks.numpy(),
+            detokenize=True,
         )
 
-        # Pythonize the torch tensors.
-        prompt_token_ranks = ranks.tolist()
-        prompt_logprobs = logprobs.tolist()
-        token_ids_list = token_ids.tolist()
-
-        # Make Logprob for each position.
-        for pos in range(num_prompt_tokens):
-            # Handle flattening and UTF-8 correction per position
-            offset = pos * num_logprobs
-            offset_end = offset + num_logprobs
-
-            decoded_tokens_for_pos: list[str] | Iterable[None]
-            if all_decoded_tokens is None:
-                decoded_tokens_for_pos = NONES
-            else:
-                # Extract decoded tokens for this position
-                decoded_tokens_slice = all_decoded_tokens[offset:offset_end]
-                # Context: preceding prompt tokens accumulated in
-                # self.prompt_logprobs from previous loop iterations.
-                context_token_ids = self._get_sampled_context_ids(self.prompt_logprobs)
-                # Apply UTF-8 correction within this position's token boundaries
-                decoded_tokens_for_pos = self._verify_tokens(
-                    decoded_tokens_list=decoded_tokens_slice,
-                    tokens=token_ids_list[pos],
-                    context_token_ids=context_token_ids,
-                )
-
-            # Update with the Logprob container for this pos.
+    def _append_rows(
+        self,
+        container: SampleLogprobs | PromptLogprobs,
+        num_logprobs: int,
+        token_ids: np.ndarray,
+        logprobs: np.ndarray,
+        ranks: np.ndarray,
+        detokenize: bool,
+    ) -> None:
+        """Appends `[n, S]` engine rows, cut to the requested width, with the
+        `[n]` ranks of their sampled tokens."""
+        width = token_ids.shape[1] if num_logprobs == -1 else num_logprobs + 1
+        token_ids, logprobs = token_ids[:, :width], logprobs[:, :width]
+        decoded = (
+            self._decode_rows(token_ids, container)
+            if detokenize and self.tokenizer is not None
+            else None
+        )
+        if isinstance(container, FlatLogprobs):
+            container.append_rows(token_ids, logprobs, ranks, decoded)
+            return
+        for i, (row_ids, row_logprobs, rank) in enumerate(
+            zip(token_ids.tolist(), logprobs.tolist(), ranks.tolist())
+        ):
             append_logprobs_for_next_position(
-                self.prompt_logprobs,
-                token_ids_list[pos],
-                prompt_logprobs[pos],
-                decoded_tokens_for_pos,
-                prompt_token_ranks[pos],
-                self.num_prompt_logprobs,
+                container,
+                row_ids,
+                row_logprobs,
+                NONES if decoded is None else decoded[i * width : (i + 1) * width],
+                rank,
+                num_logprobs,
             )
+
+    def _decode_rows(
+        self,
+        token_ids: np.ndarray,
+        logprobs_source: SampleLogprobs | PromptLogprobs,
+    ) -> list[str]:
+        """The decoded tokens of `[n, S]` rows about to be appended to
+        `logprobs_source`, flattened. Rows with a byte-fallback piece are
+        corrected using the tokens of the positions before them: the
+        source's last positions and this batch's earlier rows."""
+        assert self.tokenizer is not None
+        width = token_ids.shape[1]
+        decoded = convert_ids_list_to_tokens(self.tokenizer, token_ids.ravel().tolist())
+        for row in sorted(
+            {i // width for i, t in enumerate(decoded) if t.endswith("�")}
+        ):
+            in_batch = token_ids[max(0, row - 4) : row, 0].tolist()
+            context = (
+                self._get_sampled_context_ids(logprobs_source, 4 - len(in_batch))
+                + in_batch
+            )
+            begin, end = row * width, (row + 1) * width
+            decoded[begin:end] = self._verify_tokens(
+                decoded_tokens_list=decoded[begin:end],
+                tokens=token_ids[row].tolist(),
+                context_token_ids=context,
+            )
+        return decoded
 
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
         """Pop and return all request prompt logprobs.
@@ -242,11 +241,7 @@ class LogprobsProcessor:
 
         # Efficient path for FlatLogprobs: access token_ids directly.
         if isinstance(logprobs_source, FlatLogprobs):
-            return [
-                logprobs_source.token_ids[logprobs_source.start_indices[i]]
-                for i in range(start, n)
-                if logprobs_source.start_indices[i] < logprobs_source.end_indices[i]
-            ]
+            return logprobs_source.first_token_ids(start, n)
 
         # list[dict] path
         result: list[int] = []

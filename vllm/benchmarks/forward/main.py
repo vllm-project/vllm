@@ -5,8 +5,9 @@
 Each case is a list of requests `(query_len, kv_len, num_draft_tokens)`
 per DP rank. The bench builds the batch without the scheduler, runs it through
 the real `execute_model` (input prep, attention metadata, DP sync), and times
-the target-model forward captured as a CUDA graph. Sampling, the speculator
-and CPU step overhead aren't measured.
+the target forward, target sampling (rejection sampling for verify rows) and
+configured drafter captured as a CUDA graph. Requests use the model's default
+sampling parameters (`--generation-config`). CPU step overhead isn't measured.
 
 Single GPU: `vllm bench forward --model M --case decode=32*1@8192`.
 Multi-GPU: `torchrun --nproc-per-node=N -m vllm.entrypoints.cli.main bench
@@ -31,6 +32,7 @@ from vllm.benchmarks.forward.shapes import (
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -66,20 +68,43 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
     )
     parser.add_argument(
         "--routing",
-        choices=["auto", "real", "balanced"],
+        choices=["auto", "real", "balanced", "zipf"],
         default="auto",
         help="MoE routing. balanced: fixed routing with equal load per EP rank. "
-        "auto: balanced with dummy weights, else real.",
+        "zipf: fixed weighted sampling without replacement (alpha=1.25), "
+        "with expert popularity shuffled per layer. "
+        "auto: zipf with dummy weights, else real; falls back to real when "
+        "the synthetic fixture is unsupported.",
+    )
+    parser.add_argument(
+        "--exclude-drafter",
+        action="store_true",
+        help="Exclude the drafter from timing. By default, a configured MTP, "
+        "EAGLE, DSpark, or DFlash drafter is included, assuming all draft "
+        "tokens are accepted.",
+    )
+    parser.add_argument(
+        "--exclude-sampler",
+        action="store_true",
+        help="Exclude target sampling and rejection sampling from timing. "
+        "Requests still use the model's default sampling parameters "
+        "(`--generation-config`).",
     )
     parser.add_argument("--iters", type=int, default=20, help="Replays per sample.")
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--output-json", help="Write results to this file.")
+    parser.add_argument(
+        "--profile-dir",
+        help="After timing, trace a few replays of each case and write "
+        "`<case>.rank<r>.trace.json.gz` (Perfetto) and `<case>.rank<r>.kernels.json` "
+        "(GPU time per kernel per forward) here. Summarize or compare with "
+        "`python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]`.",
+    )
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(load_format="dummy", enable_prefix_caching=False)
 
 
 def _setup_env() -> None:
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Each case's eager pass compiles exactly the shapes it needs.
     os.environ.setdefault("VLLM_DEEP_GEMM_WARMUP", "skip")
@@ -102,6 +127,10 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
 
     engine_args = EngineArgs.from_cli_args(args)
     engine_args.distributed_executor_backend = "external_launcher"
+    if engine_args.pipeline_parallel_size > 1:
+        from vllm.benchmarks.forward.pipeline import ForwardPipelineExecutor
+
+        engine_args.distributed_executor_backend = ForwardPipelineExecutor
     engine_args.enable_prefix_caching = False
     engine_args.compilation_config.mode = CompilationMode.NONE
     engine_args.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -119,16 +148,52 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
     return engine_args
 
 
-def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any]:
+def _sampling_params(runner) -> SamplingParams:
+    """The model's default sampling parameters, as `LLM` uses them."""
+    defaults = runner.model_config.get_diff_sampling_param()
+    if defaults:
+        return SamplingParams.from_optional(**defaults)
+    return SamplingParams()
+
+
+def run_case(
+    runner,
+    case: BenchCase,
+    args: argparse.Namespace,
+    sampling_params: SamplingParams,
+) -> dict[str, Any]:
+    required_drafts = max((r.num_draft_tokens for r in case.requests), default=0)
+    if required_drafts > runner.num_speculative_steps:
+        raise ValueError(
+            f"Case {case.name!r} needs {required_drafts} draft tokens per request, "
+            f"but the runner supports {runner.num_speculative_steps}. "
+            "Set --speculative-config with a sufficient num_speculative_tokens."
+        )
+
     from vllm.benchmarks.forward.batch import build_batch
     from vllm.benchmarks.forward.capture import ForwardBench
     from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
+    from vllm.benchmarks.forward.pipeline import PipelineBench
     from vllm.benchmarks.forward.routing import install_routing
 
     context = runner.vllm_config.compilation_config.static_forward_context
+    kv_caches = {
+        name: getattr(layer, "kv_cache", None) for name, layer in context.items()
+    }
+    attn_groups = [group for groups in runner.attn_groups for group in groups]
     kv_config = runner.kv_cache_config
     dcp_size = runner.parallel_config.decode_context_parallel_size
     rng = np.random.default_rng([args.seed, runner.dp_rank])
+    include_drafter = not args.exclude_drafter
+    lookahead = (
+        runner.num_speculative_steps + 1
+        if include_drafter and runner.vllm_config.speculative_config is not None
+        else 0
+    )
+    if lookahead and any(
+        r.kv_len + lookahead > runner.model_config.max_model_len for r in case.requests
+    ):
+        raise ValueError("Increase --max-model-len to leave room for draft lookahead.")
     batch = build_batch(
         case,
         kv_config.kv_cache_groups,
@@ -136,28 +201,51 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         runner.model_config.get_vocab_size(),
         rng,
         dcp_size,
+        lookahead,
+        sampling_params,
     )
-    zero_kv_blocks(context, kv_config.kv_cache_groups, batch, kv_config.num_blocks)
-    bench = ForwardBench(
+    zero_kv_blocks(kv_caches, attn_groups, batch, kv_config.num_blocks)
+    profile_prefix = None
+    if args.profile_dir:
+        from vllm.distributed.parallel_state import get_world_group
+
+        os.makedirs(args.profile_dir, exist_ok=True)
+        rank = get_world_group().rank
+        profile_prefix = os.path.join(args.profile_dir, f"{case.name}.rank{rank}")
+    bench_cls = (
+        PipelineBench
+        if runner.parallel_config.pipeline_parallel_size > 1
+        else ForwardBench
+    )
+    bench = bench_cls(
         runner,
         batch,
         args.iters,
         args.samples,
         touched_kv_views(
-            context, kv_config.kv_cache_groups, batch, kv_config.num_blocks, dcp_size
+            kv_caches,
+            attn_groups,
+            batch,
+            kv_config.num_blocks,
+            dcp_size,
+            lookahead,
         ),
+        case.name,
+        profile_prefix,
+        include_drafter=include_drafter,
+        include_sampler=not args.exclude_sampler,
     )
-    routing, balanced = install_routing(
+    routing, fixture = install_routing(
         runner, args.routing, args.load_format == "dummy", batch.num_tokens, args.seed
     )
     try:
         result = bench.run()
-        if balanced is not None:
-            balanced.check_applied()
+        if fixture is not None:
+            fixture.check_applied()
     finally:
         runner.execute_model(batch.finish())
-        if balanced is not None:
-            balanced.remove()
+        if fixture is not None:
+            fixture.remove()
     return {
         "num_tokens": batch.num_tokens,
         "kv_blocks": batch.num_blocks,
@@ -188,10 +276,21 @@ def main(args: argparse.Namespace) -> None:
         jitter_kv_lens(c, args.kv_len_jitter, max_kv_len, args.seed) for c in cases
     ]
     world = get_world_group()
+    sampling_params = _sampling_params(runner)
+    sampling = {
+        "temperature": sampling_params.temperature,
+        "top_p": sampling_params.top_p,
+        "top_k": sampling_params.top_k,
+        "min_p": sampling_params.min_p,
+        "repetition_penalty": sampling_params.repetition_penalty,
+        "presence_penalty": sampling_params.presence_penalty,
+        "frequency_penalty": sampling_params.frequency_penalty,
+    }
+    logger.info("Sampling parameters: %s", sampling)
     results = []
     with torch.inference_mode(), set_current_vllm_config(runner.vllm_config):
         for case in cases:
-            result = run_case(runner, case, args)
+            result = run_case(runner, case, args, sampling_params)
             gathered: list[Any] = [None] * world.world_size
             torch.distributed.all_gather_object(gathered, result, group=world.cpu_group)
             if world.rank != 0:
@@ -203,6 +302,7 @@ def main(args: argparse.Namespace) -> None:
                     "case": case.name,
                     "requests": [asdict(r) for r in case.requests],
                     "median_us": latency["median"],
+                    "sampling_params": sampling,
                     "ranks": gathered,
                 }
             )
@@ -213,6 +313,14 @@ def main(args: argparse.Namespace) -> None:
                 f"eager rel rms {rank0['graph_vs_eager']['relative_rms']:.1e}",
                 flush=True,
             )
+            if profile := rank0.get("profile"):
+                from vllm.benchmarks.forward.profile import format_summary
+
+                print(
+                    f"[forward] {case.name} rank 0 kernels ({profile['summary']}):\n"
+                    + format_summary({**profile, "kernels": profile["top_kernels"]}),
+                    flush=True,
+                )
             if latency["sample_spread_pct"] > 0.5:
                 logger.warning(
                     "%s: unstable timing (sample medians spread %.2f%%).",

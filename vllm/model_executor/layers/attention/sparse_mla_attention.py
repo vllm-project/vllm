@@ -3,7 +3,7 @@
 """Shared MHA implementation and metadata builder for sparse MLA backends."""
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
@@ -11,13 +11,14 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonBaseImpl,
     MLACommonDecodeMetadata,
     MLACommonMetadata,
@@ -33,7 +34,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
-    is_quantized_kv_cache,
+    async_tensor_h2d,
     np_to_pinned_tensor,
 )
 from vllm.v1.attention.backend import AttentionLayer, AttentionMetadataBuilder
@@ -44,22 +45,35 @@ from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    SparseMLAPrefillRoute,
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops.cp_common import symm_mem_available
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.shardq import (
+    ShardQMetadata,
+    ShardQSplit,
+    build_shardq_split,
+)
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
+    hisparse_staging_block_capacity,
 )
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.ops.dcp_shardq.context import (
+        DcpShardQContext,
+        DcpShardQPlanner,
+    )
     from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -96,6 +110,127 @@ def _masked_mha_workspace_fits(
     return needed <= workspace_numel
 
 
+_MaskedMHARanges = tuple[tuple[int, int], ...]
+
+_MASKED_MHA_THRESHOLDS: dict[
+    tuple[int, int],
+    dict[str, dict[int, tuple[_MaskedMHARanges, _MaskedMHARanges | None]]],
+] = {
+    (192, 128): {
+        "FLASHMLA_SPARSE": {
+            1: (((2048, 1536), (4096, 4096)), None),
+            2: (((2048, 512), (4096, 1024), (8192, 4096)), None),
+            4: (
+                ((2048, 512), (4096, 1024), (8192, 1536), (16384, 8192)),
+                None,
+            ),
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 512),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 16384),
+                ),
+                None,
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 1024),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 32768),
+                ),
+                None,
+            ),
+        },
+    },
+    (256, 256): {
+        "FLASHMLA_SPARSE": {
+            1: (((8 * 1024, 0),), ()),
+            2: (
+                ((20 * 1024, 0),),
+                ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
+            ),
+            4: (
+                ((48 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (34 * 1024, 32 * 1024),
+                ),
+            ),
+            8: (
+                ((112 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                ),
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            4: (
+                ((36 * 1024, 0),),
+                (
+                    (12 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (28 * 1024, 24 * 1024),
+                ),
+            ),
+            8: (
+                ((64 * 1024, 0),),
+                (
+                    (20 * 1024, 4 * 1024),
+                    (24 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                    (56 * 1024, 40 * 1024),
+                    (64 * 1024, 48 * 1024),
+                    (72 * 1024, 56 * 1024),
+                ),
+            ),
+        },
+    },
+}
+
+
+def _use_masked_mha(
+    *,
+    backend_name: str,
+    tensor_parallel_size: int,
+    qk_head_dim: int,
+    v_head_dim: int,
+    query_len: int,
+    seq_len: int,
+    has_context: bool,
+) -> bool:
+    if backend_name == "FLASH_ATTN_MLA_SPARSE_FA4":
+        # Its prefill batches run on FlashInfer's kernel, so it shares those rows.
+        backend_name = "FLASHINFER_MLA_SPARSE"
+    thresholds = (
+        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
+        .get(backend_name, {})
+        .get(tensor_parallel_size)
+    )
+    if thresholds is None:
+        return False
+    pure_prefill_ranges, context_ranges = thresholds
+    ranges = pure_prefill_ranges
+    if has_context and context_ranges is not None:
+        ranges = context_ranges
+    for max_seq_len, min_query_len in ranges:
+        if seq_len <= max_seq_len:
+            return query_len >= min_query_len
+    return False
+
+
 def _is_masked_mha_available(
     num_heads_total: int,
     kv_lora_rank: int,
@@ -121,32 +256,16 @@ def _is_masked_mha_available(
         (64, 512, 256, 0, 256),
     ):
         return False
-    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    if qk_head_dim == 256 and v_head_dim == 256:
-        # This path uses contiguous K/V, so it does not need the paged-KV
-        # features that keep head-dim 256 disabled in the general FA selector.
-        fa_version = get_flash_attn_version()
-    else:
-        fa_version = get_flash_attn_version(
-            head_size=qk_head_dim, head_size_v=v_head_dim
-        )
-    return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
-
-
-def _use_dense_mha_prefill(
-    vllm_config: "VllmConfig", prefill_max_seq_len: int, topk_tokens: int
-) -> bool:
-    attention_config = vllm_config.attention_config
-    return (
-        attention_config.hisparse_config is None
-        and not attention_config.sparse_mla_force_mqa
-        and prefill_max_seq_len <= topk_tokens
+    fa_version = get_flash_attn_version(
+        head_size=qk_nope_head_dim + qk_rope_head_dim, head_size_v=v_head_dim
     )
+    return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
 
 
 @dataclass
 class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
     host_staging_plan: HiSparsePrefillStagingPlan | None = None
+    route: SparseMLAPrefillRoute = field(kw_only=True)
 
 
 @dataclass(kw_only=True)
@@ -163,9 +282,55 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     prefill_max_seq_len: int = 0
     prefill: SparseMLAPrefillMetadata | None = None
     cp_kv_cache_interleave_size: int = 1
+    # Index of the first query token's top-k in the top-k buffer.
+    topk_start: int = 0
+    # The KV cache holds every DCP rank's KV shard (a DCP ShardQ step's
+    # gathered context), so the top-k converts without the DCP filter.
+    kv_gathered: bool = False
 
 
 T = TypeVar("T", bound=SparseMLACommonMetadata)
+
+
+def build_shardq_metadata(
+    split: ShardQSplit,
+    metadata: SparseMLACommonMetadata,
+    device: torch.device,
+    gathered_context: "DcpShardQContext | None" = None,
+) -> ShardQMetadata:
+    """This step's ShardQ, with `metadata` narrowed to this rank's tokens.
+    Under DCP, those tokens attend the step's `gathered_context`."""
+    num_decode_tokens = split.num_decode_tokens
+    shardq = ShardQMetadata(
+        num_decode_tokens=num_decode_tokens,
+        num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
+        token_ids=async_tensor_h2d(split.token_ids, device=device),
+        local_token_ids_cpu=split.local_token_ids,
+        rank_offsets=async_tensor_h2d(
+            np.r_[0, np.cumsum(split.num_tokens_per_rank)], device=device
+        ),
+        gathered_context=gathered_context,
+    )
+    if gathered_context is not None:
+        # These tokens attend the gathered context instead of the DCP-local
+        # cache.
+        metadata = replace(
+            metadata,
+            block_table=gathered_context.block_table,
+            block_size=gathered_context.block_size,
+            kv_gathered=True,
+        )
+    # The indexer wrote these tokens' top-k compactly after the decodes.
+    shardq.attn_metadata = replace(
+        metadata,
+        num_decodes=0,
+        num_decode_tokens=0,
+        req_id_per_token=metadata.req_id_per_token[
+            shardq.local_token_ids + num_decode_tokens
+        ],
+        topk_start=num_decode_tokens,
+    )
+    return shardq
 
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
@@ -243,6 +408,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             layer_names[0]
         ]
         layer_prefill_backend = attention_layer.prefill_backend
+        self._backend_name = attention_layer.get_attn_backend().get_name()
+        # The workspace follows the global KV dtype; a layer group can differ
+        # (e.g. an MTP draft with its own kv_cache_dtype).
+        self._masked_mha_available = (
+            self.topk_mask_workspace is not None
+            and attention_layer.impl.masked_mha_available
+        )
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
             self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
@@ -255,6 +427,24 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
         )
+        layers = vllm_config.compilation_config.static_forward_context
+        self.use_shardq = any(
+            getattr(layers[name], "use_shardq", False) for name in layer_names
+        )
+        # Under DCP, ShardQ steps attend a gathered copy of their context.
+        self.dcp_shardq: DcpShardQPlanner | None = None
+        if self.use_shardq and self.dcp_world_size > 1:
+            from vllm.v1.attention.ops.dcp_shardq.context import (
+                make_dcp_shardq_planner,
+            )
+
+            # Only MLAAttention layers set use_shardq.
+            mla_layer = layers[layer_names[0]]
+            assert isinstance(mla_layer, MLAAttention)
+            self.dcp_shardq = make_dcp_shardq_planner(
+                kv_cache_spec, mla_layer, self.device
+            )
+            self.use_shardq = self.dcp_shardq is not None
 
     def _init_reorder_batch_threshold(
         self,
@@ -362,9 +552,24 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 )
                 decode_max_query_len = int(decode_query_lens_cpu.max().item())
 
+        shardq_split = (
+            build_shardq_split(common_attn_metadata, self.vllm_config)
+            if self.use_shardq
+            else None
+        )
+        gathered_context = None
+        if self.dcp_shardq is not None and shardq_split is not None:
+            # Under DCP, a step whose prefill requests do not fit the gathered
+            # context workspace keeps the DCP path whole.
+            gathered_context = self.dcp_shardq(common_attn_metadata, shardq_split)
+            if gathered_context is None:
+                shardq_split = None
         prefill_max_seq_len = 0
         prefill: SparseMLAPrefillMetadata | None = None
-        if num_prefills > 0 and self._prefill_backend is not None:
+        if num_prefills > 0 and (
+            self._prefill_backend is not None
+            or self.vllm_config.attention_config.hisparse_config is not None
+        ):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill_max_seq_len = int(
@@ -379,20 +584,14 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             )
             staging_plan = None
             if self.vllm_config.attention_config.hisparse_config is not None:
-                prefill_seq_lens_cpu = seq_lens_cpu[
-                    num_decodes : num_decodes + num_prefills
-                ]
-                staging_block_capacity = int(
-                    (
-                        (prefill_seq_lens_cpu + self.kv_cache_spec.block_size - 1)
-                        // self.kv_cache_spec.block_size
-                    ).sum()
-                )
                 staging_plan = build_hisparse_prefill_staging_plan(
                     block_table,
                     common_attn_metadata.seq_lens[num_decodes:],
                     self.kv_cache_spec.block_size,
-                    staging_block_capacity,
+                    hisparse_staging_block_capacity(
+                        seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                        self.kv_cache_spec.block_size,
+                    ),
                 )
                 if chunked_context is not None:
                     block_table = staging_plan.block_table
@@ -405,19 +604,20 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 q_data_type=self.model_config.dtype,
                 output_dtype=self.model_config.dtype,
                 prefill_backend=self._prefill_backend,
-                use_dense_mha=(
-                    _use_dense_mha_prefill(
-                        self.vllm_config, prefill_max_seq_len, self.topk_tokens
-                    )
-                    # Dense MHA cannot be used under PCP+DCP.
-                    and not (self.use_pcp and self.dcp_world_size > 1)
-                ),
                 topk_mask_workspace=self.topk_mask_workspace,
                 host_staging_plan=staging_plan,
+                route=self._prefill_route(
+                    prefill_max_seq_len,
+                    prefill_max_query_len,
+                    prefill_query_lens_cpu,
+                    chunked_context,
+                    use_shardq=shardq_split is not None,
+                ),
             )
-            self._prefill_backend.prepare_metadata(prefill)
+            if self._prefill_backend is not None:
+                self._prefill_backend.prepare_metadata(prefill)
 
-        return self.metadata_cls(  # type: ignore[call-arg]
+        metadata = self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
@@ -437,6 +637,83 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill=prefill,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
+        if shardq_split is not None:
+            metadata.shardq = build_shardq_metadata(
+                shardq_split, metadata, self.device, gathered_context
+            )
+        return metadata
+
+    def _prefill_route(
+        self,
+        prefill_max_seq_len: int,
+        prefill_max_query_len: int,
+        prefill_query_lens_cpu: torch.Tensor,
+        chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata | None",
+        use_shardq: bool,
+    ) -> SparseMLAPrefillRoute:
+        attention_config = self.vllm_config.attention_config
+        # ShardQ's top-k are compact per rank, so its prefills run in forward_mqa.
+        if (
+            attention_config.sparse_mla_force_mqa
+            or attention_config.hisparse_config is not None
+            or use_shardq
+        ):
+            return SparseMLAPrefillRoute.SPARSE_MQA
+        if prefill_max_seq_len <= self.topk_tokens:
+            # Dense MHA cannot be used under PCP+DCP.
+            if self.use_pcp and self.dcp_world_size > 1:
+                return SparseMLAPrefillRoute.SPARSE_MQA
+            return SparseMLAPrefillRoute.DENSE_MHA
+        if (
+            self._masked_mha_available
+            and self.dcp_world_size <= 1
+            and _use_masked_mha(
+                backend_name=self._backend_name,
+                tensor_parallel_size=(
+                    self.vllm_config.parallel_config.tensor_parallel_size
+                ),
+                qk_head_dim=self.mla_dims.qk_nope_head_dim
+                + self.mla_dims.qk_rope_head_dim,
+                v_head_dim=self.mla_dims.v_head_dim,
+                query_len=prefill_max_query_len,
+                seq_len=prefill_max_seq_len,
+                has_context=chunked_context is not None,
+            )
+            and self._topk_masks_fit(
+                len(prefill_query_lens_cpu), prefill_max_query_len, chunked_context
+            )
+        ):
+            return SparseMLAPrefillRoute.MASKED_MHA
+        return SparseMLAPrefillRoute.SPARSE_MQA
+
+    def _topk_masks_fit(
+        self,
+        batch_size: int,
+        max_query_len: int,
+        chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata | None",
+    ) -> bool:
+        """Whether this prefill batch's top-k masks fit the workspace."""
+        assert self.topk_mask_workspace is not None
+        max_context_chunk_seq_len = 0
+        if chunked_context is not None:
+            max_context_chunk_seq_len = max(
+                chunk.max_seq_len for chunk in chunked_context.chunks
+            )
+        fits = _masked_mha_workspace_fits(
+            batch_size=batch_size,
+            max_query_len=max_query_len,
+            max_context_chunk_seq_len=max_context_chunk_seq_len,
+            workspace_numel=self.topk_mask_workspace.numel(),
+        )
+        if not fits:
+            logger.warning_once(
+                "Sparse MLA top-k mask workspace (%d MiB) is too small for some "
+                "prefill batches; those fall back to slower sparse MQA.",
+                self.topk_mask_workspace.numel()
+                * torch.int32.itemsize
+                // (1024 * 1024),
+            )
+        return fits
 
     @staticmethod
     def _build_prefill_fields(
@@ -639,6 +916,11 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     # Reuse the index group's top-k conversion only for uniform decode batches
     # of multi-layer groups; other batches convert per layer.
     group_conversion_decode_only: ClassVar[bool] = False
+    # Whether forward_mqa runs ShardQ metadata and is validated.
+    supports_shardq: ClassVar[bool] = False
+    # Whether forward_mqa also runs a DCP ShardQ step's gathered context
+    # (kv_gathered metadata) and is validated.
+    supports_dcp_shardq: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -688,8 +970,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             self.index_group, self.index_group_index = (
                 index_group_builder.register_layer(
                     indexer is not None,
-                    vllm_config,
-                    head_size=head_size,
+                    vllm_config if sliding_window is None else None,
+                    row_width=(
+                        self.get_fp8_ds_mla_row_bytes()
+                        if kv_cache_dtype == "fp8_ds_mla"
+                        else head_size
+                    ),
                     kv_cache_dtype=kv_cache_dtype,
                 )
             )
@@ -708,6 +994,43 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
             kv_cache_dtype=kv_cache_dtype,
+        )
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        cudagraph_mode = (
+            vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+        )
+        dcp_size = parallel_config.decode_context_parallel_size
+        kv_transfer_config = vllm_config.kv_transfer_config
+        # A disaggregated decode instance receives its prefills' KV, so it
+        # would hold the gathered-context workspace for nothing.
+        decode_instance = (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_role == "kv_consumer"
+        )
+        # The attention layer decides whether to use ShardQ.
+        self.use_shardq = (
+            self.supports_shardq
+            and vllm_config.attention_config.sparse_mla_shard_q
+            and vllm_config.attention_config.hisparse_config is None
+            and parallel_config.tensor_parallel_size > 1
+            and (
+                dcp_size == 1
+                or (
+                    self.supports_dcp_shardq
+                    and not decode_instance
+                    and dcp_size == parallel_config.tensor_parallel_size
+                    # The gathered context is laid out for interleave 1, in
+                    # one workspace that micro-batches would share, and its
+                    # exchanges need symmetric memory.
+                    and parallel_config.cp_kv_cache_interleave_size == 1
+                    and not parallel_config.use_ubatching
+                    and current_platform.is_device_capability_family(100)
+                    and symm_mem_available
+                )
+            )
+            and parallel_config.prefill_context_parallel_size == 1
+            and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
         )
 
     def record_logical_topk_ready(self) -> None:
@@ -746,13 +1069,14 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self.topk_indices_buffer is not None
         num_tokens = q[0].shape[0] if isinstance(q, tuple) else q.shape[0]
-        topk = self.topk_indices_buffer[:num_tokens]
+        topk_start = attn_metadata.topk_start
+        topk = self.topk_indices_buffer[topk_start : topk_start + num_tokens]
         num_decode_tokens = attn_metadata.num_decode_tokens
         block_size = attn_metadata.block_size
         index_group = self.index_group
         if not isinstance(index_group, HiSparseMLAIndexGroup):
             _, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
-            if self.dcp_world_size > 1:
+            if self.dcp_world_size > 1 and not attn_metadata.kv_gathered:
                 physical_topk, valid_counts = triton_filter_and_convert_dcp_index(
                     attn_metadata.req_id_per_token[:num_tokens],
                     attn_metadata.block_table,
@@ -765,10 +1089,19 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                     NUM_TOPK_TOKENS=topk.shape[1],
                     return_valid_counts=True,
                 )
-            elif self.group_conversion_decode_only and not (
-                index_group is not None
-                and index_group.num_layers > 1
-                and num_decode_tokens >= num_tokens
+            # A mixed ShardQ step's decode tokens take the index group's
+            # conversion, so its token-sharded ones convert here.
+            elif (
+                topk_start
+                or attn_metadata.kv_gathered
+                or (
+                    self.group_conversion_decode_only
+                    and not (
+                        index_group is not None
+                        and index_group.num_layers > 1
+                        and num_decode_tokens >= num_tokens
+                    )
+                )
             ):
                 physical_topk, valid_counts = triton_convert_req_index_to_global_index(
                     attn_metadata.req_id_per_token[:num_tokens],
@@ -801,7 +1134,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         hot_cache = index_group.physical_kv_cache(layer_index).view(
             kv_c_and_k_pe_cache.dtype
         )
-        assert hot_cache.is_contiguous(), "HiSparse hot buffer must be contiguous"
         if (
             num_decode_tokens >= num_tokens
             or index_group.cache(layer_index).all_context_pages_resident
@@ -892,31 +1224,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         is_decode: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
-
-    @staticmethod
-    def masked_mha_workspace_fits(prefill: MLACommonPrefillMetadata) -> bool:
-        """Whether this prefill batch's top-k masks fit the workspace."""
-        workspace = prefill.topk_mask_workspace
-        if workspace is None or prefill.query_lens_cpu is None:
-            return False
-        max_context_chunk_seq_len = 0
-        if prefill.chunked_context is not None:
-            max_context_chunk_seq_len = max(
-                chunk.max_seq_len for chunk in prefill.chunked_context.chunks
-            )
-        fits = _masked_mha_workspace_fits(
-            batch_size=len(prefill.query_lens_cpu),
-            max_query_len=prefill.max_query_len,
-            max_context_chunk_seq_len=max_context_chunk_seq_len,
-            workspace_numel=workspace.numel(),
-        )
-        if not fits:
-            logger.warning_once(
-                "Sparse MLA top-k mask workspace (%d MiB) is too small for some "
-                "prefill batches; those fall back to slower sparse MQA.",
-                workspace.numel() * torch.int32.itemsize // (1024 * 1024),
-            )
-        return fits
 
     @staticmethod
     def _slice_topk_per_req(
@@ -1155,11 +1462,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     ) -> None:
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
-        prefill_max_seq_len = attn_metadata.prefill_max_seq_len
-        topk_tokens = attn_metadata.topk_tokens
-        force_dense = getattr(self, "_sparse_mla_force_dense_mha", False)
-        force_masked = getattr(self, "_sparse_mla_force_masked_mha", False)
-        if force_dense or (prefill_max_seq_len <= topk_tokens and not force_masked):
+        if prefill_metadata.route is SparseMLAPrefillRoute.DENSE_MHA:
             return super().forward_mha(
                 q,
                 kv_c_normed,
@@ -1171,6 +1474,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 output_scale,
             )
 
+        assert prefill_metadata.route is SparseMLAPrefillRoute.MASKED_MHA
         assert output_scale is None
         assert self.masked_mha_available
         assert prefill_metadata.query_lens_cpu is not None
@@ -1208,7 +1512,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             topk_per_req,
             q_lens,
             prefill_metadata.max_query_len,
-            prefill_max_seq_len,
+            attn_metadata.prefill_max_seq_len,
             prefill_metadata.topk_mask_workspace,
         )
         if dense_mask is not None:

@@ -34,7 +34,7 @@ async def _records_start_then_never_finishes(started_request_ids, request_id):
     ],
 )
 async def test_non_streaming_cancel_aborts_engine_requests(
-    engine_inputs, expected_request_ids
+    engine_inputs, expected_request_ids, monkeypatch
 ):
     engine_client = SimpleNamespace(
         errored=False,
@@ -46,22 +46,26 @@ async def test_non_streaming_cancel_aborts_engine_requests(
 
     server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     server.engine_client = engine_client
-    server.task_type = "transcribe"
+    server.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     server.models = SimpleNamespace(model_name=lambda: "audio")
     server.model_config = SimpleNamespace(max_model_len=1024)
     server.model_cls = SimpleNamespace(no_space_languages=set())
     server.default_sampling_params = {}
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
-    server._check_model = AsyncMock(return_value=None)
-    server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(
-        return_value=(
-            engine_inputs,
-            40.0,
-            [30.0 * i for i in range(len(engine_inputs))],
-        )
+    monkeypatch.setattr(server, "_check_model", AsyncMock(return_value=None))
+    monkeypatch.setattr(server, "_maybe_get_adapters", Mock(return_value=None))
+    monkeypatch.setattr(
+        server,
+        "_preprocess_speech_to_text",
+        AsyncMock(
+            return_value=(
+                engine_inputs,
+                40.0,
+                [30.0 * i for i in range(len(engine_inputs))],
+            )
+        ),
     )
-    server._log_inputs = Mock()
+    monkeypatch.setattr(server, "_log_inputs", Mock())
 
     request = SimpleNamespace(
         model="audio",
@@ -101,7 +105,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_cancel_advances_all_chunk_generators():
+async def test_non_streaming_cancel_advances_all_chunk_generators(monkeypatch):
     started_request_ids: list[str] = []
     engine_client = SimpleNamespace(
         errored=False,
@@ -122,18 +126,20 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
     ]
     server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     server.engine_client = engine_client
-    server.task_type = "transcribe"
+    server.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
     server.models = SimpleNamespace(model_name=lambda: "audio")
     server.model_config = SimpleNamespace(max_model_len=1024)
     server.model_cls = SimpleNamespace(no_space_languages=set())
     server.default_sampling_params = {}
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
-    server._check_model = AsyncMock(return_value=None)
-    server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(
-        return_value=(engine_inputs, 90.0, [0.0, 29.5, 29.5 + 29.7])
+    monkeypatch.setattr(server, "_check_model", AsyncMock(return_value=None))
+    monkeypatch.setattr(server, "_maybe_get_adapters", Mock(return_value=None))
+    monkeypatch.setattr(
+        server,
+        "_preprocess_speech_to_text",
+        AsyncMock(return_value=(engine_inputs, 90.0, [0.0, 29.5, 29.5 + 29.7])),
     )
-    server._log_inputs = Mock()
+    monkeypatch.setattr(server, "_log_inputs", Mock())
 
     request = SimpleNamespace(
         model="audio",
@@ -201,3 +207,28 @@ async def test_language_detection_cancel_aborts_engine_request():
     sampling_params = engine_client.generate.call_args.args[1]
     assert sampling_params.watermarking is False
     engine_client.abort.assert_awaited_once_with(request_id)
+
+
+@pytest.mark.asyncio
+async def test_language_detection_preserves_data_parallel_rank():
+    engine_client = SimpleNamespace(
+        generate=Mock(return_value=_never_finishes()), abort=AsyncMock()
+    )
+    server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
+    server.engine_client = engine_client
+    server.asr_config = SimpleNamespace()
+    server.tokenizer = Mock()
+    server.model_cls = SimpleNamespace(
+        get_language_detection_prompt=Mock(return_value={"prompt": "detect"}),
+        get_language_token_ids=Mock(return_value=[1]),
+    )
+
+    task = asyncio.create_task(
+        server._detect_language(Mock(), "lang_detect", data_parallel_rank=3)
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert engine_client.generate.call_args.kwargs["data_parallel_rank"] == 3

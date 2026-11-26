@@ -31,6 +31,11 @@ def count_clones(graph: fx.Graph) -> int:
     return len(list(find_op_nodes(torch.ops.aten.clone.default, graph)))
 
 
+def _clone_twice(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    y = x.relu()
+    return y.clone(), y.clone()
+
+
 @pytest.fixture(scope="function")
 def clone_cleanup_pass():
     return UnsafeCloneEliminationPass(VllmConfig())
@@ -170,6 +175,34 @@ class TestCloneCleanup:
         # Both clones should be removed (only readonly uses)
         assert count_clones(graph_module.graph) == 0
         torch.testing.assert_close(actual, expected)
+
+    @pytest.mark.parametrize(
+        "f, expected_clones",
+        [
+            pytest.param(lambda x: x.clone(), 1, id="input"),
+            pytest.param(lambda x: x[:2].clone(), 1, id="input_view"),
+            pytest.param(lambda x: x.clone()[:2], 1, id="view_of_clone"),
+            pytest.param(_clone_twice, 1, id="shared_intermediate"),
+            pytest.param(lambda x: x.relu().clone(), 0, id="intermediate"),
+        ],
+    )
+    def test_returned_clone_does_not_alias_graph_io(
+        self, clone_cleanup_pass, f, expected_clones
+    ):
+        """Returned clones must not alias graph inputs or other outputs, since
+        callers may mutate those in place (e.g. a later piecewise graph)."""
+        inp = torch.randn(4, 3)
+        # Fake tracing preserves view aliasing in node.meta["val"]
+        graph_module = make_fx(f, tracing_mode="fake")(inp)
+
+        clone_cleanup_pass(graph_module.graph)
+        graph_module.recompile()
+        outs = graph_module(inp)
+        outs = outs if isinstance(outs, tuple) else (outs,)
+
+        assert count_clones(graph_module.graph) == expected_clones
+        storages = {t.untyped_storage().data_ptr() for t in (inp, *outs)}
+        assert len(storages) == 1 + len(outs)
 
     def test_no_clones_in_graph(self, clone_cleanup_pass):
         """Test pass behavior when graph has no clones."""

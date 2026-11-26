@@ -7,6 +7,8 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+mod logging;
+mod model;
 mod ssl;
 mod unsupported;
 
@@ -14,13 +16,14 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
@@ -28,15 +31,26 @@ use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
-use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
-use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
-    RendererSelection,
+use vllm_managed_engine::cli::{
+    ManagedEngineArgs, parse_human_readable_int, repartition_managed_engine_args,
 };
-use vllm_text::backend::hf::HfOverrides;
+use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
+use vllm_server::{
+    AccessLogConfig, AdmissionLimits, ApiServerOptions, ChatTemplateContentFormatOption,
+    CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode, LlmSource, LoraModulePath,
+    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
+    RendererSelection, Server, ServerConfig,
+};
+use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
+use vllm_tracing::{LogFormatter, LogLevel};
 
+use crate::cli::logging::LoggingConfig;
+use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
 
@@ -53,6 +67,26 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// The level of the Rust frontend's own logs for this command.
+    pub fn log_level(&self) -> LogLevel {
+        self.runtime()
+            .map_or_else(LogLevel::from_env, SharedRuntimeArgs::effective_log_level)
+    }
+
+    /// The formatter of the Rust frontend's own logs for this command.
+    pub fn log_formatter(&self) -> LogFormatter {
+        self.runtime()
+            .map_or_else(LogFormatter::default, SharedRuntimeArgs::log_formatter)
+    }
+
+    fn runtime(&self) -> Option<&SharedRuntimeArgs> {
+        match &self.command {
+            Command::Serve(args) => Some(&args.runtime),
+            Command::Frontend(args) => Some(&args.runtime),
+            _ => None,
+        }
+    }
+
     pub fn parse() -> Self {
         Self::try_parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit())
     }
@@ -111,11 +145,9 @@ pub enum BenchCommand {
 /// Arguments for the engine-free text renderer.
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct RenderArgs {
-    /// Model identifier or local model directory containing tokenizer files.
-    model: String,
-    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
-    #[arg(long)]
-    revision: Option<String>,
+    /// The model and the sources of its tokenizer and config files.
+    #[command(flatten)]
+    model: ModelArgs,
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
     hf_overrides: HfOverrides,
@@ -125,9 +157,24 @@ pub struct RenderArgs {
     /// HTTP bind port.
     #[arg(long, default_value_t = 8000)]
     port: u16,
+    /// TCP port for the gRPC Render service, bound on the HTTP host. When not
+    /// set, no gRPC server is started.
+    #[arg(long)]
+    grpc_port: Option<u16>,
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
+    /// Accept any requested model name. Like Python, it is set only through
+    /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    skip_model_name_validation: bool,
     /// Select the tool-call parser. Use `auto` to infer from the model or
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
@@ -145,21 +192,69 @@ pub struct RenderArgs {
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
     /// Override the model chat template with a file path or inline template.
+    /// Only the `hf` renderer supports it.
     #[arg(long)]
     chat_template: Option<String>,
     /// Default JSON keyword arguments merged into every chat-template render.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    reasoning_effort_map: Option<ReasoningEffortMap>,
+    /// Whether to trust the chat template provided in the request. Only the HF
+    /// chat-template renderer honors request templates; native renderers ignore
+    /// them.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    trust_request_chat_template: bool,
+    /// Exclude tool definitions from the prompt when `tool_choice` is `none`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    exclude_tools_when_tool_choice_none: bool,
     /// How message content is exposed to the chat template.
     #[arg(long, default_value_t)]
     chat_template_content_format: ChatTemplateContentFormatOption,
     /// Maximum model context length used for request validation. When not set,
     /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
+    /// Set it to the engine's for multimodal models: some image processors size
+    /// images to fit it.
     #[arg(long)]
     max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// LoRA adapters whose names are accepted as the request model, each as
+    /// `name=path` or a JSON object: `{"name": "name", "path": "lora_path",
+    /// "base_model_name": "id"}`. Rendering does not load adapter weights.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    lora_modules: Vec<LoraModulePath>,
+    /// Disable multimodal preprocessing and treat the model as language-only.
+    #[arg(long)]
+    language_model_only: bool,
+    /// Dtype that multimodal inputs are preprocessed in; set it to the
+    /// engine's `--dtype`. `auto` follows the model config's dtype (or its
+    /// `text_config`'s), running float32 checkpoints in bfloat16 like vLLM; it
+    /// does not inspect weights or the GPU, so pass the engine's dtype when it
+    /// differs.
+    #[arg(long, value_enum, default_value_t)]
+    dtype: DtypeArg,
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
+    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities
+    /// default to the model's default, else 999 items.
+    ///
+    /// Also accepts the engine's configurable form
+    /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
+    /// applies to rendering.
+    #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
+    limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Multimodal processor options as JSON, merged into each modality's
+    /// checkpoint configuration before its processor is constructed.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
+    mm_processor_kwargs: HashMap<String, Value>,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -168,24 +263,71 @@ pub struct RenderArgs {
 impl RenderArgs {
     pub(super) fn into_config(self) -> RenderConfig {
         let tls = self.ssl.tls_config();
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
+        } = self.model.file_sources();
 
         RenderConfig {
-            model: self.model,
-            revision: self.revision,
+            model: model.id,
+            revision: model.revision,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
+            skip_model_name_validation: self.skip_model_name_validation,
             host: self.host,
             port: self.port,
+            grpc_port: self.grpc_port,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
+            trust_request_chat_template: self.trust_request_chat_template,
+            exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            lora_modules: self.lora_modules,
+            language_model_only: self.language_model_only,
+            dtype: self.dtype.model_dtype(),
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_kwargs: self.mm_processor_kwargs,
             tls,
+        }
+    }
+}
+
+/// `vllm-rs render --dtype` values: vLLM's `--dtype` choices.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DtypeArg {
+    /// Follow the model config.
+    #[default]
+    Auto,
+    #[value(name = "float16", alias = "half")]
+    Float16,
+    #[value(name = "bfloat16")]
+    BFloat16,
+    #[value(name = "float32", alias = "float")]
+    Float32,
+}
+
+impl DtypeArg {
+    /// The fixed model dtype, or `None` for `auto`.
+    fn model_dtype(self) -> Option<ModelDtype> {
+        match self {
+            Self::Auto => None,
+            Self::Float16 => Some(ModelDtype::Float16),
+            Self::BFloat16 => Some(ModelDtype::BFloat16),
+            Self::Float32 => Some(ModelDtype::Float32),
         }
     }
 }
@@ -207,15 +349,10 @@ pub struct JsonStringList(pub Vec<String>);
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
-    #[serde(rename = "model_tag")]
-    /// Model identifier or local model directory used for backend loading and
-    /// public model ID.
-    pub model: String,
-
-    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
-    #[arg(long)]
-    #[serde(default)]
-    pub revision: Option<String>,
+    /// The model and the sources of its tokenizer and config files.
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub model: ModelArgs,
 
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     /// Objects merge recursively and arrays/scalars replace existing values.
@@ -228,6 +365,20 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub generation_config: GenerationConfigMode,
+
+    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
+    /// used with `--generation-config auto`, the override parameters will be
+    /// merged with the default config from the model. If used with
+    /// `--generation-config vllm`, only the override parameters are used.
+    /// `max_new_tokens` here also caps every request's `max_tokens`.
+    #[arg(
+        long,
+        value_parser = parse_json::<Map<String, Value>>,
+        default_value = "{}",
+        value_name = "JSON"
+    )]
+    #[serde(default)]
+    pub override_generation_config: Map<String, Value>,
 
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
@@ -258,6 +409,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub tool_strict_level: Option<ToolStrictLevel>,
+    /// Structured outputs configuration as a JSON object. The Rust frontend
+    /// reads `backend`, which compiles every constraint (default xgrammar);
+    /// the other fields are forwarded to the engine.
+    #[arg(long, value_parser = parse_json::<StructuredOutputsConfig>, value_name = "JSON")]
+    #[serde(default)]
+    pub structured_outputs_config: Option<StructuredOutputsConfig>,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -278,6 +435,19 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = NonZeroU32::MIN)]
     #[serde(default = "default_stream_interval")]
     pub stream_interval: NonZeroU32,
+    /// Maximum number of requests that can be in-flight (waiting or running)
+    /// at the same time. A request with `n` samples counts as `n`. When the
+    /// limit is reached, new requests are rejected with HTTP 503 so the
+    /// client can retry on another instance.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_num_queued_reqs: Option<u64>,
+    /// Maximum total prompt tokens of requests currently in the prefill phase.
+    /// Once the backlog reaches it, new requests are rejected with HTTP 503.
+    /// Accepts human-readable counts such as `32k`, like Python.
+    #[arg(long, value_parser = parse_token_count)]
+    #[serde(default)]
+    pub max_num_queued_tokens: Option<u64>,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -289,7 +459,7 @@ pub struct SharedRuntimeArgs {
     pub http_timeout_keep_alive: Option<u64>,
 
     /// The file path to the chat template, or the template in single-line form
-    /// for the specified model.
+    /// for the specified model. Only the `hf` renderer supports it.
     #[arg(long)]
     #[serde(default)]
     pub chat_template: Option<String>,
@@ -306,16 +476,46 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
 
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    #[serde(default)]
+    pub reasoning_effort_map: Option<ReasoningEffortMap>,
+    /// Whether to trust the chat template provided in the request. If False,
+    /// the server will always use the chat template specified by
+    /// `--chat-template` or the ones from tokenizer. Only the HF chat-template
+    /// renderer honors request templates; native renderers ignore them.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub trust_request_chat_template: bool,
+
+    /// If specified, exclude tool definitions in prompts when
+    /// tool_choice='none'.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub exclude_tools_when_tool_choice_none: bool,
+
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
     ///
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); the extra
     /// profiling options are forwarded to the engine untouched.
-    /// Unspecified modalities are unlimited.
+    /// Unspecified modalities default to the model's default, else 999 items.
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+
+    /// Arguments to be forwarded to the model's processor for multi-modal data,
+    /// e.g., image processor.
+    /// Merged into the checkpoint processor configuration at startup.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub mm_processor_kwargs: HashMap<String, Value>,
 
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
@@ -323,6 +523,15 @@ pub struct SharedRuntimeArgs {
     #[arg(long, num_args = 1.., value_name = "MODULE")]
     #[serde(default)]
     pub lora_modules: Vec<LoraModulePath>,
+
+    /// Default LoRA adapter per modality, as a JSON object mapping a modality
+    /// to an adapter path or repo id (e.g. `{"audio": "org/speech-lora"}`).
+    /// Each adapter is loaded at startup under its modality's name and serves
+    /// chat requests that name no adapter but carry that modality. Requires
+    /// `--enable-lora`.
+    #[arg(long, value_parser = parse_json::<DefaultMmLoras>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub default_mm_loras: DefaultMmLoras,
 
     /// The format to render message content within a chat template.
     ///
@@ -334,14 +543,54 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub chat_template_content_format: ChatTemplateContentFormatOption,
 
+    /// When `--max-logprobs` is specified, represents single tokens as
+    /// strings of the form 'token_id:{token_id}' so that tokens that are not
+    /// JSON-encodable can be identified.
+    ///
+    /// A request's own `return_tokens_as_token_ids` overrides this default.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub return_tokens_as_token_ids: bool,
+
     /// Log a summary line for each completed request, including prompt/output
     /// token counts and finish reason.
     #[arg(long)]
     #[serde(default)]
     pub enable_log_requests: bool,
 
-    /// Include prompt_tokens_details in usage when cached prompt tokens are
-    /// present.
+    /// If set to True, log model outputs (generations). Output text and
+    /// finish reasons are logged at INFO, while output token IDs are logged at
+    /// DEBUG. Requires `--enable-log-requests`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_log_outputs: bool,
+
+    /// If set to False, output deltas will not be logged. Relevant only if
+    /// `--enable-log-outputs` is set.
+    #[arg(
+        long,
+        action = ArgAction::Set,
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default = "default_enable_log_deltas")]
+    pub enable_log_deltas: bool,
+
+    /// Max number of prompt characters or prompt ID numbers being printed in
+    /// log. The default of None means unlimited.
+    ///
+    /// Also bounds logged output characters and output token IDs.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_log_len: Option<usize>,
+
+    /// Include prompt_tokens_details in usage, including cached and newly
+    /// cached prompt tokens.
     #[arg(
         long,
         default_missing_value = "true",
@@ -355,6 +604,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_per_request_metrics: bool,
 
+    /// If set to True, including usage on every request.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_force_include_usage: bool,
+
     /// If specified, API server will add X-Request-Id header to responses.
     #[arg(
         long,
@@ -364,14 +618,35 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
-    /// Register the scale-out `/inference/v1/generate` endpoint.
+    /// If set to True, log the stack trace of error responses. Defaults to
+    /// `VLLM_SERVER_DEV_MODE`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub log_error_stack: Option<bool>,
+
+    /// Register the scale-out `/inference/v1/generate` endpoint. Defaults to
+    /// `VLLM_SERVER_DEV_MODE`.
     #[arg(
         long,
         default_missing_value = "true",
         num_args = 0..=1
     )]
     #[serde(default)]
-    pub enable_scale_out: bool,
+    pub enable_scale_out: Option<bool>,
+
+    /// If set to True, only enable the Tokens In<>Out endpoint.
+    /// This is intended for use in a Disaggregated Everything setup.
+    ///
+    /// Implies `--enable-scale-out` and `--skip-tokenizer-init`. Unlike Python,
+    /// it does not serve the unauthenticated legacy `/abort_requests`; use
+    /// `/inference/v1/abort_requests`.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub tokens_only: bool,
 
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
@@ -380,6 +655,18 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
     pub sse_keep_alive_interval: u64,
+
+    /// Controls the `system_fingerprint` field on responses: `full`
+    /// (`vllm-<version>[-<parallelism>]-<config hash>`), `hash` (without the
+    /// parallelism), `custom` (`--fingerprint-value`), or `none`.
+    #[arg(long, value_enum, default_value_t)]
+    #[serde(default)]
+    pub fingerprint_mode: FingerprintModeArg,
+
+    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
+    #[arg(long)]
+    #[serde(default)]
+    pub fingerprint_value: Option<String>,
 
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
@@ -396,6 +683,112 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub disable_log_stats: bool,
+
+    /// Custom Prometheus histogram bucket boundaries, as a JSON mapping from
+    /// bucket-family key to a list of strictly increasing, positive, finite
+    /// upper bounds. When a family key is present, its list replaces the
+    /// default buckets for every histogram in that family; families not listed
+    /// keep their defaults. Known families: `request_latency`,
+    /// `time_to_first_token`, `inter_token_latency`, `iteration_tokens`,
+    /// `request_params_n`, `request_num_preemptions`, `request_tokens`,
+    /// `kv_cache_residency`.
+    #[arg(long, value_parser = parse_json::<CustomHistogramBuckets>, default_value = "{}", value_name = "JSON")]
+    #[serde(default)]
+    pub custom_histogram_buckets: CustomHistogramBuckets,
+
+    /// Seconds between periodic engine statistics logs (default 10). Like
+    /// Python, it is set only through `VLLM_LOG_STATS_INTERVAL`.
+    #[arg(long, hide = true, env = "VLLM_LOG_STATS_INTERVAL")]
+    #[serde(default)]
+    pub log_stats_interval: Option<LogStatsInterval>,
+
+    /// Keep external request IDs as engine-core request IDs instead of adding
+    /// a random suffix. Like Python, it is set only through the deprecated
+    /// `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(default)]
+    pub disable_request_id_randomization: bool,
+
+    /// Keep the API server running after the engine becomes permanently
+    /// unhealthy. Like Python, it is set only through
+    /// `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(default)]
+    pub keep_alive_on_engine_death: bool,
+
+    /// Maximum size in bytes of an HTTP request body and of a gRPC request
+    /// message (default 32 MiB); `0` removes the limit, like the Python
+    /// frontend, which has none. It is set only through
+    /// `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+        value_parser = parse_byte_count
+    )]
+    #[serde(default)]
+    pub http_max_request_body_size: Option<usize>,
+
+    /// Accept any requested model name, served by the base model unless it
+    /// names a loaded LoRA adapter. Like Python, it is set only through
+    /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    #[serde(default)]
+    pub skip_model_name_validation: bool,
+
+    /// Register the development routes and default `--log-error-stack`. Like
+    /// Python, it is set only through `VLLM_SERVER_DEV_MODE`, which must be an
+    /// integer.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SERVER_DEV_MODE",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(default)]
+    pub server_dev_mode: bool,
+
+    /// Register the routes that load and unload LoRA adapters at runtime. Like
+    /// Python, it is set only through `VLLM_ALLOW_RUNTIME_LORA_UPDATING`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    #[serde(default)]
+    pub allow_runtime_lora_updating: bool,
+
+    /// Upper bound on a request's `n` (default 16384). Like Python, it is set
+    /// only through `VLLM_MAX_N_SEQUENCES`.
+    #[arg(long, hide = true, env = "VLLM_MAX_N_SEQUENCES", value_parser = parse_int)]
+    #[serde(default)]
+    pub max_n_sequences: Option<i64>,
 
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
@@ -432,10 +825,35 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
+    /// Disable the per-response HTTP access log.
+    #[arg(
+        long,
+        visible_alias = "disable-uvicorn-access-log",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default, alias = "disable_uvicorn_access_log")]
+    pub disable_access_log: bool,
+
+    /// Comma-separated request paths whose responses the HTTP access log
+    /// skips, such as "/health,/metrics" for frequent probes. Paths match
+    /// exactly, without the query string.
+    #[arg(long)]
+    #[serde(default)]
+    pub disable_access_log_for_endpoints: Option<String>,
+
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     #[serde(default, flatten)]
     pub ssl: SslArgs,
+
+    /// Path prefix for a server behind a path-based routing proxy.
+    ///
+    /// Every route is served both under this prefix and at its bare path:
+    /// with `/llm`, `/llm/v1/models` and `/v1/models` reach the same route.
+    #[arg(long)]
+    #[serde(default)]
+    pub root_path: Option<String>,
 
     /// Profiler configuration forwarded by the Python supervisor.
     ///
@@ -446,12 +864,41 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub profiler_config: Option<ProfilerConfig>,
 
+    /// Log level of the Rust frontend and the managed Python engine, one of
+    /// Python's level names (CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET; any
+    /// case). Overrides `--logging-config.log_level` and `VLLM_LOGGING_LEVEL`.
+    #[arg(long)]
+    #[serde(default)]
+    pub log_level: Option<LogLevel>,
+
+    /// vLLM logging configuration as a JSON object. The Rust frontend's own
+    /// logs honor `log_level` and `formatter` (`text` or `json`); the
+    /// remaining fields apply to Python logging only. The Python supervisor
+    /// sends the resolved `log_level` and `formatter`.
+    #[arg(long, value_parser = parse_json::<LoggingConfig>, value_name = "JSON")]
+    #[serde(default)]
+    pub logging_config: Option<LoggingConfig>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
     #[command(flatten)]
     #[serde(default, flatten)]
     pub unsupported: UnsupportedArgs,
+}
+
+/// The server and engine-core settings of one Rust frontend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontendConfig {
+    pub server: ServerConfig,
+    pub engine_core: EngineCoreConfig,
+}
+
+impl FrontendConfig {
+    /// Build the server that serves this engine-core engine.
+    pub fn into_server(self) -> Server {
+        Server::new(self.server, LlmSource::EngineCore(self.engine_core))
+    }
 }
 
 impl SharedRuntimeArgs {
@@ -473,6 +920,16 @@ impl SharedRuntimeArgs {
             .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
     }
 
+    /// Interval between periodic engine statistics logs, or `None` to never
+    /// log.
+    pub fn log_stats_interval(&self) -> Option<Duration> {
+        match self.log_stats_interval {
+            None => Some(DEFAULT_LOG_STATS_INTERVAL),
+            Some(LogStatsInterval::Every(interval)) => Some(interval),
+            Some(LogStatsInterval::Never) => None,
+        }
+    }
+
     /// Return the configured profiler mode, when profiling is enabled.
     pub fn profiler(&self) -> Option<String> {
         self.profiler_config.as_ref().and_then(|c| c.profiler.clone())
@@ -487,6 +944,56 @@ impl SharedRuntimeArgs {
             .expect("profiler config serialization should not fail")
     }
 
+    /// Return the backend that compiles every structured-output constraint.
+    pub fn structured_outputs_backend(&self) -> StructuredOutputBackend {
+        self.structured_outputs_config
+            .as_ref()
+            .map(|config| config.backend)
+            .unwrap_or_default()
+    }
+
+    /// Return the structured outputs config JSON for managed Python engine
+    /// forwarding.
+    pub fn structured_outputs_config_json(&self) -> Option<String> {
+        self.structured_outputs_config.as_ref().map(|config| {
+            serde_json::to_string(config)
+                .expect("structured outputs config serialization should not fail")
+        })
+    }
+
+    /// The level of the Rust frontend's own logs, with Python's precedence:
+    /// `--log-level`, then `--logging-config.log_level`, then
+    /// `VLLM_LOGGING_LEVEL`, then `INFO`. `RUST_LOG` still refines it per
+    /// target (`vllm_tracing`).
+    pub fn effective_log_level(&self) -> LogLevel {
+        self.log_level
+            .or_else(|| self.logging_config.as_ref()?.log_level)
+            .unwrap_or_else(LogLevel::from_env)
+    }
+
+    /// The formatter of the Rust frontend's own logs,
+    /// `--logging-config.formatter`, `text` by default.
+    pub fn log_formatter(&self) -> LogFormatter {
+        self.logging_config
+            .as_ref()
+            .and_then(|config| config.formatter)
+            .unwrap_or_default()
+    }
+
+    /// Return the logging config as JSON for managed Python engine forwarding,
+    /// with the level resolved as for this frontend, or `None` when no logging
+    /// argument is given and the engine reads the env vars itself.
+    pub fn logging_config_json(&self) -> Option<String> {
+        if self.log_level.is_none() && self.logging_config.is_none() {
+            return None;
+        }
+        let config = LoggingConfig {
+            log_level: Some(self.effective_log_level()),
+            ..self.logging_config.clone().unwrap_or_default()
+        };
+        Some(serde_json::to_string(&config).expect("logging config serialization should not fail"))
+    }
+
     /// Return the per-modality limits as JSON for managed Python engine
     /// forwarding, or `None` when nothing is configured.
     ///
@@ -499,13 +1006,13 @@ impl SharedRuntimeArgs {
         })
     }
 
-    /// Apply fallback logic for API key configuration from env variables.
-    fn apply_env_api_key_fallback(&mut self) {
-        if self.api_key.is_empty()
-            && let Ok(api_key) = std::env::var("VLLM_API_KEY")
-        {
-            self.api_key.push(api_key);
-        }
+    /// Return the multimodal processor kwargs as JSON for managed Python engine
+    /// forwarding, or `None` when nothing is configured.
+    pub fn mm_processor_kwargs_json(&self) -> Option<String> {
+        (!self.mm_processor_kwargs.is_empty()).then(|| {
+            serde_json::to_string(&self.mm_processor_kwargs)
+                .expect("mm-processor-kwargs serialization should not fail")
+        })
     }
 
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
@@ -522,57 +1029,92 @@ impl SharedRuntimeArgs {
         engine_start_index: u32,
         engine_count: usize,
         data_parallel_size: usize,
-    ) -> Config {
+    ) -> FrontendConfig {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
+        let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
+        let fingerprint_mode = self.fingerprint_mode_config();
+        let admission_limits = self.admission_limits();
         let cors = self.cors_config();
+        let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let structured_outputs_backend = self.structured_outputs_backend();
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
+        } = self.model_args().file_sources();
 
-        Config {
-            transport_mode: TransportMode::Bootstrapped {
-                input_listener_fd,
-                output_listener_fd,
-                engine_start_index,
-                engine_count,
-                data_parallel_size,
-                ready_timeout,
+        FrontendConfig {
+            server: ServerConfig {
+                model: model.id,
+                revision: model.revision,
+                tokenizer,
+                hf_config,
+                skip_tokenizer_init,
+                hf_token,
+                hf_overrides: self.hf_overrides,
+                generation_config: self.generation_config,
+                override_generation_config: self.override_generation_config,
+                served_model_name: self.served_model_name,
+                listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
+                grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
+                tool_call_parser: self.tool_call_parser,
+                reasoning_parser: self.reasoning_parser,
+                tool_strict_level: self.tool_strict_level,
+                structured_outputs_backend,
+                renderer: self.renderer,
+                language_model_only: self.language_model_only,
+                chat_template: self.chat_template,
+                default_chat_template_kwargs: self.default_chat_template_kwargs,
+                reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
+                trust_request_chat_template: self.trust_request_chat_template,
+                exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
+                limit_mm_per_prompt: self.limit_mm_per_prompt,
+                mm_processor_kwargs: self.mm_processor_kwargs,
+                chat_template_content_format: self.chat_template_content_format,
+                max_logprobs: self.max_logprobs,
+                api_server_options,
+                fingerprint_mode,
+                cors,
+                access_log,
+                tls,
+                root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
+                api_keys: self.api_key,
+                shutdown_timeout,
+                keep_alive_on_engine_death: self.keep_alive_on_engine_death,
+                keep_alive_timeout,
             },
-            coordinator_mode: match coordinator_address {
-                Some(address) => CoordinatorMode::External { address },
-                None => CoordinatorMode::None,
+            engine_core: EngineCoreConfig {
+                transport_mode: TransportMode::Bootstrapped {
+                    input_listener_fd,
+                    output_listener_fd,
+                    engine_start_index,
+                    engine_count,
+                    data_parallel_size,
+                    ready_timeout,
+                },
+                coordinator_mode: match coordinator_address {
+                    Some(address) => CoordinatorMode::External { address },
+                    None => CoordinatorMode::None,
+                },
+                lora_modules: self.lora_modules,
+                default_mm_loras: self.default_mm_loras,
+                stream_interval: self.stream_interval,
+                admission_limits,
+                disable_log_stats: self.disable_log_stats,
+                log_stats_interval,
+                custom_histogram_buckets: self.custom_histogram_buckets,
+                disable_request_id_randomization: self.disable_request_id_randomization,
+                // The engine is launched and supervised by another process.
+                manages_engine: false,
+                profiler,
             },
-            model: self.model,
-            revision: self.revision,
-            hf_overrides: self.hf_overrides,
-            generation_config: self.generation_config,
-            served_model_name: self.served_model_name,
-            listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
-            grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
-            tool_call_parser: self.tool_call_parser,
-            reasoning_parser: self.reasoning_parser,
-            tool_strict_level: self.tool_strict_level,
-            renderer: self.renderer,
-            language_model_only: self.language_model_only,
-            chat_template: self.chat_template,
-            default_chat_template_kwargs: self.default_chat_template_kwargs,
-            limit_mm_per_prompt: self.limit_mm_per_prompt,
-            lora_modules: self.lora_modules,
-            chat_template_content_format: self.chat_template_content_format,
-            max_logprobs: self.max_logprobs,
-            stream_interval: self.stream_interval,
-            api_server_options,
-            cors,
-            tls,
-            api_keys: self.api_key,
-            disable_log_stats: self.disable_log_stats,
-            shutdown_timeout,
-            // The engine is launched and supervised by another process.
-            manages_engine: false,
-            keep_alive_timeout,
-            profiler,
         }
     }
 
@@ -584,69 +1126,166 @@ impl SharedRuntimeArgs {
         grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
-        engine_count: usize,
+        topology: &DataParallelTopology,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
         manages_engine: bool,
-    ) -> Config {
+    ) -> FrontendConfig {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
+        let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
+        let fingerprint_mode = self.fingerprint_mode_config();
+        let admission_limits = self.admission_limits();
         let cors = self.cors_config();
+        let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let structured_outputs_backend = self.structured_outputs_backend();
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
+        } = self.model_args().file_sources();
 
-        Config {
-            transport_mode: TransportMode::HandshakeOwner {
-                handshake_address,
-                advertised_host,
-                engine_count,
-                ready_timeout,
-                local_input_address,
-                local_output_address,
+        FrontendConfig {
+            server: ServerConfig {
+                model: model.id,
+                revision: model.revision,
+                tokenizer,
+                hf_config,
+                skip_tokenizer_init,
+                hf_token,
+                hf_overrides: self.hf_overrides,
+                generation_config: self.generation_config,
+                override_generation_config: self.override_generation_config,
+                served_model_name: self.served_model_name,
+                listener_mode,
+                grpc_listener_mode,
+                tool_call_parser: self.tool_call_parser,
+                reasoning_parser: self.reasoning_parser,
+                tool_strict_level: self.tool_strict_level,
+                structured_outputs_backend,
+                renderer: self.renderer,
+                language_model_only: self.language_model_only,
+                chat_template: self.chat_template,
+                default_chat_template_kwargs: self.default_chat_template_kwargs,
+                reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
+                trust_request_chat_template: self.trust_request_chat_template,
+                exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
+                limit_mm_per_prompt: self.limit_mm_per_prompt,
+                mm_processor_kwargs: self.mm_processor_kwargs,
+                chat_template_content_format: self.chat_template_content_format,
+                max_logprobs: self.max_logprobs,
+                api_server_options,
+                fingerprint_mode,
+                cors,
+                access_log,
+                tls,
+                root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
+                api_keys: self.api_key,
+                shutdown_timeout,
+                keep_alive_on_engine_death: self.keep_alive_on_engine_death,
+                keep_alive_timeout,
             },
-            coordinator_mode: CoordinatorMode::MaybeInProc,
-            model: self.model,
-            revision: self.revision,
-            hf_overrides: self.hf_overrides,
-            generation_config: self.generation_config,
-            served_model_name: self.served_model_name,
-            listener_mode,
-            grpc_listener_mode,
-            tool_call_parser: self.tool_call_parser,
-            reasoning_parser: self.reasoning_parser,
-            tool_strict_level: self.tool_strict_level,
-            renderer: self.renderer,
-            language_model_only: self.language_model_only,
-            chat_template: self.chat_template,
-            default_chat_template_kwargs: self.default_chat_template_kwargs,
-            limit_mm_per_prompt: self.limit_mm_per_prompt,
-            lora_modules: self.lora_modules,
-            chat_template_content_format: self.chat_template_content_format,
-            max_logprobs: self.max_logprobs,
-            stream_interval: self.stream_interval,
-            api_server_options,
-            cors,
-            tls,
-            api_keys: self.api_key,
-            disable_log_stats: self.disable_log_stats,
-            shutdown_timeout,
-            manages_engine,
-            keep_alive_timeout,
-            profiler,
+            engine_core: EngineCoreConfig {
+                transport_mode: TransportMode::HandshakeOwner {
+                    handshake_address,
+                    advertised_host,
+                    engine_start_index: topology.frontend_engine_start_index(),
+                    engine_count: topology.frontend_engine_count(),
+                    data_parallel_size: topology.data_parallel_size,
+                    ready_timeout,
+                    local_input_address,
+                    local_output_address,
+                },
+                coordinator_mode: CoordinatorMode::MaybeInProc,
+                lora_modules: self.lora_modules,
+                default_mm_loras: self.default_mm_loras,
+                stream_interval: self.stream_interval,
+                admission_limits,
+                disable_log_stats: self.disable_log_stats,
+                log_stats_interval,
+                custom_histogram_buckets: self.custom_histogram_buckets,
+                disable_request_id_randomization: self.disable_request_id_randomization,
+                manages_engine,
+                profiler,
+            },
+        }
+    }
+
+    /// The model arguments with `--tokens-only` applied, which implies
+    /// `--skip-tokenizer-init` as in Python's `EngineArgs`.
+    fn model_args(&self) -> ModelArgs {
+        ModelArgs {
+            skip_tokenizer_init: self.model.skip_tokenizer_init || self.tokens_only,
+            ..self.model.clone()
         }
     }
 
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
+            log_outputs: OutputLogConfig {
+                outputs: match (self.enable_log_outputs, self.enable_log_deltas) {
+                    (false, _) => OutputLogging::Disabled,
+                    (true, false) => OutputLogging::Complete,
+                    (true, true) => OutputLogging::CompleteAndDeltas,
+                },
+                max_log_len: self.max_log_len,
+            },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
+            default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
+            force_include_usage: self.enable_force_include_usage,
             enable_request_id_headers: self.enable_request_id_headers,
-            enable_scale_out: self.enable_scale_out,
+            log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
+            enable_scale_out: self.tokens_only
+                || self.enable_scale_out.unwrap_or(self.server_dev_mode),
+            skip_model_name_validation: self.skip_model_name_validation,
+            server_dev_mode: self.server_dev_mode,
+            allow_runtime_lora_updating: self.allow_runtime_lora_updating,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
+            request_body_limit_bytes: match self.http_max_request_body_size {
+                None => Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES),
+                Some(0) => None,
+                Some(limit) => Some(limit),
+            },
+            max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+        }
+    }
+
+    fn fingerprint_mode_config(&self) -> FingerprintMode {
+        match self.fingerprint_mode {
+            FingerprintModeArg::Full => FingerprintMode::Full,
+            FingerprintModeArg::Hash => FingerprintMode::Hash,
+            // Like Python, `custom` without a value reports no fingerprint.
+            FingerprintModeArg::Custom => (self.fingerprint_value.clone())
+                .map_or(FingerprintMode::None, FingerprintMode::Custom),
+            FingerprintModeArg::None => FingerprintMode::None,
+        }
+    }
+
+    fn admission_limits(&self) -> AdmissionLimits {
+        AdmissionLimits {
+            max_num_queued_reqs: self.max_num_queued_reqs,
+            max_num_queued_tokens: self.max_num_queued_tokens,
+        }
+    }
+
+    fn access_log_config(&self) -> AccessLogConfig {
+        AccessLogConfig {
+            enabled: !self.disable_access_log,
+            excluded_paths: (self.disable_access_log_for_endpoints.iter())
+                .flat_map(|paths| paths.split(','))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
@@ -660,8 +1299,30 @@ impl SharedRuntimeArgs {
     }
 }
 
+/// `--fingerprint-mode` values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FingerprintModeArg {
+    #[default]
+    Full,
+    Hash,
+    Custom,
+    None,
+}
+
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_enable_log_deltas() -> bool {
+    true
+}
+
+/// Parse a token count written as Python's `human_readable_int`.
+fn parse_token_count(value: &str) -> Result<u64, String> {
+    parse_human_readable_int(value)
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or_else(|| format!("expected a token count such as 32768 or 32k, got `{value}`"))
 }
 
 fn default_stream_interval() -> NonZeroU32 {
@@ -697,18 +1358,128 @@ pub struct ProfilerConfig {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// Structured outputs configuration parsed from `--structured-outputs-config`.
+///
+/// Only `backend` is read by the Rust frontend. All other fields are accepted
+/// but ignored — they are consumed by the Python engine layer.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct StructuredOutputsConfig {
+    /// Backend that compiles every structured-output constraint.
+    #[serde(default)]
+    pub backend: StructuredOutputBackend,
+    /// Additional Python structured outputs config fields consumed by the
+    /// engine layer.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Keys are API effort names, so unknown efforts fail at startup.
+type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
+
+/// Parsed `VLLM_LOG_STATS_INTERVAL`, deserialized from seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(from = "f64")]
+pub enum LogStatsInterval {
+    Every(Duration),
+    /// Too long to ever elapse, such as `inf`, which Python sleeps forever on.
+    Never,
+}
+
+/// Interpret seconds like Python: a non-positive value falls back to the
+/// default, and any positive one is slept on as is.
+impl From<f64> for LogStatsInterval {
+    fn from(seconds: f64) -> Self {
+        if seconds.is_nan() || seconds <= 0.0 {
+            return Self::Every(DEFAULT_LOG_STATS_INTERVAL);
+        }
+        Duration::try_from_secs_f64(seconds).map_or(Self::Never, Self::Every)
+    }
+}
+
+impl FromStr for LogStatsInterval {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let seconds: f64 = value
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{value}` is not a number of seconds"))?;
+        Ok(seconds.into())
+    }
+}
+
+/// Parse an integer environment variable as Python's `int(value)`, for
+/// decimal integers in the `i64` range.
+fn parse_int(value: &str) -> Result<i64, String> {
+    value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))
+}
+
+/// Parse an integer flag environment variable as Python's `bool(int(value))`,
+/// for decimal integers in the `i64` range.
+fn parse_int_flag(value: &str) -> Result<bool, String> {
+    Ok(parse_int(value)? != 0)
+}
+
+/// Parse a boolean flag environment variable as Python's
+/// `value.strip().lower() in ("1", "true")`; any other value is `false`.
+fn parse_truthy_flag(value: &str) -> Result<bool, String> {
+    Ok(matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
+}
+
+/// Parse a byte count environment variable as a non-negative decimal integer.
+fn parse_byte_count(value: &str) -> Result<usize, String> {
+    value.trim().parse().map_err(|_| format!("`{value}` is not a number of bytes"))
+}
+
+/// Deserialize JSON, naming the path of a failing field, such as
+/// `logging_config.formatter` in `--args-json`.
+fn from_json_str<T: DeserializeOwned>(value: &str) -> Result<T, String> {
+    let mut deserializer = serde_json::Deserializer::from_str(value);
+    let value =
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|e| e.to_report_string())?;
+    deserializer.end().map_err(|e| e.to_report_string())?;
+    Ok(value)
+}
+
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
-    serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
+    from_json_str(value).map_err(|e| format!("invalid JSON object: {e}"))
 }
 
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
-    let mut args: SharedRuntimeArgs = serde_json::from_str(value)
-        .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
     // --args-json is parsed with serde, so clap's env support does not run for
-    // the Python-supervised frontend path.
-    args.apply_env_api_key_fallback();
+    // the Python-supervised frontend path; Python passes the settings it
+    // resolves from the environment instead.
+    let args: SharedRuntimeArgs =
+        from_json_str(value).map_err(|e| format!("invalid JSON arguments: {e}"))?;
     args.unsupported.check()?;
     Ok(args)
+}
+
+/// Parser for `--args-json`. Unlike a function value parser, it reports an
+/// error without echoing the JSON, which holds every non-default argument from
+/// Python and would bury the error.
+#[derive(Clone)]
+struct RuntimeArgsJsonParser;
+
+impl clap::builder::TypedValueParser for RuntimeArgsJsonParser {
+    type Value = SharedRuntimeArgs;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let error = |message: String| {
+            clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                format!("{message}\n"),
+            )
+            .with_cmd(cmd)
+        };
+        let value = value.to_str().ok_or_else(|| error("--args-json is not valid UTF-8".into()))?;
+        parse_runtime_args_json(value).map_err(error)
+    }
 }
 
 /// Arguments for running the Rust frontend as a Python-bootstrapped worker.
@@ -746,13 +1517,13 @@ pub struct FrontendArgs {
     pub data_parallel_size: Option<usize>,
 
     /// Shared frontend arguments as one JSON object.
-    #[arg(long = "args-json", value_parser = parse_runtime_args_json, value_name = "JSON")]
+    #[arg(long = "args-json", value_parser = RuntimeArgsJsonParser, value_name = "JSON")]
     pub runtime: SharedRuntimeArgs,
 }
 
 impl FrontendArgs {
     /// Convert the CLI arguments into the OpenAI server's runtime config.
-    pub fn into_config(self) -> Config {
+    pub fn into_config(self) -> FrontendConfig {
         let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
@@ -786,8 +1557,8 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
-    /// TCP port for the gRPC Inference and Control services. When not set, no
-    /// gRPC server is started.
+    /// TCP port for the gRPC Inference, Control, and Render services. When not
+    /// set, no gRPC server is started.
     #[arg(long)]
     pub grpc_port: Option<u16>,
 
@@ -803,15 +1574,23 @@ pub struct ServeArgs {
     /// Managed Python headless-engine arguments.
     #[command(flatten)]
     pub managed_engine: ManagedEngineArgs,
+
+    /// Data parallel load-balancing arguments.
+    #[command(flatten)]
+    pub data_parallel_lb: DataParallelLbArgs,
 }
 
 impl ServeArgs {
     /// Build the OpenAI-server runtime config used after the managed Python
     /// engine starts.
-    pub fn to_frontend_config(&self, handshake_address: String) -> Config {
+    pub fn to_frontend_config(
+        &self,
+        handshake_address: String,
+        topology: &DataParallelTopology,
+    ) -> FrontendConfig {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
-            self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
+            topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -835,7 +1614,7 @@ impl ServeArgs {
             grpc_listener_mode,
             handshake_address,
             self.managed_engine.handshake_host.clone(),
-            self.managed_engine.data_parallel_size,
+            topology,
             local_input_address,
             local_output_address,
             // `--data-parallel-size-local 0` runs the frontend without a local engine.
@@ -845,17 +1624,50 @@ impl ServeArgs {
 
     /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
-    pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
-        let reasoning_parser =
-            effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
+    pub fn to_managed_engine_config(
+        &self,
+        handshake_port: u16,
+        topology: &DataParallelTopology,
+        client_handshake_address: Option<String>,
+    ) -> ManagedEngineConfig {
+        let reasoning_parser = effective_engine_reasoning_parser(
+            &self.runtime.reasoning_parser,
+            &self.runtime.model.id,
+        );
         let profiler_config = self.runtime.profiler_config_json();
         let hf_overrides = (!self.runtime.hf_overrides.is_empty()).then(|| {
             serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
         });
+        // The engine reads it too, e.g. Llama 4 attention temperature tuning.
+        let override_generation_config = (!self.runtime.override_generation_config.is_empty())
+            .then(|| {
+                serde_json::to_string(&self.runtime.override_generation_config)
+                    .expect("JSON object serializes")
+            });
 
-        self.managed_engine.clone().into_config(
-            self.runtime.model.clone(),
-            self.runtime.revision.clone(),
+        let mut managed_engine = self.managed_engine.clone();
+        managed_engine.python_args.extend(self.runtime.model_args().python_args());
+        if let Some(logging_config) = self.runtime.logging_config_json() {
+            managed_engine
+                .python_args
+                .extend(["--logging-config".to_string(), logging_config]);
+        }
+        if let Some(mm_processor_kwargs) = self.runtime.mm_processor_kwargs_json() {
+            managed_engine
+                .python_args
+                .extend(["--mm-processor-kwargs".to_string(), mm_processor_kwargs]);
+        }
+        // The engine checks the adapters against the model at startup, as it
+        // does under the Python frontend.
+        if !self.runtime.default_mm_loras.is_empty() {
+            let default_mm_loras = serde_json::to_string(&self.runtime.default_mm_loras)
+                .expect("default-mm-loras serialization should not fail");
+            managed_engine
+                .python_args
+                .extend(["--default-mm-loras".to_string(), default_mm_loras]);
+        }
+        managed_engine.into_config(
+            self.runtime.model.id.clone(),
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),
@@ -865,12 +1677,26 @@ impl ServeArgs {
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
             hf_overrides,
+            override_generation_config,
+            self.runtime.structured_outputs_config_json(),
+            topology,
+            client_handshake_address,
         )
     }
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
     selection.resolve_reasoning_name(model).map(str::to_owned)
+}
+
+/// Allocate a fresh IPC handshake endpoint for a frontend that serves only its
+/// node's engines (hybrid or external DP LB).
+pub fn frontend_ipc_handshake_address() -> String {
+    let preferred_base_path = std::env::var_os("VLLM_RPC_BASE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let handshake = preferred_base_path.join(format!("vllm-rs-h-{}", Uuid::new_v4().simple()));
+    format!("ipc://{}", handshake.to_string_lossy())
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

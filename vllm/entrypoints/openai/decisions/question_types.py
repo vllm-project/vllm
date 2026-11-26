@@ -10,7 +10,7 @@ probabilities.
 import math
 import string
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 
@@ -23,19 +23,22 @@ class StructuredDecisionError(ValueError):
 LABELS = tuple(string.ascii_uppercase)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Option:
     name: str
     description: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Question:
     id: str
     type: "QuestionType"
     instructions: str
     options: tuple[Option, ...]
     labels: tuple[str, ...]
+    #: The request's instructions and criteria as sent. Holds dicts, so it is
+    #: left out of equality and hashing.
+    raw: tuple[Any, Any] | None = field(default=None, compare=False, repr=False)
 
 
 class QuestionType(ABC):
@@ -51,9 +54,9 @@ class QuestionType(ABC):
     def answer(
         self, question: Question, probs: list[float], label_mass: float
     ) -> dict[str, Any]:
-        """The answer for ``question``. ``probs[i]`` is the probability of
-        ``question.labels[i]`` among the labels, and the list sums to 1.
-        ``label_mass`` is the labels' total probability over the vocabulary."""
+        """The answer for `question`. `probs[i]` is the probability of
+        `question.labels[i]` among the labels, and the list sums to 1.
+        `label_mass` is the labels' total probability over the vocabulary."""
 
     def reply_line(self, label: str, option: Option) -> str:
         return (
@@ -62,13 +65,21 @@ class QuestionType(ABC):
             else f"{label}: {option.name}"
         )
 
-    def prompt(self, question: Question) -> str:
-        """The question as the model reads it, after the state."""
-        lines = [f"Question: {question.instructions}"] if question.instructions else []
-        for label, o in zip(question.labels, question.options):
-            lines.append(self.reply_line(label, o))
+    def body(self, question: Question) -> str:
+        """The options and the reply instruction, after the question's heading."""
+        lines = [
+            self.reply_line(label, o)
+            for label, o in zip(question.labels, question.options)
+        ]
         lines.append(self.reply_instruction)
         return "\n".join(lines)
+
+    def prompt(self, question: Question) -> str:
+        """The question as the model reads it, after the state."""
+        body = self.body(question)
+        if not question.instructions:
+            return body
+        return f"Question: {question.instructions}\n{body}"
 
 
 QUESTION_TYPES: dict[str, QuestionType] = {}
@@ -112,6 +123,7 @@ def build_question(
         raise StructuredDecisionError(
             f"question {qid!r}: at most {limit} options for this model"
         )
+    raw_instructions = instructions
     if not isinstance(instructions, str):
         instructions = "" if instructions is None else str(instructions)
     return Question(
@@ -120,6 +132,7 @@ def build_question(
         instructions=instructions,
         options=tuple(options),
         labels=qtype.label_set[: len(options)],
+        raw=(raw_instructions, criteria),
     )
 
 
@@ -137,7 +150,7 @@ def label_softmax(logprobs: list[float]) -> list[float]:
 
 @register_question_type
 class ChoiceQuestion(QuestionType):
-    """Pick one option. ``criteria`` maps each option name to a description,
+    """Pick one option. `criteria` maps each option name to a description,
     or to null."""
 
     name = "choice"
@@ -169,7 +182,7 @@ class ChoiceQuestion(QuestionType):
 
 @register_question_type
 class NoulQuestion(QuestionType):
-    """Yes or no. ``criteria`` may describe what true and false mean."""
+    """Yes or no. `criteria` may describe what true and false mean."""
 
     name = "noul"
     label_set = ("yes", "no")
@@ -210,7 +223,7 @@ class NoulQuestion(QuestionType):
 
 @register_question_type
 class ScoreQuestion(QuestionType):
-    """Rate the state on an ordered scale. ``criteria`` is the ordered list of
+    """Rate the state on an ordered scale. `criteria` is the ordered list of
     level names, from the first to the last level of the scale."""
 
     name = "score"
