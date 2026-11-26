@@ -21,10 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.models.deepseek_v4.common.vision import (
-    build_packed_merge_metadata,
-    build_packed_vit_metadata,
-)
+from vllm.models.deepseek_v4.common.vision import build_packed_merge_metadata
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
@@ -215,10 +212,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         patch_dtype = self.vision.patch_embed.input_norm.input_dtype or dtype
         patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=patch_dtype)
 
-        metadata = build_packed_vit_metadata(
+        metadata = self.vision.build_packed_vit_metadata(
             grids,
-            rope_dim=self.vision.rope_dim,
-            rope_theta=self.vision.rope_theta,
             device=device,
             max_seqlen_override=total_patches,
             cached=False,
@@ -226,9 +221,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         # Spare cu_seqlens slots: replay pads smaller real batches with
         # zero-length sequences (tail slots repeat the last real offset).
         real_cu = metadata.pop("cu_seqlens")
-        cu_seqlens = torch.full(
-            (max_batch_size + 2,), total_patches, dtype=torch.int32, device=device
-        )
+        cu_seqlens = real_cu.new_full((max_batch_size + 2,), total_patches)
         cu_seqlens[: real_cu.numel()] = real_cu
 
         merge = build_packed_merge_metadata(grids, r, device=device, dtype=dtype)
@@ -258,11 +251,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
 
         # Unpadded: the manager zero-pads patches/cos/sin/merge buffers and
         # pads the cu_seqlens tail with zero-length sequences.
-        metadata = build_packed_vit_metadata(
-            vit_grid,
-            rope_dim=self.vision.rope_dim,
-            rope_theta=self.vision.rope_theta,
-            device=patches.device,
+        metadata = self.vision.build_packed_vit_metadata(
+            vit_grid, device=patches.device
         )
         merge = build_packed_merge_metadata(
             vit_grid,
