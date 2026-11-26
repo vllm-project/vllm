@@ -6,6 +6,9 @@ Automatic Prefix Caching (APC in short) caches the KV cache of existing queries,
 
 APC reuses only the longest run of full blocks at the start of the prompt that is already cached. Each block's hash covers every token before it, so a prompt that differs at one token recomputes that block and every block after it, even if the later text is identical. Technical details on how vLLM implements APC can be found [here](../design/prefix_caching.md).
 
+External routers can obtain the engine's prefix-cache hashes through the
+[`/v1/completions/hash` endpoint](../serving/online_serving/renderer.md#prefix-hashes).
+
 ## Enabling APC in vLLM
 
 Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an example:

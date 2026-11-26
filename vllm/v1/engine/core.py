@@ -267,6 +267,7 @@ class EngineCore:
                 hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
                 hash_block_size=hash_block_size,
                 none_hash=kv_cache_utils.NONE_HASH,
+                kv_cache_groups=self.get_kv_cache_group_metadata(),
                 num_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             )
 
@@ -529,10 +530,7 @@ class EngineCore:
         )
 
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
-        """Return serializable KV cache metadata for external event consumers
-        (e.g., Dynamo). This function has no call sites within vLLM but needs to
-        be kept.
-        """
+        """Return serializable KV cache metadata for frontends and event consumers."""
         kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
         if kv_cache_config is None:
             return []

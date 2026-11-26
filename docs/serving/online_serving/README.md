@@ -147,6 +147,7 @@ any processed multimodal inputs for generation.
 
 See the [renderer guide](renderer.md) for setup instructions and examples.
 
+- [Prefix Hash API](renderer.md#prefix-hashes) (`/v1/completions/hash`, requires a running engine)
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)

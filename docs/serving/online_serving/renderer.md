@@ -19,12 +19,33 @@ vllm serve <model> --enable-scale-out
 
 ## API Reference
 
+- [Prefix Hash API](#prefix-hashes) (`/v1/completions/hash`, requires a running engine)
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
     - Render chat completions
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
+
+## Prefix hashes
+
+`POST /v1/completions/hash` returns the engine's prefix-cache hashes without generating tokens.
+It is disabled by default: use `vllm serve <model> --enable-scale-out` with prefix
+caching enabled. It requires a running engine serving a decoder-only model.
+
+Send an OpenAI chat/completion request, or `model` and `token_ids` for
+pretokenized input:
+
+```bash
+curl http://localhost:8000/v1/completions/hash \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"my-model","prompt":"Hello"}'
+```
+
+The response contains hexadecimal `prompts[].block_hashes`, token counts, and
+the engine's hash algorithm, block size, lookahead and cache-group geometry.
+Only complete blocks with sufficient lookahead are returned. Use [KV events](../../../examples/features/kv_events/kv_events_subscriber.py) to
+track which prefixes are cached and when they are evicted.
 
 ## Get Responses prompt token IDs
 

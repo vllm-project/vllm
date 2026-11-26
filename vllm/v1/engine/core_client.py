@@ -50,6 +50,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     EngineCoreRequestType,
     PauseMode,
+    PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -380,6 +381,9 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    def get_prefix_hash_config(self) -> PrefixHashConfig | None:
+        raise NotImplementedError
+
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
@@ -652,6 +656,7 @@ class MPClient(EngineCoreClient):
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
         self._kv_event_sources: dict[int, KVEventsConfig] = {}
+        self._prefix_hash_configs: dict[int, PrefixHashConfig | None] = {}
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -804,7 +809,10 @@ class MPClient(EngineCoreClient):
                     )
                 identity, payload = sync_input_socket.recv_multipart()
                 identities.remove(identity)
-                self._apply_ready_response(payload)
+                response = self._apply_ready_response(payload)
+                self._prefix_hash_configs[int.from_bytes(identity, "little")] = (
+                    response.prefix_hash_config if response is not None else None
+                )
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -881,7 +889,7 @@ class MPClient(EngineCoreClient):
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
 
-    def _apply_ready_response(self, payload: bytes) -> None:
+    def _apply_ready_response(self, payload: bytes) -> EngineCoreReadyResponse | None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
         config changes (e.g. auto-fitted max_model_len) back to the frontend."""
         vllm_config = self.vllm_config
@@ -898,7 +906,7 @@ class MPClient(EngineCoreClient):
             next(iter(sizes)) if len(sizes) == 1 else None
         )
         if response is None:
-            return
+            return None
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
@@ -958,6 +966,18 @@ class MPClient(EngineCoreClient):
                     setattr(self, attribute, address)
                 else:
                     assert address == existing_address
+        return response
+
+    def get_prefix_hash_config(self) -> PrefixHashConfig | None:
+        self.ensure_alive()
+        configs = [
+            self._prefix_hash_configs.get(rank) for rank in self.engine_ranks_managed
+        ]
+        if not configs or any(config is None for config in configs):
+            return None
+        if any(config != configs[0] for config in configs):
+            raise ValueError("Engines have different prefix hash configurations")
+        return configs[0]
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return dict(self._kv_event_sources)
@@ -2072,7 +2092,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 )
             identity, payload = sync_input_socket.recv_multipart()
             new_engine_identities.discard(identity)
-            self._apply_ready_response(payload)
+            response = self._apply_ready_response(payload)
+            self._prefix_hash_configs[int.from_bytes(identity, "little")] = (
+                response.prefix_hash_config if response is not None else None
+            )
 
     def _make_reconfig_request(
         self,
