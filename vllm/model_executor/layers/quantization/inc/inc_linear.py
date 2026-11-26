@@ -15,6 +15,10 @@ class INCLinearMethod(LinearMethodBase):
     def __init__(self, scheme: "INCLinearScheme") -> None:
         self.scheme = scheme
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return getattr(self.scheme, "supports_pre_processed_weights", False)
+
     def create_weights(
         self,
         layer: torch.nn.Module,
