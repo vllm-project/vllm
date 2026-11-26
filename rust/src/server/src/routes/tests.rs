@@ -2951,8 +2951,8 @@ async fn render_rejects_max_tokens_above_max_model_len() {
 }
 
 /// Render classifies a renderer's errors like the chat route: a refusal of
-/// the request is 400 with its parameter, a failure of the model's own
-/// template is 500.
+/// the request is 400 with its parameter, the model's template failing on
+/// this request is 400, and a renderer failure is 500.
 #[tokio::test]
 async fn render_chat_classifies_renderer_errors_by_fault() {
     type MakeError = fn() -> vllm_chat::Error;
@@ -2964,7 +2964,7 @@ async fn render_chat_classifies_renderer_errors_by_fault() {
         }
     }
 
-    let cases: [(MakeError, StatusCode, serde_json::Value); 3] = [
+    let cases: [(MakeError, StatusCode, serde_json::Value); 4] = [
         (
             || vllm_chat::Error::InvalidMessages {
                 message: "unknown tool_call_id `call-unknown`".to_string(),
@@ -2980,7 +2980,14 @@ async fn render_chat_classifies_renderer_errors_by_fault() {
             json!("continue_final_message"),
         ),
         (
-            || vllm_chat::Error::ChatTemplate("unknown filter".to_string()),
+            || vllm_chat::Error::ChatTemplateRender {
+                message: "unknown filter".to_string(),
+            },
+            StatusCode::BAD_REQUEST,
+            serde_json::Value::Null,
+        ),
+        (
+            || vllm_chat::Error::ChatTemplate("renderer state is inconsistent".to_string()),
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::Value::Null,
         ),

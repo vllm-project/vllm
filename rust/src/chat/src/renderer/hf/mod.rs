@@ -241,12 +241,12 @@ impl HfChatRenderer {
             self.tool_use_template.as_ref()
         }
         .or(self.default_template.as_ref());
-        let Some(override_template) = override_template else {
-            let template = model_template.ok_or(Error::MissingChatTemplate)?;
-            return self.apply_chat_template_inner(template, request);
-        };
-        self.apply_chat_template_inner(&override_template, request)
-            .map_err(request_template_error)
+        let template = override_template
+            .as_ref()
+            .or(model_template)
+            .ok_or(Error::MissingChatTemplate)?;
+
+        self.apply_chat_template_inner(template, request)
     }
 
     fn apply_chat_template_inner(
@@ -291,11 +291,9 @@ impl HfChatRenderer {
                 template_kwargs: Some(&effective_template_kwargs),
                 special_tokens: self.special_tokens.as_ref(),
             })
-            .map_err(|error| match error.thrown_message() {
-                Some(message) => Error::ChatTemplateThrown {
-                    message: message.to_owned(),
-                },
-                None => Error::ChatTemplate(error.to_report_string()),
+            .map_err(|error| Error::ChatTemplateRender {
+                message: (error.thrown_message().map(str::to_owned))
+                    .unwrap_or_else(|| error.to_report_string()),
             })?;
 
         let prompt = match &final_message_text {
@@ -328,8 +326,9 @@ impl ChatRenderer for HfChatRenderer {
     }
 }
 
-/// A request's own chat template that fails to compile or render is the
-/// request's error, where the model's template failing is this process's.
+/// A request's own chat template that fails to compile blames
+/// `chat_template`, where the model's template failing to compile is this
+/// process's error.
 fn request_template_error(error: Error) -> Error {
     match error {
         Error::ChatTemplate(message) => Error::InvalidRequestChatTemplate { message },
@@ -1242,7 +1241,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages."),
+            matches!(&error, Error::ChatTemplateRender { message } if message == "No user query found in messages."),
             "expected an exception thrown by the template, got: {error:?}"
         );
         assert!(error.kind().is_invalid_request());
@@ -1532,24 +1531,24 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Internal);
     }
 
-    /// A request template that fails while rendering is the request's error;
-    /// the model's own template failing the same way is this process's.
+    /// A template that fails while rendering is the request's error without
+    /// a `param`, whether the model or the request supplied it, as Python
+    /// answers a Jinja `TemplateError` with 400.
     #[test]
-    fn request_template_render_failure_is_a_request_error() {
+    fn template_render_failure_is_a_request_error() {
         let template = "{{ messages[0].content | no_such_filter }}";
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hi")]);
+        let model_error = render(Some(template), &request).unwrap_err();
         request.chat_options.chat_template = Some(template.to_string());
+        let request_error = render(None, &request).unwrap_err();
 
-        let error = render(None, &request).unwrap_err();
-        assert_eq!(
-            error.kind(),
-            ErrorKind::invalid_param("chat_template"),
-            "{error:?}"
-        );
-
-        request.chat_options.chat_template = None;
-        let error = render(Some(template), &request).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Internal, "{error:?}");
+        for error in [model_error, request_error] {
+            assert!(
+                matches!(error, Error::ChatTemplateRender { .. }),
+                "{error:?}"
+            );
+            assert_eq!(error.kind(), ErrorKind::invalid_request(), "{error:?}");
+        }
     }
 
     #[test]
@@ -1561,7 +1560,7 @@ mod tests {
         assert!(render(Some(template), &request).is_ok());
 
         request.chat_options.chat_template = Some(template.to_string());
-        let Err(Error::InvalidRequestChatTemplate { message }) = render(None, &request) else {
+        let Err(Error::ChatTemplateRender { message }) = render(None, &request) else {
             panic!("expected the request template to run out of fuel");
         };
         expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&message);

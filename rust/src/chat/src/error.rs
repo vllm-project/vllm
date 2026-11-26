@@ -18,11 +18,18 @@ pub enum Error {
     UnsupportedContinueFinalMessage { renderer: &'static str },
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
-    /// The model's own template, or this renderer, failed; request-caused
-    /// refusals use the typed variants below.
+    /// The chat template could not be loaded or compiled, or this renderer
+    /// failed; request-caused refusals use the typed variants below.
     #[error("chat template error: {0}")]
     ChatTemplate(String),
-    /// The request's own `chat_template` failed to compile or render.
+    /// The chat template failed while rendering this request, including its
+    /// `raise_exception`. The request's values usually cause it (a template
+    /// filter given a list instead of a string), and a template that is broken
+    /// for every request fails every request anyway, so it is the request's
+    /// error, as in Python.
+    #[error("{message}")]
+    ChatTemplateRender { message: String },
+    /// The request's own `chat_template` failed to compile.
     #[error("{message}")]
     InvalidRequestChatTemplate { message: String },
     /// `continue_final_message` without a final assistant message to
@@ -35,8 +42,6 @@ pub enum Error {
     InvalidMessages { message: String },
     #[error("{message}")]
     InvalidChatTemplateKwargs { message: String },
-    #[error("{message}")]
-    ChatTemplateThrown { message: String },
     #[error("{0}")]
     InvalidReasoningEffort(String),
     #[error("{message}")]
@@ -194,7 +199,7 @@ impl Error {
             Self::InvalidChatTemplateKwargs { .. } => {
                 ErrorKind::invalid_param("chat_template_kwargs")
             }
-            Self::ChatTemplateThrown { .. }
+            Self::ChatTemplateRender { .. }
             | Self::InvalidReasoningControl { .. }
             | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
