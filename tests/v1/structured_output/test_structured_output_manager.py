@@ -256,6 +256,7 @@ def test_single_token_checks_preserve_first_boundary(
     opened, closed, plain = map(tokenizer.encode, (opening, closing, "."))
     history = closed + opened + plain * 5
     cases = [(history, []), (history, plain * 32)]
+    tail: list[int]
     for split in range(len(closed)):
         for tail in ([], plain, opened, opened + closed, opened[:1], plain * 32):
             cases.append((history + closed[:split], closed[split:] + tail))
@@ -291,6 +292,7 @@ def test_single_token_checks_preserve_first_boundary(
                 expected,
             ), (parser, before, draft, committed)
             assert list(req.all_token_ids) == before + (draft if committed else [])
+            assert req.structured_output_request is not None
             assert req.structured_output_request.reasoning_ended is False
     finally:
         manager.clear_backend()
