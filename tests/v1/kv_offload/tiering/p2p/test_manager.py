@@ -1317,6 +1317,7 @@ class TestHasPendingWork:
 
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
             OffloadingConnectorScheduler,
+            _ManagerResults,
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
             OffloadingConnector,
@@ -1343,6 +1344,11 @@ class TestHasPendingWork:
             connector_scheduler.manager = manager
             connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
+            connector_scheduler._manager_results = _ManagerResults(
+                pending=manager.on_schedule_end(
+                    ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+                )
+            )
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
             scheduler = object.__new__(Scheduler)
@@ -1374,6 +1380,7 @@ class TestHasPendingWork:
 
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
             OffloadingConnectorScheduler,
+            _ManagerResults,
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
             OffloadingConnector,
@@ -1402,6 +1409,11 @@ class TestHasPendingWork:
             connector_scheduler.manager = manager
             connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
+            connector_scheduler._manager_results = _ManagerResults(
+                pending=manager.on_schedule_end(
+                    ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+                )
+            )
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
             scheduler = object.__new__(Scheduler)

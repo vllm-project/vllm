@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from vllm.v1.kv_offload.base import (
+    CompletedTransfer,
     LoadStoreSpec,
     LookupResult,
     Medium,
@@ -169,6 +170,25 @@ def test_cpu_stored_event_carries_request_context():
 
     [event] = manager.take_events()
     assert event.req_context is req_context
+
+
+def test_complete_transfers_reports_the_stored_events_and_stats():
+    manager = CPUOffloadingManager(num_chunks=2, enable_events=True)
+    req_context = make_req_context("writer")
+    keys = to_keys([1])
+    manager.prepare_store(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)
+
+    result = manager.complete_transfers(
+        [CompletedTransfer(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)]
+    )
+
+    assert manager.lookup(keys[0], req_context) == LookupResult.HIT
+    [event] = result.events
+    assert event.keys == keys
+    assert not event.removed
+    assert result.stats is not None
+    assert not result.pending
+    assert manager.complete_transfers(()).events == []
 
 
 def test_cpu_eviction_removed_precedes_stored():

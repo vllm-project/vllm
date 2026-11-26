@@ -24,6 +24,7 @@ import torch
 from tests.v1.kv_offload.conftest import make_offloading_config
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
+    _ConnectorMetricName,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     _parse_tier_filter,
@@ -422,6 +423,21 @@ class TestTieringOffloadingManager:
         ):
             self.manager._process_finished_jobs()
         completed.assert_called_once_with(to_keys([1]), _CTX, True)
+
+    def test_complete_transfers_reports_tier_events_and_stats(
+        self, manager_setup, monkeypatch
+    ):
+        event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
+        stats = OffloadingConnectorStats()
+        stats.increase_counter(_ConnectorMetricName.ALLOCATION_FAILURE)
+        monkeypatch.setattr(self.primary_tier, "take_events", lambda: [event])
+        monkeypatch.setattr(self.primary_tier, "get_stats", lambda: stats)
+
+        result = self.manager.complete_transfers(())
+
+        assert result.events == [event]
+        assert result.stats is not None
+        assert result.stats.reduce()[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
 
     def test_take_events_aggregates_tier_owned_events(self, manager_setup, monkeypatch):
         primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)

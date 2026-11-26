@@ -45,11 +45,13 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_reusable_prefix_length
 from vllm.v1.kv_offload.base import (
+    CompletedTransfer,
     GPULoadStoreSpec,
     LoadStoreSpec,
     Locality,
     LookupResult,
     Medium,
+    OffloadingEvent,
     OffloadingManager,
     OffloadingSpec,
     OffloadKey,
@@ -57,6 +59,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StepResult,
     StoreTrigger,
     TierFilter,
     TierMatcher,
@@ -175,6 +178,42 @@ def _create_req_context(
     )
 
 
+@dataclass(slots=True)
+class _ManagerResults:
+    """Manager results that take_events() and get_stats() have not handed out."""
+
+    # The latest of StepResult.pending and on_schedule_end()'s answer. True
+    # until the first one, so the engine steps once to ask the manager.
+    pending: bool = True
+    events: list[OffloadingEvent] = field(default_factory=list)
+    stats: OffloadingConnectorStats | None = None
+    # Whether take_events() / get_stats() has drained every StepResult so far.
+    # A reader that has asks the manager for a new one first.
+    events_drained: bool = True
+    stats_drained: bool = True
+
+    def add(self, result: StepResult) -> None:
+        self.pending = result.pending
+        self.events.extend(result.events)
+        if result.stats is not None:
+            if self.stats is None:
+                self.stats = result.stats
+            else:
+                self.stats.aggregate(result.stats)
+        self.events_drained = False
+        self.stats_drained = False
+
+    def take_events(self) -> list[OffloadingEvent]:
+        events, self.events = self.events, []
+        self.events_drained = True
+        return events
+
+    def take_stats(self) -> OffloadingConnectorStats | None:
+        stats, self.stats = self.stats, None
+        self.stats_drained = True
+        return stats
+
+
 class _StoreJobSink:
     """The store-job intake of one handler in one scheduler step."""
 
@@ -262,6 +301,7 @@ class OffloadingConnectorScheduler:
         # it cannot write.
         self.access_mode: OffloadAccessMode = spec.access_mode
         self._connector_stats = OffloadingConnectorStats()
+        self._manager_results = _ManagerResults()
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
 
         # The static config facts ride on the first stats payload of this
@@ -395,9 +435,8 @@ class OffloadingConnectorScheduler:
         """Hold the manager for the duration of one hook outside schedule().
 
         None of these hooks can legitimately run inside the step-scoped region:
-        on_new_request comes from add_request, has_pending_push_work from the
-        engine's liveness check before schedule(), the rest from output
-        processing or a client RPC. So finding the region open here means a
+        on_new_request comes from add_request, the rest from output processing
+        or a client RPC. So finding the region open here means a
         previous schedule() raised between _acquire_step() and the release in
         build_connector_meta. Recover instead of deadlocking.
         """
@@ -1447,7 +1486,9 @@ class OffloadingConnectorScheduler:
         # on_request_finished above. on_schedule_end is documented as running at
         # the end of the step, and callers rely on that to bound the step's
         # exclusive access to the manager.
-        self.manager.on_schedule_end(schedule_end_context)
+        self._manager_results.pending = self.manager.on_schedule_end(
+            schedule_end_context
+        )
         return meta
 
     def has_pending_push_work(self) -> bool:
@@ -1456,19 +1497,17 @@ class OffloadingConnectorScheduler:
         While True, build_connector_meta() and update_connector_output()
         continue to be called even when no requests are scheduled.
 
-        Must use a short region, never the step-scoped one. The engine asks this
-        before schedule() and returns early when the answer is False, so a
-        step-scoped acquire here would never reach build_connector_meta's
-        release and would hold the manager for good -- which is precisely the
-        state an idle engine settles into.
+        The manager's part is the pending flag it last reported, from
+        on_schedule_end() or a StepResult.
 
         A cache reset fence also keeps it stepping: the flush must reach the
         workers and their reports come back before on_reset_flushed().
         """
-        if self._job_statuses or self._reset_fence:
-            return True
-        with self._manager_locked():
-            return self.manager.has_pending_work()
+        return (
+            bool(self._job_statuses)
+            or bool(self._reset_fence)
+            or self._manager_results.pending
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -1524,6 +1563,10 @@ class OffloadingConnectorScheduler:
                     )
             self._connector_stats.aggregate(transfer_stats)
 
+        transfers: list[CompletedTransfer] = []
+        # Removed only after complete_transfers(): an unfrozen ReqContext reads
+        # its counters from _req_status.
+        done_req_ids: list[ReqId] = []
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
@@ -1561,11 +1604,13 @@ class OffloadingConnectorScheduler:
                         len(job_status.keys),
                     )
                 assert job_status.trigger is not None
-                self.manager.complete_store(
-                    job_status.keys,
-                    req_status.req_context,
-                    trigger=job_status.trigger,
-                    success=not job_status.failed,
+                transfers.append(
+                    CompletedTransfer(
+                        keys=job_status.keys,
+                        req_context=req_status.req_context,
+                        trigger=job_status.trigger,
+                        success=not job_status.failed,
+                    )
                 )
             else:
                 if job_status.failed:
@@ -1576,7 +1621,14 @@ class OffloadingConnectorScheduler:
                         job_status.req_id,
                     )
                     req_status.load_failed = True
-                self.manager.complete_load(job_status.keys, req_status.req_context)
+                transfers.append(
+                    CompletedTransfer(
+                        keys=job_status.keys,
+                        req_context=req_status.req_context,
+                        trigger=None,
+                        success=not job_status.failed,
+                    )
+                )
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
             if self._block_id_to_pending_jobs:
@@ -1593,7 +1645,17 @@ class OffloadingConnectorScheduler:
             del self._job_statuses[job_id]
             req_status.transfer_jobs.remove(job_id)
             if req_status.finished_signaled and not req_status.transfer_jobs:
-                self._remove_request(job_status.req_id)
+                done_req_ids.append(job_status.req_id)
+
+        self._manager_results.add(self.manager.complete_transfers(transfers))
+        for req_id in done_req_ids:
+            self._remove_request(req_id)
+
+    def _poll_manager_results(self) -> None:
+        """Get a StepResult when the step reported no transfers, or its result
+        was already drained."""
+        with self._manager_locked():
+            self._manager_results.add(self.manager.complete_transfers(()))
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats: OffloadingConnectorStats | None = None
@@ -1601,8 +1663,9 @@ class OffloadingConnectorScheduler:
             stats = self._connector_stats
             self._connector_stats = OffloadingConnectorStats()
 
-        with self._manager_locked():
-            manager_stats = self.manager.get_stats()
+        if self._manager_results.stats_drained:
+            self._poll_manager_results()
+        manager_stats = self._manager_results.take_stats()
         if manager_stats is not None:
             if stats is None:
                 stats = manager_stats
@@ -1686,13 +1749,9 @@ class OffloadingConnectorScheduler:
             the underlying `OffloadingEvent` stream.
 
         """
-        # Drain the manager eagerly, inside the region. manager.take_events() is
-        # itself a generator whose backing list is cleared once exhausted, so
-        # iterating it lazily would both hold the manager for as long as the
-        # consumer takes and let a concurrent writer append events that the
-        # clear then discards unpublished.
-        with self._manager_locked():
-            manager_events = list(self.manager.take_events())
+        if self._manager_results.events_drained:
+            self._poll_manager_results()
+        manager_events = self._manager_results.take_events()
         # Still a generator, so callers testing the result for truthiness keep
         # seeing a non-empty object the way they do today.
         yield from self._events_tracker.take_events(manager_events)

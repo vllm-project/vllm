@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import (
+    CompletedTransfer,
     ConfigInfoMapping,
     LoadStoreSpec,
     LookupResult,
@@ -21,6 +22,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    StepResult,
     StoreTrigger,
     get_offload_group_idx,
 )
@@ -540,6 +542,10 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_allocated_chunks = 0
 
     @override
+    def complete_transfers(self, transfers: Sequence[CompletedTransfer]) -> StepResult:
+        super().complete_transfers(transfers)
+        return StepResult(events=list(self.take_events()), stats=self.get_stats())
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is None:
             return

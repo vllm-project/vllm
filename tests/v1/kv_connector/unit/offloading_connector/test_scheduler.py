@@ -117,6 +117,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
+    StepResult,
     StoreTrigger,
     get_offload_block_hash,
     get_offload_group_idx,
@@ -2445,6 +2446,18 @@ def _store_in_flight(scheduler) -> set[int]:
     return store_jobs
 
 
+def _report_raw_events(manager: MagicMock, raw_events: list[OffloadingEvent]) -> None:
+    """Make the mocked manager report, and clear, raw_events in each StepResult."""
+
+    def complete_transfers(transfers):
+        OffloadingManager.complete_transfers(manager, transfers)
+        events = list(raw_events)
+        raw_events.clear()
+        return StepResult(events=events)
+
+    manager.complete_transfers.side_effect = complete_transfers
+
+
 def _report_jobs(scheduler, output, job_ids: set[int]) -> None:
     scheduler.update_from_output(
         output,
@@ -2532,6 +2545,33 @@ def test_cache_reset_without_in_flight_jobs_holds_nothing():
         assert scheduler.reset_prefix_cache(reset_connector=True)
 
         assert not scheduler.has_requests()
+    finally:
+        scheduler.shutdown()
+
+
+def test_cascade_from_the_last_store_keeps_engine_stepping():
+    """The store reports reach the manager in one call, and the cascade they
+    start keeps the engine stepping until the secondary tier is done."""
+    scheduler, manager = _make_tiering_engine_scheduler([{"type": "example"}])
+    try:
+        stored = _store_in_flight(scheduler)
+        output = scheduler.schedule()
+        with patch.object(
+            manager, "complete_transfers", wraps=manager.complete_transfers
+        ) as complete_transfers:
+            _report_jobs(scheduler, output, stored)
+        [(transfers,)] = [c.args for c in complete_transfers.call_args_list]
+        assert len(transfers) == len(stored)
+        assert manager.has_pending_work()
+        assert scheduler.has_requests()
+
+        for _ in range(10):
+            if not scheduler.has_requests():
+                break
+            output = scheduler.schedule()
+            scheduler.update_from_output(output, create_model_runner_output([]))
+        assert not scheduler.has_requests()
+        assert not manager.has_pending_work()
     finally:
         scheduler.shutdown()
 
@@ -2988,51 +3028,85 @@ def test_step_releases_the_manager_before_the_model_runs(request_runner):
     assert lock.__enter__.call_count == lock.__exit__.call_count
 
 
-def test_has_pending_push_work_does_not_open_the_step_region(request_runner):
-    """It must take a short region, never the step-scoped one.
-
-    The engine asks this before schedule() and returns early when the answer is
-    False, so a step-scoped acquire here would never reach the release in
-    build_connector_meta and would hold the manager for good.
-    """
+def test_has_pending_push_work_follows_the_manager_report(request_runner):
+    """It returns the pending flag the manager last reported without entering
+    the manager, and True before the first report."""
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
         async_scheduling=False,
     )
     scheduler = runner.connector_scheduler
-    runner.manager.has_pending_work.return_value = False
-
-    assert scheduler.has_pending_push_work() is False
-    assert scheduler._step_region is None
     lock = runner.manager.lock
-    assert lock.__enter__.call_count == lock.__exit__.call_count
+    assert scheduler.has_pending_push_work() is True
+
+    runner.manager.on_schedule_end.return_value = False
+    runner.scheduler.schedule()
+    assert scheduler.has_pending_push_work() is False
+
+    runner.manager.complete_transfers.side_effect = None
+    runner.manager.complete_transfers.return_value = StepResult(pending=True)
+    scheduler.update_connector_output(KVConnectorOutput())
+    entered = lock.__enter__.call_count
+    assert scheduler.has_pending_push_work() is True
+    assert lock.__enter__.call_count == entered
 
 
-def test_take_events_drains_the_manager_inside_the_region(request_runner):
-    """take_events must not hold the manager across its own iteration.
-
-    manager.take_events() is a generator whose backing list is cleared once
-    exhausted, so draining it lazily would both pin the manager for as long as
-    the consumer takes and lose events appended in the meantime.
-    """
+def test_results_reported_before_a_read_add_up(request_runner):
+    """Events and stats from several StepResults are all handed out by the
+    next take_events() and get_stats()."""
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
         async_scheduling=False,
     )
     scheduler = runner.connector_scheduler
-    runner.manager.take_events.return_value = iter(())
-    runner.manager.reset_mock()
+    runner.manager.complete_transfers.side_effect = None
+    for i in range(2):
+        stats = OffloadingConnectorStats()
+        stats.increase_counter(_ConnectorMetricName.ALLOCATION_FAILURE)
+        key = make_offload_key(bytes([i]) * 32, 0)
+        runner.manager.complete_transfers.return_value = StepResult(
+            events=[OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True)],
+            stats=stats,
+        )
+        scheduler.update_connector_output(KVConnectorOutput())
 
+    assert len(list(scheduler.take_events())) == 2
+    reported = scheduler.get_stats()
+    assert reported is not None
+    assert reported.reduce()[_ConnectorMetricName.ALLOCATION_FAILURE] == 2
+    assert runner.manager.complete_transfers.call_count == 2
+
+
+def test_step_without_transfers_asks_the_manager_once(request_runner):
+    """get_stats() and take_events() share one StepResult when the step
+    reported no transfers, and a later read asks for a new one."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    scheduler = runner.connector_scheduler
+    key = make_offload_key(b"\x01" * 32, 0)
+    stats = OffloadingConnectorStats()
+    stats.increase_counter(_ConnectorMetricName.ALLOCATION_FAILURE)
+    runner.manager.complete_transfers.side_effect = None
+    runner.manager.complete_transfers.return_value = StepResult(
+        events=[OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True)],
+        stats=stats,
+    )
+
+    reported = scheduler.get_stats()
     events = list(scheduler.take_events())
 
-    assert events == []
-    assert runner.manager.take_events.call_count == 1
-    assert scheduler._step_region is None
-    lock = runner.manager.lock
-    assert lock.__enter__.call_count == 1
-    assert lock.__exit__.call_count == 1
+    runner.manager.complete_transfers.assert_called_once_with(())
+    assert reported is not None
+    assert reported.reduce()[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+    assert [type(event) for event in events] == [BlockRemoved]
+    runner.manager.complete_transfers.return_value = StepResult()
+    assert list(scheduler.take_events()) == []
+    assert runner.manager.complete_transfers.call_count == 2
 
 
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
@@ -3062,7 +3136,6 @@ def test_max_offload_tokens_zero_does_not_record_pending_lookups(request_runner)
         async_scheduling=False,
     )
     runner.manager.lookup.return_value = LookupResult.RETRY
-    runner.manager.take_events.return_value = []
     runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
@@ -3095,13 +3168,8 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
         blocks_per_chunk=2,
     )
     raw_events: list[OffloadingEvent] = []
-
-    def take_raw_events():
-        yield from raw_events
-        raw_events.clear()
-
+    _report_raw_events(runner.manager, raw_events)
     runner.manager.lookup.return_value = LookupResult.RETRY
-    runner.manager.take_events.side_effect = take_raw_events
     runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
@@ -3178,12 +3246,8 @@ def test_promotion_hit_precedes_stored_event_translation(
         raw_events.append(OffloadingEvent(keys=[key], medium=Medium.CPU, removed=False))
         return LookupResult.HIT
 
-    def take_raw_events():
-        yield from raw_events
-        raw_events.clear()
-
     runner.manager.lookup.side_effect = lookup
-    runner.manager.take_events.side_effect = take_raw_events
+    _report_raw_events(runner.manager, raw_events)
     runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
