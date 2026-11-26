@@ -109,18 +109,11 @@ def test_qsa_hisparse_starts_with_automatic_cache_layout(
         assert len(result.outputs[0].token_ids) == 2
 
 
-def _kv_cache_layout(worker):
-    return {
-        name: (config.manager_cls.__name__, repr(config.spec))
-        for name, config in worker.get_kv_cache_layer_configs().items()
-    }
-
-
 @requires_qsa_kernels
 def test_qsa_kv_cache_spec_ignores_language_model_only(
     tmp_path, vllm_runner, enable_pickle
 ):
-    """A language-model-only decode must accept KV from a multimodal prefill."""
+    """A text-only decode must accept KV from a multimodal prefill."""
     from transformers import Qwen4ExpConfig
 
     Qwen4ExpConfig(
@@ -157,20 +150,18 @@ def test_qsa_kv_cache_spec_ignores_language_model_only(
     for language_model_only in (False, True):
         with vllm_runner(
             str(tmp_path),
-            # The multimodal processor needs a tokenizer; no media is profiled.
-            tokenizer_name="Qwen/Qwen3-VL-2B-Instruct",
+            tokenizer_name="Qwen/Qwen3-VL-2B-Instruct",  # for the mm processor
             language_model_only=language_model_only,
             limit_mm_per_prompt={"image": 0, "video": 0},
             load_format="dummy",
             dtype="bfloat16",
-            enable_chunked_prefill=True,
             enforce_eager=True,
             max_model_len=128,
-            max_num_seqs=2,
             kv_cache_memory_bytes=128 * 1024**2,
         ) as runner:
-            (layout,) = runner.llm.collective_rpc(_kv_cache_layout)
-            layouts.append(layout)
+            layouts += runner.llm.collective_rpc(
+                lambda worker: repr(worker.get_kv_cache_layer_configs())
+            )
     assert layouts[0] == layouts[1]
 
 

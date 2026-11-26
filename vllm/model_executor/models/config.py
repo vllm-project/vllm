@@ -1596,9 +1596,8 @@ class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
 class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConfig):
     """Apply the Qwen3.5 hybrid-cache contract to Qwen4Exp.
 
-    Keep the checkpoint's M-RoPE even under `language_model_only`: the QSA
-    raw-key cache width and the P/D position delta depend on it, so a
-    text-only decode must match a multimodal prefill's KV layout.
+    M-RoPE is kept under `language_model_only` so the KV layout matches a
+    multimodal prefill.
     """
 
     @staticmethod
