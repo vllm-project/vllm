@@ -385,7 +385,6 @@ th {
 | `AfmoeForCausalLM` | Afmoe | TBA | ✅︎ | ✅︎ |
 | `AliceAIForCausalLM` | AliceAI | `yandex/AliceAI-Foundation-80B-A3B-Base` | ✅︎ | |
 | `ApertusForCausalLM` | Apertus | `swiss-ai/Apertus-8B-2509`, `swiss-ai/Apertus-70B-Instruct-2509`, etc. | ✅︎ | ✅︎ |
-| `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | | ✅︎ |
 | `BailingMoeForCausalLM` | Ling | `inclusionAI/Ling-lite-1.5`, `inclusionAI/Ling-plus`, etc. | ✅︎ | ✅︎ |
 | `BailingMoeV2ForCausalLM` | Ling | `inclusionAI/Ling-mini-2.0`, etc. | ✅︎ | ✅︎ |
 | `BailingMoeV2_5ForCausalLM` | Ling | `inclusionAI/Ling-2.5-1T`, `inclusionAI/Ring-2.5-1T` | | ✅︎ |
@@ -406,11 +405,9 @@ th {
 | `DoryForCausalLM` | Dory | `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16` | | |
 | `DotsOCRForCausalLM` | [dots_ocr](../usage/troubleshooting.md#gpu-cpu-synchronization-errors) | `rednote-hilab/dots.ocr` | ✅︎ | ✅︎ |
 | `Ernie4_5_MoeForCausalLM` | Ernie4.5MoE | `baidu/ERNIE-4.5-21B-A3B-PT`, `baidu/ERNIE-4.5-300B-A47B-PT`, etc. | ✅︎ | ✅︎ |
-| `ExaoneForCausalLM` | EXAONE-3 | `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `ExaoneMoeForCausalLM` | K-EXAONE, K-EXAONE-2 | `LGAI-EXAONE/K-EXAONE-236B-A23B`, `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B`, etc. | | |
 | `Exaone4ForCausalLM` | EXAONE-4 | `LGAI-EXAONE/EXAONE-4.0-32B`, etc. | ✅︎ | ✅︎ |
 | `FalconForCausalLM` | Falcon | `tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc. | | ✅︎ |
-| `FalconMambaForCausalLM` | FalconMamba | `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc. | | ✅︎ |
 | `FalconH1ForCausalLM` | Falcon-H1 | `tiiuae/Falcon-H1-34B-Base`, `tiiuae/Falcon-H1-34B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `FlintForCausalLM` | Flint | `RecursiveSI/flint`, `RecursiveSI/flint-nvfp4-gguf` (GGUF) | | ✅︎ |
 | `Gemma2ForCausalLM` | Gemma 2 | `google/gemma-2-9b`, `google/gemma-2-27b`, etc. | ✅︎ | ✅︎ |
@@ -422,7 +419,6 @@ th {
 | `Glm4MoeLiteForCausalLM` | GLM-4.7-Flash | `zai-org/GLM-4.7-Flash`, etc. | ✅︎ | ✅︎ |
 | `GlmMoeDsaForCausalLM` | GLM-5, GLM-5.1, GLM-5.2 | `zai-org/GLM-5`, etc. | ✅︎ | ✅︎ |
 | `GPT2LMHeadModel` | GPT-2 | `openai-community/gpt2`, `openai-community/gpt2-xl`, etc. | | ✅︎ |
-| `GPTJForCausalLM` | GPT-J | `EleutherAI/gpt-j-6b`, `nomic-ai/gpt4all-j`, etc. | | ✅︎ |
 | `GptOssForCausalLM` | GPT-OSS | `openai/gpt-oss-120b`, `openai/gpt-oss-20b` | ✅︎ | ✅︎ |
 | `GraniteForCausalLM` | Granite 3.0, Granite 3.1, PowerLM | `ibm-granite/granite-3.0-2b-base`, `ibm-granite/granite-3.1-8b-instruct`, `ibm/PowerLM-3b`, etc. | ✅︎ | ✅︎ |
 | `GraniteMoeForCausalLM` | Granite 3.0 MoE, PowerMoE | `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc. | ✅︎ | ✅︎ |
@@ -435,17 +431,13 @@ th {
 | `HYV4ForCausalLM` | HY4 Preview | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
 | `HyperCLOVAXForCausalLM` | HyperCLOVAX-SEED-Think-14B | `naver-hyperclovax/HyperCLOVAX-SEED-Think-14B` | ✅︎ | ✅︎ |
 | `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
-| `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
-| `IQuestCoderForCausalLM` | IQuestCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Instruct`, etc. | | |
 | `IQuestLoopCoderForCausalLM` | IQuestLoopCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct`, etc. | | |
-| `JambaForCausalLM` | Jamba | `ai21labs/AI21-Jamba-1.5-Large`, `ai21labs/AI21-Jamba-1.5-Mini`, `ai21labs/Jamba-v0.1`, etc. | ✅︎ | ✅︎ |
 | `K2HorizonForCausalLM` | K2-Horizon | `IFM/K2-Horizon-7B`, `IFM/K2-Horizon-375B` | | ✅︎ |
 | `KimiLinearForCausalLM` | Kimi-Linear-48B-A3B-Base, Kimi-Linear-48B-A3B-Instruct | `moonshotai/Kimi-Linear-48B-A3B-Base`, `moonshotai/Kimi-Linear-48B-A3B-Instruct` | | ✅︎ |
 | `Lfm2ForCausalLM` | LFM2 | `LiquidAI/LFM2-1.2B`, `LiquidAI/LFM2-700M`, `LiquidAI/LFM2-350M`, etc. | ✅︎ | ✅︎ |
 | `Lfm2MoeForCausalLM` | LFM2MoE | `LiquidAI/LFM2-8B-A1B-preview`, etc. | ✅︎ | ✅︎ |
 | `Lfm3ForCausalLM` | LFM3 | `LiquidAI/LFM3-1.7B`, `LiquidAI/LFM3-1.7B-Base`, etc. | ✅︎ | ✅︎ |
 | `LongcatFlashForCausalLM` | LongCat-Flash | `meituan-longcat/LongCat-Flash-Chat`, `meituan-longcat/LongCat-Flash-Chat-FP8` | ✅︎ | ✅︎ |
-| `MambaForCausalLM` | Mamba | `state-spaces/mamba-130m-hf`, `state-spaces/mamba-790m-hf`, `state-spaces/mamba-2.8b-hf`, etc. | | ✅︎ |
 | `Mamba2ForCausalLM` | Mamba2 | `mistralai/Mamba-Codestral-7B-v0.1`, etc. | | ✅︎ |
 | `MiMoForCausalLM` | MiMo | `XiaomiMiMo/MiMo-7B-RL`, etc. | ✅︎ | ✅︎ |
 | `MiMoV2FlashForCausalLM` | MiMoV2Flash | `XiaomiMiMo/MiMo-V2-Flash`, etc. | | ✅︎ |
@@ -474,12 +466,9 @@ th {
 | `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `RicursiveForCausalLM` | Ripple | `ricursiveAI/Ripple-65B-Preview`, `ricursiveAI/Ripple-65B-Preview-NVFP4`, etc. | | ✅︎ |
 | `Rnj1ForCausalLM` | Rnj1 | `EssentialAI/rnj-1-instruct`, etc. | | |
-| `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-30b-a3b`, etc. | ✅︎ | ✅︎ |
-| `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-105b-a9b`, etc. | | ✅︎ |
 | `SolarForCausalLM` | Solar Pro | `upstage/solar-pro-preview-instruct`, etc. | ✅︎ | ✅︎ |
 | `Step1ForCausalLM` | Step-Audio | `stepfun-ai/Step-Audio-EditX`, etc. | ✅︎ | ✅︎ |
 | `Step3p5ForCausalLM` | Step-3.5-flash | `stepfun-ai/Step-3.5-Flash`, etc. | | ✅︎ |
-| `TeleFLMForCausalLM` | TeleFLM | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc. | ✅︎ | ✅︎ |
 | `Zamba2ForCausalLM` | Zamba2 | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc. | | |
 | `ZayaForCausalLM` | ZAYA1 | `Zyphra/ZAYA1-8B`, `Zyphra/ZAYA1-74B-preview`, etc. | | |
 
@@ -487,16 +476,21 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | ✅︎ | ✅︎ |
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
 | `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
+| `ExaoneForCausalLM` | EXAONE-3, EXAONE-3.5, EXAONE-Deep | `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, `LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct`, `LGAI-EXAONE/EXAONE-Deep-7.8B`, etc. | ✅︎ | ✅︎ |
 | `FlexOlmoForCausalLM` | FlexOlmo | `allenai/FlexOlmo-7x7B-1T`, `allenai/FlexOlmo-7x7B-1T-RT`, etc. | ✅︎ | ✅︎ |
 | `GemmaForCausalLM` | Gemma | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc. | ✅︎ | ✅︎ |
 | `GlmForCausalLM` | GLM-4 | `zai-org/glm-4-9b-chat-hf`, etc. | ✅︎ | ✅︎ |
 | `GPTBigCodeForCausalLM` | StarCoder, SantaCoder, WizardCoder | `bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, `WizardLM/WizardCoder-15B-V1.0`, etc. | ✅︎ | ✅︎ |
+| `GPTJForCausalLM` | GPT-J | `EleutherAI/gpt-j-6b`, `nomic-ai/gpt4all-j`, etc. | ✅︎ | ✅︎ |
 | `GPTNeoXForCausalLM` | GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM | `EleutherAI/gpt-neox-20b`, `EleutherAI/pythia-12b`, `OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, `databricks/dolly-v2-12b`, `stabilityai/stablelm-tuned-alpha-7b`, etc. | | ✅︎ |
 | `HunYuanDenseV1ForCausalLM` | Hunyuan Dense | `tencent/Hunyuan-7B-Instruct` | ✅︎ | ✅︎ |
 | `HunYuanMoEV1ForCausalLM` | Hunyuan-A13B | `tencent/Hunyuan-A13B-Instruct`, `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`, etc. | ✅︎ | ✅︎ |
+| `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
+| `IQuestCoderForCausalLM` | IQuest-Coder-V1 | `IQuestLab/IQuest-Coder-V1-7B-Instruct`, `IQuestLab/IQuest-Coder-V1-40B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `Jais2ForCausalLM` | Jais2 | `inceptionai/Jais-2-8B-Chat`, `inceptionai/Jais-2-70B-Chat`, etc. | ✅︎ | ✅︎ |
 | `Kolibri1ForCausalLM` | Kolibri 1 | `Aleph-Alpha/Kolibri-1`, `Aleph-Alpha/Kolibri-1-BF16`, etc. | ✅︎ | ✅︎ |
 | `LlamaForCausalLM` | Llama 3.1, Llama 3, Llama 2, LLaMA, Yi | `meta-llama/Meta-Llama-3.1-405B-Instruct`, `meta-llama/Meta-Llama-3.1-70B`, `meta-llama/Meta-Llama-3-70B-Instruct`, `meta-llama/Llama-2-70b-hf`, `01-ai/Yi-34B`, etc. | ✅︎ | ✅︎ |
@@ -510,11 +504,14 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `Phi3ForCausalLM` | Phi-4, Phi-3 | `microsoft/Phi-4-mini-instruct`, `microsoft/Phi-4`, `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc. | ✅︎ | ✅︎ |
 | `Qwen2ForCausalLM` | QwQ, Qwen2 | `Qwen/QwQ-32B-Preview`, `Qwen/Qwen2-7B-Instruct`, `Qwen/Qwen2-7B`, etc. | ✅︎ | ✅︎ |
 | `Qwen2MoeForCausalLM` | Qwen2MoE | `Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc. | ✅︎ | ✅︎ |
+| `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam-105b`, etc. | ✅︎ | ✅︎ |
+| `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam-30b`, etc. | ✅︎ | ✅︎ |
 | `SeedOssForCausalLM` | SeedOss | `ByteDance-Seed/Seed-OSS-36B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `SmolLM3ForCausalLM` | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` | ✅︎ | ✅︎ |
 | `StableLmForCausalLM` | StableLM | `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc. | ✅︎ | ✅︎ |
 | `Starcoder2ForCausalLM` | Starcoder2 | `bigcode/starcoder2-3b`, `bigcode/starcoder2-7b`, `bigcode/starcoder2-15b`, etc. | ✅︎ | ✅︎ |
 | `VaultGemmaForCausalLM` | VaultGemma | `google/vaultgemma-1b` | ✅︎ | ✅︎ |
+| `YoutuForCausalLM` | Youtu-LLM | `tencent/Youtu-LLM-2B`, etc. | ✅︎ | ✅︎ |
 
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
@@ -671,12 +668,20 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR-2 | T + I<sup>+</sup> | `baidu/Unlimited-OCR-2` | | |
 
-!!! note "HY4 Flash"
+!!! note "HY4 and HY4 Flash"
 
-    HY4 Flash currently supports NVIDIA CUDA only; AMD ROCm, LoRA, and pipeline
-    parallelism are not supported. Published checkpoints use
-    `HYV4FlashForConditionalGeneration`, which vLLM maps to
-    `HYV4FlashVLForConditionalGeneration`.
+    HY4 and HY4 Flash run on NVIDIA CUDA and on AMD ROCm gfx950 GPUs (MI350X,
+    MI355X). HY4 Flash and DFly reject MI300X and MI325X (gfx942); HY4 loads
+    on gfx942 but is untested there. On ROCm, set `VLLM_ROCM_USE_AITER=1`
+    and `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`: AITER's default sparse MLA
+    decode kernel reads the wrong KV rows once a layer's KV cache exceeds
+    4 GiB (ROCm/aiter#6277), and vLLM warns when the Triton kernel is not
+    selected. HY4 Flash on ROCm also requires BF16 KV storage
+    (`--kv-cache-dtype auto` or `bfloat16`) and OCP FP8.
+
+    HY4 Flash does not support LoRA or pipeline parallelism. Published HY4
+    Flash checkpoints use `HYV4FlashForConditionalGeneration`, which vLLM maps
+    to `HYV4FlashVLForConditionalGeneration`.
 
 On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
 varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.
@@ -693,6 +698,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | ------------ | ------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | ✅︎ | ✅︎ |
 | `Emu3ForConditionalGeneration` | Emu3 | T + I<sup>+</sup> | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
+| `GraniteDoclingForConditionalGeneration` | Granite Docling | T + I<sup>+</sup> | `ibm-granite/granite-for-docling-2b`, etc. | ✅︎ | ✅︎ |
 | `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | T + A<sup>+</sup> | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
@@ -730,6 +736,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 !!! note
     For `Gemma4ForConditionalGeneration`:
+    - Gemma 4 and Gemma 4 Unified use the checkpoint's resize settings by default. For requests that supply pre-resized images with `do_resize=False`, each dimension must be divisible by the pooled patch size (normally 48 pixels), and the image must fit `max_soft_tokens`. Unresized video frames have a fixed limit of 70 soft tokens per frame.
     - audio input is only supported by the `gemma-4-E2B` and `gemma-4-E4B` variants.
     - The model does not ingest videos directly. However, vLLM’s Gemma 4 implementation supports video inputs by handling video processing internally. Users can send videos directly in the message structure to vLLM, where they are converted into text and image frames before being passed to the model.
     - Gemma 4 assistant checkpoints for speculative decoding use vLLM’s Gemma
@@ -741,6 +748,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - This is the encoder-free Gemma 4 variant (e.g. `gemma-4-12B-it`). Unlike the tower-based `Gemma4ForConditionalGeneration`, it has **no SigLIP vision encoder** and **no audio encoder**. Raw pixel patches are projected directly into LM space via a Dense+LayerNorm pipeline with factorized positional embeddings, and raw audio waveform frames are projected directly through a multimodal embedder.
     - All modalities (image, video, audio) are supported.
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
+
+!!! note
+    `GraniteDoclingForConditionalGeneration` checkpoints with a fine connector path (`vision_config.use_fine_route`)
+    accept `fine_route=True` in `--mm-processor-kwargs` or per request, for four times as many image tokens per tile.
+    To choose the route of each page with the checkpoint's density router, see
+    [examples/generate/multimodal/granite_docling_density_router_online.py](../../examples/generate/multimodal/granite_docling_density_router_online.py).
 
 !!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
@@ -771,6 +784,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     image and video only, as do the Nemotron 3.5 Super VL checkpoints.
     `NemotronH_Omni_Reasoning_V3` checkpoints load without `--trust-remote-code`
     on `transformers>=5.18.0`; older versions still require the flag.
+    The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) serves image and video inputs
+    for these checkpoints. Audio inputs need the Python frontend.
 
 !!! note
     On ROCm, `Step5ForConditionalGeneration` requires CDNA3 or newer (MI300 series
@@ -832,7 +847,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `OmniASRForConditionalGeneration` | Omnilingual ASR | `hf-audio/omniasr-llm-300m-v2` | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
+
+!!! note
+    The Transformers modeling backend can't tell how many audios per prompt a model's processor accepts.
+    For models that take one audio per prompt, such as `OmniASRForConditionalGeneration`, pass
+    `--limit-mm-per-prompt.audio 1` so that extra audios are rejected up front.
 
 #### Realtime Transcription
 

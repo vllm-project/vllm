@@ -83,6 +83,10 @@ class _ClientRequestState:
     # OffloadKeys registered but not yet flushed onto the wire. Drained and
     # cleared by the next flush_pending_lookups.
     unsent: list[OffloadKey] = field(default_factory=list)
+    # Keys the peer answered MISS in a round a fetch has since closed. The
+    # peer holds nothing for them, so they are not lookup state; they only
+    # spare a re-probe. Dropped when the request finishes.
+    known_misses: set[OffloadKey] = field(default_factory=set)
     # Current lookup round. LookupMsgs carry it, each fetch closes it and
     # advances it, so every round's supply/demand/completion is isolated
     # on the wire. PD clients never probe, but each nonempty fetch also
@@ -183,9 +187,17 @@ class ClientRole:
         `peer_lookup_open` is only read by `finish`, and every path
         that clears the last probe (fetch / finish / close) also settles
         it, so dropping on emptiness never loses a flag still in use.
+        `known_misses` keeps the entry until `finish`, so a load completing
+        doesn't discard them.
         """
         st = self._requests.get(kv_request_id)
-        if st is not None and not st.loads and not st.probes and not st.unsent:
+        if (
+            st is not None
+            and not st.loads
+            and not st.probes
+            and not st.unsent
+            and not st.known_misses
+        ):
             del self._requests[kv_request_id]
 
     def _on_load_terminal(self, kv_request_id: str, st: _ClientRequestState) -> None:
@@ -296,17 +308,17 @@ class ClientRole:
         self._active_loads.add(kv_request_id)
         st.peer_lookup_open = False
         self._send(fetch)
-        # Issuing the fetch closes this lookup round, so drop all probe
-        # state. Once the peer serves the fetch both sides unpin, so a
-        # stale cached True would let a later lookup() return HIT for a
-        # block the producer may have evicted; clearing forces a fresh
-        # probe under the next round.
+        # Issuing the fetch closes this lookup round, and the peer unpins
+        # once it serves it: a cached HIT, and a probe sent under this
+        # round, are re-probed under the next one. A MISS pins nothing and
+        # is kept; keys not yet sent go out under the next round.
         if st.probed and keys:
             assert st.probes, (
                 f"symmetric fetch for {kv_request_id} has keys but no probes"
             )
             assert all(st.probes.get(key) is True for key in keys)
-        st.probes.clear()
+        st.known_misses.update(key for key, hit in st.probes.items() if hit is False)
+        st.probes = dict.fromkeys(st.unsent)
         self._lookup_deadlines.pop(kv_request_id, None)
 
     def mark_fetch_sent(self, msg: dict) -> bool:
@@ -369,6 +381,7 @@ class ClientRole:
                 self._abort_load(kv_request_id, round_seq, load)
         st.probes.clear()
         st.unsent.clear()
+        st.known_misses.clear()
         if st.peer_lookup_open:
             st.peer_lookup_open = False
             self._send(
@@ -454,19 +467,20 @@ class ClientRole:
         - Once a LookupRespMsg has resolved the entry: returns the cached
           bool result on every call without popping it.
 
-        A resolved entry is retained until a fetch closes the round
-        (`request_blocks` clears all probes) or the request finishes
-        (`finish` clears all entries for the id). A request's
-        block set can be re-probed across steps, so popping on read would
-        make a repeat probe of an already-resolved key look brand-new and
-        re-queue it, emitting a redundant LookupMsg for an answer we
-        already hold. Keeping the entry until fetch makes repeat probes
-        free; clearing at fetch forces a fresh probe under the next
-        round, since the block is unpinned once served.
+        A resolved entry is retained until a fetch closes the round or the
+        request finishes (`finish` clears all entries for the id). A
+        request's block set can be re-probed across steps, so popping on
+        read would make a repeat probe of an already-resolved key look
+        brand-new and re-queue it, emitting a redundant LookupMsg for an
+        answer we already hold. At fetch a HIT is dropped, forcing a fresh
+        probe under the next round since the block is unpinned once
+        served, while a MISS is kept for the rest of the request.
         """
         st = self._get_or_create_request(kv_request_id)
         st.probed = True
         okey = OffloadKey(key)
+        if okey in st.known_misses:
+            return False
         if okey in st.probes:
             return st.probes[okey]
         st.probes[okey] = None
