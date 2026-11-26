@@ -221,11 +221,10 @@ pub(crate) async fn render_chat<S: RenderContext>(
         .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
         .map_err(|error| match error {
-            // TODO: remove once client vs server ChatTemplate / Multimodal
-            // errors are split in `vllm-chat` (alongside the gRPC render
-            // mapping in `grpc/render.rs`); keeps `render_chat` from
-            // regressing 400 -> 500 for these variants in the meantime.
-            vllm_chat::Error::ChatTemplate(_) | vllm_chat::Error::Multimodal(_) => {
+            // TODO: remove once client vs server ChatTemplate errors are split
+            // in `vllm-chat`; keeps `render_chat` from regressing 400 -> 500
+            // for this variant in the meantime.
+            vllm_chat::Error::ChatTemplate(_) => {
                 ApiError::invalid_request(error.to_report_string(), None)
             }
             other => chat_submit_error("failed to prepare render chat request", other),
