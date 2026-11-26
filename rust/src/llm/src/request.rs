@@ -25,7 +25,6 @@ use crate::request_metrics::current_unix_timestamp_secs;
 /// Original Python API reference:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/protocol.py#L67-L84>
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(any(test, feature = "test-util"), derive(Default))]
 pub struct GenerateRequest {
     /// Unique ID of the request.
     pub request_id: String,
@@ -184,6 +183,7 @@ mod tests {
             request_id: "req-1".to_string(),
             prompt_token_ids: vec![11, 22, 33],
             sampling_params: EngineCoreSamplingParams::for_test(),
+            mm_features: None,
             arrival_time: Some(42.5),
             cache_salt: Some("salt".to_string()),
             trace_headers: Some(BTreeMap::from([(
@@ -212,7 +212,8 @@ mod tests {
                 )]
                 .into(),
             }),
-            ..Default::default()
+            reasoning_ended: None,
+            lora_request: None,
         }
     }
 
