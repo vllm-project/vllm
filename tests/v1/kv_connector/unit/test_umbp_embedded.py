@@ -563,6 +563,67 @@ def test_mori_scheduler_routes_lookup_and_clear_to_all_ranks(socket_dir, close_r
             server.close()
 
 
+def test_a_lease_reaches_each_ranks_own_pool(socket_dir):
+    """The scheduler leases through the same per-rank sockets it looks up
+    through, and each worker's pool answers for the keys it still holds."""
+
+    class _Pool:
+        def __init__(self, keys):
+            self.keys = set(keys)
+            self.leases = []
+
+        def batch_exists(self, keys):
+            return [key in self.keys for key in keys]
+
+        def batch_lease(self, keys, ttl_ms):
+            self.leases.append((list(keys), ttl_ms))
+            return [key in self.keys for key in keys]
+
+    namespace = "routed-lease"
+    topology = RankTopology(tp_size=2)
+    codec = BlockIdentityCodec(UMBPNamespace(namespace))
+    (a0, a1), (b0, b1) = (
+        codec.keys_for_topology(block_hash, topology, (0,))
+        for block_hash in (b"a", b"b")
+    )
+    pools = [_Pool([a0, b0]), _Pool([a1])]
+    servers = []
+    for rank, pool in zip(topology.all_namespaces(), pools, strict=True):
+        server = _MoriLookupServer(
+            _lookup_socket_path(namespace, rank, socket_dir), pool
+        )
+        server.start()
+        servers.append(server)
+    scheduler = _MoriSchedulerHandle(namespace, topology, socket_dir)
+    try:
+        assert scheduler.lease([a0, a1, b0, b1], 2500) == [True, True, True, False]
+        assert [pool.leases for pool in pools] == [
+            [([a0, b0], 2500)],
+            [([a1, b1], 2500)],
+        ]
+        assert scheduler.lease([], 2500) == []
+        servers[1].close()
+        assert scheduler.lease([a0, a1], 2500) == [True, None]
+    finally:
+        for server in servers:
+            server.close()
+
+
+def test_a_worker_on_mori_without_leases_answers_a_lease_by_existence():
+    client = SimpleNamespace(batch_exists=lambda keys: [key == "held" for key in keys])
+    worker = SimpleNamespace(client=client)
+    worker.batch_exists = lambda keys: _MoriWorkerHandle.batch_exists(worker, keys)
+    assert _MoriWorkerHandle.batch_lease(worker, ["held", "gone"], 100) == [
+        True,
+        False,
+    ]
+    client.batch_lease = lambda keys, ttl_ms: [ttl_ms == 100 for _ in keys]
+    assert _MoriWorkerHandle.batch_lease(worker, ["held", "gone"], 100) == [
+        True,
+        True,
+    ]
+
+
 def test_single_rank_lookup_returns_fresh_results(socket_dir):
     """The only rank also answers legacy keys, and hits are never cached."""
     namespace = "single-route"

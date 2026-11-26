@@ -137,11 +137,13 @@ Set these options in `kv_connector_extra_config`:
 | `rebuild_sliding_window` | `false` | For models with SWA bounded replay (DeepSeek-V4 on ROCm), store only the compressed KV and rebuild the sliding-window state by recomputing the hit's last window. The rebuilt window state is approximate. With `false` every cache group is stored. |
 | `enable_partial_hash_hits` | `false` | Allow hits that end inside a block, at core's prefix-match unit (`cache_config.prefix_match_unit`). |
 | `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and the transfer timeout. A synchronous wait that times out fails the step rather than reusing its blocks. |
+| `load_lease_ms` | `timeout_ms` | How long the objects a hit will load are kept from eviction. Lookups change nothing in the pool; once the scheduler knows what a hit loads, it leases exactly those objects on every rank, and an object lost since the lookup shortens the hit instead of failing the load. `0` takes no lease. Needs a MORI with `batch_lease`; with an older one, loads are not protected. |
 | `key_namespace` | derived | Overrides the namespace derived from the model, revision, KV layout, cache groups, parallel topology and draft model. The pool can then hold KV from a different layout, so attention backends that require KV written by their own cache layout fall back as with other connectors. |
 
 Use `kv_load_failure_policy: "recompute"` in `kv_transfer_config`, as in the
-examples above. An object can be evicted between lookup and load; the default
-`fail` policy fails the request instead of recomputing it.
+examples above. A load can still fail, for example when the pool is
+unreachable or MORI has no `batch_lease`; the default `fail` policy fails the
+request instead of recomputing it.
 
 With `kv_role: "kv_consumer"` the connector only restores and never stores.
 

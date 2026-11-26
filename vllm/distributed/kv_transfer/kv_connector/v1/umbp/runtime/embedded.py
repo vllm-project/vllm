@@ -10,7 +10,7 @@ import os
 import socket
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Executor, Future, ThreadPoolExecutor, TimeoutError
 from functools import lru_cache
 from pathlib import Path
@@ -63,6 +63,8 @@ def _rank_namespace_from_key_prefix(prefix: str) -> tuple[int, int, int, int] | 
 
 class _LookupClient(Protocol):
     def batch_exists(self, keys: Sequence[str]) -> Sequence[bool]: ...
+
+    def batch_lease(self, keys: Sequence[str], ttl_ms: int) -> Sequence[bool]: ...
 
     def clear(self) -> bool: ...
 
@@ -164,7 +166,12 @@ class _MoriLookupServer:
                             msgspec.json.encode(bool(self.client.clear())) + b"\n"
                         )
                         continue
-                    result = self.client.batch_exists(payload)
+                    if isinstance(payload, dict) and payload.get("op") == "lease":
+                        result = self.client.batch_lease(
+                            payload["keys"], int(payload["ttl_ms"])
+                        )
+                    else:
+                        result = self.client.batch_exists(payload)
                     connection.sendall(
                         msgspec.json.encode([bool(value) for value in result]) + b"\n"
                     )
@@ -213,11 +220,24 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
             return msgspec.json.decode(response or b"[]")
 
     def lookup(self, keys: Sequence[str]) -> Sequence[bool | None]:
+        return self._ask(keys, list)
+
+    def lease(self, keys: Sequence[str], ttl_ms: int) -> Sequence[bool | None]:
+        if not keys:
+            return []
+        return self._ask(
+            keys, lambda batch: {"op": "lease", "keys": batch, "ttl_ms": ttl_ms}
+        )
+
+    def _ask(
+        self, keys: Sequence[str], payload: Callable[[list[str]], Any]
+    ) -> Sequence[bool | None]:
+        """Send each rank's keys to the worker that owns that rank's pool."""
         unavailable: list[tuple[int, int, int, int]]
         if len(self._paths) == 1:
             rank, path = next(iter(self._paths.items()))
             try:
-                values = self._request(path, keys)
+                values = self._request(path, payload(list(keys)))
                 if len(values) != len(keys):
                     raise ValueError("lookup returned an invalid result length")
                 return self._lookup_result(keys, [bool(value) for value in values], [])
@@ -245,7 +265,7 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
         for rank, indexed_keys in keys_by_rank.items():
             path = self._paths[rank]
             try:
-                values = self._request(path, [key for _, key in indexed_keys])
+                values = self._request(path, payload([key for _, key in indexed_keys]))
                 if len(values) != len(indexed_keys):
                     raise ValueError("lookup returned an invalid result length")
                 for (index, _), value in zip(indexed_keys, values, strict=True):
@@ -258,7 +278,7 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
             if not unrouted:
                 break
             try:
-                values = self._request(path, [key for _, key in unrouted])
+                values = self._request(path, payload([key for _, key in unrouted]))
                 for (index, _), value in zip(unrouted, values, strict=True):
                     result[index] = result[index] or bool(value)
             except (OSError, ValueError):
@@ -496,6 +516,13 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
 
     def batch_exists(self, keys: Sequence[str]) -> Sequence[bool]:
         return [bool(value) for value in self.client.batch_exists(keys)]
+
+    def batch_lease(self, keys: Sequence[str], ttl_ms: int) -> Sequence[bool]:
+        lease = getattr(self.client, "batch_lease", None)
+        if lease is None:
+            # A MORI without leases: what the lookup found is all there is.
+            return self.batch_exists(keys)
+        return [bool(value) for value in lease(list(keys), ttl_ms)]
 
     def clear(self) -> bool:
         return bool(self.client.clear())

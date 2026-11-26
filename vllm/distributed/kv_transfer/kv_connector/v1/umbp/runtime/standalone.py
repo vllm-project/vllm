@@ -233,6 +233,7 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
         self._call_lock = threading.Lock()
         self._unanswered: Future | None = None
         self._last_failure_log = float("-inf")
+        self._warned_no_lease = False
 
     def _call(self, method: str, *args: Any) -> Any:
         with self._call_lock:
@@ -261,6 +262,33 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
         if len(result) != len(keys):
             self._log_failure(
                 "lookup", ValueError(f"{len(result)} results for {len(keys)} keys")
+            )
+            return [None] * len(keys)
+        return result
+
+    def lease(self, keys: Sequence[str], ttl_ms: int) -> Sequence[bool | None]:
+        if not keys:
+            return []
+        if not hasattr(self._client, "batch_lease"):
+            if not self._warned_no_lease:
+                self._warned_no_lease = True
+                logger.warning(
+                    "MORI's UMBP client has no batch_lease; loads from %s are "
+                    "not protected from eviction after their lookup",
+                    self._address,
+                )
+            return [True] * len(keys)
+        try:
+            result = [
+                bool(value)
+                for value in self._call("batch_lease", list(keys), int(ttl_ms))
+            ]
+        except Exception as exc:
+            self._log_failure("lease", exc)
+            return [None] * len(keys)
+        if len(result) != len(keys):
+            self._log_failure(
+                "lease", ValueError(f"{len(result)} results for {len(keys)} keys")
             )
             return [None] * len(keys)
         return result
