@@ -231,6 +231,7 @@ impl Error {
             | Self::IncompatibleParserSelections { .. }
             | Self::ParserUnavailableByName { .. }
             | Self::ParserInitialization { .. }
+            | Self::UnusableAutoParser { .. }
             | Self::OutputParserInitialization { .. }
             | Self::HarmonyParserOverrideUnsupported { .. }
             | Self::HarmonyOutputParsing { .. }
