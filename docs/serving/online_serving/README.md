@@ -267,6 +267,10 @@ and all chat requests will error.
 vllm serve <model> --chat-template ./path-to-chat-template.jinja
 ```
 
+With `--tokenizer-mode cohere`, configure custom templates with
+`--chat-template`. This mode rejects template source in HTTP requests,
+even when `--trust-request-chat-template` is enabled.
+
 vLLM community provides a set of chat templates for popular models. You can find them under the [examples](../../../examples) directory.
 
 With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
