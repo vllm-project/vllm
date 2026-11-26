@@ -17,6 +17,7 @@ from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
     load_model_without_vllm_runner,
+    named_expert_checkpoint_entries,
     quant_config_args,
 )
 from tests.single_rank_group import SingleRankGroup, override_parallel_groups
@@ -1178,16 +1179,7 @@ def test_weight_loading_requantization_moe(
         "quark": "w13_input_scale_2",
     }[source_format]
     tensors[input_name] = torch.tensor([[0.25, 0.5], [0.75, 1.0]])
-    checkpoint = []
-    for name, tensor in tensors.items():
-        stem, suffix = name.split("_", 1)
-        projections = ("gate_proj", "up_proj") if stem == "w13" else ("down_proj",)
-        for expert in range(2):
-            parts = (
-                tensor[expert].chunk(2, dim=0) if stem == "w13" else (tensor[expert],)
-            )
-            for projection, part in zip(projections, parts, strict=True):
-                checkpoint.append((f"{expert}.{projection}.{suffix}", part))
+    checkpoint = list(named_expert_checkpoint_entries(tensors, range(2)))
     # Input scales first: a loader counting them more than once would complete
     # the layerwise element count before the last checkpoint tensor.
     checkpoint.sort(key=lambda item: "input" not in item[0])
