@@ -774,6 +774,7 @@ steps:
   - tests/quantization/test_cutlass_w4a16.py
   - tests/model_executor/test_deep_gemm_warmup.py
   - tests/kernels/moe/test_deep_gemm_mega_moe.py
+  - vllm/models/inkling2/nvidia/ops/moe_sm90_mega.py
   commands:
     - python3 ../tools/check_wheel_deepgemm.py
     - pytest -v -s kernels/quantization/test_block_fp8.py
@@ -782,7 +783,7 @@ steps:
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
     - pytest -v -s model_executor/test_deep_gemm_warmup.py
-    - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py -k fp8_block_sm90_matches_reference
+    - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py -k sm90_matches_reference
   mirror:
     amd:
       automatic_shard: true

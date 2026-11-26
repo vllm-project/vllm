@@ -16,10 +16,12 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP4,
     MEGA_MOE_MXFP4_SM90,
     MEGA_MOE_NVFP4,
+    MEGA_MOE_NVFP4_SM90,
     MEGA_MOE_WEIGHT_FORMATS,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
     MegaMoEWeightSpec,
+    deep_gemm_supports_sm90_nvfp4,
 )
 from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
@@ -1687,6 +1689,76 @@ def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
             0,
             token,
             _expert(x[token], w13[e], w2[e], topk_weights[token, slot], fmt, act, 1.0),
+        )
+
+    assert output.dtype == torch.bfloat16
+    assert _calc_diff(output, expected) < 1e-3
+    assert F.cosine_similarity(output.float(), expected, dim=-1).min() > 0.99
+
+
+E2M1_VALUES = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
+
+
+def _nvfp4_checkpoint(e: int, n: int, k: int, device: torch.device):
+    """Random NVFP4 experts `(codes, E4M3 scales, FP32 global scales)` and
+    the dequantized weights."""
+    codes = torch.randint(0, 256, (e, n, k // 2), dtype=torch.uint8, device=device)
+    scale = torch.randint(0x20, 0x50, (e, n, k // 16), dtype=torch.uint8, device=device)
+    scale = scale.view(torch.float8_e4m3fn)
+    global_scale = (torch.rand(e, device=device) + 0.5) / (4 * k**0.5)
+    nibbles = torch.stack((codes & 0xF, codes >> 4), dim=-1).flatten(-2).long()
+    values = torch.tensor(E2M1_VALUES, device=device)[nibbles]
+    full_scale = scale.float().repeat_interleave(16, -1) * global_scale[:, None, None]
+    return (codes, scale, global_scale), values * full_scale
+
+
+@pytest.mark.skipif(
+    not (has_sm90_mega_moe and deep_gemm_supports_sm90_nvfp4()),
+    reason="The SM90 NVFP4 MegaMoE kernel requires SM90 and DeepGEMM",
+)
+def test_deep_gemm_mega_moe_nvfp4_sm90_matches_reference(dist_init):
+    """Random NVFP4 experts laid out for SM90 and run through the Inkling2
+    experts with SiTU match the dequantized reference."""
+    from vllm.models.inkling2.nvidia.ops.moe_sm90_mega import Inkling2MegaMoEExperts
+    from vllm.utils.deep_gemm import transform_nvfp4_weights_for_sm90_mega_moe
+
+    act = ACTIVATIONS["situ"]
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    # L1 rows alternate gate and up.
+    l1, w13 = _nvfp4_checkpoint(NUM_EXPERTS, 2 * INTER, HIDDEN, device)
+    l2, w2 = _nvfp4_checkpoint(NUM_EXPERTS, HIDDEN, INTER, device)
+    with torch.device(device):
+        experts = Inkling2MegaMoEExperts(
+            vllm_config,  # type: ignore[arg-type]
+            *transform_nvfp4_weights_for_sm90_mega_moe(l1, l2),
+            top_k=TOP_K,
+            gate_cap=act.alpha,
+            up_cap=act.beta,
+            prefix="model.layers.0.nvfp4_sm90",
+        )
+    assert experts.weight_format == MEGA_MOE_NVFP4_SM90
+
+    hidden_states = torch.randn(NUM_TOKENS, HIDDEN, device=device).bfloat16()
+    scores = torch.randn(NUM_TOKENS, NUM_EXPERTS, device=device)
+    topk_weights, topk_ids = torch.topk(scores.softmax(-1), TOP_K, dim=-1)
+
+    output = experts(hidden_states, topk_weights, topk_ids)
+
+    x = hidden_states.float()
+    expected = torch.zeros_like(x)
+    for e in range(NUM_EXPERTS):
+        token, slot = (topk_ids == e).nonzero(as_tuple=True)
+        gate_up = torch.cat([w13[e, 0::2], w13[e, 1::2]])
+        weight = topk_weights[token, slot]
+        expected.index_add_(
+            0,
+            token,
+            _expert(x[token], gate_up, w2[e], weight, MEGA_MOE_NVFP4_SM90, act, 1.0),
         )
 
     assert output.dtype == torch.bfloat16
