@@ -208,7 +208,8 @@ class EplbModelState:
     """
     Async worker progress in the current rearrangement, written by the worker:
     2 * layer while transferring the layer, plus 1 once it is published. -1
-    until the worker starts the first layer.
+    until the worker starts the first layer, and 2 * num_moe_layers once it has
+    published a cycle that has no layer to transfer.
     """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
@@ -833,6 +834,8 @@ class EplbState:
             slowest = int(progress.min())
             if slowest < 0:
                 stage = "computing the new placement"
+            elif slowest >= 2 * model_state.model.num_moe_layers:
+                stage = "published the empty cycle"
             else:
                 layer, published = divmod(slowest, 2)
                 stage = f"{'published' if published else 'transferring'} layer {layer}"

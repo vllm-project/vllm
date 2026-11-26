@@ -594,7 +594,9 @@ def test_async_rearrangement_interval_starts_after_last_layer_commit(dist_init):
     assert rearrange_steps == [0, last_commit_step + interval]
 
 
-def _overrun_warning_worker(rank: int, world_size: int, port: int):
+def _overrun_warning_worker(
+    rank: int, world_size: int, port: int, progress: tuple[int, ...], stage: str
+):
     dist.init_process_group(
         "gloo",
         init_method=f"tcp://127.0.0.1:{port}",
@@ -618,8 +620,7 @@ def _overrun_warning_worker(rank: int, world_size: int, port: int):
     model_state.rebalanced = True
     model_state.pending_result = None
     model_state.num_committed_layers = 1
-    # Rank 0 has published layer 1; rank 1 is still transferring it.
-    model_state.worker_progress = 3 - rank
+    model_state.worker_progress = progress[rank]
     state = EplbState(ParallelConfig(), torch.device("cpu"))
     state.is_async = True
     state.expert_rearrangement_step_interval = interval
@@ -635,17 +636,32 @@ def _overrun_warning_worker(rank: int, world_size: int, port: int):
     if rank == 0:
         warning.assert_called_once()
         message = warning.call_args.args[0] % warning.call_args.args[1:]
-        assert message.endswith("slowest EP ranks [1]: transferring layer 1")
+        assert message.endswith(stage)
     else:
         warning.assert_not_called()
     dist.destroy_process_group()
 
 
-def test_async_rearrangement_overrun_warning_names_slowest_rank():
+@pytest.mark.parametrize(
+    "progress,stage",
+    [
+        # Rank 0 has published layer 1; rank 1 is still transferring it.
+        ((3, 2), "slowest EP ranks [1]: transferring layer 1"),
+        # Both ranks published a cycle that had no layer to transfer (3 layers).
+        ((6, 6), "slowest EP ranks [0, 1]: published the empty cycle"),
+    ],
+    ids=["transferring_layer", "published_empty_cycle"],
+)
+def test_async_rearrangement_overrun_warning_names_slowest_rank(progress, stage):
     """When an async cycle overruns step_interval, every EP rank must enter
     the progress all-reduce, and only rank 0 logs the rank that is behind.
     """
-    mp.spawn(_overrun_warning_worker, args=(2, get_open_port()), nprocs=2, join=True)
+    mp.spawn(
+        _overrun_warning_worker,
+        args=(2, get_open_port(), progress, stage),
+        nprocs=2,
+        join=True,
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

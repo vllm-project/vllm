@@ -282,6 +282,20 @@ def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_a
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
+def test_async_rebalance_rejects_policy_output_of_the_wrong_shape(model_state):
+    """The worker finds the changed layers by comparing the two placements row by
+    row, so a policy output with another shape must fail instead of broadcasting."""
+
+    class Policy(DefaultEplbPolicy):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            return super().rebalance_experts(stats, old_global_expert_indices)[:, :-1]
+
+    model_state.eplb_stats = EplbStats(torch.tensor([[13, 3, 4, 3]]), 6, 1, 1, 2)
+    current = torch.tensor([[0, 1, 2, 3, 0, 1]])
+    with pytest.raises(AssertionError, match=r"shape \(1, 5\), expected \(1, 6\)"):
+        run_rebalance_experts(model_state, _State(Policy()), current, None)
+
+
 @pytest.mark.parametrize("fail_commit", [False, True])
 def test_async_commit_updates_maps_before_buffer_acknowledgement(
     model_state, fail_commit

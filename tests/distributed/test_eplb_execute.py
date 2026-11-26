@@ -8,7 +8,6 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -18,7 +17,6 @@ import vllm.distributed.eplb.eplb_communicator as eplb_comm
 import vllm.utils.gpu_sync_debug as gsd
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.utils import hash_config_cached
-from vllm.distributed.eplb import async_worker
 from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
     has_nixl,
@@ -26,7 +24,6 @@ from vllm.distributed.eplb.eplb_communicator import (
 from vllm.distributed.eplb.eplb_state import EplbModelState, EplbState
 from vllm.distributed.eplb.policy.abstract import AbstractEplbPolicy, EplbStats
 from vllm.distributed.eplb.rebalance_execute import (
-    AsyncEplbCycleComplete,
     AsyncEplbLayerResult,
     move_from_buffer,
     rearrange_expert_weights_inplace,
@@ -870,148 +867,6 @@ def test_async_transfer_layer_without_mtp(
     )
 
 
-@pytest.mark.parametrize(
-    "changed_layers",
-    [set(), {2}, {3}, {0, 2}],
-    ids=["unchanged", "middle", "last", "non_contiguous"],
-)
-def test_async_worker_skips_unchanged_layers_without_changing_output(
-    monkeypatch: pytest.MonkeyPatch,
-    changed_layers: set[int],
-):
-    """Match the tensor output of the legacy all-layer transfer behavior."""
-
-    class Stream:
-        def synchronize(self):
-            pass
-
-    num_layers = 4
-    old_map = torch.arange(num_layers * 2).reshape(num_layers, 2)
-    new_map = old_map.clone()
-    for layer_idx in changed_layers:
-        new_map[layer_idx] = new_map[layer_idx].flip(0)
-
-    initial_weights = torch.arange(num_layers * 2 * 3).reshape(num_layers, 2, 3)
-
-    def rearrange_layer(
-        weights: torch.Tensor,
-        old_indices: torch.Tensor,
-        new_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        source_indices = torch.tensor(
-            [(old_indices == logical).nonzero().item() for logical in new_indices]
-        )
-        return weights[source_indices]
-
-    expected_weights = torch.stack(
-        [
-            rearrange_layer(
-                initial_weights[layer_idx],
-                old_map[layer_idx],
-                new_map[layer_idx],
-            )
-            for layer_idx in range(num_layers)
-        ]
-    )
-
-    model_state = SimpleNamespace(
-        communicator=MagicMock(),
-        expert_buffer=torch.empty_like(initial_weights[0]),
-        model=SimpleNamespace(
-            expert_weights=[weights.clone() for weights in initial_weights],
-            num_moe_layers=num_layers,
-        ),
-        model_name="model",
-        pending_result=None,
-        physical_to_logical_map=old_map.clone(),
-        rebalanced=True,
-        worker_progress=-1,
-    )
-    state = SimpleNamespace(
-        is_async=True,
-        ft_reset_epoch=0,
-        model_states={"model": model_state},
-        parallel_config=SimpleNamespace(
-            eplb_config=SimpleNamespace(migration_batching_enabled=False)
-        ),
-    )
-    group = SimpleNamespace(rank=lambda: 0, size=lambda: 1)
-    eplb_group = SimpleNamespace(device_group=group, cpu_group=group)
-
-    def transfer_layer(**kwargs):
-        model_state.expert_buffer.copy_(
-            rearrange_layer(
-                kwargs["expert_weights"],
-                kwargs["old_layer_indices"],
-                kwargs["new_layer_indices"],
-            )
-        )
-        return MagicMock()
-
-    transfer = MagicMock(side_effect=transfer_layer)
-    all_reduce = MagicMock()
-    results = []
-
-    class ConsumedEvent:
-        def wait(self, stream):
-            del stream
-            result = model_state.pending_result
-            assert result is not None
-            results.append(result)
-            if isinstance(result, AsyncEplbLayerResult):
-                model_state.model.expert_weights[result.layer_idx].copy_(
-                    model_state.expert_buffer
-                )
-                model_state.physical_to_logical_map[result.layer_idx].copy_(
-                    result.new_physical_to_logical_map
-                )
-            if result.completes_cycle:
-                model_state.rebalanced = False
-            model_state.pending_result = None
-
-    monkeypatch.setattr(async_worker, "get_eplb_group", lambda: eplb_group)
-    monkeypatch.setattr(
-        async_worker,
-        "run_rebalance_experts",
-        lambda *args, **kwargs: new_map,
-    )
-    monkeypatch.setattr(async_worker, "transfer_layer", transfer)
-    monkeypatch.setattr(async_worker, "CpuGpuEvent", ConsumedEvent)
-    monkeypatch.setattr(async_worker.torch.distributed, "all_reduce", all_reduce)
-    monkeypatch.setattr(
-        async_worker,
-        "device_stream",
-        lambda stream: contextlib.nullcontext(stream),
-    )
-
-    async_worker._transfer_cycle(state, Stream(), is_profile=False)
-
-    transferred_layers = [call.kwargs["layer_idx"] for call in transfer.call_args_list]
-    assert transferred_layers == sorted(changed_layers)
-    assert all_reduce.call_count == len(changed_layers)
-    assert len(results) == max(1, len(changed_layers))
-    torch.testing.assert_close(
-        torch.stack(model_state.model.expert_weights),
-        expected_weights,
-        rtol=0,
-        atol=0,
-    )
-    torch.testing.assert_close(
-        model_state.physical_to_logical_map,
-        new_map,
-        rtol=0,
-        atol=0,
-    )
-
-    if changed_layers:
-        assert all(isinstance(result, AsyncEplbLayerResult) for result in results)
-        assert [result.completes_cycle for result in results] == [False] * (
-            len(results) - 1
-        ) + [True]
-    else:
-        assert isinstance(results[0], AsyncEplbCycleComplete)
-
-
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_no_change(world_size):
     """Test that when the indices do not change, the weights should remain
@@ -1485,31 +1340,37 @@ def _skip_unless_communicator_usable(communicator: str, world_size: int) -> None
 
 _ALL_LAYERS = set(range(_SCENARIO_NUM_LAYERS))
 
+# name -> (world_size, layers changed by each cycle, migration batching)
+_CYCLE_SCENARIOS: dict[str, tuple[int, list[set[int]], bool]] = {
+    "empty_cycles": (2, [set(), set(), set(), _ALL_LAYERS], False),
+    # The last physical layer never changes, so a cycle must not wait for it.
+    "middle_layer_last_unchanged": (2, [{1}, {1, 2}], False),
+    "sparse_then_dense": (2, [{0, 2}, _ALL_LAYERS, {3}], False),
+    "migration_batching": (2, [{0, 2}, _ALL_LAYERS, {3}], True),
+    "sparse_then_dense_4gpu": (4, [{0, 2}, _ALL_LAYERS, {3}], False),
+}
+# The communicator only moves the weights of the layers a cycle changes, so
+# torch_gloo runs every script and the others one representative script.
+_CYCLE_CASES = [("torch_gloo", name) for name in _CYCLE_SCENARIOS] + [
+    (communicator, "sparse_then_dense")
+    for communicator in ("torch_xccl", "nixl", "symm_mem")
+]
+
 
 @pytest.mark.parametrize(
-    "world_size,script,migration_batching",
-    [
-        pytest.param(2, [set(), set(), set(), _ALL_LAYERS], False, id="empty_cycles"),
-        # The last physical layer never changes, so a cycle must not wait for it.
-        pytest.param(2, [{1}, {1, 2}], False, id="middle_layer_last_unchanged"),
-        pytest.param(2, [{0, 2}, _ALL_LAYERS, {3}], False, id="sparse_then_dense"),
-        pytest.param(2, [{0, 2}, _ALL_LAYERS, {3}], True, id="migration_batching"),
-        pytest.param(4, [{0, 2}, _ALL_LAYERS, {3}], False, id="sparse_then_dense_4gpu"),
-    ],
-)
-@pytest.mark.parametrize(
-    "eplb_communicator", ["torch_gloo", "torch_xccl", "nixl", "symm_mem"]
+    "eplb_communicator,scenario",
+    _CYCLE_CASES,
+    ids=[f"{communicator}-{name}" for communicator, name in _CYCLE_CASES],
 )
 def test_async_eplb_cycles_through_production_worker(
-    world_size: int,
-    script: list[set[int]],
-    migration_batching: bool,
     eplb_communicator: str,
+    scenario: str,
 ):
     """Cycles that change a known set of layers, from none to all, run through
     the real async worker, communicator and per-step main-thread commits: each
     completes without a hang, transfers exactly the changed layers, and leaves
     the committed maps and expert weights equal to the plan."""
+    world_size, script, migration_batching = _CYCLE_SCENARIOS[scenario]
     _skip_unless_communicator_usable(eplb_communicator, world_size)
     distributed_run(
         _test_async_eplb_cycles,

@@ -56,6 +56,36 @@ def _publish_result_and_wait(
     return state.ft_reset_epoch == reset_epoch
 
 
+def _all_ranks_rebalancing(
+    model_state: "EplbModelState",
+    eplb_cpu_group: torch.distributed.ProcessGroup,
+    ep_rank: int,
+    stage: str,
+) -> bool:
+    """All-reduce `rebalanced` so every EPLB rank continues or stops together.
+
+    Returns:
+        False if any rank no longer has `rebalanced` set; it is then cleared on
+        every rank, so none publishes a result that another rank's main thread
+        will never consume.
+
+    """
+    flag = torch.tensor([int(model_state.rebalanced)], dtype=torch.int32, device="cpu")
+    torch.distributed.all_reduce(flag, group=eplb_cpu_group)
+    flag_sum = int(flag.item())
+    if flag_sum == eplb_cpu_group.size():
+        return True
+    logger.warning(
+        "async worker (rank=%d): %s coordinated stop (flag_sum=%d, group_size=%d)",
+        ep_rank,
+        stage,
+        flag_sum,
+        eplb_cpu_group.size(),
+    )
+    model_state.rebalanced = False
+    return False
+
+
 def start_async_worker(
     state: "EplbState",
     is_profile: bool = False,
@@ -103,6 +133,11 @@ def run_rebalance_experts(
         physical_to_logical_map_cpu,
     )
     assert new_physical_to_logical_map.device == torch.device("cpu")
+    assert new_physical_to_logical_map.shape == physical_to_logical_map_cpu.shape, (
+        f"EPLB policy returned a placement of shape "
+        f"{tuple(new_physical_to_logical_map.shape)}, expected "
+        f"{tuple(physical_to_logical_map_cpu.shape)}"
+    )
 
     return new_physical_to_logical_map
 
@@ -159,17 +194,19 @@ def _transfer_cycle(
             model_state, state, physical_to_logical_map_cpu, stream
         )
 
-        changed_layers = [
-            layer_idx
-            for layer_idx in range(num_layers)
-            if not torch.equal(
-                physical_to_logical_map_cpu[layer_idx],
-                new_physical_to_logical_map[layer_idx],
-            )
-        ]
-        if not changed_layers:
+        changed_layers = (
+            (physical_to_logical_map_cpu != new_physical_to_logical_map)
+            .any(dim=1)
+            .nonzero()
+            .flatten()
+            .tolist()
+        )
+        if not changed_layers and _all_ranks_rebalancing(
+            model_state, eplb_cpu_group, ep_rank, "empty cycle"
+        ):
             # Nothing to transfer, but the main thread still has to clear
             # model_state.rebalanced.
+            model_state.worker_progress = 2 * num_layers
             empty_cycle = AsyncEplbCycleComplete(consumed_event=CpuGpuEvent())
             if not _publish_result_and_wait(
                 state, model_state, empty_cycle, stream, reset_epoch
@@ -184,14 +221,20 @@ def _transfer_cycle(
             profile_name = "eplb: schedule migration batches"
             num_local_experts = model_state.model.expert_weights[0][0].shape[0]
             # The placement snapshots stay fixed for this rebalance cycle.
-            # Precompute all layer schedules once, but execute transfers one
-            # layer at a time below to preserve the migration lifecycle. This
-            # profiling range therefore covers scheduling for every MoE layer.
+            # Precompute the changed layers' schedules once, but execute
+            # transfers one layer at a time below to preserve the migration
+            # lifecycle. This profiling range therefore covers scheduling for
+            # every changed layer.
             with torch.profiler.record_function(profile_name):
-                migration_batches_by_layer = schedule_migration_batches_for_layers(
-                    num_local_experts,
-                    physical_to_logical_map_cpu.numpy(),
-                    new_physical_to_logical_map.numpy(),
+                migration_batches_by_layer = dict(
+                    zip(
+                        changed_layers,
+                        schedule_migration_batches_for_layers(
+                            num_local_experts,
+                            physical_to_logical_map_cpu[changed_layers].numpy(),
+                            new_physical_to_logical_map[changed_layers].numpy(),
+                        ),
+                    )
                 )
 
         # Execute one changed EPLB layer transfer per model forward pass. Each
@@ -203,22 +246,9 @@ def _transfer_cycle(
         num_transferred = 0
         for changed_idx, layer_idx in enumerate(changed_layers):
             model_state.worker_progress = 2 * layer_idx
-            flag = torch.tensor(
-                [int(model_state.rebalanced)],
-                dtype=torch.int32,
-                device="cpu",
-            )
-            torch.distributed.all_reduce(flag, group=eplb_cpu_group)
-            if int(flag.item()) != eplb_cpu_group.size():
-                logger.warning(
-                    "async worker (rank=%d): layer %d coordinated stop "
-                    "(flag_sum=%d, group_size=%d)",
-                    ep_rank,
-                    layer_idx,
-                    int(flag.item()),
-                    eplb_cpu_group.size(),
-                )
-                model_state.rebalanced = False
+            if not _all_ranks_rebalancing(
+                model_state, eplb_cpu_group, ep_rank, f"layer {layer_idx}"
+            ):
                 break
 
             transfer_metadata = transfer_layer(
