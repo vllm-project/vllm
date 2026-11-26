@@ -5,7 +5,6 @@
 from dataclasses import replace
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import Glm5NextTextConfig
 
@@ -1118,28 +1117,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if not metadata.num_spec_decodes:
             return 0, None
         cursors = kda_replayssm.step_cursors(self, metadata)
-        num_reqs, query_len = cursors.slot.numel(), 1 + self.num_spec
-        rows = num_reqs * query_len
         beta = beta[0]
-        scattered = metadata.num_spec_decodes and metadata.num_prefills
-        if scattered:
+        if metadata.num_prefills:
             indx = metadata.spec_token_indx
             qkv, beta, f_a, g_a = (
                 t.index_select(0, indx) for t in (qkv, beta, f_a, g_a)
             )
-        # The kernel addresses the packed rows of each request as [N, T] views.
-        x, beta, f_a, g_a = (
-            (
-                t[:rows] if t.size(0) >= rows else F.pad(t, (0, 0, 0, rows - t.size(0)))
-            ).unflatten(0, (num_reqs, query_len))
-            for t in (qkv, beta, f_a, g_a)
-        )
-        direct = not scattered and out.size(1) >= rows
-        step_out = out[0, :rows] if direct else out.new_empty(rows, *out.shape[2:])
+            out = out.new_empty(1, qkv.size(0), *out.shape[2:])
         assert self._fi_conv_weight is not None and self._fi_norm_weight is not None
         checkpoint, u_ring, k_ring, g_ring = self.kv_cache[1:]
         kda_replayssm.kda_replayssm_step(
-            x.unflatten(-1, (3, self.local_num_heads, self.head_dim)),
+            qkv.unflatten(-1, (3, self.local_num_heads, self.head_dim)),
             beta,
             f_a,
             g_a,
@@ -1160,17 +1148,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             u_ring,
             k_ring,
             g_ring,
-            step_out.view(num_reqs, query_len, *out.shape[2:]),
+            out[0],
             self.kda_lower_bound,
             self.head_dim**-0.5,
             self.o_norm.eps,
         )
-        num_tokens = metadata.num_spec_decode_tokens
-        if scattered:
-            return 0, step_out[:num_tokens].unsqueeze(0)
-        if not direct:
-            out[0, :num_tokens] = step_out[:num_tokens]
-        return num_tokens, None
+        if metadata.num_prefills:
+            return 0, out
+        return metadata.num_spec_decode_tokens, None
 
     @eager_break_during_capture
     def _forward(

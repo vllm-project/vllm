@@ -2,13 +2,12 @@
 // B200 rank, vLLM layouts.
 //
 // Request n owns the packed token rows b_n .. b_n + q_n - 1 (b_n =
-// query_start_loc[n], q_n = query_start_loc[n+1] - b_n) of the flat token
-// buffer [N*T, ...]; the token args are [N, T, ...] views of it, so flat row r
-// is at (r / T) * stride[0] + (r % T) * stride[1]. The kernels are templated on
-// the capacity T (6, 9) and mask the tokens q_n .. T - 1 (zero inputs, never
-// stored). A request with q_n = 0 or slot 0 (padded) touches no cache. Each CTA
-// (h, n) also zeroes the out rows n*T .. n*T + T - 1 of head h that lie at or
-// past query_start_loc[N] (the tail of the batch). The ring has R = 32 rows per
+// query_start_loc[n], q_n = query_start_loc[n+1] - b_n) of the token args [M,
+// ...] and of out [MO, H, D]. The kernels are templated on the capacity T (6,
+// 9) and mask the tokens q_n .. T - 1 (zero inputs, never stored). A request
+// with q_n = 0 or slot 0 (padded) touches no cache. The out rows from
+// query_start_loc[N] (the tail of the batch) to MO are zeroed: CTA (h, n) takes
+// those of head h at n, n + N, ... past the tail. The ring has R = 32 rows per
 // slot and head, at slot ring_slot[n] (each ring's slots stride0 apart); a
 // request flushes when c + q_n > L.
 //
@@ -87,12 +86,6 @@ __device__ __forceinline__ float4 ld4(const float* p) {
   return *reinterpret_cast<const float4*>(p);
 }
 __device__ __forceinline__ float f(uint32_t x) { return __uint_as_float(x); }
-// Element offset of flat token row r in a [N, T, ...] view of the flat token
-// buffer.
-__device__ __forceinline__ int64_t trow(int r, int T, int64_t s0, int64_t s1) {
-  return (r / T) * s0 + (r % T) * s1;
-}
-
 // Request n's token rows and the batch total from query_start_loc; q clamped to
 // [0, T].
 struct Toks {
@@ -108,16 +101,15 @@ __device__ __forceinline__ Toks req_tokens(const int32_t* qsl, int n, int N,
   return t;
 }
 
-// The out rows n*T .. n*T + T - 1 of head h at or past the batch total are zero
-// (threads 0 .. 16 T - 1).
-__device__ __forceinline__ void zero_tail(__nv_bfloat16* out, int n, int h,
-                                          int H, int T, int total, int tid) {
-  if (tid < 16 * T) {
-    const int r = n * T + tid / 16, c8 = tid % 16;
-    if (r >= total)
-      *reinterpret_cast<uint4*>(out + (static_cast<int64_t>(r) * H + h) * D +
-                                8 * c8) = make_uint4(0, 0, 0, 0);
-  }
+// The out rows total + n, total + n + N, ... below MO of head h are zero (16
+// threads per row).
+__device__ __forceinline__ void zero_tail(__nv_bfloat16* out, int n, int N,
+                                          int h, int H, int total, int64_t MO,
+                                          int tid) {
+  for (int64_t r = total + n + static_cast<int64_t>(N) * (tid / 16); r < MO;
+       r += static_cast<int64_t>(N) * (NTHR / 16))
+    *reinterpret_cast<uint4*>(out + (r * H + h) * D + 8 * (tid % 16)) =
+        make_uint4(0, 0, 0, 0);
 }
 
 // One step of a transposing warp reduction on each of NB blocks of 32 values:
@@ -226,18 +218,18 @@ __device__ __forceinline__ void proj_lds(uint4 (&b)[4][4],
 }
 
 struct ProjArgs {
-  const __nv_bfloat16* act[2];  // f_a, g_a: [N, T, D] views
-  int64_t s0[2], s1[2];
+  const __nv_bfloat16* act[2];  // f_a, g_a: [M, D] views
+  int64_t s0[2];
   const __nv_bfloat16* wt[2];  // f_b_weight, g_b_weight [H, D, D]
-  // [2][N*T][H*D]: raw gate (bf16-rounded), output-gate logits, flat token rows
+  // [2][M][H*D]: raw gate (bf16-rounded), output-gate logits
   float* out;
   // query_start_loc: rows at or past qsl[N] are not computed
   const int32_t* qsl;
-  int T, NT, HD, N;
+  int M, HD, N;
   int round_z;  // round the output-gate logits to bf16
 };
 
-// Grid (H, 2, ceil(NT / PR)), 4 warps: warp w computes channels 32w .. of head
+// Grid (H, 2, ceil(M / PR)), 4 warps: warp w computes channels 32w .. of head
 // blockIdx.x of projection blockIdx.y (0: gate, 1: output gate) for up to PR
 // tokens, the activation rows staged in shared memory.
 constexpr int PR = 32;
@@ -252,14 +244,13 @@ __global__ void __launch_bounds__(128)
   // never stored) and the weights are loaded before the total arrives
   const int nrows_q = static_cast<int>(ptx::ld_global_u32(p.qsl + p.N));
   const __nv_bfloat16* act = p.act[0];
-  int64_t s0 = p.s0[0], s1 = p.s1[0];
-  if (pj) act = p.act[1], s0 = p.s0[1], s1 = p.s1[1];
+  int64_t s0 = p.s0[0];
+  if (pj) act = p.act[1], s0 = p.s0[1];
 #pragma unroll
   for (int i = 0; i < PR / 8; ++i) {
     const int idx = tid + 128 * i, r = idx >> 4, ch = idx & 15, row = rbase + r;
-    if (row < p.NT)
-      ptx::cp_async_16(sa(&at[r][8 * ch]),
-                       act + trow(row, p.T, s0, s1) + 8 * ch);
+    if (row < p.M)
+      ptx::cp_async_16(sa(&at[r][8 * ch]), act + row * s0 + 8 * ch);
     else
       *reinterpret_cast<uint4*>(&at[r][8 * ch]) = make_uint4(0, 0, 0, 0);
   }
@@ -268,12 +259,12 @@ __global__ void __launch_bounds__(128)
   proj_load(
       b, (pj ? p.wt[1] : p.wt[0]) + (static_cast<int64_t>(h) * D + 32 * w) * D,
       g, tq);
-  const int nrows = min(p.NT, nrows_q);  // packed rows in use
+  const int nrows = min(p.M, nrows_q);  // packed rows in use
   ptx::cp_async_wait<0>();
   if (rbase >= nrows) return;
   __syncthreads();
   const bool rnd = pj == 0 || p.round_z;
-  float* out = p.out + static_cast<int64_t>(pj) * p.NT * p.HD + h * D + 32 * w;
+  float* out = p.out + static_cast<int64_t>(pj) * p.M * p.HD + h * D + 32 * w;
 #pragma unroll
   for (int mt = 0; mt < PR / 16; ++mt) {
     const int rb = rbase + 16 * mt;
@@ -302,8 +293,7 @@ __global__ void __launch_bounds__(128)
 
 struct StepArgs {
   kda_replayssm::Args a;
-  // [2][N*T][H*D] gate and output-gate logits from proj_kernel (FZ false), flat
-  // token rows
+  // [2][M][H*D] gate and output-gate logits from proj_kernel (FZ false)
   const float* gz;
   // flashinfer / triton: conv output and recurrent output rounded to bf16
   int rounded;
@@ -421,7 +411,7 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
   // product).
   auto issue_small = [&](const Unit& x) {
     {
-      const __nv_bfloat16* xs = a.x + x.h * a.x_stride[3];
+      const __nv_bfloat16* xs = a.x + x.h * a.x_stride[2];
 #pragma unroll
       for (int i0 = 0; i0 < T * 48; i0 += NTHR) {
         const int i = i0 + tid;
@@ -430,8 +420,7 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
           if (t < x.q)
             ptx::cp_async_16(
                 sa(&s.B.pre.xw[t][p][8 * ch]),
-                xs + trow(x.b + t, T, a.x_stride[0], a.x_stride[1]) +
-                    p * a.x_stride[2] + 8 * ch);
+                xs + (x.b + t) * a.x_stride[0] + p * a.x_stride[1] + 8 * ch);
           else
             *reinterpret_cast<uint4*>(&s.B.pre.xw[t][p][8 * ch]) =
                 make_uint4(0, 0, 0, 0);
@@ -442,12 +431,10 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
           const int pj = i / (16 * TA), t = (i / 16) % TA, ch = i & 15;
           __nv_bfloat16* dst = pj ? &s.fa[t][8 * ch] : &s.ga[t][8 * ch];
           if (t < x.q)
-            ptx::cp_async_16(
-                sa(dst),
-                (pj ? a.f_a + trow(x.b + t, T, a.f_a_stride[0], a.f_a_stride[1])
-                    : a.g_a +
-                          trow(x.b + t, T, a.g_a_stride[0], a.g_a_stride[1])) +
-                    8 * ch);
+            ptx::cp_async_16(sa(dst),
+                             (pj ? a.f_a + (x.b + t) * a.f_a_stride[0]
+                                 : a.g_a + (x.b + t) * a.g_a_stride[0]) +
+                                 8 * ch);
           else
             *reinterpret_cast<uint4*>(dst) = make_uint4(0, 0, 0, 0);
         }
@@ -545,7 +532,7 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
     ptx::bulk_copy_g2s(sa(wts + D * D), a.f_b_weight + hw, D * D * 2,
                        sa(&s.wbar));
   }
-  zero_tail(a.out, cur.n, cur.h, H, T, cur.total, tid);
+  zero_tail(a.out, cur.n, N, cur.h, H, cur.total, a.dims.MO, tid);
   // padded request: no cache touched, no output row of its own
   if (cur.slot <= 0 || cur.q <= 0) {
     if (tid == 0) {
@@ -574,12 +561,10 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
     if (tid >= D)
 #pragma unroll
       for (int t = 0; t < T; ++t)
-        bt[t] =
-            t < q
-                ? __bfloat162float(__ushort_as_bfloat16(ptx::ld_global_u16(
-                      a.beta +
-                      trow(b + t, T, a.beta_stride[0], a.beta_stride[1]) + h)))
-                : 0.f;
+        bt[t] = t < q
+                    ? __bfloat162float(__ushort_as_bfloat16(ptx::ld_global_u16(
+                          a.beta + (b + t) * a.beta_stride[0] + h)))
+                    : 0.f;
     ptx::cp_async_wait<1>();  // all but the records' u
     __syncthreads();
     issue_ck(cur);  // the checkpoint after the small inputs have landed
@@ -649,15 +634,12 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
           // zero)
         } else {
           ptx::griddep_wait();
-          const int NTt = N * T;
           for (int i = d; i < 2 * T * 32; i += D) {
             const int pj = i / (32 * T), t = (i / 32) % T, ch = i % 32;
             float* dst = (pj ? &s.zs[t][0] : &s.g1s[t][0]) + 4 * ch;
             if (t < q)
-              ptx::cp_async_16(
-                  sa(dst), P.gz +
-                               (static_cast<int64_t>(pj) * NTt + b + t) * HD +
-                               h * D + 4 * ch);
+              ptx::cp_async_16(sa(dst), P.gz + (pj * a.dims.M + b + t) * HD +
+                                            h * D + 4 * ch);
             else
               *reinterpret_cast<float4*>(dst) = make_float4(0.f, 0.f, 0.f, 0.f);
           }
@@ -987,8 +969,7 @@ __global__ void unsupported_kernel() {}
 namespace kda_replayssm {
 
 void kernel_workspace(const Dims& d, size_t* scratch_bytes) {
-  *scratch_bytes =
-      2 * static_cast<size_t>(d.N * d.T * d.H * d.D) * sizeof(float);
+  *scratch_bytes = 2 * static_cast<size_t>(d.M * d.H * d.D) * sizeof(float);
 }
 
 void kernel_run(const Args& x, const Ctx& ctx) {
@@ -998,13 +979,13 @@ void kernel_run(const Args& x, const Ctx& ctx) {
     unsupported_kernel<<<1, 2048, 0, ctx.stream>>>();
     return;
   }
-  const int NT = static_cast<int>(d.N * d.T), HD = static_cast<int>(d.H * d.D);
+  const int M = static_cast<int>(d.M), HD = static_cast<int>(d.H * d.D);
   // vLLM's route for the shape: KdaSplit only at TP4 with T = 6, up to 16
   // tokens per graph (split) and 32-64 tokens (split_gate); FlashInfer (other
   // TP4 T = 6 rows) and Triton (TP8 T = 6, every T = 9) round to bf16.
   const bool ks_route = d.H == 16 && d.T == 6;
-  const bool split = ks_route && NT <= 16;
-  const bool split_gate = ks_route && NT >= 32 && NT <= 64;
+  const bool split = ks_route && M <= 16;
+  const bool split_gate = ks_route && M >= 32 && M <= 64;
   // The projections in the step CTAs (FZ) for T = 6 up to FZ_UNITS units (the
   // head's weights by bulk copy there, one CTA per SM); otherwise in their own
   // launch (weights read once per head and PR tokens).
@@ -1013,15 +994,13 @@ void kernel_run(const Args& x, const Ctx& ctx) {
   if (!fz) {
     ProjArgs p{};
     p.act[0] = x.f_a, p.act[1] = x.g_a;
-    p.s0[0] = x.f_a_stride[0], p.s1[0] = x.f_a_stride[1];
-    p.s0[1] = x.g_a_stride[0], p.s1[1] = x.g_a_stride[1];
+    p.s0[0] = x.f_a_stride[0], p.s0[1] = x.g_a_stride[0];
     p.wt[0] = x.f_b_weight, p.wt[1] = x.g_b_weight;
     p.out = gz;
     p.qsl = x.query_start_loc;
-    p.T = static_cast<int>(d.T), p.NT = NT, p.HD = HD,
-    p.N = static_cast<int>(d.N);
+    p.M = M, p.HD = HD, p.N = static_cast<int>(d.N);
     p.round_z = !split_gate;
-    proj_kernel<<<dim3(d.H, 2, (NT + PR - 1) / PR), 128, 0, ctx.stream>>>(p);
+    proj_kernel<<<dim3(d.H, 2, (M + PR - 1) / PR), 128, 0, ctx.stream>>>(p);
   }
   const StepArgs sa_{x, gz, !(split || split_gate), !split_gate};
   if (d.T == 6) {

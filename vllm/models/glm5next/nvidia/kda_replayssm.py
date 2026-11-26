@@ -150,17 +150,16 @@ def kda_replayssm_step(
     scale: float,
     norm_eps: float,
 ) -> None:
-    """One step of N requests with up to T tokens each, `out` [N, T, H, D].
+    """One step of N requests with up to T tokens each (`conv_state` holds T + 2
+    rows), on the packed token rows `[M, ...]`; out rows past the batch total
+    are zeroed.
 
-    The token arguments are `[N, T, ...]` views of the packed token rows; the
-    shapes and dtypes are those of `step` in ops/kda_replayssm_binding.cu.
+    The shapes and dtypes are those of `step` in ops/kda_replayssm_binding.cu.
     Request n's rings are at slot `ring_slot[n]`, its other state at `slot[n]`.
     """
     module = _module()
-    N, T, P, H, D = x.shape
-    scratch_bytes = module.scratch_bytes(
-        N, T, H, D, P, conv_weight.size(1), conv_state.size(0), u_ring.size(2)
-    )
+    M, _, H, D = x.shape
+    scratch_bytes = module.scratch_bytes(M, H, D)
     scratch = torch.empty(scratch_bytes, dtype=torch.uint8, device=x.device)
     module.step(
         x, beta, f_a, g_a, conv_weight, A_log, dt_bias, f_b_weight, g_b_weight,

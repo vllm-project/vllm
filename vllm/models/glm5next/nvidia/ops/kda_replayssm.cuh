@@ -6,17 +6,18 @@
 namespace kda_replayssm {
 struct Dims {
   int64_t N, T, H, D, P, W, S, R;
+  int64_t M, MO;  // token rows (at least query_start_loc[N]), out rows
 };
 struct Args {
   Dims dims;
-  const __nv_bfloat16* x;           // in [N, T, P, H, D] view
-  int64_t x_stride[5];              // in elements; x_stride[4] == 1
-  const __nv_bfloat16* beta;        // in [N, T, H] view
-  int64_t beta_stride[3];           // in elements; beta_stride[2] == 1
-  const __nv_bfloat16* f_a;         // in [N, T, D] view
-  int64_t f_a_stride[3];            // in elements; f_a_stride[2] == 1
-  const __nv_bfloat16* g_a;         // in [N, T, D] view
-  int64_t g_a_stride[3];            // in elements; g_a_stride[2] == 1
+  const __nv_bfloat16* x;           // in [M, P, H, D] view
+  int64_t x_stride[4];              // in elements; x_stride[3] == 1
+  const __nv_bfloat16* beta;        // in [M, H] view
+  int64_t beta_stride[2];           // in elements; beta_stride[1] == 1
+  const __nv_bfloat16* f_a;         // in [M, D] view
+  int64_t f_a_stride[2];            // in elements; f_a_stride[1] == 1
+  const __nv_bfloat16* g_a;         // in [M, D] view
+  int64_t g_a_stride[2];            // in elements; g_a_stride[1] == 1
   const float* conv_weight;         // in [P, W, H, D]
   const float* A_log;               // in [H]
   const float* dt_bias;             // in [H, D]
@@ -39,7 +40,7 @@ struct Args {
   int64_t k_ring_stride0;
   float* g_ring;  // inout [S, H, R, D] view
   int64_t g_ring_stride0;
-  __nv_bfloat16* out;  // out [N, T, H, D]
+  __nv_bfloat16* out;  // out [MO, H, D]
   float lower_bound;
   float scale;
   float norm_eps;

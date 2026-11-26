@@ -42,11 +42,6 @@ void check_tensor(const TensorView& t, const char* name,
       << name << ": must be on the same CUDA device as the first tensor";
 }
 
-kda_replayssm::Dims make_dims(int64_t N, int64_t T, int64_t H, int64_t D,
-                              int64_t P, int64_t W, int64_t S, int64_t R) {
-  return kda_replayssm::Dims{N, T, H, D, P, W, S, R};
-}
-
 void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
                TensorView conv_weight, TensorView A_log, TensorView dt_bias,
                TensorView f_b_weight, TensorView g_b_weight,
@@ -57,10 +52,10 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
                TensorView k_ring, TensorView g_ring, TensorView out,
                double lower_bound, double scale, double norm_eps,
                TensorView scratch) {
-  check_ndim(x, "x", 5);
-  check_ndim(beta, "beta", 3);
-  check_ndim(f_a, "f_a", 3);
-  check_ndim(g_a, "g_a", 3);
+  check_ndim(x, "x", 4);
+  check_ndim(beta, "beta", 2);
+  check_ndim(f_a, "f_a", 2);
+  check_ndim(g_a, "g_a", 2);
   check_ndim(conv_weight, "conv_weight", 4);
   check_ndim(A_log, "A_log", 1);
   check_ndim(dt_bias, "dt_bias", 2);
@@ -78,20 +73,22 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
   check_ndim(u_ring, "u_ring", 4);
   check_ndim(k_ring, "k_ring", 4);
   check_ndim(g_ring, "g_ring", 4);
-  check_ndim(out, "out", 4);
-  const int64_t N = x.size(0);
-  const int64_t T = x.size(1);
-  const int64_t P = x.size(2);
-  const int64_t H = x.size(3);
-  const int64_t D = x.size(4);
+  check_ndim(out, "out", 3);
+  const int64_t M = x.size(0);
+  const int64_t P = x.size(1);
+  const int64_t H = x.size(2);
+  const int64_t D = x.size(3);
+  const int64_t N = slot.size(0);
+  const int64_t T = conv_state.size(1) - 2;
   const int64_t W = conv_weight.size(1);
   const int64_t S = conv_state.size(0);
   const int64_t R = u_ring.size(2);
+  const int64_t MO = out.size(0);
   const int device = x.device().device_id;
-  check_tensor(x, "x", {N, T, P, H, D}, kDLBfloat, 16, device, true);
-  check_tensor(beta, "beta", {N, T, H}, kDLBfloat, 16, device, true);
-  check_tensor(f_a, "f_a", {N, T, D}, kDLBfloat, 16, device, true);
-  check_tensor(g_a, "g_a", {N, T, D}, kDLBfloat, 16, device, true);
+  check_tensor(x, "x", {M, P, H, D}, kDLBfloat, 16, device, true);
+  check_tensor(beta, "beta", {M, H}, kDLBfloat, 16, device, true);
+  check_tensor(f_a, "f_a", {M, D}, kDLBfloat, 16, device, true);
+  check_tensor(g_a, "g_a", {M, D}, kDLBfloat, 16, device, true);
   check_tensor(conv_weight, "conv_weight", {P, W, H, D}, kDLFloat, 32, device);
   check_tensor(A_log, "A_log", {H}, kDLFloat, 32, device);
   check_tensor(dt_bias, "dt_bias", {H, D}, kDLFloat, 32, device);
@@ -125,8 +122,8 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
   TVM_FFI_CHECK(aligned16(u_ring) && aligned16(k_ring) && aligned16(g_ring),
                 ValueError)
       << "rings: base and slot stride must be 16-byte aligned";
-  check_tensor(out, "out", {N, T, H, D}, kDLBfloat, 16, device);
-  kda_replayssm::Dims dims = make_dims(N, T, H, D, P, W, S, R);
+  check_tensor(out, "out", {MO, H, D}, kDLBfloat, 16, device);
+  const kda_replayssm::Dims dims{N, T, H, D, P, W, S, R, M, MO};
   size_t scratch_need = 0;
   kda_replayssm::kernel_workspace(dims, &scratch_need);
   check_tensor(scratch, "scratch", {scratch.ndim() == 1 ? scratch.size(0) : -1},
@@ -142,22 +139,18 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
   args.x_stride[1] = x.stride(1);
   args.x_stride[2] = x.stride(2);
   args.x_stride[3] = x.stride(3);
-  args.x_stride[4] = x.stride(4);
   args.beta = reinterpret_cast<const __nv_bfloat16*>(
       static_cast<char*>(beta.data_ptr()) + beta.byte_offset());
   args.beta_stride[0] = beta.stride(0);
   args.beta_stride[1] = beta.stride(1);
-  args.beta_stride[2] = beta.stride(2);
   args.f_a = reinterpret_cast<const __nv_bfloat16*>(
       static_cast<char*>(f_a.data_ptr()) + f_a.byte_offset());
   args.f_a_stride[0] = f_a.stride(0);
   args.f_a_stride[1] = f_a.stride(1);
-  args.f_a_stride[2] = f_a.stride(2);
   args.g_a = reinterpret_cast<const __nv_bfloat16*>(
       static_cast<char*>(g_a.data_ptr()) + g_a.byte_offset());
   args.g_a_stride[0] = g_a.stride(0);
   args.g_a_stride[1] = g_a.stride(1);
-  args.g_a_stride[2] = g_a.stride(2);
   args.conv_weight = static_cast<const float*>(conv_weight.data_ptr());
   args.A_log = static_cast<const float*>(A_log.data_ptr());
   args.dt_bias = static_cast<const float*>(dt_bias.data_ptr());
@@ -215,10 +208,12 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
       << "kernel_run: " << cudaGetErrorString(err);
 }
 
-int64_t scratch_bytes_impl(int64_t N, int64_t T, int64_t H, int64_t D,
-                           int64_t P, int64_t W, int64_t S, int64_t R) {
+// Scratch of a step with M token rows of H heads of D channels.
+int64_t scratch_bytes_impl(int64_t M, int64_t H, int64_t D) {
+  kda_replayssm::Dims dims{};
+  dims.M = M, dims.H = H, dims.D = D;
   size_t bytes = 0;
-  kda_replayssm::kernel_workspace(make_dims(N, T, H, D, P, W, S, R), &bytes);
+  kda_replayssm::kernel_workspace(dims, &bytes);
   return static_cast<int64_t>(bytes);
 }
 
