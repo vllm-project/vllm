@@ -203,6 +203,12 @@ class InputProcessor:
                         else None
                     ),
                     vocab_size=self.model_config.get_vocab_size(),
+                    tensor_parallel_size=(
+                        self.vllm_config.parallel_config.tensor_parallel_size
+                        if self.model_config.architecture
+                        == "DiffusionGemmaForBlockDiffusion"
+                        else 1
+                    ),
                 )
 
             if self.model_config.return_sampling_mask:

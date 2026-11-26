@@ -31,6 +31,9 @@ used for classification and routing.
 | `Qwen3_5MoeForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
 | `DiffusionGemmaForBlockDiffusion`       | T + I<sup>+</sup> + V<sup>+</sup>     | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
 
+DiffusionGemma's optional constrained reads require tensor parallel size 1.
+See the [structured diffusion example](../../examples/features/structured_diffusion/README.md).
+
 ## Online Serving
 
 ### TypeSafe System One Endpoint

@@ -8,12 +8,16 @@ import pytest
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.utils.diffusion import validate_diffusion_sampling_params
+from vllm.utils.diffusion import (
+    validate_constrained_diffusion,
+    validate_diffusion_sampling_params,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 
 
 @dataclass(slots=True)
 class MockModelConfig:
+    architecture: str = "DiffusionGemmaForBlockDiffusion"
     is_diffusion: bool = False
     max_logprobs: int = 20
     logits_processors: list | None = None
@@ -28,7 +32,8 @@ def _admit(params: SamplingParams, async_scheduling: bool = False) -> None:
     processor = SimpleNamespace(
         model_config=MockModelConfig(is_diffusion=True),
         vllm_config=SimpleNamespace(
-            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
+            parallel_config=SimpleNamespace(tensor_parallel_size=1),
         ),
         speculative_config=None,
         structured_outputs_config=None,
@@ -183,6 +188,41 @@ def test_diffusion_constrained_must_be_a_bool(value):
     params = SamplingParams(extra_args={"diffusion_constrained": value})
     with pytest.raises(VLLMValidationError, match="must be a boolean"):
         _verify_diffusion(params)
+
+
+def test_constrained_diffusion_requires_single_tensor_parallel_rank():
+    params = SamplingParams(
+        logprob_token_ids=[3], extra_args={"diffusion_constrained": True}
+    )
+
+    validate_constrained_diffusion(params, vocab_size=1024, tensor_parallel_size=1)
+    with pytest.raises(VLLMValidationError, match="tensor parallel size 1"):
+        validate_constrained_diffusion(params, vocab_size=1024, tensor_parallel_size=2)
+
+
+def test_unconstrained_diffusion_allows_tensor_parallel_ranks():
+    validate_constrained_diffusion(
+        SamplingParams(), vocab_size=1024, tensor_parallel_size=2
+    )
+
+
+def test_constrained_diffusion_checks_token_ids_against_model_vocabulary():
+    params = SamplingParams(
+        logprob_token_ids=[8], extra_args={"diffusion_constrained": True}
+    )
+    with pytest.raises(VLLMValidationError, match="valid token IDs"):
+        validate_constrained_diffusion(params, vocab_size=8)
+
+
+def test_diffusion_read_only_validation_is_idempotent():
+    params = SamplingParams(
+        max_tokens=32,
+        extra_args={"diffusion_read_only": True},
+    )
+    _verify_diffusion(params, canvas_length=8)
+    _verify_diffusion(params, canvas_length=8)
+    assert params.max_tokens == 8
+    assert params.ignore_eos
 
 
 def test_diffusion_seed_canvas_must_fill_the_canvas():
