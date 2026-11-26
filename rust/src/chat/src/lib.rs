@@ -24,7 +24,7 @@ pub use event::{
 };
 use futures::{StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
-pub use multimodal::{mm_request_span, mm_timing_layer};
+pub use multimodal::{InputAudioFormat, mm_request_span, mm_timing_layer};
 use output::apply_output_grammar;
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,

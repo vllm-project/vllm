@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_chat::{AllowedToolsMode, ChatTool};
+use vllm_chat::{AllowedToolsMode, ChatTool, InputAudioFormat};
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
@@ -219,11 +219,10 @@ pub struct AudioUrl {
 }
 
 /// Base64-encoded audio bytes in OpenAI `input_audio` form.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct InputAudio {
     pub data: String,
-    pub format: Option<String>,
+    pub format: InputAudioFormat,
 }
 
 // ============================================================================
