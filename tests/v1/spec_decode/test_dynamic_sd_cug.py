@@ -51,6 +51,7 @@ def _create_vllm_config_for_dsd(
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
+    vllm_config.model_config.max_model_len = 8192
     vllm_config.scheduler_config = SchedulerConfig.default_factory(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_capture_tokens,

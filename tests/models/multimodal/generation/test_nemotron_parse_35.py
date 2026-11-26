@@ -91,7 +91,9 @@ def test_model(
         )
         tokenizer = vllm_model.llm.get_tokenizer()
 
-    with hf_runner(MODEL, dtype=dtype, auto_cls=AutoModel) as hf_model:
+    with hf_runner(
+        MODEL, dtype=dtype, auto_cls=AutoModel, trust_remote_code=True
+    ) as hf_model:
         hf_outputs = generate_hf_logprobs_from_logits(
             hf_model, prompts, images, max_tokens, num_logprobs
         )

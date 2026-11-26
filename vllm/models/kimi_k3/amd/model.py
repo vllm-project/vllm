@@ -47,6 +47,7 @@ from ..common.mm_preprocess import (
     KimiK3MultiModalProcessor,
     KimiK3ProcessingInfo,
 )
+from .encoder_cudagraph import KimiK3EncoderCudaGraphMixin
 from .linear import KimiLinearForCausalLM
 
 
@@ -58,6 +59,7 @@ from .linear import KimiLinearForCausalLM
 class KimiK3ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    KimiK3EncoderCudaGraphMixin,
     SupportsPP,
     SupportsQuant,
     SupportsEagle3,
@@ -91,6 +93,7 @@ class KimiK3ForConditionalGeneration(
         super().__init__()
         model_config = vllm_config.model_config
         config: KimiK3Config = model_config.hf_config
+        self.model_config = model_config
         self.config = config
         quant_config = vllm_config.quant_config
 

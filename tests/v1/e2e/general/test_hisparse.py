@@ -40,6 +40,11 @@ HF_OVERRIDES = {
 }
 
 
+# Compares greedy tokens across paths that are not bitwise equivalent (cold vs.
+# restored prefix, batched vs. single, two engines).
+pytestmark = pytest.mark.usefixtures("narrow_dummy_fp8_weights")
+
+
 def _shrink_config(config):
     overrides = HF_OVERRIDES.copy()
     if any("MTP" in architecture for architecture in config.architectures):

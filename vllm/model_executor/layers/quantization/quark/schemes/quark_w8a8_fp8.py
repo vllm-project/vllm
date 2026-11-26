@@ -306,7 +306,7 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
-        logger.info_once(
+        logger.debug_once(
             "Selected %s for QuarkW8A8Fp8PerBlock",
             type(self.fp8_linear).__name__,
         )

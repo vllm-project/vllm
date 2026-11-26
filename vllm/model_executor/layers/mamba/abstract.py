@@ -72,7 +72,7 @@ class MambaBase(AttentionLayerBase):
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
         """Token alignment of the checkpoint offsets this layer can export from
-        inside a prefill, if any; in align mode, the platform makes Mamba blocks
+        inside a prefill, if any; with prefix caching, the platform makes Mamba blocks
         multiples of it.
         """
         return None
@@ -101,7 +101,7 @@ class MambaBase(AttentionLayerBase):
         checkpoint_alignment = self.get_kv_cache_checkpoint_alignment(vllm_config)
         return MambaManager.layer_config(
             spec,
-            mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
+            enable_prefix_caching=vllm_config.cache_config.enable_prefix_caching,
             num_speculative_blocks=get_mamba_num_speculative_blocks(vllm_config),
             num_prefill_checkpoint_blocks=int(checkpoint_alignment is not None),
             prefill_checkpoint_alignment=checkpoint_alignment,

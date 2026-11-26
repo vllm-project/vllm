@@ -1339,10 +1339,7 @@ def test_flashinfer_indexer_impl_matches_triton(local_blocks, index_dtype, monke
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads,
-        "sparse_local_block": local_blocks,
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
 
     # Decode-first mixed batch: one short and one long decode request, then
     # two prefill requests whose prefixes exceed topk causal blocks.

@@ -1476,7 +1476,8 @@ def down_weights_942(c, e, task):
     lane, a, d = c["lane"], c["args"], c["d"]
     j = lane // 16
     kd, kc = d.inter_real // 8, d.inter_real // 32
-    assert kc % 4 in (0, 2), kc
+    # The last step of a row is two K blocks at TP4, one at TP8.
+    assert kc % 4 in (0, 1, 2), kc
     # The tile's 16 rows are 16 kd dwords, a 64-byte step of them 256 dwords.
     tile0 = (e * HIDDEN + task * 16) * kd
     base = fresh(tile0 + 4 * lane)
@@ -1503,6 +1504,19 @@ def down_weights_942(c, e, task):
             )
         )
         wd += [fx.Int32(v[i]) for i in range(2)]
+    if const_expr(kc % 4 == 1):
+        # TP8: one dword a lane.
+        wd.append(
+            fx.Int32(
+                bo.buffer_load(
+                    rsrc(a["w2"]),
+                    fresh(tile0 + lane) + 256 * (kc // 4),
+                    vec_width=1,
+                    dtype=T.i32,
+                    cache_modifier=CM_NT,
+                )
+            )
+        )
     # 4 rows' codes: 4 kc bytes from a multiple of 4 kc, so whole dwords.
     sw0 = (e * HIDDEN + task * 16 + 4 * j) * kc // 4
     nwords = kc

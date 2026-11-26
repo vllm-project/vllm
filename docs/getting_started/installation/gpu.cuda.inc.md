@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD041 MD051 -->
 --8<-- [start:installation]
 
-vLLM contains pre-compiled C++ and CUDA (12.9) binaries.
+vLLM contains pre-compiled C++ and CUDA (13.0) binaries.
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
@@ -28,8 +28,8 @@ vllm download-kernels
 
 ??? console "pip"
     ```bash
-    # Install vLLM with CUDA 12.9.
-    pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
+    # Install vLLM with CUDA 13.0.
+    pip install vllm --extra-index-url https://download.pytorch.org/whl/cu130
     vllm download-kernels
     ```
 
@@ -50,22 +50,26 @@ We recommend leveraging `uv` to [automatically select the appropriate PyTorch in
 !!! note
     NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
 
-As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.2, and public PyTorch release versions:
+vLLM release binaries are compiled with CUDA 13.0 and public PyTorch release versions by default. A release can also publish binaries for other CUDA versions. Each release lists its CUDA variants at `https://wheels.vllm.ai/<version>/`. For CUDA, vLLM 0.33.0 publishes only CUDA 13.0 (`cu130`) binaries.
 
 ```bash
-# Install vLLM with a specific CUDA version (e.g., 13.2).
-export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-export CUDA_VERSION=132 # or other
-export CPU_ARCH=$(uname -m) # x86_64 or aarch64
-uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
+# Install vLLM with a specific CUDA version (e.g., 13.0).
+export VLLM_VERSION=$(curl -s https://pypi.org/pypi/vllm/json | jq -r .info.version)
+export CUDA_VARIANT=cu130 # see https://wheels.vllm.ai/${VLLM_VERSION}/ for the variants of a release
+uv pip install "vllm==${VLLM_VERSION}" \
+    --extra-index-url "https://wheels.vllm.ai/${VLLM_VERSION}/${CUDA_VARIANT}" \
+    --torch-backend=${CUDA_VARIANT}
 ```
+
+!!! note "CUDA 12"
+    vLLM 0.32.0 is the last release with CUDA 12.9 binaries. Later releases are built for CUDA 13 and need an NVIDIA driver that supports CUDA 13. To stay on CUDA 12.9, install vLLM 0.32.0 with `VLLM_VERSION=0.32.0` and `CUDA_VARIANT=cu129` in the command above.
 
 #### Install the latest code
 
 LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.5.3` on <https://wheels.vllm.ai/nightly>. There are multiple indices that could be used:
 
-- `https://wheels.vllm.ai/nightly`: the default variant (CUDA with version specified in `VLLM_MAIN_CUDA_VERSION`) built with the last commit on the `main` branch. Currently it is CUDA 12.9.
-- `https://wheels.vllm.ai/nightly/<variant>`: all other variants. Now this includes `cu132`, and `cpu`. The default variant (`cu129`) also has a subdirectory to keep consistency.
+- `https://wheels.vllm.ai/nightly`: the default variant (CUDA with version specified in `VLLM_MAIN_CUDA_VERSION`) built with the last commit on the `main` branch. Currently it is CUDA 13.2.
+- `https://wheels.vllm.ai/nightly/<variant>`: all other variants. Now this includes `cpu` and `xpu`. The default variant (`cu132`) also has a subdirectory to keep consistency. The `cu129` and `cu130` subdirectories no longer get new builds.
 
 To install from nightly index, run:
 
@@ -132,6 +136,8 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
+    With `VLLM_USE_RUST_FRONTEND=1`, `vllm serve` warns at startup when `rust/` in your checkout differs from the commit the packaged `vllm/vllm-rs` was built from, for example after changing `rust/` on a branch installed with `VLLM_USE_PRECOMPILED=1`. Rebuild the binary as above.
+
 Wheels are published an hour or two after a commit lands on `main`. If the wheel for
 your merge-base with upstream `main` is not available yet, the installer uses the
 nearest older commit that has one, searching up to 20 commits back. It stops with an
@@ -147,7 +153,7 @@ There are more environment variables to control the behavior of Python-only buil
 
 - `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
 - `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit to download the pre-compiled wheel from. Must be a full 40-character SHA.
-- `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cu132`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
+- `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu132`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
 
@@ -446,31 +452,24 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
 Set `INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path.
 
-Triton must currently be installed from source for Rubin compatibility.
-Specify its repository with `TRITON_INSTALL_FROM_SOURCE_REPO`; an empty
-`TRITON_INSTALL_FROM_SOURCE_REVISION` selects the repository's latest `main`,
-while a commit, branch, or tag selects that revision. The tested revision
-lowers SM107 through LLVM's SM100 target and uses the final CUDA image's
-version-matched `ptxas` for SM107 assembly. This enables vLLM's default compiled
-mode on VR200 and R100.
-
-BuildKit does not automatically invalidate cached layers when a mutable Git
-ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
-branch, or tag revision.
+Triton is the version that the pinned PyTorch nightly requires
+(`triton==3.9.0+gitb7ddcf86`, the Triton 3.9.0 release), installed from
+PyTorch's nightly index. It lowers SM107 through LLVM's SM100 target, which
+enables vLLM's default compiled mode on VR200 and R100. See the warning on
+ptxas 13.5.37 below.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvidia/cuda:13.5.0-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
 newer, the first NCCL release with Rubin (SM107) support.
 For `BUILD_BASE_IMAGE`, use:
 
-- `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
-- `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
+- `pytorch/manylinux2_28-builder:cuda13.5` for x86_64 CPUs.
+- `pytorch/manylinuxaarch64-builder:cuda13.5` for ARM64/AArch64 CPUs.
 
-PyTorch does not publish CUDA 13.5 builder images or cu135 wheels yet, so the
-build stage and the prerelease PyTorch wheels in
-`requirements/rubin-prerelease.txt` stay on CUDA 13.4. Set `CUDA_VERSION` to
-the final image's CUDA version (13.5): the runtime stage installs the matching
-CUDA packages, including the `ptxas` above.
+`requirements/rubin-prerelease.txt` pins PyTorch's cu135 nightly. PyTorch does
+not publish cu135 torchvision or torchaudio yet, so they use the cu134
+nightlies of the same date. Set `CUDA_VERSION` to the final image's CUDA
+version (13.5): the runtime stage installs the matching CUDA packages.
 
 ??? console "ARM64/AArch64 build command"
 
@@ -484,10 +483,8 @@ CUDA packages, including the `ptxas` above.
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.5 \
-      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.5" \
       --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
       --build-arg NCCL_VERSION=2.32.3 \
       .
@@ -505,10 +502,8 @@ CUDA packages, including the `ptxas` above.
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.5 \
-      --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.5" \
       --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
       --build-arg NCCL_VERSION=2.32.3 \
       .
@@ -530,6 +525,20 @@ CUDA packages, including the `ptxas` above.
     fusion fall back to NCCL, and serving performance differs from a native
     R620 driver. The image's `NVIDIA_REQUIRE_CUDA` does not list R570 or R590
     drivers, so the toolkit refuses to start it on those.
+
+!!! warning
+    CUDA 13.5.0's ptxas (13.5.37) silently miscompiles some `sm_107a` code,
+    which can corrupt model output on VR200 and R100. Importing FlashInfer
+    points Triton at the `ptxas` on `PATH`, which in these images is that
+    version. Until a fixed ptxas ships, run the image with this option, which
+    keeps Triton on the `ptxas-blackwell` 13.4 that its wheel bundles:
+
+    ```bash
+    --env "TRITON_PTXAS_BLACKWELL_PATH=/usr/local/lib/python3.14/dist-packages/triton/backends/nvidia/bin/ptxas-blackwell"
+    ```
+
+    The path is for the default `PYTHON_VERSION` (3.14). Triton uses this
+    ptxas for every SM90-and-newer GPU.
 
 #### Use the custom-built vLLM Docker image**
 
