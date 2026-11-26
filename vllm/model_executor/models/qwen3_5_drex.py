@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Drex v1.5: a Qwen3.5 backbone plus a trained pointer head.
 
-The backbone is a plain causal text model; the checkpoint adds ``head.pt``, a
+The backbone is a plain causal text model; the checkpoint adds `head.pt`, a
 two-layer projection that scores a question's options from the hidden states at
-``</opt>`` and ``<decide>``. The model is a pooling model: it never generates.
+`</opt>` and `<decide>`. The model is a pooling model: it never generates.
 """
 
 import io

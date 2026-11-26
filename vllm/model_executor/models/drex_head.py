@@ -3,7 +3,7 @@
 """Drex pointer readout.
 
 Drex scores a question's options without generating text: the backbone hidden
-state at ``<decide>`` is the query, the hidden state at each ``</opt>`` is a
+state at `<decide>` is the query, the hidden state at each `</opt>` is a
 key, and the score is their scaled dot product projected through the trained
 head. This module is torch-only so the math can be tested without the engine.
 """
@@ -28,8 +28,8 @@ class PointerHead(nn.Module):
         """Score options against the decide state.
 
         Args:
-            h_decide: Hidden state at ``<decide>``, shape `[hidden]`.
-            h_opts: Hidden states at each ``</opt>``, shape `[K, hidden]`.
+            h_decide: Hidden state at `<decide>`, shape `[hidden]`.
+            h_opts: Hidden states at each `</opt>`, shape `[K, hidden]`.
 
         Returns:
             One score per option, shape `[K]`.
@@ -49,8 +49,8 @@ def read_pointer_scores(
 
     Args:
         hidden_states: Row hidden states, shape `[seq, hidden]`.
-        opt_positions: Row indices of the ``</opt>`` tokens, one per option.
-        decide_position: Row index of the ``<decide>`` token.
+        opt_positions: Row indices of the `</opt>` tokens, one per option.
+        decide_position: Row index of the `<decide>` token.
         head: The pointer head.
 
     Returns:
@@ -82,13 +82,13 @@ def scores_for_pooling(
 ) -> torch.Tensor:
     """Read one row's scores and apply the requested activation.
 
-    Drex is served with ``use_activation=False`` so the strategy owns the
-    softmax; ``None``/``True`` applies it here, matching the pooling contract.
+    Drex is served with `use_activation=False` so the strategy owns the
+    softmax; `None`/`True` applies it here, matching the pooling contract.
 
     Args:
         hidden_states: Row hidden states, shape `[seq, hidden]`.
-        opt_positions: Row indices of the ``</opt>`` tokens, one per option.
-        decide_position: Row index of the ``<decide>`` token.
+        opt_positions: Row indices of the `</opt>` tokens, one per option.
+        decide_position: Row index of the `<decide>` token.
         use_activation: Whether to softmax the scores.
         head: The pointer head.
 

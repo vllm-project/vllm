@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Compare vLLM's Drex v1.5 decisions with the reference ``code/kev``.
 
 Each input line is a ``/v1/systemone`` request body::

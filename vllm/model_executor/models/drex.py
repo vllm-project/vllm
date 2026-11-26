@@ -3,8 +3,8 @@
 """Drex pointer pooler.
 
 Drex reads no generated token. Each request row carries the packed state and
-one question branch; the caller passes the row positions of every ``</opt>``
-and of ``<decide>`` through ``PoolingParams.extra_kwargs`` and the pooler
+one question branch; the caller passes the row positions of every `</opt>`
+and of `<decide>` through `PoolingParams.extra_kwargs` and the pooler
 scores the options from the row's hidden states.
 """
 
