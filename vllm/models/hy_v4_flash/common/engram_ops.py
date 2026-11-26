@@ -32,10 +32,11 @@ def _lookup_norm_kernel(
     lanes = tl.arange(0, BLOCK_D)[None, :]
     head_mask = heads < HEADS
     mask = head_mask & (lanes < DIM)
+    gamma = tl.load(gamma_ptr + heads * DIM + lanes, mask=mask, other=0.0)
 
     for token_index in tl.static_range(0, TOKENS_PER_PROGRAM):
         token = tl.program_id(0).to(tl.int64) * TOKENS_PER_PROGRAM + token_index
-        token_mask = token < num_tokens
+        token_mask = True if TOKENS_PER_PROGRAM == 1 else token < num_tokens
         bucket = tl.load(
             hashes_ptr + token * hashes_stride + heads,
             mask=head_mask & token_mask,
@@ -48,7 +49,6 @@ def _lookup_norm_kernel(
         if HAS_SCALES:
             x *= tl.load(scales_ptr + row, mask=found, other=0.0).to(tl.float32)
         rstd = tl.rsqrt(tl.sum(x * x, axis=1) / DIM + eps)[:, None]
-        gamma = tl.load(gamma_ptr + heads * DIM + lanes, mask=mask, other=0.0)
         tl.store(
             out_ptr + (token * HEADS + heads) * DIM + lanes,
             (x * rstd * gamma.to(tl.float32)).to(out_ptr.dtype.element_ty),
