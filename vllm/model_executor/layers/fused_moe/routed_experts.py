@@ -1425,6 +1425,9 @@ class RoutedExperts(PluggableLayer):
         topk_ids: torch.Tensor,
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Execute routed experts using the quantization method's apply function.
 
@@ -1438,6 +1441,8 @@ class RoutedExperts(PluggableLayer):
             topk_ids: Selected expert IDs from router (for modular kernels)
             shared_experts: The shared experts (if any)
             shared_experts_input: Input for shared experts (if any)
+            prequantized_input: Optional FP8 input produced by the mHC epilogue.
+            prequantized_input_scale: Matching group-128 scales.
 
         Returns:
             Finalized routed states or a deferred-finalize output.
@@ -1445,7 +1450,12 @@ class RoutedExperts(PluggableLayer):
         """
         assert not self.quant_method.is_monolithic
 
-        # Modular kernels use pre-computed routing
+        kwargs = {}
+        if prequantized_input is not None or prequantized_input_scale is not None:
+            kwargs = {
+                "prequantized_input": prequantized_input,
+                "prequantized_input_scale": prequantized_input_scale,
+            }
         return self.quant_method.apply(
             layer=self,
             x=x,
@@ -1453,6 +1463,7 @@ class RoutedExperts(PluggableLayer):
             topk_ids=topk_ids,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            **kwargs,
         )
 
     def forward_monolithic(

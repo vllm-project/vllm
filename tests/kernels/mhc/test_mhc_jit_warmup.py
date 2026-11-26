@@ -209,22 +209,31 @@ def test_mhc_fused_declines_shapes_it_cannot_tile() -> None:
                 block_m=2,
             ),
         ),
-        (
-            MhcPreBigFuseTileLangKernel(),
-            MhcPreBigFuseTileLangKernel.CompileKey(
-                hidden_size=4096,
-                hc_mult=4,
-                n_splits=2,
-                use_norm_weight=True,
-                is_broadcast=False,
-                rms_eps=1.0e-6,
-                hc_pre_eps=2.0e-6,
-                hc_sinkhorn_eps=3.0e-6,
-                hc_post_mult_value=0.5,
-                sinkhorn_repeat=3,
-                norm_eps=1.0e-5,
-            ),
-        ),
+        *[
+            (
+                MhcPreBigFuseTileLangKernel(),
+                MhcPreBigFuseTileLangKernel.CompileKey(
+                    hidden_size=4096,
+                    hc_mult=4,
+                    n_splits=2,
+                    use_norm_weight=True,
+                    is_broadcast=False,
+                    rms_eps=1.0e-6,
+                    hc_pre_eps=2.0e-6,
+                    hc_sinkhorn_eps=3.0e-6,
+                    hc_post_mult_value=0.5,
+                    sinkhorn_repeat=3,
+                    norm_eps=1.0e-5,
+                    quant_out=quant_out,
+                    use_ue8m0=use_ue8m0,
+                ),
+            )
+            for quant_out, use_ue8m0 in (
+                (False, False),
+                (True, False),
+                (True, True),
+            )
+        ],
         (
             MhcPreBigFuseTileLangKernel(),
             MhcPreBigFuseTileLangKernel.CompileKey(

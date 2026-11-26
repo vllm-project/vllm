@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
+
 import torch
 
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -810,28 +812,23 @@ def _mhc_fused_post_pre_tilelang_impl(
     tile_n: int = 1,
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
+    *,
     reuse_residual: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run one MHC post block followed by the next MHC pre block.
+    quant_out: bool = False,
+    use_ue8m0: bool = False,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
+    """Shared body of the fused post+pre MHC wrappers.
 
-    When `norm_weight` is provided, the layer_input_cur output is the
-    RMSNorm'd activation (fused into the kernel); otherwise it is the
-    raw pre-norm activation as before.
-
-    `n_splits` and `tile_n` are retained for the shared MHC operator API.
-    The TileLang path selects both values internally from the runtime shape.
-
-    With `reuse_residual`, the unfused path writes residual_cur into
-    `residual`'s storage instead of allocating a new buffer. The post kernel
-    reads every hc row of a hidden block before writing that block, so the
-    in-place update is exact.
-
-    Returns:
-        residual_cur: post-mapped residual, shape (..., hc_mult, hidden_size)
-        post_mix_cur: shape (..., hc_mult, 1)
-        comb_mix_cur: shape (..., hc_mult, hc_mult)
-        layer_input_cur: shape (..., hidden_size)
-
+    Returns six tensors; the last two (a1q, scale) are None unless
+    `quant_out` is True. The public four-output wrapper takes the first
+    four; the FP8 wrapper returns all six.
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_FUSED_TILELANG_KERNEL,
@@ -839,6 +836,8 @@ def _mhc_fused_post_pre_tilelang_impl(
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
         mhc_fused_post_pre_split_config,
     )
+
+    group_size = 128
 
     assert residual.dtype == torch.bfloat16
     assert x.dtype == torch.bfloat16
@@ -899,6 +898,22 @@ def _mhc_fused_post_pre_tilelang_impl(
         device=residual.device,
     )
 
+    a1q_flat: torch.Tensor | None = None
+    scale_flat: torch.Tensor | None = None
+    if quant_out:
+        a1q_flat = torch.empty(
+            num_tokens,
+            hidden_size,
+            dtype=torch.float8_e4m3fn,
+            device=residual.device,
+        )
+        scale_flat = torch.empty(
+            num_tokens,
+            hidden_size // group_size,
+            dtype=torch.float32,
+            device=residual.device,
+        )
+
     if fused_config is not None:
         gemm_out_mul, gemm_out_sqrsum, residual_cur = _MHC_FUSED_TILELANG_KERNEL(
             comb_res_mix_flat,
@@ -926,6 +941,10 @@ def _mhc_fused_post_pre_tilelang_impl(
             sinkhorn_repeat,
             norm_weight=norm_weight,
             norm_eps=norm_eps,
+            a1q=a1q_flat,
+            scale=scale_flat,
+            quant_out=quant_out,
+            use_ue8m0=use_ue8m0,
         )
     else:
         residual_cur = (
@@ -962,13 +981,236 @@ def _mhc_fused_post_pre_tilelang_impl(
             sinkhorn_repeat,
             norm_weight=norm_weight,
             norm_eps=norm_eps,
+            a1q=a1q_flat,
+            scale=scale_flat,
+            quant_out=quant_out,
+            use_ue8m0=use_ue8m0,
         )
 
+    a1q_out = a1q_flat.view(*outer_shape, hidden_size) if a1q_flat is not None else None
+    scale_out = (
+        scale_flat.view(*outer_shape, hidden_size // group_size)
+        if scale_flat is not None
+        else None
+    )
     return (
         residual_cur.view(*outer_shape, hc_mult, hidden_size),
         post_mix_cur.view(*outer_shape, hc_mult, 1),
         comb_mix_cur.view(*outer_shape, hc_mult, hc_mult),
         layer_input_cur.view(*outer_shape, hidden_size),
+        a1q_out,
+        scale_out,
+    )
+
+
+def _check_mhc_fp8_epilogue_inputs(
+    residual: torch.Tensor, norm_weight: torch.Tensor | None
+) -> None:
+    """Validate the extra requirements of the g128 with-norm epilogue."""
+    assert norm_weight is not None, "FP8 output requires RMSNorm"
+    assert residual.shape[-1] % 128 == 0, "FP8 output requires complete groups of 128"
+
+
+def mhc_fused_post_pre_fp8_tilelang(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    n_splits: int = 1,
+    tile_n: int = 1,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+    use_ue8m0: bool = False,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Return the four mHC outputs and a g128 FP8 copy of layer_input.
+
+    Quantize the BF16-rounded RMSNorm output into contiguous E4M3FN values
+    and row-major FP32 scales of shape (..., hidden_size // 128).
+    With use_ue8m0, scales are rounded up to powers of two but remain FP32.
+    The model passes the same scale mode used by the standalone quantizer.
+    """
+    _check_mhc_fp8_epilogue_inputs(residual, norm_weight)
+    outputs = _mhc_fused_post_pre_tilelang_impl(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        n_splits=n_splits,
+        tile_n=tile_n,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+        quant_out=True,
+        use_ue8m0=use_ue8m0,
+    )
+    return cast(
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+        outputs,
+    )
+
+
+def mhc_fused_post_pre_fp8_tilelang_reuse_residual(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    n_splits: int = 1,
+    tile_n: int = 1,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+    use_ue8m0: bool = False,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """FP8 epilogue for eager callers that hand over residual ownership."""
+    _check_mhc_fp8_epilogue_inputs(residual, norm_weight)
+    outputs = _mhc_fused_post_pre_tilelang_impl(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        n_splits=n_splits,
+        tile_n=tile_n,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+        reuse_residual=True,
+        quant_out=True,
+        use_ue8m0=use_ue8m0,
+    )
+    return cast(
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+        outputs,
+    )
+
+
+def _mhc_fused_post_pre_fp8_tilelang_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    n_splits: int = 1,
+    tile_n: int = 1,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+    use_ue8m0: bool = False,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    _check_mhc_fp8_epilogue_inputs(residual, norm_weight)
+    hc_mult = residual.shape[-2]
+    hidden_size = residual.shape[-1]
+    outer_shape = residual.shape[:-2]
+
+    residual_cur = torch.empty_like(residual)
+    post_mix_cur = torch.empty(
+        *outer_shape,
+        hc_mult,
+        1,
+        dtype=torch.float32,
+        device=residual.device,
+    )
+    comb_mix_cur = torch.empty(
+        *outer_shape,
+        hc_mult,
+        hc_mult,
+        dtype=torch.float32,
+        device=residual.device,
+    )
+    layer_input_cur = torch.empty(
+        *outer_shape,
+        hidden_size,
+        dtype=torch.bfloat16,
+        device=residual.device,
+    )
+    a1q_cur = torch.empty(
+        *outer_shape,
+        hidden_size,
+        dtype=torch.float8_e4m3fn,
+        device=residual.device,
+    )
+    scale_cur = torch.empty(
+        *outer_shape,
+        hidden_size // 128,
+        dtype=torch.float32,
+        device=residual.device,
+    )
+    return (
+        residual_cur,
+        post_mix_cur,
+        comb_mix_cur,
+        layer_input_cur,
+        a1q_cur,
+        scale_cur,
     )
 
 
@@ -1006,7 +1248,7 @@ def mhc_fused_post_pre_tilelang(
         sinkhorn_repeat,
         norm_weight=norm_weight,
         norm_eps=norm_eps,
-    )
+    )[:4]
 
 
 def mhc_fused_post_pre_tilelang_reuse_residual(
@@ -1048,7 +1290,7 @@ def mhc_fused_post_pre_tilelang_reuse_residual(
         norm_weight=norm_weight,
         norm_eps=norm_eps,
         reuse_residual=True,
-    )
+    )[:4]
 
 
 def _mhc_fused_post_pre_tilelang_fake(
@@ -1184,6 +1426,13 @@ direct_register_custom_op(
     op_func=mhc_fused_post_pre_tilelang,
     mutates_args=[],
     fake_impl=_mhc_fused_post_pre_tilelang_fake,
+)
+
+direct_register_custom_op(
+    op_name="mhc_fused_post_pre_fp8_tilelang",
+    op_func=mhc_fused_post_pre_fp8_tilelang,
+    mutates_args=[],
+    fake_impl=_mhc_fused_post_pre_fp8_tilelang_fake,
 )
 
 direct_register_custom_op(

@@ -462,6 +462,9 @@ class DeepseekV4MoE(nn.Module):
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
@@ -471,7 +474,16 @@ class DeepseekV4MoE(nn.Module):
             raise ValueError("DeepSeek V4 vision MoE routing requires input_ids.")
 
         if not self.use_native_mega_moe:
-            return self._forward_fused_moe(hidden_states, input_ids)
+            return self._forward_fused_moe(
+                hidden_states,
+                input_ids,
+                prequantized_input=prequantized_input,
+                prequantized_input_scale=prequantized_input_scale,
+            )
+        if prequantized_input is not None or prequantized_input_scale is not None:
+            raise ValueError(
+                "prequantized mHC FP8 input is unsupported on the native mega MoE path"
+            )
 
         org_shape = hidden_states.shape
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
@@ -533,13 +545,20 @@ class DeepseekV4MoE(nn.Module):
         return final_hidden_states.view(org_shape)
 
     def _forward_fused_moe(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        *,
+        prequantized_input: torch.Tensor | None = None,
+        prequantized_input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         org_shape = hidden_states.shape
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=hidden_states,
             input_ids=input_ids,
+            prequantized_input=prequantized_input,
+            prequantized_input_scale=prequantized_input_scale,
         )
 
         return final_hidden_states.view(org_shape)
@@ -627,6 +646,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.hc_mult = config.hc_mult
+        # The MoE backend's input format is checked after weights are loaded.
+        self._mhc_fp8_requested = (
+            envs.VLLM_MHC_FP8_EPILOGUE
+            and current_platform.is_cuda()
+            and self.hidden_size % 128 == 0
+        )
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
         self.hc_post_alpha = 2.0
@@ -736,11 +761,61 @@ class DeepseekV4DecoderLayer(nn.Module):
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
             )
+            if self._mhc_fp8_requested:
+                from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+                # Include the quantized variants alongside the original keys.
+                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
+                    vllm_config,
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.hc_mult,
+                    use_norm_weight=True,
+                    include_pre_gemm_splits=include_pre_gemm_splits,
+                    include_broadcast_splits=False,
+                    rms_eps=self.rms_norm_eps,
+                    hc_pre_eps=self.hc_eps,
+                    hc_sinkhorn_eps=self.hc_eps,
+                    hc_post_mult_value=self.hc_post_alpha,
+                    sinkhorn_repeat=self.hc_sinkhorn_iters,
+                    norm_eps=self.ffn_norm.variance_epsilon,
+                    quant_out=True,
+                    use_ue8m0=is_deep_gemm_e8m0_used(),
+                )
             _MHC_FUSED_TILELANG_KERNEL.register_warmup(
                 vllm_config,
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
             )
+
+    def _mhc_fp8_backend_ready(self) -> bool:
+        """Check backend support and whether the runner preserves the input."""
+        from vllm.model_executor.layers.quantization.humming import (
+            mhc_fp8_epilogue_supported,
+        )
+
+        runner = getattr(self.ffn, "experts", None)
+        if runner is None:
+            return False
+        routed = getattr(runner, "routed_experts", None)
+        if routed is None or not mhc_fp8_epilogue_supported(routed):
+            return False
+        # The pair must describe the input that reaches the experts unchanged.
+        moe_config = getattr(runner, "moe_config", None)
+        if moe_config is None:
+            return False
+        hidden_dim = getattr(moe_config, "hidden_dim", None)
+        if hidden_dim is None or hidden_dim != self.hidden_size:
+            return False
+        if getattr(runner, "routed_input_transform", None) is not None:
+            return False
+        if runner.do_naive_dispatch_combine:
+            return False
+        if (
+            moe_config.pcp_size > 1
+            and not moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            return False
+        return not routed.apply_router_weight_on_input
 
     def forward(
         self,
@@ -784,6 +859,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             else:
                 residual = x
                 fused_post_pre = mhc_fused_post_pre_tilelang
+                reuse_residual = False
                 post_mix, res_mix, x = mhc_pre_tilelang(
                     x,
                     self.hc_attn_fn,
@@ -826,26 +902,85 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
-        residual, post_mix, res_mix, x = fused_post_pre(
-            x,
-            residual,
-            post_mix,
-            res_mix,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-            self.hc_eps,
-            self.hc_post_alpha,
-            self.hc_sinkhorn_iters,
-            n_splits=1,
-            tile_n=1,
-            norm_weight=ffn_norm_weight,
-            norm_eps=ffn_norm_eps,
-        )
+        mhc_fp8_requested = getattr(self, "_mhc_fp8_requested", False)
+        use_mhc_fp8 = mhc_fp8_requested and self._mhc_fp8_backend_ready()
+        mhc_a1q = None
+        mhc_a1q_scale = None
+        if use_mhc_fp8:
+            from vllm.model_executor.kernels.mhc.tilelang import (
+                mhc_fused_post_pre_fp8_tilelang,
+                mhc_fused_post_pre_fp8_tilelang_reuse_residual,
+            )
+            from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
-        x = self.ffn(x, input_ids, mega_gate_metadata)
+            fused_post_pre_fp8 = (
+                mhc_fused_post_pre_fp8_tilelang_reuse_residual
+                if reuse_residual
+                else mhc_fused_post_pre_fp8_tilelang
+            )
+            (
+                residual,
+                post_mix,
+                res_mix,
+                x,
+                mhc_a1q,
+                mhc_a1q_scale,
+            ) = fused_post_pre_fp8(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                n_splits=1,
+                tile_n=1,
+                norm_weight=ffn_norm_weight,
+                norm_eps=ffn_norm_eps,
+                use_ue8m0=is_deep_gemm_e8m0_used(),
+            )
+        else:
+            if mhc_fp8_requested:
+                logger.info_once(
+                    "VLLM_MHC_FP8_EPILOGUE=1 but the Humming backend does "
+                    "not support the fused epilogue on this layer; using "
+                    "the unfused path"
+                )
+            residual, post_mix, res_mix, x = fused_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                n_splits=1,
+                tile_n=1,
+                norm_weight=ffn_norm_weight,
+                norm_eps=ffn_norm_eps,
+            )
+
+        mhc_kwargs = (
+            dict(prequantized_input=mhc_a1q, prequantized_input_scale=mhc_a1q_scale)
+            if mhc_a1q is not None
+            else {}
+        )
+        x = self.ffn(
+            x,
+            input_ids,
+            mega_gate_metadata,
+            **mhc_kwargs,
+        )
         return x, residual, post_mix, res_mix
 
 
