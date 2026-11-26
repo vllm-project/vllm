@@ -302,6 +302,7 @@ async fn outputs(
         prompt_logprobs: None,
         prompt_token_id_logprobs: None,
     }));
+    let mut output_tokens = 0u64;
     while let Some(frame) = frames.try_next().await? {
         let out = frame.outputs.ok_or_else(|| remote("missing sequence output"))?;
         if frame.prompt_info.is_some()
@@ -310,11 +311,20 @@ async fn outputs(
         {
             return Err(remote("invalid token delta"));
         }
+        output_tokens += u64::from(out.num_tokens);
         let terminal = out.finish_info.as_ref();
         let finish_reason = terminal.map(finish).transpose()?;
         // A worker can send a terminal message followed by a non-OK RPC status.
-        if terminal.is_some() && frames.try_next().await?.is_some() {
-            return Err(remote("output after finish"));
+        if let Some(info) = terminal {
+            if frames.try_next().await?.is_some() {
+                return Err(remote("output after finish"));
+            }
+            if u64::from(info.num_output_tokens) != output_tokens {
+                return Err(remote(format!(
+                    "worker reported {} output tokens, streamed token count was {output_tokens}",
+                    info.num_output_tokens
+                )));
+            }
         }
         y.yield_ok(GenerateOutput {
             request_id: request_id.clone(),
@@ -427,9 +437,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn terminal_frame_requires_successful_rpc_status() {
-        let frames = futures::stream::iter([
+    fn terminal_frames(num_output_tokens: u32) -> [Result<pb::GenerateResponse>; 2] {
+        [
             Ok(pb::GenerateResponse {
                 prompt_info: Some(pb::PromptInfo::default()),
                 outputs: None,
@@ -441,13 +450,32 @@ mod tests {
                     num_tokens: 1,
                     finish_info: Some(pb::FinishInfo {
                         finish_reason: pb::finish_info::FinishReason::Length as i32,
+                        num_output_tokens,
                         ..Default::default()
                     }),
                     ..Default::default()
                 }),
             }),
-            Err(status(Status::unavailable("worker stopped"))),
-        ]);
+        ]
+    }
+
+    #[tokio::test]
+    async fn terminal_count_must_match_streamed_tokens() {
+        let frames = futures::stream::iter(terminal_frames(2));
+        let mut decoded = outputs("test".into(), frames).boxed();
+        assert!(
+            matches!(decoded.next().await, Some(Err(Error::Remote { message }))
+            if message.contains("token count"))
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_frame_requires_successful_rpc_status() {
+        let frames = futures::stream::iter(
+            terminal_frames(1)
+                .into_iter()
+                .chain([Err(status(Status::unavailable("worker stopped")))]),
+        );
         let mut decoded = outputs("test".into(), frames).boxed();
         let error = decoded
             .next()
