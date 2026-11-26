@@ -1384,15 +1384,43 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Int4 C=136: carve packed halves + per-token-head scales (never
         # split(head_size) on content=136). Gated so FA_INT4_AVAILABLE=False
-        # keeps the dense/fp8 path unchanged.
+        # keeps the dense/fp8 path unchanged. M1 FA int4 is decode-only —
+        # prefill (q_len>1) reuses Triton int4 on the same pages.
         from vllm.v1.attention.backends.fa_int4 import (
             ensure_int4_scale_caches,
             fa_int4_enabled,
+            run_int4_triton_attention,
         )
 
-        use_fa_int4 = (
+        use_fa_int4_env = (
             self.kv_cache_dtype == "int4_per_token_head" and fa_int4_enabled()
         )
+        if use_fa_int4_env and max_seqlen_q > 1:
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            run_int4_triton_attention(
+                query[:num_actual_tokens],
+                kv_cache,
+                output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                block_table=block_table,
+                softmax_scale=self.scale,
+                causal=attn_metadata.causal,
+                window_size=self.sliding_window,
+                softcap=self.logits_soft_cap,
+                sinks=self.sinks,
+                alibi_slopes=self.alibi_slopes,
+                mm_prefix_range=getattr(
+                    attn_metadata, "mm_prefix_range_tensor", None
+                ),
+                rswa_prefix_lens=getattr(attn_metadata, "rswa_prefix_lens", None),
+                rswa_window=getattr(attn_metadata, "rswa_window", None),
+            )
+            return output
+
+        use_fa_int4 = use_fa_int4_env  # implies max_seqlen_q == 1
         if use_fa_int4:
             # kv_cache: (blocks, nkv, block_size, C=136)
             key_u8, value_u8, k_scale_cache, v_scale_cache = (

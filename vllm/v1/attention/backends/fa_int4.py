@@ -82,3 +82,67 @@ def ensure_int4_scale_caches(
         storage_offset=v_scale_off_f32,
     )
     return key_cache, value_cache, k_scale, v_scale
+
+
+def run_int4_triton_attention(
+    query: torch.Tensor,
+    kv_cache: torch.Tensor,
+    output: torch.Tensor,
+    *,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_q: int,
+    seqused_k: torch.Tensor,
+    max_seqlen_k: int,
+    block_table: torch.Tensor,
+    softmax_scale: float,
+    causal,
+    window_size,
+    softcap: float = 0.0,
+    sinks: torch.Tensor | None = None,
+    alibi_slopes: torch.Tensor | None = None,
+    output_scale: torch.Tensor | None = None,
+    mm_prefix_range: torch.Tensor | None = None,
+    rswa_prefix_lens: torch.Tensor | None = None,
+    rswa_window: int | None = None,
+) -> None:
+    """Run Triton int4 attention on C=136 pages (prefill / q_len>1).
+
+    M1 FA int4 kernels are decode-only (``max_seqlen_q==1``). When the FA
+    backend is selected via ``VLLM_XPU_FA_INT4=1``, prefill must reuse the
+    production Triton int4 path on the same packed KV.
+    """
+    from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    _, _, k_scale_cache, v_scale_cache = ensure_int4_scale_caches(kv_cache)
+    # Triton int4 expects padded halves (data + scale pad), not packed-only.
+    padded_hs = kv_cache.shape[-1] // 2
+    key_cache, value_cache = kv_cache.transpose(1, 2).split(padded_hs, dim=-1)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q,
+        seqused_k=seqused_k,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        alibi_slopes=alibi_slopes,
+        window_size=window_size,
+        block_table=block_table,
+        softcap=softcap,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        sinks=sinks,
+        output_scale=output_scale,
+        mm_prefix_range=mm_prefix_range,
+        rswa_prefix_lens=rswa_prefix_lens,
+        rswa_window=rswa_window,
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+        k_scale_cache=k_scale_cache,
+        v_scale_cache=v_scale_cache,
+    )
