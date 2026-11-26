@@ -574,7 +574,7 @@ def test_rmsnorm_gated_int64_row_offset() -> None:
     num_tokens = 2**31 // (num_heads * head_dim) + 4
     # x, z and the output, all bf16.
     need = num_tokens * num_heads * head_dim * 2 * 3
-    free, _ = current_platform.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < need + (1 << 30):
         pytest.skip("not enough free device memory")
 

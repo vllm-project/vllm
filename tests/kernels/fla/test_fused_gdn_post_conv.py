@@ -234,7 +234,7 @@ def test_fused_post_conv_int64_token_offset():
     L = 2**31 // qkv_dim + 16
     # conv_output plus the q, k and v outputs, all bf16.
     need = L * (qkv_dim + 2 * H * K + HV * V) * 2
-    free, _ = current_platform.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < need + (1 << 30):
         pytest.skip("not enough free device memory")
 

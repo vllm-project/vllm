@@ -299,7 +299,7 @@ def test_flydsl_kv_cache_over_4gib():
     # Enough leading blocks that every referenced block starts above 4 GiB.
     lead_blocks = (1 << 32) // bytes_per_block + 1
     need = (lead_blocks + num_seqs * (seq_len // kv_block_size) + 8) * bytes_per_block
-    if current_platform.mem_get_info()[0] < need + (1 << 30):
+    if torch.accelerator.get_memory_info()[0] < need + (1 << 30):
         pytest.skip("needs >5 GiB free device memory")
 
     centroids, q_bf16, kv_cache, block_table, seq_lens, k_ref, v_ref = _build_cache(
