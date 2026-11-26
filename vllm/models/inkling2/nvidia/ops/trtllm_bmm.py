@@ -83,29 +83,28 @@ def configs(nvfp4: bool, tile_n: int) -> dict[str, tuple[int, int]]:
 _TILES = ((8, 8), (128, 16), (384, 32), (768, 64), (4096, 128), (1 << 31, 256))
 # Kernel of each (format, tile) for the gate/up and down projections.
 _KERNELS = {
-    (True, 8): ("t128x8x512_s5_et128x8_m128x8x64_c1x1x1_rM_TN_transOut_schPd",) * 2,
-    (True, 16): ("t128x16x512_s5_et128x16_m256x16x64_c2x1x1_rM_TN_transOut_schPd",) * 2,
-    (True, 32): ("t128x32x512_s5_et128x32_m256x32x64_c2x1x1_rM_TN_transOut_schPd",) * 2,
-    (True, 64): ("t128x64x512_s4_et128x64_m256x64x64_c2x1x1_rM_TN_transOut_schPd",) * 2,
+    (True, 8): ("t128x8x512_s5_et128x8_m128x8x64_c1x1x1_rM_TN_transO_schPd",) * 2,
+    (True, 16): ("t128x16x512_s5_et128x16_m256x16x64_c2x1x1_rM_TN_transO_schPd",) * 2,
+    (True, 32): ("t128x32x512_s5_et128x32_m256x32x64_c2x1x1_rM_TN_transO_schPd",) * 2,
+    (True, 64): ("t128x64x512_s4_et128x64_m256x64x64_c2x1x1_rM_TN_transO_schPd",) * 2,
     (True, 128): (
-        "t128x128x256u2_s6_et128x128_m256x128x64_c2x1x1_rM_TN_transOut_schPd",
-        "t128x128x256_s6_et128x128_m256x128x64_c2x1x1_rM_TN_transOut_schPd",
+        "t128x128x256u2_s6_et128x128_m256x128x64_c2x1x1_rM_TN_transO_schPd",
+        "t128x128x256_s6_et128x128_m256x128x64_c2x1x1_rM_TN_transO_schPd",
     ),
     (True, 256): ("t128x256x256_s5x5x5x5x1x1_et128x64_m256x256x64_c2x1x1",) * 2,
-    (False, 8): ("t128x8x512_s3_et128x8_m128x8x32_c1x1x1_rM_TN_transOut_schPd",) * 2,
+    (False, 8): ("t128x8x512_s3_et128x8_m128x8x32_c1x1x1_rM_TN_transO_schPd",) * 2,
     (False, 16): (
-        "t128x16x256u2_s6_et128x16_m256x16x32_c2x1x1_rM_TN_transOut_schPd",
-        "t128x16x256_s6_et128x16_m256x16x32_c2x1x1_rM_TN_transOut_schPd",
+        "t128x16x256u2_s6_et128x16_m256x16x32_c2x1x1_rM_TN_transO_schPd",
+        "t128x16x256_s6_et128x16_m256x16x32_c2x1x1_rM_TN_transO_schPd",
     ),
-    (False, 32): ("t128x32x256_s5_et128x32_m256x32x32_c2x1x1_rM_TN_transOut_schPd",)
-    * 2,
+    (False, 32): ("t128x32x256_s5_et128x32_m256x32x32_c2x1x1_rM_TN_transO_schPd",) * 2,
     (False, 64): (
-        "t128x64x256u2_s4_et128x64_m256x64x32_c2x1x1_rM_TN_transOut_schPd",
-        "t128x64x256_s4_et128x64_m256x64x32_c2x1x1_rM_TN_transOut_schPd",
+        "t128x64x256u2_s4_et128x64_m256x64x32_c2x1x1_rM_TN_transO_schPd",
+        "t128x64x256_s4_et128x64_m256x64x32_c2x1x1_rM_TN_transO_schPd",
     ),
     (False, 128): (
-        "t128x128x256u2_s4_et128x64_m256x128x32_c2x1x1_rM_TN_transOut_schPd",
-        "t128x128x256_s4_et128x64_m256x128x32_c2x1x1_rM_TN_transOut_schPd",
+        "t128x128x256u2_s4_et128x64_m256x128x32_c2x1x1_rM_TN_transO_schPd",
+        "t128x128x256_s4_et128x64_m256x128x32_c2x1x1_rM_TN_transO_schPd",
     ),
     (False, 256): ("t128x256x128_s5x5x5x5x1x1_et128x64_m256x256x32_c2x1x1",) * 2,
 }
