@@ -20,7 +20,6 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForMultimodalLM,
-    AutoProcessor,
     PreTrainedConfig,
     core_model_loading,
 )
@@ -1098,7 +1097,8 @@ def test_split_weights_splits_fused_gqa_qkv():
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
     into each projection's size, matched before and named after the renamings. Like
     in Transformers, a longer name that only starts with the pattern is not split,
-    and a quantization scale for the fused tensor is rejected, not split."""
+    and a quantization scale for the fused tensor is rejected, not split. The fused
+    tensor of a skipped module is left for the loader to drop."""
     with torch.device("meta"):
         model = nn.Module()
         model.config = PreTrainedConfig()
@@ -1106,13 +1106,17 @@ def test_split_weights_splits_fused_gqa_qkv():
         model.self_attn.q_proj = nn.Linear(8, 8, bias=False)
         model.self_attn.k_proj = nn.Linear(8, 2, bias=False)
         model.self_attn.v_proj = nn.Linear(8, 2, bias=False)
+        model.vision_tower = StageMissingLayer("vision_tower")
     converter = WeightConverter(
         source_patterns="query_key_value",
         target_patterns=["q_proj", "k_proj", "v_proj"],
         operations=[core_model_loading.Split(dim=0)],
     )
     mapper = WeightsMapper(
-        orig_to_new_renaming=[WeightRenaming(r"^attention\.", "self_attn.")]
+        orig_to_new_renaming=[
+            WeightRenaming(r"^attention\.", "self_attn."),
+            WeightRenaming(r"^vision_model\.", "vision_tower."),
+        ]
     )
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
@@ -1134,29 +1138,5 @@ def test_split_weights_splits_fused_gqa_qkv():
     with pytest.raises(ValueError, match="quantized tensors is not supported"):
         list(weights([scale]))
 
-
-def test_fused_weights_of_skipped_towers_are_dropped(tmp_path, tp_init):
-    """The fused tensors of a tower the model skips, here Qianfan-OCR's vision
-    `attn.qkv` with images disabled, are left unsplit for the loader to drop."""
-    sizes = dict(hidden_size=64, intermediate_size=128, num_hidden_layers=2)
-    heads = dict(num_attention_heads=2, num_key_value_heads=1, head_dim=64)
-    config = AutoConfig.for_model(
-        "qianfan_ocr",
-        text_config=sizes | heads | dict(vocab_size=99),
-        vision_config=sizes | dict(num_attention_heads=2, image_size=32, patch_size=4),
-    )
-    # Saved in the layout of the Hub checkpoints (`vision_model.encoder.layers.*`)
-    AutoModelForMultimodalLM.from_config(config).save_pretrained(tmp_path)
-    checkpoint = load_file(tmp_path / "model.safetensors")
-    assert "vision_model.encoder.layers.0.attn.qkv.weight" in checkpoint
-    processor = "hf-internal-testing/tiny-processor-qianfan_ocr"
-    AutoProcessor.from_pretrained(processor).save_pretrained(tmp_path)
-
-    model_config = ModelConfig(
-        str(tmp_path), model_impl="transformers", limit_mm_per_prompt={"image": 0}
-    )
-    vllm_config = VllmConfig(model_config=model_config)
-    with set_current_vllm_config(vllm_config):
-        model = model_loader.get_model(vllm_config=vllm_config)
-
-    assert isinstance(model.model.vision_tower, StageMissingLayer)
+    skipped = ("vision_model.query_key_value.weight", fused)
+    assert list(weights([skipped])) == [skipped]
