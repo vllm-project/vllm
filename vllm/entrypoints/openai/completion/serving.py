@@ -409,6 +409,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         )
 
         last_res: RequestOutput | None = None
+        first_content_token_ts: float | None = None
         try:
             # Requests that can only emit plain delta chunks render them from a
             # per-stream template; everything else uses the model path below.
@@ -444,6 +445,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     i = output.index + prompt_idx * num_choices
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
+
+                    if (
+                        self.enable_per_request_metrics
+                        and num_prompts == 1
+                        and num_choices == 1
+                        and first_content_token_ts is None
+                        and request.max_tokens != 0
+                        and output.text
+                        and res.metrics is not None
+                        and res.metrics.last_token_ts > 0
+                    ):
+                        first_content_token_ts = res.metrics.last_token_ts
 
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
@@ -648,7 +661,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
-                            last_metrics, total_completion_tokens
+                            last_metrics,
+                            total_completion_tokens,
+                            first_content_token_ts=first_content_token_ts,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
