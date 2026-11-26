@@ -51,10 +51,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_root_path.py
   - pytest -v -s entrypoints/openai/chat_completion/test_enable_force_include_usage.py
   # test_batch_completions also sends beam search, which the Rust frontend rejects.
-  # The Rust frontend keeps the last of top_logprobs candidates with the same
-  # text until #68488 lands, and decodes byte fragments to "\ufffd" until
-  # #63926 lands.
-  - pytest -v -s entrypoints/openai/completion/test_completion.py -k "not test_batch_completions and not string_collision"
+  - pytest -v -s entrypoints/openai/completion/test_completion.py -k "not test_batch_completions"
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
   - pytest -v -s entrypoints/openai/completion/test_token_in_token_out.py
   - pytest -v -s entrypoints/openai/test_chunked_prompt.py

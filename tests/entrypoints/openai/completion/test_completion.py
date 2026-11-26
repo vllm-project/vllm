@@ -9,6 +9,7 @@ import pytest_asyncio
 import regex as re
 from openai import BadRequestError
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.sampling_params import SamplingParams
@@ -319,8 +320,16 @@ FRAGMENT_REQUEST = dict(
     extra_body={"allowed_token_ids": [8158], "logprob_token_ids": [3023, 378]},
 )
 
+# The Rust frontend keeps the last of the candidates with the same text until
+# #68488 lands, and decodes byte fragments to "\ufffd" until #63926 lands.
+skip_on_rust_frontend = pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not keep the sampled top_logprobs entry yet",
+)
+
 
 @pytest.mark.asyncio
+@skip_on_rust_frontend
 async def test_top_logprobs_keep_sampled_entry_on_string_collision(
     client: openai.AsyncOpenAI,
 ):
@@ -332,6 +341,7 @@ async def test_top_logprobs_keep_sampled_entry_on_string_collision(
 
 
 @pytest.mark.asyncio
+@skip_on_rust_frontend
 async def test_top_logprobs_keep_sampled_entry_on_string_collision_stream(
     client: openai.AsyncOpenAI,
 ):
