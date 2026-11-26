@@ -257,6 +257,12 @@ impl ChatRequestProcessor {
         self.backend.chat_renderer().render_completion_suffix(prompt, suffix)
     }
 
+    /// Render one request's chat template, without media, tokenization or
+    /// validation. Rendering blocks, so call it off the async workers.
+    pub fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        self.backend.chat_renderer().render(request)
+    }
+
     /// Prepare one chat request for tokenization without constructing an output processor.
     pub async fn prepare_for_tokenization(&self, mut request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
