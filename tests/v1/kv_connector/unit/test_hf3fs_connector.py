@@ -3,6 +3,7 @@
 """Tests for HF3FS KV Connector high-level components:
 - TestHf3fsMockClient      : file-backed mock client I/O correctness
 - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
+- test_ptrs_to_int64        : pointers >= 2**63 survive the int64 storage
 """
 
 import contextlib
@@ -22,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
     AsyncOperationManager,
     HF3FSKVConnector,
     HF3FSKVConnectorStats,
+    _ptrs_to_int64,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
     AtomicCounter,
@@ -41,10 +43,10 @@ def hf3fs_stats():
     return HF3FSKVConnectorStats()
 
 
-def _make_cuda_event():
-    """Return a real CUDA event when available, otherwise a MagicMock."""
-    if torch.cuda.is_available():
-        return torch.cuda.Event()
+def _make_event():
+    """Return a real accelerator event when available, otherwise a MagicMock."""
+    if torch.accelerator.is_available():
+        return torch.Event()
     return MagicMock()
 
 
@@ -82,7 +84,7 @@ class TestHf3fsMockClient:
         elem_size = torch.tensor([], dtype=dtype).element_size()
         numel = bytes_per_page // elem_size
         tensor_write = torch.arange(numel, dtype=dtype)
-        event = _make_cuda_event()
+        event = _make_event()
 
         results = client.batch_write([0], [tensor_write], event)
         assert results == [bytes_per_page], f"Write should succeed, got {results}"
@@ -119,7 +121,7 @@ class TestHf3fsMockClient:
         )
         numel = bytes_per_page // 4
         tensor = torch.ones(numel, dtype=torch.float32)
-        event = _make_cuda_event()
+        event = _make_event()
         results = client.batch_write([size], [tensor], event)  # OOB offset
         assert results[0] == -1, "Out-of-bounds write should return -1"
         client.close()
@@ -140,7 +142,7 @@ class TestHf3fsMockClient:
             for i in range(n)
         ]
         offsets = [i * bytes_per_page for i in range(n)]
-        event = _make_cuda_event()
+        event = _make_event()
 
         results = client.batch_write(offsets, tensors_write, event)
         assert all(r == bytes_per_page for r in results)
@@ -789,3 +791,26 @@ class TestHF3FSRecomputeDoesNotReload:
             connector.close()
             for signum, handler in saved_signals.items():
                 signal.signal(signum, handler)
+
+# ---------------------------------------------------------------------------
+# Pointer conversion (addresses >= 2**63, e.g. on XPU)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ptr, expected",
+    [
+        (0, 0),
+        (0x7F00_0000_1000, 0x7F00_0000_1000),
+        (2**63 - 1, 2**63 - 1),
+        (2**63, -(2**63)),
+        (0xFF00_0000_0000_1000, 0xFF00_0000_0000_1000 - 2**64),
+        (2**64 - 1, -1),
+    ],
+)
+def test_ptrs_to_int64(ptr, expected):
+    (converted,) = _ptrs_to_int64([ptr])
+    assert converted == expected
+    # Must fit in an int64 tensor and round-trip to the original bit pattern.
+    t = torch.tensor([converted], dtype=torch.int64)
+    assert t.item() & (2**64 - 1) == ptr

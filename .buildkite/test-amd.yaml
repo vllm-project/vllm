@@ -3106,6 +3106,9 @@ steps:
   - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
   - vllm/v1/attention/ops/dcp.py
   - tests/distributed/test_dcp_a2a.py
+  - tests/distributed/test_muse_spark_decode_moe.py
+  - tests/models/test_muse_spark_rocm_mono.py
+  - vllm/models/muse_spark/amd/
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
@@ -3120,6 +3123,7 @@ steps:
   - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
+  - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
 
 - label: ":amd: (MI355) Distributed AgRs All2All"
   timeout_in_minutes: 30
@@ -4445,6 +4449,7 @@ steps:
       kernels/test_kpool_decode_update_batched.py
       kernels/test_minimax_m3_amd_ops.py
       kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+      kernels/test_muse_spark_rocm_decode_moe.py
       kernels/test_muse_spark_router_bf16x3.py
       kernels/test_onednn.py
       kernels/test_relu2_fp8_quant.py
@@ -4946,6 +4951,7 @@ steps:
   - tests/models/test_vision.py
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v4_vl.py
+  - tests/models/test_muse_spark_fp32_rope.py
   - tests/models/test_utils.py
   commands:
   - >-
@@ -4955,6 +4961,7 @@ steps:
     models/test_registry.py
     models/test_deepseek_v4_vl_rocm.py
     models/test_deepseek_v4_vl.py
+    models/test_muse_spark_fp32_rope.py
     models/test_utils.py::test_merge_multimodal_embeddings_no_sync
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
