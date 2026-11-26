@@ -26,6 +26,7 @@ def _accumulate_kernel(
     num_rejected_ptr,
     features_ptr,
     features_stride,
+    predecessor_surprise_ptr,
     pred_ptr,
     pred_stride,
     counts_ptr,
@@ -38,6 +39,8 @@ def _accumulate_kernel(
     req_state_block = tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0).to(
         tl.int64
     )
+
+    req_mask = req_mask & (req_state_block >= 0)
 
     num_sampled = tl.load(num_sampled_ptr + req_block, mask=req_mask, other=0).to(
         tl.int64
@@ -68,26 +71,41 @@ def _accumulate_kernel(
     resid = tl.where(observed, label - pred, 0.0)
 
     # This block's contribution to the normal equations for design row
-    # x = [feature, eₖ]: the XᵀWX entries aₖ, bₖ, cₖ and the Xᵀr entries g₀ₖ, g₁ₖ.
-    # aₖ and g₀ₖ are partials of scalars shared by every position, which
-    # _refit_kernel sums.
+    # x = [feature, predecessor surprise, eₖ]. Shared-slope moments are
+    # partials that _refit_kernel sums across positions.
+    feature = tl.where(observed, feature, 0.0)
     a_k = tl.sum(w * feature * feature, axis=0)
     b_k = tl.sum(w * feature, axis=0)
     c_k = tl.sum(w, axis=0)
     g0_k = tl.sum(resid * feature, axis=0)
     g1_k = tl.sum(resid, axis=0)
     count = tl.sum(tl.where(observed, 1.0, 0.0), axis=0)
-    tl.store(info_ptr + step * 3 + 0, tl.load(info_ptr + step * 3 + 0) + a_k)
-    tl.store(info_ptr + step * 3 + 1, tl.load(info_ptr + step * 3 + 1) + b_k)
-    tl.store(info_ptr + step * 3 + 2, tl.load(info_ptr + step * 3 + 2) + c_k)
-    tl.store(grad_ptr + step * 2 + 0, tl.load(grad_ptr + step * 2 + 0) + g0_k)
-    tl.store(grad_ptr + step * 2 + 1, tl.load(grad_ptr + step * 2 + 1) + g1_k)
+    tl.store(info_ptr + step * 6 + 0, tl.load(info_ptr + step * 6 + 0) + a_k)
+    tl.store(info_ptr + step * 6 + 1, tl.load(info_ptr + step * 6 + 1) + b_k)
+    tl.store(info_ptr + step * 6 + 2, tl.load(info_ptr + step * 6 + 2) + c_k)
+    tl.store(grad_ptr + step * 3 + 0, tl.load(grad_ptr + step * 3 + 0) + g0_k)
+    tl.store(grad_ptr + step * 3 + 1, tl.load(grad_ptr + step * 3 + 1) + g1_k)
+    extra = tl.load(
+        predecessor_surprise_ptr + req_state_block * features_stride + step,
+        mask=req_mask,
+        other=0.0,
+    )
+    extra = tl.where(observed, extra, 0.0)
+    a01 = tl.sum(w * feature * extra, axis=0)
+    a11 = tl.sum(w * extra * extra, axis=0)
+    b1 = tl.sum(w * extra, axis=0)
+    g_extra = tl.sum(resid * extra, axis=0)
+    tl.store(info_ptr + step * 6 + 3, tl.load(info_ptr + step * 6 + 3) + a01)
+    tl.store(info_ptr + step * 6 + 4, tl.load(info_ptr + step * 6 + 4) + a11)
+    tl.store(info_ptr + step * 6 + 5, tl.load(info_ptr + step * 6 + 5) + b1)
+    tl.store(grad_ptr + step * 3 + 2, tl.load(grad_ptr + step * 3 + 2) + g_extra)
     tl.store(counts_ptr + step, tl.load(counts_ptr + step) + count)
 
 
 @triton.jit
 def _refit_kernel(
     slope_ptr,
+    surprise_slope_ptr,
     intercepts_ptr,
     info_ptr,
     info_row_stride,
@@ -116,16 +134,20 @@ def _refit_kernel(
     w = tl.load(slope_ptr)
     bias = tl.load(intercepts_ptr + k, mask=mask, other=0.0)
 
-    # Solve for the shared slope delta, Δω, in the following arrowhead system:
-    #   ⎡ a+λ   b₀     b₁    …  bₙ₋₁    ⎤ ⎡  Δω   ⎤   ⎡  g₀   ⎤
-    #   ⎢ b₀    c₀+λ                    ⎥ ⎢  Δβ₀  ⎥   ⎢  g₁₀  ⎥
-    #   ⎢ b₁           c₁+λ             ⎥ ⎢  Δβ₁  ⎥ = ⎢  g₁₁  ⎥
-    #   ⎢ ⋮                  ⋱          ⎥ ⎢  ⋮    ⎥   ⎢  ⋮    ⎥
-    #   ⎣ bₙ₋₁                  cₙ₋₁+λ   ⎦ ⎣ Δβₙ₋₁ ⎦   ⎣ g₁ₙ₋₁ ⎦
-    #               XᵀWX + λI                Δθ        Xᵀ(Y-P)
-    shrink = b_k * b_k / c_k
-    coupling = b_k * g1_k / c_k
-    step_w = (g0 - tl.sum(coupling, axis=0)) / (a - tl.sum(shrink, axis=0))
+    # Eliminate the diagonal intercept block to obtain a 2x2 Schur complement
+    # for the two shared slopes. Recover the intercept steps below.
+    a01 = tl.load(info_ptr + k * info_row_stride + 3, mask=mask, other=0.0)
+    a11 = tl.load(info_ptr + k * info_row_stride + 4, mask=mask, other=0.0)
+    b1 = tl.load(info_ptr + k * info_row_stride + 5, mask=mask, other=0.0)
+    g_extra = tl.load(grad_ptr + k * grad_row_stride + 2, mask=mask, other=0.0)
+    m00 = a - tl.sum(b_k * b_k / c_k, axis=0)
+    m01 = tl.sum(a01 - b_k * b1 / c_k, axis=0)
+    m11 = tl.sum(a11 - b1 * b1 / c_k, axis=0) + L2
+    v0 = g0 - tl.sum(b_k * g1_k / c_k, axis=0)
+    v1 = tl.sum(g_extra - b1 * g1_k / c_k, axis=0)
+    det = m00 * m11 - m01 * m01
+    step_w = (v0 * m11 - v1 * m01) / det
+    step_extra = (v1 * m00 - v0 * m01) / det
 
     # The slope learns from every position, so it is damped by the round's
     # total sample count.
@@ -136,11 +158,14 @@ def _refit_kernel(
     step_w = tl.where(
         (tl.abs(step_w) < float("inf")) & (w + step_w >= 0.0), step_w, 0.0
     )
+    step_extra *= total_n / (total_n + DAMPING)
+    step_extra = tl.where(tl.abs(step_extra) < float("inf"), step_extra, 0.0)
+    tl.store(surprise_slope_ptr, tl.load(surprise_slope_ptr) + step_extra)
     # Update the shared slope.
     new_w = w + step_w
 
     # Solve for the per-position intercept deltas, Δβₖ, in the same system.
-    step_bias = (g1_k - b_k * step_w) / c_k
+    step_bias = (g1_k - b_k * step_w - b1 * step_extra) / c_k
     # Damp by the position's sample count.
     step_bias *= n / (n + DAMPING)
     # Mask out non-finite steps.
@@ -157,6 +182,9 @@ def _refit_kernel(
     tl.store(info_ptr + k * info_row_stride + 2, 0.0, mask=mask)
     tl.store(grad_ptr + k * grad_row_stride + 0, 0.0, mask=mask)
     tl.store(grad_ptr + k * grad_row_stride + 1, 0.0, mask=mask)
+    for col in tl.static_range(3, 6):
+        tl.store(info_ptr + k * info_row_stride + col, 0.0, mask=mask)
+    tl.store(grad_ptr + k * grad_row_stride + 2, 0.0, mask=mask)
     tl.store(counts_ptr + k, 0.0, mask=mask)
 
 
@@ -241,6 +269,18 @@ def _local_max_sumexp_kernel(
     )
 
 
+@triton.jit
+def _acceptance_probability(weight, feature, bias, surprise_weight, surprise):
+    base = weight * feature + bias
+    return tl.sigmoid(
+        tl.where(
+            (surprise_weight == 0.0) | (surprise == 0.0),
+            base,
+            base + surprise_weight * surprise,
+        )
+    )
+
+
 @triton.jit(do_not_specialize=["num_tokens"])
 def _predict_kernel(
     features_ptr,
@@ -258,6 +298,14 @@ def _predict_kernel(
     idx_mapping_ptr,
     idx_mapping_stride,
     step_ptr,
+    surprise_ptr,
+    predecessor_surprise_ptr,
+    surprise_slope_ptr,
+    sampling_logits_ptr,
+    sampling_stride,
+    sampled_tokens_ptr,
+    temperature_ptr,
+    sampling_vocab_size,
     num_tokens,
     vocab_num_blocks,
     per_token_step: tl.constexpr,
@@ -334,12 +382,77 @@ def _predict_kernel(
     feature = tl.minimum(tl.maximum(feature, -MAX_LOG_ODDS), MAX_LOG_ODDS)
     tl.store(features_ptr + req_state_idx * features_stride + step, feature)
 
-    # Predict the acceptance probability from the feature and current coefficients.
+    # The log probability ratio is just a temperature-scaled logit gap.
+    # Cache the draw for the next position, never for its own score.
+    surprise = 0.0
+    if sampled_tokens_ptr is not None:
+        token = tl.load(sampled_tokens_ptr + token_idx).to(tl.int64)
+        temp = tl.load(temperature_ptr + req_state_idx)
+        if (
+            temp > 0
+            and token >= 0
+            and token < sampling_vocab_size
+            and tl.abs(global_max) < float("inf")
+        ):
+            sampled = tl.load(sampling_logits_ptr + token_idx * sampling_stride + token)
+            gap = global_max - sampled.to(tl.float32) / temp
+            surprise = tl.where(tl.abs(gap) < float("inf"), tl.maximum(0.0, gap), 0.0)
+    row = req_state_idx * features_stride
+    if per_token_step and sampled_tokens_ptr is not None:
+        tl.store(surprise_ptr + row + step, surprise)
+        return  # A separate launch reads the preceding row's surprise.
+    # Sequential drafting has already published the previous position.
     weight = tl.load(slope_ptr)
     bias = tl.load(intercepts_ptr + step)
-    prob = tl.sigmoid(weight * feature + bias)
+    extra = 0.0
+    if sampled_tokens_ptr is not None:
+        extra = tl.load(
+            surprise_ptr + row + step - 1,
+            mask=(step > 0) & (tl.load(temperature_ptr + req_state_idx) > 0),
+            other=0.0,
+        )
+    tl.store(surprise_ptr + row + step, surprise)
+    tl.store(predecessor_surprise_ptr + row + step, extra)
+    prob = _acceptance_probability(
+        weight, feature, bias, tl.load(surprise_slope_ptr), extra
+    )
     tl.store(pred_ptr + req_state_idx * pred_stride + step, prob)
     tl.store(conf_ptr + batch_idx * conf_stride + step, prob)
+
+
+@triton.jit
+def _predict_causal_block(
+    peak_ptr,
+    surprise_ptr,
+    extra_ptr,
+    pred_ptr,
+    conf_ptr,
+    idx_ptr,
+    idx_stride,
+    feature_stride,
+    conf_stride,
+    slope_ptr,
+    surprise_slope_ptr,
+    bias_ptr,
+    K: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    batch = tl.program_id(0)
+    req = tl.load(idx_ptr + batch * K * idx_stride).to(tl.int64)
+    if req < 0:
+        return
+    step = tl.arange(0, BLOCK)
+    valid = step < K
+    base = req * feature_stride
+    feature = tl.load(peak_ptr + base + step, valid, 0.0)
+    extra = tl.load(surprise_ptr + base + step - 1, valid & (step > 0), 0.0)
+    bias = tl.load(bias_ptr + step, step < K, 0.0)
+    p = _acceptance_probability(
+        tl.load(slope_ptr), feature, bias, tl.load(surprise_slope_ptr), extra
+    )
+    tl.store(extra_ptr + base + step, extra, valid)
+    tl.store(pred_ptr + base + step, p, valid)
+    tl.store(conf_ptr + batch * conf_stride + step, p, valid)
 
 
 class OnlineAcceptanceEstimator:
@@ -391,42 +504,23 @@ class OnlineAcceptanceEstimator:
         self.features = torch.zeros(
             max_num_reqs, num_speculative_steps, dtype=torch.float32, device=device
         )
-        # Holds the acceptance predictions made at draft time, computed as:
-        #   p = σ(ω * f + βₖ)
-        # where f is feature (logit(max q)) at draft position k, ω is the learned
-        # shared slope, and βₖ is the learned per-position intercept. Stored in
-        # stable slots keyed by the persistent request-state index.
+        # Predictions and predecessor features are retained until verification.
         self.predictions = torch.zeros(
             max_num_reqs, num_speculative_steps, dtype=torch.float32, device=device
         )
+        self.surprise = torch.zeros_like(self.features)
+        self.predecessor_surprise = torch.zeros_like(self.features)
+        self.surprise_slope = torch.zeros_like(self.slope)
 
-        # Per-round Newton-IRLS statistics, cleared after each refit. For observation
-        # i the design row is xᵢ = [fᵢ, eₖ], the IRLS weight is wᵢ = pᵢ(1-pᵢ), and the
-        # residual is yᵢ - pᵢ, where yᵢ is the label (1 for accepted, 0 for rejected).
-        # XᵀWX is then the negative Hessian of the Bernoulli log-likelihood loss and
-        # Xᵀ(Y-P) is its gradient, so the Newton step for θ = [ω, β₀ … βₙ₋₁] is the
-        # the solution of (XᵀWX + λI) Δθ = Xᵀ(Y-P).
-        #
-        # Columns [aₖ, bₖ, cₖ] are each position's contribution to the XᵀWX arrowhead:
-        #   ⎡ a    b₀   b₁ … bₙ₋₁ ⎤
-        #   ⎢ b₀   c₀             ⎥
-        #   ⎢ b₁        c₁        ⎥
-        #   ⎢ ⋮            ⋱      ⎥
-        #   ⎣ bₙ₋₁           cₙ₋₁ ⎦
-        # bₖ and cₖ are per-position, but a = Σₖ aₖ is one scalar shared by all of
-        # them.
+        # Per-position contributions to XᵀWX and Xᵀ(Y-P), for a design
+        # row [f, s, eₖ] with peak log-odds f and predecessor surprise s.
+        # Info columns: [w*f*f, w*f, w, w*f*s, w*s*s, w*s].
+        # Gradient columns: [r*f, r, r*s], where w=p(1-p), r=y-p.
         self.info = torch.zeros(
-            num_speculative_steps, 3, dtype=torch.float32, device=device
+            num_speculative_steps, 6, dtype=torch.float32, device=device
         )
-        # Columns [g₀ₖ, g₁ₖ] are each position's contribution to the Xᵀ(Y-P) vector:
-        #   ⎡ g₀    ⎤
-        #   ⎢ g₁₀   ⎥
-        #   ⎢ g₁₁   ⎥
-        #   ⎢  ⋮    ⎥
-        #   ⎣ g₁ₙ₋₁ ⎦
-        # As above, g₁ₖ is per-position and g₀ = Σₖ g₀ₖ is shared.
         self.grad = torch.zeros(
-            num_speculative_steps, 2, dtype=torch.float32, device=device
+            num_speculative_steps, 3, dtype=torch.float32, device=device
         )
         # Number of graded drafts per-position in the current round, zeroed after
         # each refit. _refit_kernel uses this to damp coefficient updates by:
@@ -451,6 +545,7 @@ class OnlineAcceptanceEstimator:
             num_rejected,
             self.features,
             self.features.stride(0),
+            self.predecessor_surprise,
             self.predictions,
             self.predictions.stride(0),
             self.counts,
@@ -481,6 +576,7 @@ class OnlineAcceptanceEstimator:
     def _refit(self) -> None:
         _refit_kernel[(1,)](
             self.slope,
+            self.surprise_slope,
             self.intercepts,
             self.info,
             self.info.stride(0),
@@ -500,7 +596,12 @@ class OnlineAcceptanceEstimator:
         draft_step: torch.Tensor,
         confidence_probs: torch.Tensor,
         temperature: torch.Tensor,
+        sampled_tokens: torch.Tensor | None = None,
+        sampling_logits: torch.Tensor | None = None,
     ) -> None:
+        # Reduced-vocab drafters may sample in target-vocabulary space.
+        # Keep the peak reduction in draft space and look up the draw in its
+        # actual sampling vocabulary.
         num_tokens, vocab_size = logits.shape
         VOCAB_BLOCK_SIZE = 4096
         num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
@@ -522,6 +623,7 @@ class OnlineAcceptanceEstimator:
             vocab_size,
             BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         )
+        sampling_logits = logits if sampling_logits is None else sampling_logits
         _predict_kernel[(num_tokens,)](
             self.features,
             self.features.stride(0),
@@ -538,6 +640,14 @@ class OnlineAcceptanceEstimator:
             idx_mapping,
             idx_mapping.stride(0),
             draft_step,
+            self.surprise,
+            self.predecessor_surprise,
+            self.surprise_slope,
+            sampling_logits,
+            sampling_logits.stride(0),
+            sampled_tokens,
+            temperature,
+            sampling_logits.shape[1],
             num_tokens,
             num_blocks,
             per_token_step=draft_step.dim() > 0,
@@ -545,3 +655,22 @@ class OnlineAcceptanceEstimator:
             MAX_LOG_ODDS=_MAX_LOG_ODDS,
             PADDED_VOCAB_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
         )
+
+        if draft_step.dim() > 0 and sampled_tokens is not None:
+            k = self.num_speculative_steps
+            _predict_causal_block[(num_tokens // k,)](
+                self.features,
+                self.surprise,
+                self.predecessor_surprise,
+                self.predictions,
+                confidence_probs,
+                idx_mapping,
+                idx_mapping.stride(0),
+                self.features.stride(0),
+                confidence_probs.stride(0),
+                self.slope,
+                self.surprise_slope,
+                self.intercepts,
+                K=k,
+                BLOCK=triton.next_power_of_2(k),
+            )

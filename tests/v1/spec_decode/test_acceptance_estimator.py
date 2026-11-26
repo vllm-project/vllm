@@ -9,18 +9,21 @@ to another request -- so it is asserted here rather than left to acceptance
 metrics to hint at.
 """
 
+import numpy as np
 import pytest
 import torch
 
-from vllm.platforms import current_platform
-from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+pytest.importorskip("triton")
+
+from vllm.platforms import current_platform  # noqa: E402
+from vllm.triton_utils import tl, triton  # noqa: E402
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (  # noqa: E402
     _MAX_LOG_ODDS,
     OnlineAcceptanceEstimator,
     _accumulate_kernel,
     _refit_kernel,
 )
 
-pytest.importorskip("triton")
 if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
     pytest.skip(
         "CUDA/XPU required for acceptance estimator tests", allow_module_level=True
@@ -535,3 +538,315 @@ def test_warmup_covers_every_batch_size_and_the_refit():
 
     assert estimator._refits == 1
     assert compiled_variants() == warmed
+
+
+@triton.jit
+def _baseline_score(features, slope, intercepts, out, K: tl.constexpr):
+    k = tl.arange(0, K)
+    tl.store(
+        out + k,
+        tl.sigmoid(tl.load(slope) * tl.load(features + k) + tl.load(intercepts + k)),
+    )
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_predecessor_surprise_is_causal_and_cold_start_matches_baseline(parallel):
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    logits = torch.tensor([[3.0, 1.0, -2.0, -6.0]], device=device)
+    slots = torch.full((NUM_STEPS,), 0, device=device, dtype=torch.int32)
+    steps = torch.arange(NUM_STEPS, device=device)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    confidence = torch.empty((1, NUM_STEPS), device=device)
+
+    def score(tokens):
+        if parallel:
+            estimator.predict(
+                logits.repeat(NUM_STEPS, 1),
+                slots,
+                steps,
+                confidence,
+                temperature,
+                tokens,
+            )
+        else:
+            for k in range(NUM_STEPS):
+                estimator.predict(
+                    logits,
+                    slots[:1],
+                    steps[k],
+                    confidence,
+                    temperature,
+                    None if tokens is None else tokens[k : k + 1],
+                )
+        return confidence.clone()
+
+    draws = torch.tensor([0, 3, 1, 2], device=device)
+    cold = score(draws)
+    baseline = torch.empty_like(cold)
+    _baseline_score[(1,)](
+        estimator.features[0],
+        estimator.slope,
+        estimator.intercepts,
+        baseline,
+        K=NUM_STEPS,
+    )
+    torch.testing.assert_close(cold, baseline, rtol=0, atol=0)
+    estimator.surprise_slope.fill_(-0.5)
+    reference = score(draws)
+    expected_surprise = torch.tensor([0.0, 0.0, 9.0, 2.0], device=device)
+    torch.testing.assert_close(estimator.predecessor_surprise[0], expected_surprise)
+    for k in range(NUM_STEPS):
+        changed = draws.clone()
+        changed[k:] = (changed[k:] + 1) % logits.shape[1]
+        result = score(changed)
+        torch.testing.assert_close(
+            result[:, : k + 1], reference[:, : k + 1], rtol=0, atol=0
+        )
+        if k + 1 < NUM_STEPS:
+            assert result[0, k + 1] != reference[0, k + 1]
+
+    # No-sample and greedy paths must not inherit a previous round's surprise.
+    torch.testing.assert_close(score(None), baseline, rtol=0, atol=0)
+    assert not estimator.predecessor_surprise[0].any()
+    temperature.zero_()
+    torch.testing.assert_close(score(draws), baseline, rtol=0, atol=0)
+    assert not estimator.predecessor_surprise[0].any()
+
+
+@pytest.mark.parametrize("all_rejected", [False, True])
+def test_joint_refit_matches_dense_newton_step(all_rejected):
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    rng = np.random.default_rng(12)
+    num_reqs = 12
+    logits = rng.normal(size=(num_reqs, NUM_STEPS, 8)).astype(np.float32)
+    logits[2, 0, 0] = 80.0
+    draws = rng.integers(0, 8, size=(num_reqs, NUM_STEPS))
+    draws[2, 0] = 1
+    temps = np.ones(MAX_NUM_REQS, dtype=np.float32)
+    temps[::2] = 0.0
+    slots = np.arange(num_reqs)[::-1].copy()
+    temperature = torch.tensor(temps, device=device)
+    confidence = torch.empty((num_reqs, NUM_STEPS), device=device)
+    tensor_slots = torch.tensor(slots, device=device, dtype=torch.int32)
+    steps = torch.arange(NUM_STEPS, device=device).repeat(num_reqs)
+    estimator.predict(
+        torch.tensor(logits.reshape(-1, 8), device=device),
+        tensor_slots.repeat_interleave(NUM_STEPS),
+        steps,
+        confidence,
+        temperature,
+        torch.tensor(draws.flatten(), device=device),
+    )
+
+    # Independent fp64 reference: construct every observed row explicitly.
+    scaled = logits.astype(np.float64)
+    top = scaled.max(axis=-1)
+    rest = scaled.copy()
+    np.put_along_axis(rest, scaled.argmax(axis=-1)[..., None], -np.inf, axis=-1)
+    peak = np.clip(top - np.logaddexp.reduce(rest, axis=-1), -40.0, 40.0)
+    surprise = top - np.take_along_axis(scaled, draws[..., None], axis=-1)[..., 0]
+    surprise[temps[slots] == 0] = 0.0
+    predecessor = np.concatenate((np.zeros((num_reqs, 1)), surprise[:, :-1]), axis=1)
+    np.testing.assert_allclose(
+        estimator.predecessor_surprise[tensor_slots].cpu(),
+        predecessor,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    accepted = (
+        np.zeros(num_reqs, dtype=int)
+        if all_rejected
+        else np.arange(num_reqs) % (NUM_STEPS + 1)
+    )
+    admitted = np.minimum(accepted + 1, NUM_STEPS)
+    positions = np.arange(NUM_STEPS)[None, :]
+    observed = positions < admitted[:, None]
+    labels = (positions < accepted[:, None])[observed]
+    design = np.concatenate(
+        (
+            peak[..., None],
+            predecessor[..., None],
+            np.broadcast_to(np.eye(NUM_STEPS), (num_reqs, NUM_STEPS, NUM_STEPS)),
+        ),
+        axis=-1,
+    )[observed]
+    probs = confidence.cpu().numpy().astype(np.float64)[observed]
+    hessian = design.T @ ((probs * (1 - probs))[:, None] * design)
+    hessian += estimator.L2 * np.eye(NUM_STEPS + 2)
+    grad = design.T @ (labels - probs)
+    delta = np.linalg.solve(hessian, grad)
+    counts = observed.sum(axis=0)
+    total = counts.sum()
+    damp = estimator.DAMPING_OBSERVATIONS
+    delta[:2] *= total / (total + damp)
+    initial = np.r_[
+        estimator.slope.cpu(),
+        estimator.surprise_slope.cpu(),
+        estimator.intercepts.cpu(),
+    ]
+    if initial[0] + delta[0] < 0:
+        delta[0] = 0.0
+    # Back-substitution uses the damped/guarded shared slopes, as in production.
+    delta[2:] = (grad[2:] - hessian[2:, :2] @ delta[:2]) / hessian.diagonal()[2:]
+    delta[2:] *= counts / (counts + damp)
+    estimator.step(
+        tensor_slots,
+        torch.tensor(accepted + 1, device=device, dtype=torch.int32),
+        torch.tensor(admitted - accepted, device=device, dtype=torch.int32),
+    )
+    actual = np.r_[
+        estimator.slope.cpu(),
+        estimator.surprise_slope.cpu(),
+        estimator.intercepts.cpu(),
+    ]
+    np.testing.assert_allclose(actual, initial + delta, rtol=2e-4, atol=2e-5)
+    assert not estimator.info.any()
+    assert not estimator.grad.any()
+    assert not estimator.counts.any()
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_predecessor_surprise_padding_and_slot_reuse(parallel):
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+    estimator.surprise_slope.fill_(-1.0)
+    slots = torch.tensor([7, -1, 2], device=device, dtype=torch.int32)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    steps = torch.arange(NUM_STEPS, device=device)
+    logits = torch.tensor([[2.0, -4.0]], device=device)
+    confidence = torch.full((3, NUM_STEPS), -1.0, device=device)
+
+    num_rows = 3 * NUM_STEPS if parallel else 3
+    draws = torch.ones(num_rows, device=device, dtype=torch.int64)
+    rows = logits.repeat(num_rows, 1)
+
+    def score():
+        if parallel:
+            estimator.predict(
+                rows,
+                slots.repeat_interleave(NUM_STEPS),
+                steps.repeat(3),
+                confidence,
+                temperature,
+                draws,
+            )
+        else:
+            for k in range(NUM_STEPS):
+                estimator.predict(
+                    rows,
+                    slots,
+                    steps[k],
+                    confidence,
+                    temperature,
+                    draws,
+                )
+
+    score()
+    assert (estimator.predecessor_surprise[7, 1:] == 6.0).all()
+    if torch.cuda.is_available():
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            score()
+        draws.zero_()  # New request reuses the same persistent slot.
+        graph.replay()
+    else:
+        draws.zero_()
+        score()
+    assert not estimator.predecessor_surprise[7].any()
+    assert (confidence[1] == -1.0).all()
+    assert not estimator.features[-1].any()
+    assert not estimator.surprise[-1].any()
+    # The padding row carries bogus verification counts; it must not be graded.
+    estimator.step(
+        slots,
+        torch.ones(3, device=device, dtype=torch.int32),
+        torch.full((3,), NUM_STEPS, device=device, dtype=torch.int32),
+    )
+    assert estimator.counts.tolist() == [2.0, 0.0, 0.0, 0.0]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA budget kernel")
+def test_fixed_budget_admission_does_not_read_current_draw():
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        assign_draft_token_budget,
+    )
+
+    device = "cuda"
+    estimator = _make_estimator(device)
+    estimator.surprise_slope.fill_(-0.5)
+    slots = torch.arange(3, device=device, dtype=torch.int32)
+    steps = torch.arange(NUM_STEPS, device=device).repeat(3)
+    logits = torch.tensor([[2.0, -1.0, -4.0]], device=device).repeat(3 * NUM_STEPS, 1)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    confidence = torch.empty((3, NUM_STEPS), device=device)
+    scratch = torch.empty(3 * NUM_STEPS, dtype=torch.int32, device=device)
+
+    def admit(draws):
+        estimator.predict(
+            logits,
+            slots.repeat_interleave(NUM_STEPS),
+            steps,
+            confidence,
+            temperature,
+            draws,
+        )
+        capacities = torch.full((3,), NUM_STEPS, dtype=torch.int32, device=device)
+        assign_draft_token_budget(confidence, slots, capacities, 5, scratch)
+        assert capacities.sum().item() == 5
+        return capacities
+
+    draws = torch.zeros(3 * NUM_STEPS, dtype=torch.int64, device=device)
+    initial = admit(draws)
+    for k in range(NUM_STEPS):
+        changed = draws.clone()
+        changed[k:NUM_STEPS] = 2
+        result = admit(changed)
+        assert (initial[0] > k) == (result[0] > k)
+
+
+def test_predecessor_surprise_uses_target_vocab_sample_id():
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+    estimator.surprise_slope.fill_(-0.5)
+    # Draft column 1 corresponds to target ID 9, not target ID 1.
+    logits = torch.tensor([[3.0, -2.0, 1.0]], device=device)
+    target_logits = torch.full((1, 12), -float("inf"), device=device)
+    target_logits[:, [7, 9, 2]] = logits
+    slots = torch.tensor([0], dtype=torch.int32, device=device)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    confidence = torch.empty((1, NUM_STEPS), device=device)
+    token = torch.tensor([9], device=device)
+    for step in range(2):
+        estimator.predict(
+            logits,
+            slots,
+            torch.tensor(step, device=device),
+            confidence,
+            temperature,
+            token,
+            target_logits,
+        )
+    assert estimator.predecessor_surprise[0, 1] == 5.0
+
+
+@pytest.mark.parametrize("gradient", [float("inf"), float("-inf"), float("nan")])
+def test_refit_rejects_non_finite_surprise_step(gradient):
+    device = current_platform.device_type
+    estimator = _make_estimator(device)
+    estimator.REFIT_INTERVAL = 1
+    estimator.info[:, 0] = 1.0
+    estimator.info[:, 2] = 1.0
+    estimator.info[:, 4] = 1.0
+    estimator.grad[:, 1] = 0.5
+    estimator.grad[0, 2] = gradient
+    estimator.counts[:] = estimator.DAMPING_OBSERVATIONS
+    before = estimator.intercepts.clone()
+    empty = torch.empty(0, dtype=torch.int32, device=device)
+    estimator.step(empty, empty, empty)
+    assert estimator.surprise_slope.item() == 0.0
+    torch.testing.assert_close(
+        estimator.intercepts, before + 0.25 / (1.0 + estimator.L2)
+    )

@@ -187,13 +187,14 @@ class DSparkSpeculator(DFlashSpeculator):
     ) -> torch.Tensor:
         """Sample draft ids from the logits. If `bias` is provided, the Gumbel
         kernel adds it."""
-        self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
             draft_ids = greedy_argmax(logits)
+            self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
             return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
         # space. A reduced draft vocabulary is scattered into its target rows.
+        draft_vocab_logits = logits
         if self._d2t_scatter_index is not None:
             assert self._draft_scatter_buf is not None
             buf = self._draft_scatter_buf[: logits.shape[0]]
@@ -203,7 +204,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
         if self.draft_watermarker is not None:
-            return self.draft_watermarker.sample(
+            sampled = self.draft_watermarker.sample(
                 logits,
                 idx_map,
                 self.temperature,
@@ -215,20 +216,25 @@ class DSparkSpeculator(DFlashSpeculator):
                 logits_cache_col=self._step_cols[step],
                 use_fp64=self.use_fp64_gumbel,
             )
-        return gumbel_sample(
-            logits,
-            idx_map,
-            self.temperature,
-            self.seeds,
-            sample_pos - 1,
-            apply_temperature=True,
-            is_drafting=True,
-            logits_cache=self.draft_logits.values,
-            logits_cache_col=self._step_cols[step],
-            use_fp64=self.use_fp64_gumbel,
-            logits_cache_row_mapping=self.draft_logits.row_mapping,
-            bias=bias,
+        else:
+            sampled = gumbel_sample(
+                logits,
+                idx_map,
+                self.temperature,
+                self.seeds,
+                sample_pos - 1,
+                apply_temperature=True,
+                is_drafting=True,
+                logits_cache=self.draft_logits.values,
+                logits_cache_col=self._step_cols[step],
+                use_fp64=self.use_fp64_gumbel,
+                logits_cache_row_mapping=self.draft_logits.row_mapping,
+                bias=bias,
+            )
+        self._maybe_predict_acceptance(
+            draft_vocab_logits, idx_map, self._step_cols[step], sampled, logits
         )
+        return sampled
 
     def _markov_step(
         self,

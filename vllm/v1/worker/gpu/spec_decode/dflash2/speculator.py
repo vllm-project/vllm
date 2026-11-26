@@ -26,6 +26,7 @@ def _selector_walk_kernel(
     seeds_ptr,
     tokens_ptr,
     realized_scores_ptr,
+    sampled_columns_ptr,
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -76,6 +77,8 @@ def _selector_walk_kernel(
         )
         token = tl.load(candidate_ptr + candidate_base + index, mask=valid, other=0)
         tl.store(tokens_ptr + flat, token, mask=valid)
+        if sampled_columns_ptr is not None:
+            tl.store(sampled_columns_ptr + flat, index, mask=valid)
         previous = index
 
 
@@ -116,7 +119,13 @@ class CandidateSampler:
     """The shared DFlash2/LiLiCorr candidate walk and realized proposal cache."""
 
     def __init__(
-        self, max_num_reqs: int, num_steps: int, top_k: int, device: torch.device
+        self,
+        max_num_reqs: int,
+        num_steps: int,
+        top_k: int,
+        device: torch.device,
+        *,
+        track_sampled_columns: bool = False,
     ):
         self.num_steps = num_steps
         self.top_k = top_k
@@ -125,6 +134,11 @@ class CandidateSampler:
         )
         self.cached_candidate_ids = torch.zeros(
             self.scores.shape, dtype=torch.int64, device=device
+        )
+        self.sampled_columns = (
+            torch.empty(max_num_reqs * num_steps, dtype=torch.int32, device=device)
+            if track_sampled_columns
+            else None
         )
 
     def sample(
@@ -153,6 +167,7 @@ class CandidateSampler:
             seeds,
             draft_tokens,
             self.scores,
+            self.sampled_columns,
             num_steps=self.num_steps,
             top_k=self.top_k,
             BLOCK_K=block_k,
@@ -202,7 +217,12 @@ class DFlash2Speculator(DFlashSpeculator):
         draft_config = self.draft_model_config.hf_config.dflash_config
         self.top_k = int(draft_config[self._candidate_top_k_key])
         self.candidate_sampler = CandidateSampler(
-            self.max_num_reqs, self.num_speculative_steps, self.top_k, device
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            self.top_k,
+            device,
+            track_sampled_columns=self.use_acceptance_estimator
+            and self.use_draft_logits,
         )
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
@@ -246,6 +266,7 @@ class DFlash2Speculator(DFlashSpeculator):
                 self.candidate_sampler.scores[:num_reqs].flatten(0, 1),
                 self.sample_idx_mapping[:num_sample],
                 self.sample_col[:num_sample],
+                self.candidate_sampler.sampled_columns,
             )
 
     def _prepare_candidates(self, model_output, num_reqs):

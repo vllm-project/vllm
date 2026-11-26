@@ -355,6 +355,8 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
         self.num_speculative_steps = 2
         self.num_query_per_req = 3
         self.dtype = torch.float32
+        self.use_acceptance_estimator = True
+        self.use_draft_logits = False
 
     monkeypatch.setattr(DFlashSpeculator, "__init__", init_base)
     cls = LiLiCorrSpeculator if lilicorr else DFlash2Speculator
@@ -430,6 +432,7 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     torch.testing.assert_close(adaptive_inputs[0], scores[:, :, 0].flatten(0, 1))
     torch.testing.assert_close(adaptive_inputs[1], spec.sample_idx_mapping)
     torch.testing.assert_close(adaptive_inputs[2], spec.sample_col)
+    assert adaptive_inputs[3] is None
 
 
 def test_lilicorr_config_preserves_architecture():
@@ -446,7 +449,11 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
     """Check the shared sampler's actual q, stale support, and graph padding."""
     device = torch.device("cuda")
     batch, steps, top_k, vocab = 3, 3, 4, 32
-    sampler = CandidateSampler(batch, steps, top_k, device)
+    sampler = CandidateSampler(
+        batch, steps, top_k, device, track_sampled_columns=probabilistic
+    )
+    if sampler.sampled_columns is not None:
+        sampler.sampled_columns.fill_(-1)
     candidates = (
         torch.arange(steps * top_k, device=device)
         .view(1, steps, top_k)
@@ -495,6 +502,8 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
             realized = scores[row, step, previous]
             torch.testing.assert_close(sampler.scores[row, step], realized)
             index = (candidates[row, step] == tokens[row, step]).nonzero().item()
+            if sampler.sampled_columns is not None:
+                assert sampler.sampled_columns.view(batch, steps)[row, step] == index
             if not probabilistic or temperature[state] == 0:
                 assert index == realized.argmax().item()
             if cache is not None:
@@ -508,6 +517,8 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
                 )
             previous = index
     assert (tokens[2] == -1).all()
+    if sampler.sampled_columns is not None:
+        assert (sampler.sampled_columns.view(batch, steps)[2] == -1).all()
     if cache is not None:
         assert cache.values[1].isneginf().all()
 
