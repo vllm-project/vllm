@@ -281,7 +281,7 @@ impl TextLlm {
     }
 
     /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
-    /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
+    /// like the Python frontend `len(tokenizer)`.
     pub fn tokenizer_vocab_size(&self) -> usize {
         self.processor.backend.tokenizer_vocab_size()
     }

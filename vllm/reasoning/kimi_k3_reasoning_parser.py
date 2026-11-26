@@ -35,6 +35,7 @@ from vllm.v1.token_buffer import rfind_token_sequences
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.parser.engine.parser_engine import ReasoningEnd
 
 
 def _match_at(haystack: Sequence[int], i: int, needle: Sequence[int]) -> bool:
@@ -164,6 +165,30 @@ class KimiK3ReasoningParser(ReasoningParser):
         return (
             _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
         )
+
+    def find_reasoning_end(self, token_ids: Sequence[int]) -> "ReasoningEnd | None":
+        from vllm.parser.engine.parser_engine import ReasoningEnd
+
+        if not self._thinking_enabled:
+            return ReasoningEnd(0, False)
+        close = self._think_close_ids
+        # A context-free scan is safe only when the streaming carry cannot
+        # contain a complete close, nor finish one at the start of this delta.
+        if not close or len(close) != len(self._think_open_ids):
+            return None
+        num_tokens = len(token_ids)
+        for offset in range(1, len(close)):
+            remaining = len(close) - offset
+            if (
+                remaining <= num_tokens
+                and token_ids[0] == close[offset]
+                and all(token_ids[i] == close[offset + i] for i in range(remaining))
+            ):
+                return None
+        for i in range(num_tokens - len(close) + 1):
+            if token_ids[i] == close[0] and _match_at(token_ids, i, close):
+                return ReasoningEnd(i + len(close) - 1, False)
+        return ReasoningEnd(num_tokens, False)
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
