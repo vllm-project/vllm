@@ -31,28 +31,67 @@ async def list_server_and_tools(server_url: str):
 
 
 def trim_schema(schema: dict) -> dict:
-    # Turn JSON Schema from MCP generated into Harmony's variant.
-    if "title" in schema:
-        del schema["title"]
-    if "default" in schema and schema["default"] is None:
-        del schema["default"]
-    if "anyOf" in schema:
-        # Turn "anyOf": [{"type": "type-1"}, {"type": "type-2"}]
-        # into "type": ["type-1", "type-2"]
-        # if there's more than 1 types, also remove "null" type as Harmony will
-        # just ignore it
-        types = [
-            type_dict["type"]
-            for type_dict in schema["anyOf"]
-            if type_dict["type"] != "null"
-        ]
-        schema["type"] = types
-        del schema["anyOf"]
-    if "properties" in schema:
-        schema["properties"] = {
-            k: trim_schema(v) for k, v in schema["properties"].items()
-        }
-    return schema
+    """Adapt MCP parameter schemas for Harmony's tool descriptions."""
+
+    def merge(base: dict, overlay: dict) -> dict | None:
+        annotations = {"title", "description", "default", "examples"}
+        for key in base.keys() & overlay.keys() - annotations:
+            if base[key] != overlay[key]:
+                return None
+        return {**base, **overlay}
+
+    def convert(node: Any, refs: frozenset[str] = frozenset()) -> Any:
+        if not isinstance(node, dict):
+            return node
+        node = node.copy()
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/") and ref not in refs:
+            target = schema
+            try:
+                for part in ref[2:].split("/"):
+                    target = target[part.replace("~1", "/").replace("~0", "~")]
+            except (KeyError, TypeError):
+                pass
+            else:
+                if isinstance(target, dict):
+                    siblings = {
+                        key: value for key, value in node.items() if key != "$ref"
+                    }
+                    merged = merge(target, siblings)
+                    if merged is not None:
+                        return convert(merged, refs | {ref})
+
+        node.pop("title", None)
+        if node.get("default") is None:
+            node.pop("default", None)
+        if "properties" in node:
+            node["properties"] = {
+                name: convert(value, refs) for name, value in node["properties"].items()
+            }
+        if "items" in node:
+            node["items"] = convert(node["items"], refs)
+        if "oneOf" in node:
+            node["oneOf"] = [convert(variant, refs) for variant in node["oneOf"]]
+        if "anyOf" in node and "oneOf" not in node:
+            variants = [
+                convert(variant, refs)
+                for variant in node["anyOf"]
+                if not isinstance(variant, dict) or variant.get("type") != "null"
+            ]
+            if len(variants) == 1 and isinstance(variants[0], dict):
+                siblings = {key: value for key, value in node.items() if key != "anyOf"}
+                merged = merge(variants[0], siblings)
+                if merged is not None:
+                    node = merged
+                elif isinstance(variant_type := variants[0].get("type"), str):
+                    node.setdefault("type", [variant_type])
+            elif variants:
+                # Harmony renders oneOf branches, including their constraints.
+                del node["anyOf"]
+                node["oneOf"] = variants
+        return node
+
+    return convert(schema)
 
 
 def post_process_tools_description(
