@@ -2098,6 +2098,24 @@ class MooncakeConnectorWorker:
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
 
+        # Consecutive regions with this layout use the same block ids and
+        # sender plan. Preserve layer order when flattening their descriptors.
+        def layout_key(pair: tuple[TransferRegion, TransferRegion]) -> tuple:
+            local, remote = pair
+            assert local.group_index == remote.group_index, (
+                "Aligned Mooncake transfer regions must belong to the same KV group."
+            )
+            return (
+                local.group_index,
+                local.shared_group_ids,
+                local.block_len,
+                remote.block_len,
+                local.kv_block_len,
+                remote.kv_block_len,
+            )
+
+        layouts = None
+
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
 
@@ -2193,28 +2211,55 @@ class MooncakeConnectorWorker:
                 remote_block_ids_by_group
             )
 
+            # Completion-only pulls release P blocks without needing a layout.
+            if layouts is None:
+                layouts = []
+                for key, region_pairs in itertools.groupby(
+                    zip(local_regions, remote_regions), layout_key
+                ):
+                    pairs = list(region_pairs)
+                    if len(pairs) == 1:
+                        local, remote = pairs[0]
+                        src_bases, dst_bases = (
+                            np.uint64(local.base_addr),
+                            np.uint64(remote.base_addr),
+                        )
+                    else:
+                        src_bases, dst_bases = np.array(
+                            [
+                                (local.base_addr, remote.base_addr)
+                                for local, remote in pairs
+                            ],
+                            dtype=np.uint64,
+                        ).T[:, :, None]
+                    layouts.append((key, len(pairs), src_bases, dst_bases))
+
             # Regions of the same KV group share block ids; group them once.
             block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
-            for local_region, remote_region in zip(local_regions, remote_regions):
-                assert local_region.group_index == remote_region.group_index, (
-                    "Aligned Mooncake transfer regions must belong to the same "
-                    "KV group."
-                )
-                group_key = (local_region.group_index, local_region.shared_group_ids)
+            for geometry, region_count, src_bases, dst_bases in layouts:
+                (
+                    group_index,
+                    shared_groups,
+                    src_stride,
+                    dst_stride,
+                    src_size,
+                    dst_size,
+                ) = geometry
+                group_key = (group_index, shared_groups)
                 if group_key not in block_runs:
                     local_ids = np.asarray(
                         _block_ids_for_region(
                             local_block_ids_by_group,
-                            local_region.group_index,
-                            local_region.shared_group_ids,
+                            group_index,
+                            shared_groups,
                         ),
                         dtype=np.int64,
                     )
                     remote_ids = np.asarray(
                         _block_ids_for_region(
                             remote_block_ids_by_group,
-                            remote_region.group_index,
-                            local_region.shared_group_ids,
+                            group_index,
+                            shared_groups,
                         ),
                         dtype=np.int64,
                     )
@@ -2233,8 +2278,8 @@ class MooncakeConnectorWorker:
                     dst_region_offset,
                     transfer_len,
                 ) = self._get_sender_transfer_plan(
-                    local_kv_block_len=local_region.kv_block_len,
-                    remote_kv_block_len=remote_region.kv_block_len,
+                    local_kv_block_len=src_size,
+                    remote_kv_block_len=dst_size,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
                 )
@@ -2246,17 +2291,17 @@ class MooncakeConnectorWorker:
                     # unnecessary ZMQ requests and remove this branch.
                     continue
 
-                assert src_region_offset + transfer_len <= local_region.kv_block_len, (
+                assert src_region_offset + transfer_len <= src_size, (
                     "Computed source transfer region exceeds local KV block size."
                 )
-                assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
+                assert dst_region_offset + transfer_len <= dst_size, (
                     "Destination transfer region exceeds remote KV block size."
                 )
                 # Collapse one contiguous block group into a single larger
                 # transfer descriptor when the per-block copy is identical.
                 can_coalesce = _can_coalesce_block_transfers(
-                    local_region_block_len=local_region.block_len,
-                    remote_region_block_len=remote_region.block_len,
+                    local_region_block_len=src_stride,
+                    remote_region_block_len=dst_stride,
                     src_region_offset=src_region_offset,
                     dst_region_offset=dst_region_offset,
                     transfer_len=transfer_len,
@@ -2265,21 +2310,26 @@ class MooncakeConnectorWorker:
                 if can_coalesce:
                     local_ids = local_ids[run_starts]
                     remote_ids = remote_ids[run_starts]
+                    sizes = run_lens.astype(np.uint64) * np.uint64(transfer_len)
                     length_chunks.append(
-                        run_lens.astype(np.uint64) * np.uint64(transfer_len)
+                        sizes if region_count == 1 else np.tile(sizes, region_count)
                     )
                 else:
                     length_chunks.append(
-                        np.full(len(local_ids), transfer_len, dtype=np.uint64)
+                        np.full(
+                            region_count * len(local_ids),
+                            transfer_len,
+                            dtype=np.uint64,
+                        )
                     )
-                src_chunks.append(
-                    local_ids.astype(np.uint64) * np.uint64(local_region.block_len)
-                    + np.uint64(local_region.base_addr + src_region_offset)
-                )
-                dst_chunks.append(
-                    remote_ids.astype(np.uint64) * np.uint64(remote_region.block_len)
-                    + np.uint64(remote_region.base_addr + dst_region_offset)
-                )
+                src_offsets = local_ids.astype(np.uint64) * np.uint64(src_stride)
+                dst_offsets = remote_ids.astype(np.uint64) * np.uint64(dst_stride)
+                if src_region_offset:
+                    src_offsets += np.uint64(src_region_offset)
+                if dst_region_offset:
+                    dst_offsets += np.uint64(dst_region_offset)
+                src_chunks.append((src_bases + src_offsets).ravel())
+                dst_chunks.append((dst_bases + dst_offsets).ravel())
 
             logger.debug(
                 "Sending kv_caches for request %s (%d blocks) to %s",

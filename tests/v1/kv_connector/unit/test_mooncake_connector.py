@@ -2837,8 +2837,10 @@ def test_contiguous_runs(src, dst, starts, run_lens):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kv_block_len", [256, 128])
-async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
+@pytest.mark.parametrize(
+    "kv_block_lens", [(256, 256), (128, 128), (256, 256, 128, 256)]
+)
+async def test_build_transfer_params_fragmented_block_ids(kv_block_lens):
     """Fragmented ids give one copy per contiguous run per layer, in layer order.
 
     A kv_block_len shorter than the block row cannot be merged across blocks.
@@ -2868,7 +2870,7 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
                 layer_name=f"model.layers.{layer}.self_attn",
                 layer_index=layer,
             )
-            for layer in range(2)
+            for layer, kv_block_len in enumerate(kv_block_lens)
         ]
         for base in (0x100000, 0xA00000)
     )
@@ -2896,21 +2898,26 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
         remote_regions=remote_regions,
     )
 
-    if kv_block_len == block_len:
-        local_ids, remote_ids, sizes = [3, 9, 6], [7, 2, 5], [512, 256, 256]
-    else:
-        local_ids, remote_ids, sizes = [3, 4, 9, 6], [7, 8, 2, 5], [128] * 4
+    expected_src: list[int] = []
+    expected_dst: list[int] = []
+    expected_sizes: list[int] = []
+    for local, remote in zip(local_regions, remote_regions):
+        if local.kv_block_len == block_len:
+            local_ids, remote_ids, sizes = [3, 9, 6], [7, 2, 5], [512, 256, 256]
+        else:
+            local_ids, remote_ids, sizes = [3, 4, 9, 6], [7, 8, 2, 5], [128] * 4
+        expected_src.extend(local.base_addr + b * block_len for b in local_ids)
+        expected_dst.extend(remote.base_addr + b * block_len for b in remote_ids)
+        expected_sizes.extend(sizes)
     assert err_reqs == []
     assert err_msg is None
-    np.testing.assert_array_equal(
-        src_ptrs,
-        [r.base_addr + b * block_len for r in local_regions for b in local_ids],
-    )
-    np.testing.assert_array_equal(
-        dst_ptrs,
-        [r.base_addr + b * block_len for r in remote_regions for b in remote_ids],
-    )
-    np.testing.assert_array_equal(lengths, sizes * len(local_regions))
+    for actual, expected in (
+        (src_ptrs, expected_src),
+        (dst_ptrs, expected_dst),
+        (lengths, expected_sizes),
+    ):
+        np.testing.assert_array_equal(actual, expected)
+        assert actual.dtype == np.uint64 and actual.flags.c_contiguous
 
 
 def test_coalesce_promotes_padding_only_for_a_full_row():
