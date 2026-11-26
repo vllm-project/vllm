@@ -1426,7 +1426,14 @@ def test_declined_hit_frees_sync_load_reservation_for_co_scheduled_request():
     external, load_async = scheduler.get_num_new_matched_tokens(second, 0)
     assert (external, load_async) == (28, False)
     scheduler.update_state_after_alloc(
-        second, cast(KVCacheBlocks, SimpleNamespace(blocks=[])), external
+        second,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        external,
     )
     assert "b" in scheduler._current_batch_sync_loads
 
@@ -1445,7 +1452,14 @@ def test_accepted_hit_consumes_budget_so_later_request_stays_async():
 
     assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
     scheduler.update_state_after_alloc(
-        first, cast(KVCacheBlocks, SimpleNamespace(blocks=[])), 28
+        first,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        28,
     )
     assert first.request_id in scheduler._current_batch_sync_loads
 
