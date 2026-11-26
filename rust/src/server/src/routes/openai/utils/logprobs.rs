@@ -216,11 +216,11 @@ fn format_token(entry: &DecodedTokenLogprob, as_token_id: bool) -> String {
 }
 
 /// A sampled token repeated among the top-k candidates, or several tokens
-/// decoding to the same string (byte fragments, which decode to "\u{fffd}"),
+/// decoding to the same string (byte fragments of one multi-byte character),
 /// share one entry. The entry stays where its first candidate is, so the token
 /// at this position, which the engine row puts first, keeps the first entry.
 /// It holds the highest logprob of its candidates; on a tie the earlier one
-/// stays. The Python frontend does the same after #65741.
+/// stays, as in the Python frontend.
 fn position_top_logprobs_map(
     position: &DecodedPositionLogprobs,
     return_tokens_as_token_ids: bool,
@@ -382,9 +382,8 @@ mod tests {
     }
 
     /// Byte fragments: sampled `C` (rank 3), `A` and `B` all decode to the same
-    /// string, here "" (the logic does not depend on which string; the Rust
-    /// frontend decodes them to "\u{fffd}" until #63926). The engine row is
-    /// `[C, A, B, C, D]`.
+    /// string, here "" (the logic does not depend on which string). The engine
+    /// row is `[C, A, B, C, D]`.
     fn colliding_logprobs() -> DecodedLogprobs {
         let mut logprobs = sample_logprobs();
         for entry in &mut logprobs.positions[0].entries {
