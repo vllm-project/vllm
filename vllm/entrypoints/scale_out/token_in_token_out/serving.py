@@ -53,6 +53,7 @@ from vllm.exceptions import (
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
+from vllm.multimodal.cache.shm import ShmObjectStoreSenderCache
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -377,9 +378,50 @@ class ServingTokens(GenerateBaseServing):
 
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
-            mm_kwargs = mm_kwargs_from_features(features)
+            try:
+                mm_kwargs = mm_kwargs_from_features(features)
+            except ValueError as exc:
+                return self.create_error_response(exc, param="features")
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
+
+            renderer = self.online_renderer.renderer
+            processor = renderer.mm_processor
+            if processor is None and any(mm_kwargs.values()):
+                return self.create_error_response(
+                    "This server does not accept preprocessed multimodal features",
+                    param="features",
+                )
+            if processor is not None:
+                allow_shm_handles = isinstance(
+                    renderer.mm_processor_cache, ShmObjectStoreSenderCache
+                )
+                ec_config = (
+                    self.engine_client.vllm_config.ec_transfer_config
+                    if request.ec_transfer_params
+                    else None
+                )
+                allow_metadata_only = bool(ec_config and ec_config.is_ec_consumer)
+                kwargs_data = features.kwargs_data or {}
+                try:
+                    for modality, items in mm_kwargs.items():
+                        payloads = kwargs_data.get(modality)
+                        for i, (item, placeholder) in enumerate(
+                            zip(items, mm_placeholders[modality], strict=True)
+                        ):
+                            if item is None:
+                                continue
+                            if allow_shm_handles and "address" in item:
+                                continue
+                            processor.validate_preprocessed_item(
+                                modality,
+                                item,
+                                placeholder_length=placeholder.length,
+                                metadata_only=payloads is None or payloads[i] is None,
+                                allow_metadata_only=allow_metadata_only,
+                            )
+                except ValueError as exc:
+                    return self.create_error_response(exc, param="features")
 
             token_ids = request.token_ids
             mm_hashes = {m: list(h) for m, h in features.mm_hashes.items()}

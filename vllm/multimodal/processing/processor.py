@@ -34,6 +34,7 @@ from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
     MultiModalFieldConfig,
+    MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
@@ -1160,6 +1161,57 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Given the HF-processed data, output the metadata of each field."""
         raise NotImplementedError
+
+    def validate_mm_field_layout(
+        self, modality: str, item: MultiModalKwargsItem
+    ) -> None:
+        """Check the batching layout of a transported item against this processor."""
+        from transformers.feature_extraction_utils import BatchFeature
+
+        # Undo the per-item split before asking the processor for its layout.
+        # For a single tensor, reducing a flat or batched field needs no copy.
+        try:
+            data = BatchFeature(
+                data={key: elem.field.reduce_data([elem]) for key, elem in item.items()}
+            )
+            fields = self._get_mm_fields_config(data, {})
+        except (AttributeError, IndexError, KeyError, RuntimeError, TypeError) as exc:
+            raise ValueError("Cannot determine multimodal feature layout") from exc
+
+        for key, elem in item.items():
+            if (config := fields.get(key)) is None:
+                continue
+            expected = config.field
+            actual = elem.field
+            if config.modality != modality or type(expected) is not type(actual):
+                raise ValueError(
+                    f"Invalid batching layout for {modality} field {key!r}"
+                )
+            if (
+                isinstance(expected, MultiModalFlatField)
+                and isinstance(actual, MultiModalFlatField)
+                and expected.dim != actual.dim
+            ):
+                raise ValueError(
+                    f"Invalid batching dimension for {modality} field {key!r}"
+                )
+
+    def validate_preprocessed_item(
+        self,
+        modality: str,
+        item: MultiModalKwargsItem,
+        *,
+        placeholder_length: int,
+        metadata_only: bool,
+        allow_metadata_only: bool,
+    ) -> None:
+        """Raise `ValueError` for invalid preprocessed input before admission.
+
+        `metadata_only` describes the submitted item. `allow_metadata_only`
+        indicates that an encoder-cache consumer can supply its embeddings.
+        """
+        if modality == "image" and not metadata_only:
+            self.validate_mm_field_layout(modality, item)
 
     @abstractmethod
     def _get_prompt_updates(

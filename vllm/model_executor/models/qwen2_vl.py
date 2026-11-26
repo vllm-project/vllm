@@ -68,8 +68,10 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
+    MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     VideoItem,
@@ -1331,8 +1333,81 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
         )(hf_inputs)
 
 
+class Qwen2VLFeatureProcessor(Qwen2VLMultiModalProcessor):
+    """Validate preprocessed image geometry for Qwen2-VL and Qwen2.5-VL."""
+
+    def validate_preprocessed_item(
+        self,
+        modality: str,
+        item: MultiModalKwargsItem,
+        *,
+        placeholder_length: int,
+        metadata_only: bool,
+        allow_metadata_only: bool,
+    ) -> None:
+        super().validate_preprocessed_item(
+            modality,
+            item,
+            placeholder_length=placeholder_length,
+            metadata_only=metadata_only,
+            allow_metadata_only=allow_metadata_only,
+        )
+        if modality != "image":
+            return
+
+        grid_elem = item.get("image_grid_thw")
+        if (
+            grid_elem is None
+            or not isinstance(grid_elem.field, MultiModalBatchedField)
+            or not isinstance(grid := grid_elem.data, torch.Tensor)
+            or grid.shape != (3,)
+            or grid.dtype not in (torch.int32, torch.int64)
+        ):
+            raise ValueError(
+                "image_grid_thw must be a batched integer tensor of size 3"
+            )
+
+        config = self.info.get_hf_config()
+        vision = config.vision_config
+        merge_size = vision.spatial_merge_size
+        t, h, w = grid.tolist()
+        if t != 1 or min(h, w) <= 0 or h % merge_size or w % merge_size:
+            raise ValueError("image_grid_thw has invalid patch dimensions")
+
+        patches = t * h * w
+        embeds = patches // merge_size**2
+        if placeholder_length != embeds:
+            raise ValueError(
+                "image_grid_thw does not match the image placeholder length"
+            )
+
+        keys = item.keys()
+        if keys == {"image_grid_thw"} and metadata_only and allow_metadata_only:
+            return
+        if keys == {"image_grid_thw", "pixel_values"}:
+            pixel_width = (
+                vision.in_channels * vision.temporal_patch_size * vision.patch_size**2
+            )
+            key, shape = "pixel_values", (patches, pixel_width)
+        elif keys == {"image_grid_thw", "image_embeds"}:
+            key, shape = "image_embeds", (embeds, config.get_text_config().hidden_size)
+        else:
+            raise ValueError("Image features require pixel_values or image_embeds")
+
+        elem = item[key]
+        if (
+            not isinstance(elem.field, MultiModalFlatField)
+            or elem.field.dim != 0
+            or not isinstance(elem.data, torch.Tensor)
+            or elem.data.shape != shape
+        ):
+            raise ValueError(
+                f"{key} must be a tensor of shape {shape} matching the grid"
+            )
+
+
 @MULTIMODAL_REGISTRY.register_processor(
-    Qwen2VLMultiModalProcessor,
+    Qwen2VLFeatureProcessor,
     info=Qwen2VLProcessingInfo,
     dummy_inputs=Qwen2VLDummyInputsBuilder,
 )

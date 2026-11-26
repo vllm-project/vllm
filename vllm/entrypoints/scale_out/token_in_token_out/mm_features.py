@@ -113,6 +113,8 @@ def mm_kwargs_from_features(
                 kwargs_items, metadata_items, strict=True
             )
         ]
+        if any(item is not None and "self" in item for item in mm_kwargs[modality]):
+            raise ValueError("Multimodal features must not contain reserved key 'self'")
     return mm_kwargs
 
 
