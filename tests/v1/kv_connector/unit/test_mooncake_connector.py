@@ -4,9 +4,14 @@
 import asyncio
 import contextlib
 import errno
+import os
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -56,6 +61,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -77,6 +83,13 @@ from .utils import (
 def _reset_shared_transfer_engine():
     yield
     transfer_engine_registry._SHARED = None
+
+
+def _stub_worker_shutdown(
+    worker: MooncakeConnectorWorker, shutdown: Callable[[], object]
+) -> None:
+    # Keep the stub installed through __del__, after the test's patch scopes end.
+    worker.shutdown = shutdown  # type: ignore[method-assign]
 
 
 @pytest.mark.parametrize(
@@ -359,7 +372,7 @@ def test_del_keeps_quiet_when_the_constructor_did_not_finish():
 def test_del_shuts_down_a_worker_that_started():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.async_zmq_ctx = MagicMock()
-    worker.shutdown = MagicMock()
+    worker.shutdown = MagicMock()  # type: ignore[method-assign]
 
     worker.__del__()
 
@@ -507,6 +520,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        assert prefill_worker is not None
 
         block_len = 4096
         prefill_worker.kv_caches_base_addr = [0x1000]
@@ -594,6 +608,7 @@ def test_basic_interface():
         do_remote_prefill=True,
     )
     request_id = request.request_id
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         {
             "transfer_id": request_id,
@@ -643,6 +658,7 @@ def test_prompt_less_than_block_size():
         do_remote_prefill=True,
         num_remote_blocks=1,
     )
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         {
             "transfer_id": request.request_id,
@@ -1143,9 +1159,13 @@ def test_scheduler_request_finished():
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
     scheduler = create_scheduler(vllm_config)
-    scheduler_connector = scheduler.get_kv_connector().connector_scheduler
+    connector = scheduler.get_kv_connector()
+    assert isinstance(connector, MooncakeConnector)
+    scheduler_connector = connector.connector_scheduler
+    assert scheduler_connector is not None
 
     request = create_request(request_id=1, do_remote_decode=True)
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params["transfer_id"] = request.request_id
 
     # Case: Capped length (Successful prefill, need to send to decoder)
@@ -1162,6 +1182,15 @@ def test_scheduler_request_finished():
     assert delay_free is False
     assert len(scheduler_connector._reqs_need_send) == 0
     assert "id-1" in scheduler_connector._reqs_not_processed
+
+
+def _live_peer_monitor() -> MagicMock:
+    """A ZMQ socket monitor that never reports a lost peer."""
+
+    async def wait_forever():
+        await asyncio.get_running_loop().create_future()
+
+    return MagicMock(recv_multipart=AsyncMock(side_effect=wait_forever))
 
 
 @contextlib.contextmanager
@@ -1204,6 +1233,10 @@ def patch_worker_dependencies():
         # Mock ZMQ socket
         mock_socket_object = AsyncMock()
         mock_socket_object.setsockopt = MagicMock()
+        mock_socket_object.get_monitor_socket = MagicMock(
+            return_value=_live_peer_monitor()
+        )
+        mock_socket_object.disable_monitor = MagicMock()
         mock_socket_ctx = MagicMock()
         mock_socket_ctx.__enter__.return_value = mock_socket_object
         mock_make_zmq.return_value = mock_socket_ctx
@@ -1288,6 +1321,7 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
+        assert worker is not None
         mock_thread.return_value.is_alive.return_value = False
         with patch.object(
             FakeMooncakeWrapper, "batch_register_memory", return_value=0
@@ -1401,6 +1435,7 @@ async def test_receive_kv_selects_remote_pp_workers(
             _make_test_kv_cache_config(),
         )
         decode_worker = decode_connector.connector_worker
+        assert decode_worker is not None
         decode_worker.pp_size = local_pp_size
         decode_worker.pp_rank = local_pp_rank
         decode_worker._remote_agents = {
@@ -1442,6 +1477,35 @@ async def test_receive_kv_selects_remote_pp_workers(
         decode_worker.shutdown()
 
 
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_prefill_early_abort_cleanup_is_idempotent():
+    """An abort for a transfer the worker never recorded must not stop cleanup."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+
+    def pending(transfer_id: str) -> SendBlockMeta:
+        return SendBlockMeta(
+            p_req_id=transfer_id,
+            transfer_id=transfer_id,
+            local_block_ids=[],
+            ready=asyncio.Event(),
+        )
+
+    unrelated = pending("unrelated")
+    worker.reqs_need_send = {"recorded": pending("recorded"), "unrelated": unrelated}
+
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_not_processed = {"never-recorded", "recorded"}
+
+    # The second call repeats the abort after the record is already gone.
+    for _ in range(2):
+        await worker.record_send_reqs(metadata)
+        assert worker.reqs_need_send == {"unrelated": unrelated}
+
+
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
     """Producer-side completion waits for every paired consumer TP pull."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
@@ -1480,6 +1544,7 @@ def test_mooncake_compressed_kernel_split(kernel_block_size, raises):
         worker = MooncakeConnector(
             config, KVConnectorRole.WORKER, _make_compressed_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         worker.shutdown()
 
 
@@ -1495,6 +1560,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
         worker = MooncakeConnector(
             config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         try:
             worker.pp_size = 4
             worker.kv_caches_base_addr = [0x1000]
@@ -1567,6 +1633,7 @@ async def test_kv_producer(monkeypatch):
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        assert prefill_worker is not None
         prefill_worker.kv_caches_base_addr = [0x1000]
         block_len = 4096
         prefill_worker.block_len_per_layer = [block_len]
@@ -1734,7 +1801,7 @@ def test_pull_completion_requires_local_blocks(
     expected_finished: set[str],
 ):
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.shutdown = MagicMock()
+    _stub_worker_shutdown(worker, MagicMock())
     worker.finished_recving_reqs = set()
     pull_meta = PullReqMeta(
         d_req_id="d-req-1",
@@ -1792,6 +1859,7 @@ async def test_peer_failure_only_settles_its_pending_requests(terminal):
                 )
             )
         )
+        assert isinstance(mooncake_connector.make_zmq_socket, MagicMock)
         sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
         sock.recv.side_effect = [worker._encoder.encode(partial)] * 2 + [end]
         await worker.receive_kv_from_single_worker("tcp://producer:1234", metas)
@@ -1883,6 +1951,7 @@ async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
             )
             assert meta.pull_tasks_count == 1
             assert worker.finished_recving_reqs == set()
+            assert isinstance(mooncake_connector.make_zmq_socket, MagicMock)
             sock = (
                 mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
             )
@@ -1916,6 +1985,7 @@ async def test_kv_consumuer(monkeypatch):
             _make_test_kv_cache_config(),
         )
         decode_worker = decode_connector.connector_worker
+        assert decode_worker is not None
         decode_worker.kv_caches_base_addr = [0x1000]
         decode_worker.block_len_per_layer = [4096]
         decode_worker.kv_block_len_per_layer = [4096]
@@ -1955,6 +2025,8 @@ async def test_kv_consumuer(monkeypatch):
             zmq.DEALER,
             bind=False,
             linger=0,
+            heartbeat_ivl_ms=mooncake_connector._PULL_HEARTBEAT_IVL_MS,
+            heartbeat_timeout_ms=mooncake_connector._PULL_HEARTBEAT_TIMEOUT_MS,
         )
         sent_payload = mocks["mock_socket_object"].send.call_args[0][0]
         sent_meta = decode_worker._xfer_meta_decoder.decode(sent_payload)
@@ -1985,6 +2057,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        assert prefill_worker is not None
 
         # Add an expired request (expire_time is in the past).
         prefill_worker.reqs_need_send["tx-expired"] = SendBlockMeta(
@@ -2052,6 +2125,7 @@ def _remote_prefill_request(request_id: int, block_size: int):
         num_tokens=block_size * 2,
         do_remote_prefill=True,
     )
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         {
             "transfer_id": f"xfer-{request_id}",
@@ -2152,6 +2226,7 @@ async def test_decode_heartbeat_reaches_every_paired_prefill_worker():
         worker = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         sock = mocks["mock_socket_object"]
         sock.recv.return_value = msgspec.msgpack.encode(
             MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
@@ -2195,6 +2270,7 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
         producer = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert producer is not None
 
         # Allocation, then prefill end, as the scheduler reports them.
         for block_ids in ([], [[1]]):
@@ -2247,6 +2323,7 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
             )
             response = await request(pull)
             assert response.status == MooncakeXferResponseStatus.ERROR
+            assert response.err_msg is not None
             assert "not paired" in response.err_msg
 
             assert await producer.fetch_finished_sending_reqs() == expired
@@ -2268,6 +2345,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
         producer = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert producer is not None
         producer.kv_caches_base_addr = [0x1000]
         producer.block_len_per_layer = [256]
         producer.kv_block_len_per_layer = [256]
@@ -2324,6 +2402,75 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
 
         producer.sender_loop = sender_loop
         producer.shutdown()
+
+
+# A P worker that takes one pull and never answers it.
+_SILENT_PREFILL_WORKER = """
+import zmq
+router = zmq.Context().socket(zmq.ROUTER)
+print(router.bind_to_random_port("tcp://127.0.0.1"), flush=True)
+router.recv_multipart()
+print("pulled", flush=True)
+router.recv_multipart()
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loss", ["killed", "frozen", "not_listening"])
+async def test_pull_fails_fast_when_prefill_worker_is_lost(loss):
+    """D must not hold a pull's blocks for the full timeout once P is gone."""
+    prefill = subprocess.Popen(
+        [sys.executable, "-c", _SILENT_PREFILL_WORKER],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert prefill.stdout is not None
+    addr = f"tcp://127.0.0.1:{prefill.stdout.readline().strip()}"
+    if loss == "not_listening":
+        prefill.kill()
+        prefill.wait()
+    vllm_config = _make_worker_vllm_config("kv_consumer")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch.object(mooncake_connector, "make_zmq_socket", make_zmq_socket),
+        patch.object(mooncake_connector, "_PULL_HEARTBEAT_IVL_MS", 100),
+        patch.object(mooncake_connector, "_PULL_HEARTBEAT_TIMEOUT_MS", 500),
+    ):
+        worker = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        assert worker is not None
+        worker._remote_agents = {
+            "p-engine": {0: {0: addr}},
+            "other-engine": {0: {0: "tcp://127.0.0.1:1"}},
+        }
+        metas = {
+            "d-req-1": PullReqMeta(
+                d_req_id="d-req-1",
+                transfer_id="xfer-1",
+                local_block_ids=[[1]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=1,
+            )
+        }
+        pull = asyncio.create_task(worker.receive_kv_from_single_worker(addr, metas))
+        try:
+            if loss != "not_listening":
+                await asyncio.to_thread(prefill.stdout.readline)
+                os.kill(
+                    prefill.pid, signal.SIGKILL if loss == "killed" else signal.SIGSTOP
+                )
+            # Far less than the pull's own VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60s.
+            await asyncio.wait_for(pull, timeout=10)
+        finally:
+            prefill.kill()
+            prefill.wait()
+        assert worker.get_block_ids_with_load_errors() == {1}
+        # Later requests for P query its bootstrap server again.
+        assert list(worker._remote_agents) == ["other-engine"]
+        worker.shutdown()
 
 
 def test_worker_publishes_and_clears_shared_engine():
@@ -3126,6 +3273,12 @@ class _ScriptedSock:
     async def recv(self):
         return self._responses.pop(0)
 
+    def get_monitor_socket(self, *_args):
+        return _live_peer_monitor()
+
+    def disable_monitor(self):
+        return None
+
     def __enter__(self):
         return self
 
@@ -3455,6 +3608,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        assert prefill_worker is not None
 
         # Override TP rank/size to simulate P TP=2
         prefill_worker.tp_rank = P_TP_RANK

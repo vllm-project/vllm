@@ -72,10 +72,13 @@ class BaseServing:
             ):
                 error_response = load_result
 
+        model_name = request.model
+        if model_name and len(model_name) > 256:
+            model_name = model_name[:256] + "..."
         served_names = ", ".join(model.name for model in self.models.base_model_paths)
         return error_response or self.create_error_response(
             message=(
-                f"The model `{request.model}` does not exist. "
+                f"The model `{model_name}` does not exist. "
                 f"Valid aliases: {served_names}."
             ),
             err_type="NotFoundError",

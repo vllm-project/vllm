@@ -55,7 +55,6 @@ def test_speculators_model_integration(
     with vllm_runner(
         model_path,
         block_size=None,
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
         max_model_len=4096,
@@ -88,7 +87,6 @@ def test_speculators_model_integration(
     with vllm_runner(
         verifier_model,
         block_size=None,
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
         max_model_len=4096,

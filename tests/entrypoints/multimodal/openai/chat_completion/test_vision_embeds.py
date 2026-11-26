@@ -33,7 +33,6 @@ def test_single_content(model_name: str):
         "--dtype",
         "float16",
         "--enforce-eager",
-        "--trust-remote-code",
         "--max-num-seqs",
         "32",
         "--model-impl",

@@ -51,7 +51,6 @@ def run_maverick_serving(model: str):
             enforce_eager=True,
             tensor_parallel_size=8,
             enable_expert_parallel=True,
-            trust_remote_code=True,
             gpu_memory_utilization=0.4,
             kv_cache_dtype="fp8",
         )
@@ -135,9 +134,7 @@ def create_reduced_maverick_model(
 
     try:
         print("Loading original model configuration...")
-        original_config = AutoConfig.from_pretrained(
-            original_model_name, trust_remote_code=True
-        )
+        original_config = AutoConfig.from_pretrained(original_model_name)
         print("Creating reduced configuration...")
         reduced_config = create_reduced_config(
             original_config, text_layers, num_experts, vision_layers
@@ -221,9 +218,7 @@ def create_reduced_config(
 def copy_tokenizer_files(original_model_name: str, output_path: Path) -> None:
     """Copy tokenizer files from the original model."""
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            original_model_name, trust_remote_code=True
-        )
+        tokenizer = AutoTokenizer.from_pretrained(original_model_name)
         tokenizer.save_pretrained(output_path)
         print("Tokenizer files copied successfully")
     except Exception as e:
@@ -236,8 +231,7 @@ def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
     try:
         processor = AutoProcessor.from_pretrained(
             original_config._name_or_path
-            or "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
-            trust_remote_code=True,
+            or "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
         )
         processor.save_pretrained(output_path)
         print("Copied original preprocessor config")
@@ -628,7 +622,6 @@ def test_dummy_maverick(
 
     llm = LLM(
         model=model_path,
-        trust_remote_code=True,
         max_model_len=512,  # Small context for testing
         gpu_memory_utilization=0.3,  # Conservative memory usage
         enforce_eager=enforce_eager,

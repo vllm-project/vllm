@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-11-11
+  date_updated: 2026-11-24
   tasks:
     - multimodal
     - text
@@ -97,10 +97,26 @@ features:
     description: "Skip the vision encoder for text-only workloads. Mutually exclusive with encoder_parallel."
     args:
       - "--language-model-only"
+  strict_tool_calls:
+    label: "Strict tool calls"
+    description: "Constrain tool calls to each tool's declared arguments. Needs vLLM 0.31.0 or newer; use with Tool calling."
+    # Not offered under pd_cluster: its Dynamo router passes feature args to a
+    # worker that rejects this flag.
+    strategies:
+      - single_node_tp
+      - multi_node_tp
+      - multi_node_tep
+      - multi_node_tp_pp
+      - multi_node_dep
+      - multi_node_tp_dp
+    args:
+      - "--tool-strict-level"
+      - "parameter"
 
 opt_in_features:
   - spec_decoding
   - text_only
+  - strict_tool_calls
 
 variants:
   default:
@@ -327,7 +343,6 @@ presets:
     hardware: gb200
     strategy: multi_node_tp_pp
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP8 x PP2 + DCP8 across four GB200 trays with the DSpark K4 draft and an embedded Mooncake store."
     source: { label: "InferenceX #3748", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/3748", key: "kimik3-fp4-gb200-dynamo-vllm-agentic-dspark-mooncake-agg", revision: b7eee97 }
     image: "vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f"
@@ -460,7 +475,6 @@ presets:
     hardware: gb200
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "One TP16 + DCP16 prefill pool and one decode pool across four GB200 trays each, served by Dynamo with the DSpark K4 draft."
     source: { label: "InferenceX #4322", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4322", key: "kimik3-fp4-gb200-dynamo-vllm-agentic-dspark-mooncake-disagg", revision: b7eee97 }
     image:
@@ -639,7 +653,6 @@ presets:
     hardware: gb300
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP8 + DCP8 prefill and decode workers across two GB300 trays each, served by Dynamo with the DSpark K4 draft: latency-specialized decode at 16-32 clients, KV-balanced decode attention at 112-264."
     source: { label: "InferenceX #4638", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4638", key: "kimik3-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: bc4d49f5df307680be5a1567e01b838b83b31b62 }
     image:
@@ -1922,7 +1935,7 @@ guide: |
   - **MoE backend**: Recommend to use `deep_gemm_mega_moe` for DEP deployments with cross-node NVLink e.g. GB200 and GB300. Note that DeepGEMM MegaMoE is not compatible with cross-node RDMA.
   - **Rust Frontend**: Selected by default in the command builder. Switch to Python if you encounter unsupported features or compatibility issues.
   - **Model Runner v2**: `VLLM_USE_V2_MODEL_RUNNER=1`: Model Runner v2 fully supports this model and can be enabled if needed.
-  - **Tool calling**: K3 occasionally emit a tool-call format its own parser doesn't expect. Suggest to run do schema validation and retry.
+  - **Tool calling**: Without a grammar, K3 sometimes calls a tool with no arguments. The opt-in **Strict tool calls** toggle adds `--tool-strict-level parameter` (vLLM 0.31.0 or newer; the day-0 `kimi-k3` images predate it), which constrains every tool call to a declared tool and to that tool's declared argument names and types, as if each tool had set `strict: true`. On the [Kimi Vendor Verifier](https://github.com/MoonshotAI/Kimi-Vendor-Verifier) Tool Call benchmark (70 samples x 5 epochs, 8x MI355X, single-node TP8, Python frontend) K3 scored 0.851 without the flag and 0.983 with it. The Rust frontend builds its own grammar and was not measured; the limits that follow were checked on the Python frontend. The grammar is not a full schema check, so keep validating arguments on the client and retry. A tool schema it cannot compile, such as a `$ref` into the schema's own `properties` or contradictory bounds, fails the whole request (HTTP 400, or an error in the stream of a streaming request), also for tools that do not set `strict`; `--tool-strict-level function` constrains only the call format and the tool name. With the flag, a `tool_choice="auto"` request that also sets `response_format` can return a tool call instead of the structured answer. The toggle is not offered for prefill/decode disaggregation: Dynamo workers do not accept the flag and constrain tool calls through their own `--dyn-enable-structural-tag`.
   - **AMD (MI355X / MI350X, CDNA4 gfx950)**: `VLLM_ROCM_USE_AITER_MOE_SITUV2=1` (set above) enables AITER's SiTUv2 a4w4 FlyDSL MoE path on builds that carry vllm-project/vllm#53940 (ROCm nightlies since 2026-09-16). v0.30.0 predates it: there the variable is ignored and the MoE runs the default a16w4 path. Unset it or set `0` for the default a16w4 path. On builds with #53940, `VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4` is a deprecated alias for the same a4w4 path and vLLM removes `AITER_SITUV2_A8W4` at startup while the toggle is on; on v0.30.0 and older, `VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1` selects the a8w4 path instead. Do not set `AITER_SITUV2_A8W4=1` by itself: vLLM does not derive its MoE weight layout from that AITER flag (vllm-project/vllm#53954 is open), so the two can disagree and corrupt output without an error.
   - **max-model-len**: Adjust max-model-len for different benchmark scenarios for best performance.
   - **RDMA**: If RDMA is enabled, set `UCX_TLS="rc,cuda_copy"` to make sure KV Cache transfer goes through RDMA.
