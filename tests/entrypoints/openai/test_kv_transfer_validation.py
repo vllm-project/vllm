@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from argparse import Namespace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from vllm.entrypoints.common.cli_args import FrontendArgs
 from vllm.entrypoints.launchers.app import build_app
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMValidationError
@@ -23,6 +24,7 @@ REMOTE_KV_SOURCE = {
 }
 
 COMPLETION_BATCH = {"prompt": ["first", "second"]}
+CHAT = {"messages": [{"role": "user", "content": "single"}]}
 BATCH_CHAT = {
     "messages": [
         [{"role": "user", "content": "first"}],
@@ -37,6 +39,12 @@ BATCH_CHAT = {
         (CompletionRequest, COMPLETION_BATCH),
         (CompletionRequest, {"prompt": [[1], [2]]}),
         (CompletionRequest, {"prompt_embeds": [b"first", b"second"]}),
+        (
+            CompletionRequest,
+            {"prompt": "single", "prompt_embeds": b"embedding"},
+        ),
+        (CompletionRequest, {"prompt": "single", "n": 2}),
+        (ChatCompletionRequest, {**CHAT, "n": 2}),
         (BatchChatCompletionRequest, BATCH_CHAT),
     ],
 )
@@ -57,6 +65,12 @@ def test_rejects_remote_kv_source_fanout(request_type, request_args):
     [
         (CompletionRequest, {"prompt": "single"}),
         (
+            CompletionRequest,
+            {"prompt": "single", "n": 2, "use_beam_search": True},
+        ),
+        (ChatCompletionRequest, CHAT),
+        (ChatCompletionRequest, {**CHAT, "n": 2, "use_beam_search": True}),
+        (
             BatchChatCompletionRequest,
             {"messages": [[{"role": "user", "content": "single"}]]},
         ),
@@ -72,23 +86,10 @@ def test_allows_remote_kv_source_without_fanout(request_type, request_args):
     assert request.kv_transfer_params == REMOTE_KV_SOURCE
 
 
-def _build_test_client() -> TestClient:
-    args = Namespace(
-        disable_fastapi_docs=False,
-        enable_offline_docs=False,
-        root_path="",
-        allowed_origins=["*"],
-        allow_credentials=False,
-        allowed_methods=["*"],
-        allowed_headers=["*"],
-        api_key=None,
-        enable_request_id_headers=False,
-        enable_fault_tolerance=False,
-        middleware=[],
-        log_error_stack=False,
-    )
+@pytest.fixture(scope="module")
+def api_client() -> TestClient:
     return TestClient(
-        build_app(args, supported_tasks=("generate",)),
+        build_app(FrontendArgs(), supported_tasks=("generate",)),
         raise_server_exceptions=False,
     )
 
@@ -97,13 +98,19 @@ def _build_test_client() -> TestClient:
     "path,payload",
     [
         ("/v1/completions", COMPLETION_BATCH),
+        (
+            "/v1/completions",
+            {"prompt": "single", "prompt_embeds": "embedding"},
+        ),
+        ("/v1/completions", {"prompt": "single", "n": 2}),
+        ("/v1/chat/completions", {**CHAT, "n": 2}),
         ("/v1/chat/completions/batch", BATCH_CHAT),
     ],
 )
 def test_remote_kv_source_fanout_returns_400(
-    path: str, payload: dict[str, Any]
+    api_client: TestClient, path: str, payload: dict[str, Any]
 ) -> None:
-    response = _build_test_client().post(
+    response = api_client.post(
         path,
         json={
             "model": "test-model",

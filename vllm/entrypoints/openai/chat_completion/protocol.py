@@ -41,6 +41,7 @@ from vllm.entrypoints.generate.base.protocol import (
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.openai.kv_transfer import validate_remote_kv_source_fanout
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -628,6 +629,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 msg["tool_calls"] = list(tool_calls)
         return self
 
+    @model_validator(mode="after")
+    def check_remote_kv_source_fanout(self) -> "ChatCompletionRequest":
+        if self.use_beam_search:
+            return self
+        validate_remote_kv_source_fanout(
+            self.kv_transfer_params,
+            input_count=1,
+            n=self.n,
+        )
+        return self
+
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
@@ -1190,6 +1202,10 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     include_reasoning: bool = True
 
     # vLLM extensions
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
     best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
@@ -1245,23 +1261,6 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "prompt cannot serve several conversations.",
                 parameter="kv_transfer_params.prompt_token_ids",
             )
-        remote_kv_source = (
-            kv_transfer_params.get("remote_kv_source")
-            if isinstance(kv_transfer_params, dict)
-            else None
-        )
-        messages = data.get("messages")
-        if (
-            isinstance(messages, list)
-            and len(messages) > 1
-            and isinstance(remote_kv_source, dict)
-        ):
-            raise VLLMValidationError(
-                "`kv_transfer_params['remote_kv_source']` cannot be shared "
-                "across multiple conversations. Send each conversation "
-                "separately with a distinct `kv_request_id`.",
-                parameter="kv_transfer_params.remote_kv_source",
-            )
         response_format = data.get("response_format")
         if response_format is not None:
             rf_type = (
@@ -1281,6 +1280,15 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 value=n,
             )
         return data
+
+    @model_validator(mode="after")
+    def check_remote_kv_source_fanout(self) -> "BatchChatCompletionRequest":
+        validate_remote_kv_source_fanout(
+            self.kv_transfer_params,
+            input_count=len(self.messages),
+            n=self.n,
+        )
+        return self
 
     def to_chat_completion_request(
         self, messages: list[ChatCompletionMessageParam]
