@@ -171,10 +171,6 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-extra-params"
     ```
 
-#### Logprobs
-
-`top_logprobs` is a dict keyed by each candidate's decoded text, so candidates that decode to the same string share one entry. This happens with byte-fallback tokens that each hold part of a multi-byte character (Thai, CJK or emoji text), which decode to `""`. The entry keeps the highest logprob among those candidates (on a tie, the token at that position), so `max(top_logprobs[i].values())` is the logprob of the most likely returned candidate. Where `top_logprobs[i]` is not `None`, `top_logprobs[i][tokens[i]] == token_logprobs[i]` holds unless a candidate with the same text is more likely than the token at that position. Set `return_tokens_as_token_ids` to get one entry per candidate, keyed by token ID (`token_id:{id}`).
-
 #### Echo with prompt truncation
 
 `truncate_prompt_tokens` and `truncation_side` are vLLM extensions. In the Python
