@@ -167,7 +167,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
             .await?;
             (Box::new(llm), Some((engine_core, server_info)))
         }
-        LlmSource::RemoteGrpc(url) => {
+        LlmSource::RemoteGrpc { url } => {
             let max_model_len = if let Some(limit) = config.max_model_len {
                 limit.get()
             } else {
@@ -306,7 +306,7 @@ pub enum LlmSource {
     /// [`EngineCoreLlm`].
     EngineCore(EngineCoreConfig),
     /// Connect to the worker's vLLM gRPC endpoint.
-    RemoteGrpc(String),
+    RemoteGrpc { url: String },
     /// A caller-built `Llm`, such as a router over several engines or a client
     /// for a remote one. The server treats it as opaque, even when it is an
     /// [`EngineCoreLlm`]: routes and gRPC services that drive the engine-core

@@ -169,7 +169,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             let mut server_config = args.to_server_config();
             if let Some(url) = &args.remote_generation_url {
                 server_config.max_model_len = args.remote_max_model_len()?;
-                return Server::new(server_config, LlmSource::RemoteGrpc(url.clone()))
+                return Server::new(server_config, LlmSource::RemoteGrpc { url: url.clone() })
                     .serve(shutdown_signal())
                     .await;
             }
