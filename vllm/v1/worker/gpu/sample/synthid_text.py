@@ -47,11 +47,6 @@ def _patterns(words, CHUNK: tl.constexpr, CHUNK_BITS: tl.constexpr):
 
 
 @triton.jit
-def _add_mass(mass_ptr, patterns, mass):
-    tl.atomic_add(mass_ptr + patterns, mass, mask=mass != 0, sem="relaxed")
-
-
-@triton.jit
 def _log_multiplier_kernel(
     log_multipliers_ptr,
     mass_ptr,
@@ -208,11 +203,9 @@ def _synthid_text_kernel(
 
         if CHUNK < NUM_CHUNKS:
             mass = tl.exp(logits + log_multiplier - row_max) * _MASS_SCALE + 0.5
-            _add_mass(
-                row_mass_ptr + CHUNK * (1 << CHUNK_BITS),
-                _patterns(words, CHUNK, CHUNK_BITS),
-                mass.to(tl.int64),
-            )
+            mass = mass.to(tl.int64)
+            patterns = CHUNK * (1 << CHUNK_BITS) + _patterns(words, CHUNK, CHUNK_BITS)
+            tl.atomic_add(row_mass_ptr + patterns, mass, mask=mass != 0, sem="relaxed")
         else:
             value, index = gumbel_noised_argmax(
                 logits + log_multiplier,

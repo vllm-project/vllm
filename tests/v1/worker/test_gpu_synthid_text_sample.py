@@ -92,11 +92,7 @@ def test_rows_sample_the_same_token_in_any_batch():
 
 
 def test_peaked_top_k_rows_match_reference():
-    """Peaked bf16 rows with all but 40 tokens masked, as the sampler passes them.
-
-    Their layer means round to 1, which must not make a multiplier negative: the
-    NaN scores that followed let masked tokens win.
-    """
+    """Peaked bf16 rows with all but 40 tokens masked, as the sampler passes them."""
     num_rows, vocab_size = 64, 151936
     torch.manual_seed(0)
     rows = torch.arange(num_rows, device=DEVICE)
