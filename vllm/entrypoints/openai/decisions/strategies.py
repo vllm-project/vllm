@@ -1529,7 +1529,7 @@ class DrexStrategy(ReadStrategy):
             )
         state = self.render_state(state)
 
-        rows: list[tuple[list[str], list[int], list[int], int]] = []
+        rows: list[tuple[list[str], list[int], list[int], tuple[list[int], int]]] = []
         for q in questions:
             texts, order = self._options(q)
             try:
