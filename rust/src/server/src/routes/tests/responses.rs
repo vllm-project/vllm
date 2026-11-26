@@ -10,7 +10,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::json;
 use serial_test::serial;
 use tower::Service as _;
-use vllm_engine_core_client::protocol::output::EngineCoreFinishReason;
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason,
+};
 
 use super::*;
 
@@ -508,11 +510,41 @@ async fn responses_thinking_token_budget_reaches_engine_core() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn responses_per_request_metrics_follow_server_option() {
-    for (enabled, stream) in [(false, false), (true, false), (true, true)] {
-        let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+    for (enabled, stream, empty_with_tool_parser) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
             b"engine-openai-responses-metrics",
-            default_stream_output_specs(),
-            Arc::new(FakeChatBackend::new()),
+            move |request_id| {
+                let text: &[u8] = if empty_with_tool_parser { b"!" } else { b"Hi!" };
+                let mut output = request_output(
+                    request_id,
+                    bytes_to_token_ids(text),
+                    Some(EngineCoreFinishReason::Stop),
+                );
+                output.events = Some(vec![EngineCoreEvent {
+                    r#type: EngineCoreEventType::Scheduled,
+                    timestamp: 1.0,
+                }]);
+                RequestBatchOutputs {
+                    outputs: vec![output],
+                    timestamp: 2.0,
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new().with_parser_selections(
+                if empty_with_tool_parser {
+                    ParserSelection::Explicit("hermes".to_string())
+                } else {
+                    ParserSelection::None
+                },
+                ParserSelection::Auto,
+            )),
         )
         .await;
         let app = build_router(Arc::new(
@@ -549,6 +581,18 @@ async fn responses_per_request_metrics_follow_server_option() {
             terminal
         };
         assert_eq!(final_response["metrics"].is_object(), enabled, "{text}");
+        if enabled {
+            let metrics = &final_response["metrics"];
+            assert_eq!(metrics["time_to_first_token_ms"], 1000.0);
+            if stream && !empty_with_tool_parser {
+                assert_eq!(
+                    metrics["time_to_first_content_token_ms"],
+                    metrics["time_to_first_token_ms"]
+                );
+            } else {
+                assert!(metrics["time_to_first_content_token_ms"].is_null());
+            }
+        }
         assert!(
             lifecycle.iter().all(|event| event["response"].get("metrics").is_none()),
             "{text}"

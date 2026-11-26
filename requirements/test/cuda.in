@@ -80,7 +80,7 @@ openpyxl # required for perf comparison excel report
 plotly # required for perf comparison html report
 
 # Dependabot GHSA floors for transitive test deps (excl. dependabot.yml ignores:
-# torch/torchvision/xformers/lm-format-enforcer/compressed-tensors/ray/lm-eval).
+# torch/torchvision/compressed-tensors/ray/lm-eval).
 # Skipped (no patched release yet): sqlitedict, accelerate.
 urllib3>=2.8.0
 cryptography>=50.0.0

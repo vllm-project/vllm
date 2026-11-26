@@ -110,6 +110,62 @@ def test_qsa_hisparse_starts_with_automatic_cache_layout(
         assert len(result.outputs[0].token_ids) == 2
 
 
+@requires_qsa_kernels
+def test_qsa_kv_cache_spec_ignores_language_model_only(
+    tmp_path, vllm_runner, enable_pickle
+):
+    """A text-only decode must accept KV from a multimodal prefill."""
+    from transformers import Qwen4ExpConfig
+
+    Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        vision_config={
+            "depth": 1,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_heads": 2,
+            "out_hidden_size": 256,
+            "deepstack_visual_indexes": [],
+        },
+        text_config={
+            **_TINY_QSA_TEXT_CONFIG,
+            "vocab_size": 128,
+            "num_hidden_layers": 2,
+            "layer_types": ["linear_attention", "indexed_attention"],
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "output_gate_type": "sigmoid",
+            "moe_intermediate_size": 64,
+            "shared_expert_intermediate_size": 64,
+            "hc_lowrank": 28,
+            "mtp_num_hidden_layers": 0,
+            "rope_parameters": {
+                "rope_type": "default",
+                "mrope_section": [11, 11, 10],
+                "mrope_interleaved": True,
+                "partial_rotary_factor": 1.0,
+            },
+        },
+    ).save_pretrained(tmp_path)
+    layouts = []
+    for language_model_only in (False, True):
+        with vllm_runner(
+            str(tmp_path),
+            tokenizer_name="Qwen/Qwen3-VL-2B-Instruct",  # for the mm processor
+            language_model_only=language_model_only,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            load_format="dummy",
+            dtype="bfloat16",
+            enforce_eager=True,
+            max_model_len=128,
+            kv_cache_memory_bytes=128 * 1024**2,
+        ) as runner:
+            layouts += runner.llm.collective_rpc(
+                lambda worker: repr(worker.get_kv_cache_layer_configs())
+            )
+    assert layouts[0] == layouts[1]
+
+
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

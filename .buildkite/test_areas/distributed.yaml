@@ -27,9 +27,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Comm Ops'
+      label: ':amd: (MI300 DPX) Distributed Comm Ops'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 30
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -103,6 +103,8 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
+  - tests/entrypoints/serve/instrumentator/readiness/
+  - vllm/entrypoints/serve/instrumentator/health.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/v1/e2e/general/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/test_sharded_sampling.py
@@ -111,6 +113,7 @@ steps:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - pytest -v -s entrypoints/serve/instrumentator/readiness/test_ready_multi_gpu.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
@@ -218,9 +221,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Torchrun + Shutdown'
+      label: ':amd: (MI300 DPX) Distributed Torchrun + Shutdown'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -644,7 +647,10 @@ steps:
       - tests/distributed/test_quick_all_reduce.py
       - tests/distributed/test_aiter_rms_fallback.py
       - tests/distributed/test_muse_spark_token_shard.py
+      - tests/distributed/test_muse_spark_decode_moe.py
       - vllm/models/muse_spark/amd/model.py
+      - vllm/models/muse_spark/amd/
+      - tests/models/test_muse_spark_rocm_mono.py
       - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - tests/utils.py
       - tests/distributed/test_weight_transfer.py
@@ -666,6 +672,7 @@ steps:
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
       - pytest -v -s tests/distributed/test_muse_spark_token_shard.py
+      - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
 
 - label: ":nvidia: (B200) [Nightly] Distributed"
   key: distributed-tests-2xb200
