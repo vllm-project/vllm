@@ -1061,10 +1061,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     hidden_states, residual, post_mix, res_mix
                 )
 
-        if self.use_sequence_parallel:
+        is_last_rank = get_pp_group().is_last_rank
+        # PP and MTP consume all HC streams. A plain LM head needs one per token.
+        gather_after_head = (
+            self.use_sequence_parallel
+            and is_last_rank
+            and self._mtp_hidden_buffer is None
+        )
+        if self.use_sequence_parallel and not gather_after_head:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
-        if not get_pp_group().is_last_rank:
+        if not is_last_rank:
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -1084,6 +1091,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.rms_norm_eps,
             self.hc_eps,
         )
+        if gather_after_head:
+            # Keep RMSNorm's original row count for batch-dependent reductions.
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.norm(hidden_states)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
