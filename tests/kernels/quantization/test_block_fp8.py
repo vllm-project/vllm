@@ -182,7 +182,7 @@ def test_w8a8_block_fp8_matmul_rows_past_int32_offsets(M, N, K):
         if on_gfx1250():
             pytest.skip("gfx1250 takes the torch fallback, not this kernel")
     need = M * K + N * K + 2 * M * N + 4 * M * (K // 128) + 2**30
-    free, _ = current_platform.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < need:
         pytest.skip(f"needs {need / 2**30:.1f} GiB of free device memory")
     block_size = [128, 128]
