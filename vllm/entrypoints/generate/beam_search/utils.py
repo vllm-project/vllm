@@ -37,6 +37,17 @@ class BeamSearchSequence:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
 
+    def append_token(
+        self, token_id: int, logprobs: dict[int, Logprob]
+    ) -> "BeamSearchSequence":
+        return BeamSearchSequence(
+            self.orig_prompt,
+            tokens=self.tokens + [token_id],
+            logprobs=self.logprobs + [logprobs],
+            lora_request=self.lora_request,
+            cum_logprob=self.cum_logprob + logprobs[token_id].logprob,
+        )
+
     def get_prompt(self):
         prompt = self.orig_prompt
 
