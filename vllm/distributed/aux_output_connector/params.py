@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.distributed.aux_output_connector.object_store import (
+    NAMESPACE_SALT_MARKER,
     aux_namespace_cache_salt,
 )
 from vllm.exceptions import VLLMValidationError
@@ -38,6 +39,12 @@ def prepare_aux_request(
     if config.enabled:
         _fold_prompt_start_alias(params)
     if (namespace := params.aux_namespace) is None:
+        if config.object_key_prefix and NAMESPACE_SALT_MARKER in (cache_salt or ""):
+            raise VLLMValidationError(
+                f"cache_salt must not contain {NAMESPACE_SALT_MARKER!r} while "
+                "AuxOutputConfig.object_key_prefix is set.",
+                parameter="cache_salt",
+            )
         return cache_salt
     verify_aux_namespace(params)
     if (key_prefix := config.object_key_prefix) is None or not config.enabled:

@@ -16,7 +16,7 @@ This page specifies the second path: a request names a **namespace**, the engine
 
 A request that reuses KV computed its later tokens against that KV, so the rows it needs for those positions are those of the computation that produced the KV. The design makes the name of a span identify that computation:
 
-1. The input processor folds the namespace and the key prefix into the request's cache salt, in a reserved form that no client salt can produce. A request therefore reuses only KV that requests of its namespace computed for the same tokens, and every KV connector keyed by block hashes follows with no connector code.
+1. The input processor folds the namespace and the key prefix into the request's cache salt, behind a leading `@`. No other request carries such a salt: the HTTP routes reject `@` in a client salt, and with `object_key_prefix` set the engine rejects a request without a namespace whose cache salt contains `@`, offline requests included. A request therefore reuses only KV that requests of its namespace computed for the same tokens, and every KV connector keyed by block hashes follows with no connector code.
 2. A full span is stored as `<object_key_prefix>/<aux_namespace>/<hash of its last hash block, hex>`. Block hashes chain, so the name identifies the whole token prefix within the namespace.
 3. Every run writes every full span it computes, and the store keeps the first copy of a name. A request that hits KV lists the name under which the computation that produced the KV stored its rows.
 

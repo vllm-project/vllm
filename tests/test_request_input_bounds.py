@@ -293,7 +293,7 @@ def test_aux_namespace_validated_before_engine_submission(
 
 
 def test_aux_namespace_cache_salt_separates_namespaces():
-    salts = [None, "user", "a/g"]
+    salts = [None, "user", "a/g", '["a", "g", null]']
     outputs = salts + [
         aux_namespace_cache_salt(prefix, namespace, salt)
         for prefix in ("a", "b")
@@ -301,6 +301,37 @@ def test_aux_namespace_cache_salt_separates_namespaces():
         for salt in salts
     ]
     assert len(set(outputs)) == len(outputs)
+
+
+@pytest.mark.parametrize(
+    "forge,rejected",
+    [
+        (lambda salt: salt, True),
+        (lambda salt: f"prefix-lm:0:{salt}", True),
+        (lambda salt: '["job", "g", null]', False),
+    ],
+    ids=["namespace-salt", "prefix-lm-wrapped", "unmarked-json"],
+)
+def test_request_without_namespace_never_takes_a_namespace_salt(forge, rejected):
+    processor = _mock_input_processor()
+    processor.vllm_config.aux_output_config = AuxOutputConfig(
+        enable_return_routed_experts=True, object_key_prefix="job"
+    )
+    tokens = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    namespace_salt = InputProcessor.process_inputs(
+        processor, "ns", tokens, SamplingParams(aux_namespace="g"), ("generate",)
+    ).cache_salt
+    prompt = {**tokens, "cache_salt": forge(namespace_salt)}
+    args = ("plain", prompt, SamplingParams(), ("generate",))
+    if not rejected:
+        assert InputProcessor.process_inputs(processor, *args).cache_salt not in (
+            namespace_salt,
+            None,
+        )
+        return
+    with pytest.raises(VLLMValidationError, match="must not contain") as exc_info:
+        InputProcessor.process_inputs(processor, *args)
+    assert exc_info.value.parameter == "cache_salt"
 
 
 def _process_inputs_with_max_model_len(

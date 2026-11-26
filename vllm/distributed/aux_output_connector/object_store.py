@@ -143,12 +143,15 @@ def aux_namespace_prefix(key_prefix: str, namespace: str) -> str:
     return f"{key_prefix}/{namespace}/"
 
 
+NAMESPACE_SALT_MARKER = "@"
+
+
 def aux_namespace_cache_salt(
     key_prefix: str, namespace: str, cache_salt: str | None
 ) -> str:
-    """The cache salt of a request with `aux_namespace`: only requests of the
-    same namespace and key prefix share KV blocks, as they share objects."""
-    return json.dumps([key_prefix, namespace, cache_salt])
+    """The cache salt of a request with `aux_namespace`, shared only within its
+    namespace and key prefix; no client salt may contain its leading marker."""
+    return NAMESPACE_SALT_MARKER + json.dumps([key_prefix, namespace, cache_salt])
 
 
 def read_aux_rows(
