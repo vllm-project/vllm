@@ -45,6 +45,48 @@ def torch_topk(
     return topk_weights, topk_ids
 
 
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("indices_type", [torch.int32, torch.int64])
+def test_fused_topk_empty_input(scoring_func: str, indices_type: torch.dtype):
+    """Idle ranks return empty routing tensors before participating in dispatch."""
+    device = current_platform.device_type
+    hidden_states = torch.empty((0, 128), dtype=torch.bfloat16, device=device)
+    gating_output = torch.empty((0, 2), dtype=torch.bfloat16, device=device)
+
+    topk_weights, topk_ids, token_expert_indices = fused_topk(
+        hidden_states,
+        gating_output,
+        topk=1,
+        renormalize=True,
+        indices_type=indices_type,
+        scoring_func=scoring_func,
+    )
+
+    for tensor, dtype in (
+        (topk_weights, torch.float32),
+        (topk_ids, indices_type),
+        (token_expert_indices, torch.int32),
+    ):
+        assert tensor.shape == (0, 1)
+        assert tensor.numel() == 0
+        assert tensor.dtype == dtype
+        assert tensor.device == hidden_states.device
+
+
+def test_fused_topk_empty_input_rejects_unsupported_scoring():
+    device = current_platform.device_type
+    hidden_states = torch.empty((0, 128), device=device)
+    gating_output = torch.empty((0, 2), device=device)
+    with pytest.raises(ValueError, match="Unsupported scoring function"):
+        fused_topk(
+            hidden_states,
+            gating_output,
+            topk=1,
+            renormalize=True,
+            scoring_func="unsupported",
+        )
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="This test is skipped on non-CUDA platform.",

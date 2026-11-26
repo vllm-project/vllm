@@ -146,6 +146,7 @@ MoEBackend = Literal[
     "aiter_mega_moe",
     "aiter_triton_mxfp4_bf16",
     "aiter_triton_mxfp4_mxfp4",
+    "aiter_triton_mxfp8_mxfp8",
     "flydsl",
     "hpc",
     "emulation",
@@ -348,12 +349,14 @@ class KernelConfig:
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
-    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
+    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (NVFP4, and
+      MXFP8 with `--all2all-backend deepep_low_latency` or `nixl_ep`, on
+      Blackwell; unquantized bf16/fp16 on Hopper)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
       mega-kernel with NVFP4 or MXFP4 weights on Blackwell (SM100/SM103,
       where MXFP4 checkpoints are requantized to NVFP4 at load, or SM107,
       where MXFP4 runs with MXFP8 activations), or with block-FP8 (128x128)
-      weights on Hopper; requires expert parallelism and NVSHMEM
+      or MXFP4 weights on Hopper; requires expert parallelism and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
@@ -372,6 +375,8 @@ class KernelConfig:
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "aiter_triton_mxfp4_mxfp4": Use the AITER Triton/Gluon MXFP4 W4A4
       (moe_gemm_a4w4) MoE kernel (ROCm gfx1250)
+    - "aiter_triton_mxfp8_mxfp8": Use the AITER Triton MXFP8 W8A8
+      (moe_gemm_a8w8) MoE kernel (ROCm gfx942)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
     - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
     - "rdna3_int4_int8": Int4 MoE decode with int8 activations per 32 values

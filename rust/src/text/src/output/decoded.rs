@@ -99,6 +99,8 @@ pub struct Finished {
 /// updates.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SampledDelta {
+    /// Engine output-batch timestamp, on the same clock as `RequestTimestamps`.
+    pub timestamp: f64,
     /// Token IDs produced by this engine update, after stop-string truncation.
     pub token_ids: Vec<u32>,
     /// Per-position logprobs aligned with `token_ids`, when requested.
@@ -375,6 +377,7 @@ pub async fn decoded_text_event_stream(
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
+                    timestamp: output.timestamps.last_token_ts,
                     token_ids: sampled_token_ids,
                     logprobs: sampled_logprobs,
                     sampling_mask: sampled_sampling_mask,
@@ -402,6 +405,7 @@ pub async fn decoded_text_event_stream(
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
+                    timestamp: output.timestamps.last_token_ts,
                     token_ids: new_token_ids,
                     logprobs: decoded_logprobs,
                     sampling_mask: new_sampling_mask,
@@ -580,6 +584,7 @@ mod tests {
                 attributions: attributions.into_iter().collect(),
             },
             sampled: SampledDelta {
+                timestamp: finished.as_ref().map_or(0.0, |value| value.timestamps.last_token_ts),
                 token_ids: sampled_token_ids,
                 logprobs: None,
                 sampling_mask: None,

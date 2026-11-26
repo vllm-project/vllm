@@ -97,6 +97,7 @@ SPARSE_MLA_ARCHS = (
     "DeepseekV32ForCausalLM",
     "Glm5NextForCausalLM",
     "GlmMoeDsaForCausalLM",
+    "HYV4FlashForCausalLM",
     "HYV4ForCausalLM",
 )
 # Their CUDA attention has no path below Hopper.

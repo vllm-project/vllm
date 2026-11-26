@@ -9,8 +9,9 @@ sees the layout direct mode actually restored (the NCCL engine does it at its
 first target update), and reduces each traced `copy_` to a box of the
 checkpoint tensor and a strided region of the target's storage
 (`geometry.py`). A name is
-direct only if every byte it writes is a copy of one incoming byte; anything
-else is a fallback, which the engine sends in full through `load_weights`.
+direct only if every element it writes is a copy of one incoming element,
+as bytes or through the loader's own `copy_` cast; anything else is a
+fallback, which the engine sends in full through `load_weights`.
 The plan holds for every later update of the same model.
 
 `load_planned` loads full checkpoint tensors through `get_dest`; the NCCL
@@ -32,7 +33,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .bake import Copy, Targets, Traced, trace_loads
-from .direct import direct_reload_active, direct_reload_enabled, mark_loaded
+from .direct import direct_reload_active, mark_loaded, reloads_directly
 from .geometry import (
     Box,
     Fallback,
@@ -82,7 +83,8 @@ class LoadPlan:
         its tensor's shape, into that tensor is exactly what the loader would
         have written. `None`: fallback, send the full tensor through
         `load_weights`. Write only between `start_reload` and
-        `finish_reload`; never read.
+        `finish_reload`; never read. A tensor may be in another dtype than
+        the checkpoint tensor, so write it with `copy_`, not as raw bytes.
 
         `load_planned` copies full tensors through it; an engine that sends
         only `get_boxes` copies its slices the same way."""
@@ -222,8 +224,11 @@ def check_plannable(model: torch.nn.Module) -> None:
         RuntimeError: the configuration cannot be planned.
 
     """
-    if not direct_reload_enabled():
-        raise RuntimeError("load plan: requires VLLM_RELOAD_MODE=direct")
+    if not reloads_directly(model):
+        raise RuntimeError(
+            "load plan: requires direct reload; this rank reloads layerwise "
+            "(see its startup log)"
+        )
     for name, module in model.named_modules():
         moe_config = getattr(module, "moe_config", None)
         parallel = getattr(moe_config, "moe_parallel_config", None)
@@ -257,21 +262,27 @@ def _write(
     """`copy` as a box and region; `None` if it copies nothing.
 
     Raises:
-        Fallback: it is not a plain copy of checkpoint bytes.
+        Fallback: it is not a copy of checkpoint elements.
 
     """
     src = copy.src
     if src._geom is None:
         raise Fallback(src._lost or "not a view of the checkpoint tensor")
-    if src.dtype != copy.dtype:
+    # A cast is replayed from the checkpoint dtype, so a cast of a view in
+    # another dtype cannot be.
+    if src.dtype == copy.dtype or _same_bits(src.dtype, copy.dtype):
+        cast = None
+    elif src.dtype == dtype:
+        cast = copy.dtype
+    else:
         raise Fallback(
-            f"casts {src.dtype} to {copy.dtype} at copy_ "
-            f"(send it as {copy.dtype} to make it direct)"
+            f"casts {src.dtype} (a view of the {dtype} checkpoint tensor) "
+            f"to {copy.dtype} at copy_"
         )
     target = targets.by_storage.get(copy.storage)
     if target is None:
         raise Fallback("copies into a tensor that is not a checkpoint tensor")
-    size = dtype.itemsize
+    size = (cast or dtype).itemsize
     rel = copy.byte_offset - target.byte_offset
     if rel % size or target.byte_offset % size:
         raise Fallback("copies into a destination viewed with another element size")
@@ -288,12 +299,24 @@ def _write(
     dims = list(zip(copy.shape, geom.stride(), copy.stride))
     box, dst_shape, dst_stride = box_and_region(shape, geom.storage_offset(), dims)
     return Write(
-        box, target.module, target.tensor, Region(rel // size, dst_shape, dst_stride)
+        box,
+        target.module,
+        target.tensor,
+        Region(rel // size, dst_shape, dst_stride),
+        cast,
+    )
+
+
+def _same_bits(a: torch.dtype, b: torch.dtype) -> bool:
+    """Integer casts between equal widths keep every bit."""
+    return a.itemsize == b.itemsize and not any(
+        d.is_floating_point or d.is_complex or d == torch.bool for d in (a, b)
     )
 
 
 def _dest(targets: Targets, write: Write, dtype: torch.dtype) -> torch.Tensor:
-    """The live tensor of `write`, in the checkpoint dtype."""
+    """The live tensor of `write`, in `write.dtype` or else `dtype`."""
+    dtype = write.dtype or dtype
     target = targets.by_name[(write.module, write.tensor)]
     r = write.dst
     offset = target.byte_offset // dtype.itemsize + r.offset

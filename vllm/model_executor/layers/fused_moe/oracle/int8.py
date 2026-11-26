@@ -268,5 +268,22 @@ def make_int8_moe_kernel(
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    *,
+    input_dtype: torch.dtype | None = None,
+    activation_key: QuantKey | None = None,
 ) -> mk.FusedMoEKernel:
-    return make_moe_kernel(moe_quant_config, moe_config, experts_cls, routing_tables)
+    prepare_finalize_kwargs = (
+        {"input_dtype": input_dtype} if input_dtype is not None else None
+    )
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        prepare_finalize_kwargs=prepare_finalize_kwargs,
+        experts_kwargs=(
+            {"activation_key": activation_key}
+            if int8_backend == Int8MoeBackend.TRITON and activation_key is not None
+            else None
+        ),
+    )

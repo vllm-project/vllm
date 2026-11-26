@@ -92,15 +92,23 @@ fn validate_bad_words_limits(bad_words_token_ids: &[Vec<u32>]) -> Result<(), Tok
 
 /// Validate that pre-tokenized prompt IDs are within the engine-visible prompt
 /// vocabulary range.
+///
+/// Only multimodal placeholders may exceed the model vocabulary: the engine
+/// replaces them before the embedding lookup. A prompt without multimodal
+/// inputs is embedded in full, so tokenizer-only IDs (e.g. Kimi's reserved
+/// tokens) are rejected. Python widens the bound for every request to a
+/// multimodal model (`BaseRenderer.validate_token_ids`).
 pub(crate) fn validate_prompt_token_ids(
     prompt_token_ids: &[u32],
+    has_multimodal_inputs: bool,
     limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
-    validate_param(
-        "prompt",
-        prompt_token_ids.iter().copied(),
-        limits.prompt_token_vocab_size(),
-    )
+    let vocab_size = if has_multimodal_inputs {
+        limits.tokenizer_vocab_size.max(limits.model_vocab_size)
+    } else {
+        limits.model_vocab_size
+    };
+    validate_param("prompt", prompt_token_ids.iter().copied(), vocab_size)
 }
 
 /// Validate that token IDs in text sampling parameters are within their

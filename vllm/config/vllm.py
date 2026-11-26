@@ -39,6 +39,7 @@ from .compilation import (
 )
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
+from .ec_events import ECEventsConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
@@ -112,11 +113,14 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Glm5NextMTPModel",
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
         "HYV4MTPModel",
         "HYV4DFlyModel",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "Inkling2ForConditionalGeneration",
+        "Inkling2LoopForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
         "KimiK3MTPModel",
         "KimiK31ForConditionalGeneration",
@@ -476,7 +480,7 @@ class VllmConfig:
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
     num_hash_lookahead_tokens: int = Field(default=0, init=False)
-    """Tokens after each block covered by its hash; zero keeps legacy hashes."""
+    """Tokens after each block that its hash covers; 0 unless draft KV reads ahead."""
     watermark_config: WatermarkConfig | None = None
     """Text watermarking configuration."""
     diffusion_config: DiffusionConfig | None = None
@@ -509,6 +513,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
+    ec_events_config: ECEventsConfig | None = None
+    """The configurations for encoder cache event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
     """The configurations for distributed EC cache transfer."""
     ec_manager_config: EncoderCacheManagerConfig = Field(
@@ -725,38 +731,33 @@ class VllmConfig:
         Mid-prefill the drafter consumes tokens the target model has not been
         scheduled for yet, so every component that has to keep them available
         must apply this margin: the scheduler, which never ends a chunk within
-        it and shifts encoder scheduling by it, and the KV cache manager, which
-        treats the trailing `this - 1` tokens as re-prefillable rather than
-        finalized. Consumers must read this property rather than re-deriving
-        their own per-method lookahead, so those components cannot drift apart.
+        it and shifts encoder scheduling by it, and the components that read
+        `num_reprefillable_tokens`. Consumers must read this property rather
+        than re-deriving their own per-method lookahead, so those components
+        cannot drift apart.
         """
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
         return speculative_config.speculator_config.num_prefill_lookahead_tokens
 
+    @property
+    def num_reprefillable_tokens(self) -> int:
+        """Trailing computed tokens whose drafter KV is not final yet: of the
+        `num_prefill_lookahead_tokens` read past the prompt end, only the first
+        is sampled, so the rest are rewritten later."""
+        return max(0, self.num_prefill_lookahead_tokens - 1)
+
     def _resolve_num_hash_lookahead_tokens(self) -> int:
         """Resolve the hash lookahead after the relevant configs are finalized."""
-        speculative_config = self.speculative_config
+        if self.speculative_config is None:
+            return 0
         if (
-            speculative_config is None
-            or not speculative_config.use_eagle_block_drop()
-            or speculative_config.disable_lookahead_block_hashes
+            self.kv_transfer_config is None
+            and not self.cache_config.enable_prefix_caching
         ):
             return 0
-        kv_transfer_config = self.kv_transfer_config
-        if kv_transfer_config is not None:
-            from vllm.distributed.kv_transfer.kv_connector.factory import (
-                KVConnectorFactory,
-            )
-
-            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
-            if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
-                return 0
-        elif not self.cache_config.enable_prefix_caching:
-            return 0
-        # The drafter's KV at a block's last position reads this far ahead.
-        return self.num_prefill_lookahead_tokens
+        return self.speculative_config.speculator_config.num_hash_lookahead_tokens
 
     @property
     def uniform_decode_query_len(self) -> int:
@@ -811,25 +812,20 @@ class VllmConfig:
         }
 
     def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
-        """Request counts of the FULL graphs of one-token draft decodes, the
-        draft steps after the first of EAGLE, EAGLE3, single-module MTP and
-        draft models: the request-count grid up to `max_num_seqs`. The target's
-        decode cap can be far lower: off SM100 its default is 512 / (1 + K)
-        requests, 64 at K=7. Above it the K - 1 draft steps would run eagerly
-        and pay their host launch time on every step, while their graphs are
-        small. Empty without such steps or decode graphs."""
+        """Request counts of the FULL graphs of one-token draft decodes (see
+        `SpeculatorConfig.one_token_draft_decodes`): the request-count grid up
+        to `max_num_seqs`. The target's decode cap can be far lower: off SM100
+        its default is 512 / (1 + K) requests, 64 at K=7. Above it the K - 1
+        draft steps would run eagerly and pay their host launch time on every
+        step, while their graphs are small. Empty without such steps or decode
+        graphs."""
         speculative_config = self.speculative_config
         sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
         if (
             not sizes
             or speculative_config is None
             or self.num_speculative_tokens < 2
-            or speculative_config.method
-            not in ("eagle", "eagle3", "mtp", "draft_model")
-            or (
-                speculative_config.use_multi_module_mtp()
-                and not speculative_config.use_gemma4_mtp()
-            )
+            or not speculative_config.speculator_config.one_token_draft_decodes
         ):
             return []
         max_requests = self.scheduler_config.max_num_seqs
@@ -1326,37 +1322,17 @@ class VllmConfig:
 
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
-        # not `direct_reload_enabled()`: importing it would load the model
-        # loaders into every process that builds a config
+        # imported only in direct mode: it loads the model loaders
         if envs.VLLM_RELOAD_MODE != "direct":
             return
-        offload = self.offload_config
-        if (
-            offload.offload_backend != "auto"
-            or offload.prefetch.offload_group_size > 0
-            or offload.uva.cpu_offload_gb > 0
-        ):
-            # CPU/UVA offload gives parameters new storage on every post-load
-            # processing; prefetch offload shares one buffer between layers
-            raise ValueError("Direct reload does not support weight offloading.")
-        model_config = self.model_config
-        if model_config is not None and model_config.quantization == "torchao":
-            # its load_weights runs a layerwise reload, and its post-load
-            # processing replaces the weight parameter
-            raise ValueError("Direct reload does not support torchao quantization.")
-        spec = self.speculative_config
-        if spec is not None and spec.draft_lm_head_quantization is not None:
-            # after `begin` the draft's quantized lm_head is a view of the target
-            # lm_head's storage: post-load processing would write it there
+        from vllm.model_executor.model_loader.reload.direct import (
+            direct_reload_refusal,
+        )
+
+        if reason := direct_reload_refusal(self):
             raise ValueError(
-                "Direct reload does not support draft_lm_head_quantization."
-            )
-        transfer = self.weight_transfer_config
-        if transfer is not None and transfer.backend == "sharded_rdt":
-            # its replay plan is baked by a layerwise (meta) dry run
-            raise ValueError(
-                "Direct reload does not support the sharded_rdt weight-transfer "
-                "backend. Use VLLM_RELOAD_MODE=layerwise or another backend."
+                f"Direct reload does not support {reason}. Use "
+                "VLLM_RELOAD_MODE=auto or layerwise."
             )
 
     def _verify_kv_transfer_compat(self) -> None:
@@ -1584,6 +1560,28 @@ class VllmConfig:
         self.engram_config.verify_model_config(model_config)
         self.engram_config.resolve_dp_shared_memory(self.parallel_config, model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
+        if (
+            self.engram_config.peer_group_size
+            and model_config is not None
+            and model_config.architecture
+            in (
+                "Qwen4ExpForCausalLM",
+                "Qwen4ExpForConditionalGeneration",
+            )
+        ):
+            if self.parallel_config.use_ubatching:
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support DBO or microbatching"
+                )
+            if self.load_config.load_format in ("ipc_cache", "sharded_state"):
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support "
+                    f"{self.load_config.load_format} loading. Use a full checkpoint."
+                )
+            if self.weight_transfer_config:
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support weight transfer"
+                )
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def _reject_mismatched_float_kv_cache(self) -> None:
@@ -1593,6 +1591,19 @@ class VllmConfig:
             return
         model_dtype = str(self.model_config.dtype).removeprefix("torch.")
         if model_dtype == cache_dtype:
+            return
+        if (
+            cache_dtype == "float16"
+            and model_dtype == "bfloat16"
+            and current_platform.is_device_capability_family(120)
+            and getattr(self.model_config, "architecture", None)
+            in (
+                "Inkling2ForConditionalGeneration",
+                "Inkling2LoopForConditionalGeneration",
+            )
+            and self.speculative_config is None
+        ):
+            # Inkling2's SM12 kernel converts stored KV to the query dtype.
             return
         allowed = (
             f"`auto` or `{model_dtype}`"
@@ -1731,16 +1742,31 @@ class VllmConfig:
             and hasattr(self.quant_config, "use_deep_gemm")
             and self.quant_config.use_deep_gemm is None
         ):
-            from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+            from vllm.utils.deep_gemm import (
+                is_deep_gemm_fp8_linear_requested,
+                should_auto_disable_deep_gemm,
+            )
 
             model_type = getattr(self.model_config.hf_text_config, "model_type", None)
             if should_auto_disable_deep_gemm(model_type):
-                self.quant_config.use_deep_gemm = False
-                logger.warning_once(
-                    "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
-                    "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
-                    model_type,
-                )
+                if is_deep_gemm_fp8_linear_requested(self.kernel_config):
+                    logger.warning_once(
+                        "DeepGemm is auto-disabled for model_type=%s on this "
+                        "GPU, but --linear-backend deep_gemm requests it. "
+                        "Using DeepGemm for the FP8 linear layers. The "
+                        "weights are requantized to E8M0 scales, which is "
+                        "lossy.",
+                        model_type,
+                    )
+                else:
+                    self.quant_config.use_deep_gemm = False
+                    logger.warning_once(
+                        "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
+                        "To use it anyway, pass --linear-backend deep_gemm for "
+                        "the FP8 linear layers. To disable DeepGemm globally, "
+                        "set VLLM_USE_DEEP_GEMM=0.",
+                        model_type,
+                    )
 
         from vllm.v1.executor.abstract import Executor
 
@@ -2017,19 +2043,8 @@ class VllmConfig:
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
 
-        from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
-
-        if HAS_OPAQUE_TYPE:
-            # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
-            # fast_moe_cold_start, so force it off.
-            self.compilation_config.fast_moe_cold_start = False
-        elif self.compilation_config.fast_moe_cold_start is None:
-            # resolve default behavior: try to be as safe as possible
-            # this config is unsafe if any spec decoding draft model has a MOE.
-            # We'll conservatively turn it off if we see spec decoding.
-            self.compilation_config.fast_moe_cold_start = (
-                self.speculative_config is None
-            )
+        # The hoisted OpaqueObject approach supersedes fast_moe_cold_start.
+        self.compilation_config.fast_moe_cold_start = False
 
         self._set_max_num_scheduled_tokens()
 
@@ -2148,6 +2163,17 @@ class VllmConfig:
                 "KV cache events are disabled, "
                 "but the scheduler is configured to publish them. "
                 "Modify KVEventsConfig.enable_kv_cache_events "
+                "to True to enable."
+            )
+        if (
+            self.ec_events_config is not None
+            and self.ec_events_config.publisher != "null"
+            and not self.ec_events_config.enable_ec_cache_events
+        ):
+            logger.warning_once(
+                "Encoder cache events are disabled, "
+                "but the scheduler is configured to publish them. "
+                "Modify ECEventsConfig.enable_ec_cache_events "
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
@@ -2342,24 +2368,15 @@ class VllmConfig:
         if (
             self.model_config is not None
             and self.model_config.attention_chunk_size is not None
+            and not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
         ):
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.uses_target_hidden_states
-            ):
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention + eagle.
-                need_disable_hybrid_kv_cache_manager = True
-            elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
-                logger.warning(
-                    "There is a latency regression when using chunked local"
-                    " attention with the hybrid KV cache manager. Disabling"
-                    " it, by default. To enable it, set the environment "
-                    "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
-                )
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention.
-                need_disable_hybrid_kv_cache_manager = True
+            logger.warning(
+                "There is a latency regression when using chunked local"
+                " attention with the hybrid KV cache manager. Disabling"
+                " it, by default. To enable it, set the environment "
+                "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+            )
+            need_disable_hybrid_kv_cache_manager = True
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Auto-disable HMA only when the connector config does not support it.
@@ -2374,7 +2391,7 @@ class VllmConfig:
                         "Turning off hybrid kv cache manager because "
                         "`--kv-transfer-config` selects a KV connector that "
                         "does not support it. Impact: hybrid SSM models "
-                        "(e.g. Jamba, Bamba) require HMA and will fail at "
+                        "(e.g. Zamba2, NemotronH) require HMA and will fail at "
                         "startup without it; models with sliding window "
                         "attention will run with reduced performance. "
                         "To add HMA support to a KV connector, subclass "
@@ -3756,8 +3773,12 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
-        # Mamba cache align-mode constraints
-        if self.cache_config.mamba_cache_mode == "align":
+        # Mamba prefix caching constraints
+        if (
+            self.cache_config.enable_prefix_caching
+            and self.model_config is not None
+            and self.model_config.is_hybrid
+        ):
             assert not self.scheduler_config.disable_chunked_mm_input, (
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "
@@ -3766,16 +3787,6 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
-        if (
-            self.cache_config.cache_dtype == "nvfp4_ds_mla"
-            and self.parallel_config.decode_context_parallel_size > 1
-        ):
-            raise ValueError(
-                "nvfp4_ds_mla KV cache is not supported with decode context "
-                "parallelism: the chunked-context prefill gather is not "
-                "validated under DCP. Use decode_context_parallel_size=1 or a "
-                "different --kv-cache-dtype."
-            )
         if self.model_config is None:
             return self
         # The ds_mla layouts are MLA-only by construction; the plain nvfp4
@@ -3873,13 +3884,14 @@ class VllmConfig:
             )
             if (
                 is_flashinfer
-                and self.cache_config.mamba_cache_mode == "align"
+                and self.cache_config.enable_prefix_caching
                 and self.model_config is not None
                 and self.model_config.dtype != torch.bfloat16
             ):
                 raise ValueError(
-                    "FlashInfer ReplaySSM align requires bfloat16 model inputs "
-                    "for its replay rings; SSM state cache dtype is independent"
+                    "FlashInfer ReplaySSM with prefix caching requires bfloat16 "
+                    "model inputs for its replay rings; SSM state cache dtype is "
+                    "independent"
                 )
             if not is_flashinfer and self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(

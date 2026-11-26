@@ -7,7 +7,6 @@ import logging
 import os
 import sys
 import tempfile
-import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -87,6 +86,7 @@ if TYPE_CHECKING:
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES: int = 715_827_880
+    VLLM_MAX_MEDIA_PREPROCESSING_BYTES: int = 715_827_880
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
+    VLLM_MAX_STOP_TOKEN_IDS: int = 128
     VLLM_MAX_TOKENIZE_TOKENS: int | None = None
     VLLM_MAX_NUM_BAD_WORDS: int = 128
     VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
@@ -190,7 +191,6 @@ if TYPE_CHECKING:
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
-    VLLM_ENABLE_PREGRAD_PASSES: bool = True
     VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
     VLLM_DP_MASTER_IP: str = "127.0.0.1"
     VLLM_DP_MASTER_PORT: int = 0
@@ -306,7 +306,7 @@ if TYPE_CHECKING:
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
-    VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str | None = None
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_MORI_EP_V2: bool | None = None
@@ -335,7 +335,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
-    VLLM_RELOAD_MODE: Literal["layerwise", "direct"] = "layerwise"
+    VLLM_RELOAD_MODE: Literal["auto", "layerwise", "direct"] = "auto"
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -405,23 +405,13 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils.torch_version import is_torch_equal_or_newer
-
-    default_value = (
-        "1"
-        if is_torch_equal_or_newer("2.10.0") and not disable_compile_cache()
-        else "0"
-    )
+    default_value = "0" if disable_compile_cache() else "1"
 
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
 
 
 def use_mega_aot_artifact():
-    from vllm.utils.torch_version import is_torch_equal_or_newer
-
-    default_value = (
-        "1" if is_torch_equal_or_newer("2.12.0.dev") and use_aot_compile() else "0"
-    )
+    default_value = "1" if use_aot_compile() else "0"
 
     return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
 
@@ -583,34 +573,6 @@ def get_vllm_port() -> int | None:
                 "check the warning in: https://docs.vllm.ai/en/latest/configuration/env_vars.html"
             ) from None
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
-
-
-def _generate_shm_name() -> str:
-    import pybase64
-
-    # Fit macOS's 30-character limit without truncating the UUID.
-    encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
-    return "vllm_mm_" + encoded_uuid.rstrip("=")
-
-
-def get_env_or_set_default(
-    env_name: str,
-    default_factory: Callable[[], str],
-) -> Callable[[], str]:
-    """Create a lambda that returns an environment variable value if set,
-    or generates and sets a default value using the provided factory function.
-    """
-
-    def _get_or_set_default() -> str:
-        value = os.getenv(env_name)
-        if value is not None:
-            return value
-
-        default_value = default_factory()
-        os.environ[env_name] = default_value
-        return default_value
-
-    return _get_or_set_default
 
 
 # The start-* and end* here are used by the documentation generator
@@ -797,7 +759,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
     # Applies to any tokenizer mode that loads an HF fast tokenizer
     # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
-    # Python package (>= 0.3.5) must be installed.
+    # Python package (>= 0.3.6) must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
@@ -817,19 +779,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")
     ),
     # Feature flag to enable/disable Inductor standalone compile.
-    # In torch <= 2.7 we ignore this flag; in torch >= 2.9 this is
-    # enabled by default.
     "VLLM_USE_STANDALONE_COMPILE": lambda: (
         os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1"
-    ),
-    # Inductor's pre-grad passes don't do anything for vLLM.
-    # The pre-grad passes get run even on cache-hit and negatively impact
-    # vllm cold compile times by O(1s)
-    # Can remove this after the following issue gets fixed
-    # TODO(luka): maybe_inplace requires this
-    # https://github.com/pytorch/pytorch/issues/174502
-    "VLLM_ENABLE_PREGRAD_PASSES": lambda: (
-        os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "1") == "1"
     ),
     # Experimental: breakable cudagraph does not rely on torch.compile
     "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
@@ -1117,6 +1068,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "715827880")
     ),
+    # Maximum estimated bytes per prompt in supported media preprocessors.
+    # Set to 0 to disable the preprocessing checks.
+    "VLLM_MAX_MEDIA_PREPROCESSING_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", "715827880")
+    ),
     "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", "256")
     ),
@@ -1231,6 +1187,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Maximum number of stop strings allowed in a single request.
     "VLLM_MAX_STOP_STRINGS": lambda: int(os.environ.get("VLLM_MAX_STOP_STRINGS", "4")),
+    # Maximum number of stop token IDs allowed in a single request.
+    "VLLM_MAX_STOP_TOKEN_IDS": lambda: int(
+        os.environ.get("VLLM_MAX_STOP_TOKEN_IDS", "128")
+    ),
     # Maximum number of tokens allowed for /tokenize, /detokenize, and
     # /v1/messages/count_tokens requests. Defaults to max(max_model_len * 2, 131072);
     # set <= 0 to disable. The --max-tokenize-tokens CLI flag takes precedence.
@@ -1590,7 +1550,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set to "0", disable LayerName opaque type for layer_name
-    # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
+    # parameters in custom ops.
     "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
     # If set, use the Rust frontend binary instead of the Python API server
     # process(es).
@@ -2199,13 +2159,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES": lambda: bool(
         int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))
     ),
-    # Name of the shared memory buffer used for object storage.
-    # Only effective when mm_config.mm_processor_cache_type == "shm".
-    # Automatically generates a unique UUID-based name per process tree
-    # if not explicitly set.
-    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": get_env_or_set_default(
-        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-        _generate_shm_name,
+    # Deprecated: use mm_config.mm_shm_cache_buffer_name instead.
+    # This environment variable will be removed in v0.36.0.
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": lambda: os.getenv(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"
     ),
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
@@ -2365,9 +2322,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # How weight updates reload the model: "layerwise" rebuilds each layer
     # from the checkpoint tensors; "direct" writes them into the live
-    # tensors and reruns post-load processing in place.
+    # tensors and reruns post-load processing in place; "auto" reloads
+    # directly with runtime weight updates where supported, else layerwise.
     "VLLM_RELOAD_MODE": env_with_choices(
-        "VLLM_RELOAD_MODE", "layerwise", ["layerwise", "direct"]
+        "VLLM_RELOAD_MODE", "auto", ["auto", "layerwise", "direct"]
     ),
     # Max descriptors per CPU-KV-offload batch-memcpy call. 0 = platform default
     # (ROCm chunks at 8192, since hipMemcpyBatchAsync faults above that on
@@ -2634,6 +2592,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB",
         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",
+        "VLLM_MAX_MEDIA_PREPROCESSING_BYTES",
         "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
@@ -2654,6 +2613,15 @@ def compile_factors() -> dict[str, object]:
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
+        # Install-time switches, like VLLM_SKIP_VERSION_SUFFIX above.
+        "VLLM_USE_PRECOMPILED",
+        "VLLM_USE_PRECOMPILED_RUST",
+        "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX",
+        # Frontend selection: the Python and Rust frontends drive the same
+        # engine graphs.
+        "VLLM_USE_RUST_FRONTEND",
+        "VLLM_USE_RUST_BENCH",
+        "VLLM_RUST_FRONTEND_PATH",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
         # Where Engram host tables live; the GPU views and graphs are the same.

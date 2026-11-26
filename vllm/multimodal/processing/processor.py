@@ -40,7 +40,7 @@ from ..inputs import (
     PlaceholderRange,
 )
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
-from .context import BaseProcessingInfo, TimingContext
+from .context import BaseProcessingInfo, TimingContext, profiling_media
 from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
 from .inputs import ProcessorInputs
 
@@ -1114,10 +1114,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processor_inputs.cache = cache
 
-        mm_inputs = self.apply(
-            processor_inputs,
-            timing_ctx=TimingContext(enabled=False),
-        )
+        with profiling_media():
+            mm_inputs = self.apply(
+                processor_inputs,
+                timing_ctx=TimingContext(enabled=False),
+            )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -1865,6 +1866,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     skip_decoder_start_token: bool = False
+    """Set this if the decoder prompt always carries its complete prefix,
+    so the decoder start token must not be prepended to it."""
+
+    def should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        """Whether to leave the decoder start token out of this decoder prompt.
+
+        Override this instead of setting `skip_decoder_start_token` if only
+        some decoder prompts carry their complete prefix.
+        """
+        return self.skip_decoder_start_token
 
     @abstractmethod
     def create_encoder_prompt(

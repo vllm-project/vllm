@@ -65,7 +65,9 @@ pub struct CompletionRequest {
     pub model: Option<String>,
 
     /// The prompt(s) to generate completions for.
-    pub prompt: CompletionPrompt,
+    ///
+    /// `None` (missing or null) is rejected when the request is lowered.
+    pub prompt: Option<CompletionPrompt>,
 
     /// Echo back the prompt in addition to the completion
     #[serde(default)]
@@ -376,7 +378,7 @@ mod tests {
     fn prompt_accepts_one_prompt_or_a_batch_of_one_kind() {
         let prompts = |prompt: Value| {
             serde_json::from_value::<CompletionRequest>(json!({ "prompt": prompt }))
-                .map(|request| request.prompt.into_prompts())
+                .map(|request| request.prompt.unwrap().into_prompts())
         };
         assert_eq!(prompts(json!("a")).unwrap(), [Prompt::Text("a".into())]);
         assert_eq!(

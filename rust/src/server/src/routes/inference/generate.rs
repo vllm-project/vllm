@@ -232,6 +232,7 @@ async fn generate_chunk_stream(
         enable_log_requests,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -246,6 +247,8 @@ async fn generate_chunk_stream(
     mut mm_info: Option<MmResponseInfo>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     pin_mut!(stream);
     let mut prompt_token_ids = None;
     // Like Python, continuous usage counts tokens only; the final usage chunk
@@ -288,6 +291,7 @@ async fn generate_chunk_stream(
             token_ids,
             logprobs,
             sampling_mask,
+            ..
         } = sampled;
         continuous_usage.add_output_tokens(token_ids.len());
 

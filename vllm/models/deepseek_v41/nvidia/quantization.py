@@ -5,9 +5,9 @@
 `DeepseekV4FP8Config` asks this module, on CUDA only, for the methods of
 the MXFP8 linear layers and of the MXFP4 routed experts:
 
-- On A100 (SM80) and H100 (SM90) the MXFP8 linear layers run as BF16 GEMMs on
-  weights dequantized once at load, and decode steps of a few rows on an FP8
-  GEMV kernel that reads a packed copy of the FP8 weights.
+- On A100 (SM80) and H100 (SM90, except at TP1) the MXFP8 linear layers run
+  as BF16 GEMMs on weights dequantized once at load, and decode steps of a few
+  rows on an FP8 GEMV kernel that reads a packed copy of the FP8 weights.
 - On A100 and H100 the Marlin MXFP4 experts pad the per-rank intermediate
   size to a multiple of 64 instead of 128, and leave their top-k reduction to
   the next mHC boundary. vLLM picks the experts' backend: Marlin on A100,
@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
@@ -56,10 +57,14 @@ def mxfp8_linear_as_bf16() -> bool:
     H100 (SM90), whose MXFP8 kernels (Marlin, Humming) are slower than cuBLAS
     on the weights dequantized once at load at decode sizes. SM80 always does
     (its attention reads the BF16 `wo_a` weight); SM90 only when no MXFP8
-    linear backend is requested explicitly."""
+    linear backend is requested explicitly and not at TP1, where every rank
+    holds whole dense layers and the BF16 copy and the GEMV's packed copy cost
+    12.4 GiB per GPU for DeepSeek-V4.1-Flash, against about 1% of decode time."""
     if current_platform.is_device_capability(80):
         return True
     if not current_platform.is_device_capability(90):
+        return False
+    if get_tensor_model_parallel_world_size() == 1:
         return False
     kernel_config = get_current_vllm_config().kernel_config
     overrides = kernel_config.linear_backend_per_quant or {}
