@@ -846,6 +846,44 @@ def test_turboquant_boundary_selection_is_not_cached_from_ordinary_run(
     ]
 
 
+def test_ultraquant_boundary_selection_shares_a_layout(
+    cleared_attention_selector_cache,
+    monkeypatch,
+):
+    """Automatic selection for an ultraquant_4bit run must give the native-dtype
+    boundary layers a backend whose KV layout ULTRAQUANT can share; otherwise
+    get_supported_kv_cache_layouts() fails at engine startup."""
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx1201", lambda: False)
+    monkeypatch.setattr(rocm, "on_gfx1100", lambda: False)
+    from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+    from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
+    from vllm.v1.attention.selector import get_attn_backend
+
+    ultraquant_config = VllmConfig(
+        cache_config=CacheConfig(cache_dtype="ultraquant_4bit")
+    )
+    backend_priorities = [
+        AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.ULTRAQUANT,
+    ]
+    with (
+        patch(
+            "vllm.platforms.rocm._get_backend_priorities",
+            return_value=backend_priorities,
+        ),
+        set_current_vllm_config(ultraquant_config),
+    ):
+        boundary_backend = get_attn_backend(128, torch.bfloat16, "auto")
+        quantized_backend = get_attn_backend(128, torch.bfloat16, "ultraquant_4bit")
+
+    assert quantized_backend is AttentionBackendEnum.ULTRAQUANT.get_class()
+    assert boundary_backend is not AttentionBackendEnum.ROCM_ATTN.get_class()
+    assert get_supported_kv_cache_layouts([boundary_backend, quantized_backend])
+
+
 def test_turboquant_run_does_not_mask_unsupported_selected_backend(
     turboquant_run_config,
 ):
