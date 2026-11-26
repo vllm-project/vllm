@@ -501,6 +501,21 @@ class ServingTokens(GenerateBaseServing):
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
             mm_kwargs = mm_kwargs_from_features(features)
+            # These tensors were rendered on the P0 server and were not
+            # recorded in its processor cache. Keep them out of the P1 LRU too.
+            kwargs_data = features.kwargs_data or {}
+            for modality, items in mm_kwargs.items():
+                full_tensor_items = kwargs_data.get(modality)
+                if full_tensor_items is None:
+                    continue
+                for item, full_tensor_data in zip(
+                    items, full_tensor_items, strict=True
+                ):
+                    if full_tensor_data is None:
+                        continue
+                    if item is not None:
+                        for elem in item.values():
+                            elem.skip_mm_cache = True
             self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes)
 
             token_ids = request.token_ids

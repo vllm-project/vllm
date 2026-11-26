@@ -3,9 +3,13 @@
 
 """Tests for P1 receiver-side multimodal cache behavior."""
 
+from unittest.mock import MagicMock, Mock
+
 import pytest
 
+from vllm import SamplingParams
 from vllm.config.multimodal import MultiModalConfig
+from vllm.inputs.engine import mm_input
 from vllm.multimodal.cache import (
     LruKeyReplicatedReceiverCache,
     MultiModalCacheMissError,
@@ -16,6 +20,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.engine.input_processor import InputProcessor
 
 # =====================================================================
 # Helpers
@@ -114,3 +119,54 @@ class TestReceiverSkipMmCache:
         with pytest.raises(MultiModalCacheMissError) as exc_info:
             _call_receiver(cache, _make_feature("image-skipped", None))
         assert exc_info.value.mm_hashes == ["image-skipped"]
+
+
+class TestInputProcessorSkipMmCache:
+    def test_skip_flag_is_preserved_per_feature(self, monkeypatch):
+        processor = InputProcessor.__new__(InputProcessor)
+        processor.vllm_config = MagicMock()
+        processor.vllm_config.parallel_config.data_parallel_size = 1
+        processor.vllm_config.parallel_config.data_parallel_size_local = 1
+        processor.vllm_config.parallel_config.local_engines_only = False
+        processor.renderer = MagicMock()
+        processor.renderer.get_eos_token_id.return_value = None
+        processor.renderer.tokenizer = None
+        processor.generation_config_fields = {}
+        processor._validate_params = Mock(return_value=True)
+        processor._validate_lora = Mock()
+        processor._validate_model_inputs = Mock()
+        processor.apply_watermarking = Mock()
+        processor._get_mm_identifier = lambda mm_hash, lora_request: mm_hash
+
+        monkeypatch.setattr(
+            "vllm.v1.engine.input_processor.current_platform.validate_request",
+            lambda engine_input, params: None,
+        )
+
+        skipped_item = _make_item()
+        for elem in skipped_item.values():
+            elem.skip_mm_cache = True
+        cached_item = _make_item()
+        prompt = mm_input(
+            prompt_token_ids=[1, 2],
+            mm_kwargs={"image": [skipped_item, cached_item]},
+            mm_hashes={"image": ["image-skipped", "image-cached"]},
+            mm_placeholders={
+                "image": [
+                    PlaceholderRange(offset=0, length=1),
+                    PlaceholderRange(offset=1, length=1),
+                ]
+            },
+        )
+
+        request = processor.process_inputs(
+            "req-skip-mm-cache",
+            prompt,
+            SamplingParams(max_tokens=1, temperature=0.0),
+            ("generate",),
+        )
+
+        assert [feature.skip_mm_cache for feature in request.mm_features] == [
+            True,
+            False,
+        ]
