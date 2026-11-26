@@ -24,3 +24,15 @@ def test_registry_resolves_drex():
     from vllm.model_executor.models.qwen3_5_drex import Qwen3_5ForDrex
 
     assert ModelRegistry.models["Qwen3_5ForDrex"].load_model_cls() is Qwen3_5ForDrex
+
+
+def test_text_backbone_reads_the_drex_head_marker():
+    """A Drex repo declares the plain text model type, so that type needs the
+    Qwen3.5 arch convertor to look for ``head.pt``."""
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        MODEL_ARCH_CONFIG_CONVERTORS,
+        Qwen3_5ModelArchConfigConvertor,
+    )
+
+    convertor = MODEL_ARCH_CONFIG_CONVERTORS.get("qwen3_5_text")
+    assert convertor is Qwen3_5ModelArchConfigConvertor
