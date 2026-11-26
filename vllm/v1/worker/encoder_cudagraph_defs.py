@@ -107,6 +107,10 @@ class EncoderCudaGraphConfig:
     product), so the total number of captured graphs is
     `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
+    eager_fallback_fast_path: bool = False
+    """Opt in to skip full-fallback staging when eager accepts unsorted inputs.
+    Oversized output views are compacted in a batch."""
+
     requires_exact_token_budget: bool = False
     """Only replay an exact token count when padding can change valid outputs."""
 
