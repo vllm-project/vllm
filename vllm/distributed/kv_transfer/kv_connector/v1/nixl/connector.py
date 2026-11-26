@@ -294,9 +294,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is None:
-            return None
-        return self.connector_worker.get_kv_connector_stats()
+        if self.connector_worker is not None:
+            return self.connector_worker.get_kv_connector_stats()
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_kv_connector_stats()
+        return None
 
     @classmethod
     def build_kv_connector_stats(

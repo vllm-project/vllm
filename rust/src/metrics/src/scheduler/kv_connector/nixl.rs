@@ -33,6 +33,9 @@ pub struct NixlStats {
     /// Declined expired-read counter increments collected since the previous update.
     #[serde(default)]
     pub num_declined_expired_reads: Vec<u64>,
+    /// Push-mode registration-expiry counter increments collected since the previous update.
+    #[serde(default)]
+    pub num_registration_expired: Vec<u64>,
 }
 
 // Buckets copied verbatim from the Python `NixlPromMetrics` class so
@@ -91,6 +94,7 @@ pub(super) struct NixlMetrics {
     num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
     num_notifications_after_expiry: Family<EngineLabels, U64Counter>,
     num_declined_expired_reads: Family<EngineLabels, U64Counter>,
+    num_registration_expired: Family<EngineLabels, U64Counter>,
 }
 
 impl NixlMetrics {
@@ -171,6 +175,14 @@ impl NixlMetrics {
             num_declined_expired_reads.clone(),
         );
 
+        let num_registration_expired = Family::default();
+        registry.register(
+            "vllm:nixl_num_registration_expired",
+            "Number of push-mode D-side registrations whose watchdog deadline passed \
+             without a push completion. NOTE: This metric is tracked on the D instance.",
+            num_registration_expired.clone(),
+        );
+
         Self {
             xfer_time_seconds,
             post_time_seconds,
@@ -181,6 +193,7 @@ impl NixlMetrics {
             num_kv_expired_reqs,
             num_notifications_after_expiry,
             num_declined_expired_reads,
+            num_registration_expired,
         }
     }
 
@@ -221,5 +234,8 @@ impl NixlMetrics {
         self.num_declined_expired_reads
             .get_or_create(labels)
             .inc_by(stats.num_declined_expired_reads.iter().sum());
+        self.num_registration_expired
+            .get_or_create(labels)
+            .inc_by(stats.num_registration_expired.iter().sum());
     }
 }

@@ -479,6 +479,7 @@ as interval counts in the same line and via Prometheus (see
 | `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
 | `Num failed transfers` | count | Failed NIXL transfers, handshakes, and completion notifications (`send_notif`) in the interval, grouped because all are sporadic lower-transport-layer events. |
 | `Num KV expired reqs` | count | Requests whose KV blocks expired before being read. Reported separately from the failure counts above because it is an autoscaler/lease-tuning signal rather than a transport issue. |
+| `Num registration expired` | count | Push connector only: D-side registrations that timed out without a push completion. See `vllm:nixl_num_registration_expired` below. |
 
 ### Prometheus metrics
 
@@ -496,6 +497,7 @@ exported when NixlConnector is active:
 | `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). Kept separate from the failure counters above: KV expiry is an autoscaler/lease-tuning signal, not a transport issue. |
 | `vllm:nixl_num_notifications_after_expiry` | Counter | Completion notifications that arrive for a request that is no longer tracked, usually because its KV lease expired first. Pull connector: counted on P, where it means the decoder may have read blocks that were already reused; each matches a "Potentially invalid KV blocks" error log. Push connector: counted on whichever instance tracks the request as neither a send nor a receive (P after the lease expired, or D after the receive completed or was abandoned); each matches an "Unrecognized request" error log. Counted per notification, not per request: each remote rank notifies separately, so with TP > 1 or heterogeneous TP one late request counts several times, and the value is not comparable to `vllm:nixl_num_kv_expired_reqs`. |
 | `vllm:nixl_num_declined_expired_reads` | Counter | Remote reads the consumer declined because the producer's lease had run out before the read reached it (the blocks may have been recycled); each one is a request that follows `kv_load_failure_policy`. Tracked on the reading instance; the producer-side view is `vllm:nixl_num_kv_expired_reqs`. |
+| `vllm:nixl_num_registration_expired` | Counter | Push connector only. D-side registrations whose watchdog deadline (`push_registration_timeout`, default `decoder_kv_blocks_ttl`) passed without a push completion, usually because the prefiller never wrote the KV. Each matches a "registration for request ... timed out" warning log. Counted once per request on the D scheduler, independent of TP size. |
 
 !!! tip
     High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease

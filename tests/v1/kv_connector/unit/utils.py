@@ -684,6 +684,9 @@ def make_nixl_push_scheduler(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
         NixlPushConnectorScheduler,
     )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+        NixlKVConnectorStats,
+    )
 
     sched = object.__new__(NixlPushConnectorScheduler)
 
@@ -730,6 +733,7 @@ def make_nixl_push_scheduler(
         if push_registration_timeout is not None
         else decoder_kv_blocks_ttl
     )
+    sched._xfer_stats = NixlKVConnectorStats()
 
     # Heartbeat fields touched by base request_finished /
     # update_connector_output.

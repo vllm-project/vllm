@@ -42,6 +42,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
@@ -551,6 +552,10 @@ class NixlBaseConnectorScheduler:
         self._reqs_need_send = {}
 
         return meta
+
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
+        """Scheduler-side stats; none by default."""
+        return None
 
     def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
         """Stop heartbeating for requests whose KV transfer completed."""

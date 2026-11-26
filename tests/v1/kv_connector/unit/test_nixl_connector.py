@@ -2162,6 +2162,7 @@ def test_kv_connector_stats_failure_grouping():
     stats.record_kv_expired_req()
     stats.record_notification_after_expiry()
     stats.record_declined_expired_read()
+    stats.record_registration_expired()
     assert not stats.is_empty()
 
     # No successful transfers: latency stats are zero but the failure
@@ -2172,6 +2173,7 @@ def test_kv_connector_stats_failure_grouping():
     assert reduced["Num KV expired reqs"] == 1
     assert reduced["Num notifs after expiry"] == 1
     assert reduced["Num declined expired reads"] == 1
+    assert reduced["Num registration expired"] == 1
 
 
 def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
@@ -2218,6 +2220,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     stats.record_kv_expired_req()
     stats.record_notification_after_expiry()
     stats.record_declined_expired_read()
+    stats.record_registration_expired()
     prom.observe(stats.data, engine_idx=0)
 
     def counter_value(name: str) -> float:
@@ -2231,6 +2234,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
     assert counter_value("vllm:nixl_num_notifications_after_expiry_total") == 1.0
     assert counter_value("vllm:nixl_num_declined_expired_reads_total") == 1.0
+    assert counter_value("vllm:nixl_num_registration_expired_total") == 1.0
 
 
 @patch(

@@ -31,12 +31,16 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
     ReqId,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+    NixlKVConnectorStats,
 )
 from vllm.logger import init_logger
 
@@ -99,6 +103,15 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 self.decoder_kv_blocks_ttl,
             )
         )
+
+        # Recorded here rather than on the workers so each event counts once
+        # regardless of TP size.
+        self._xfer_stats = NixlKVConnectorStats()
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self._xfer_stats.is_empty():
+            return None
+        return self._xfer_stats.clone_and_reset()
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -325,6 +338,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 rid,
                 self._push_registration_timeout,
             )
+            self._xfer_stats.record_registration_expired()
 
         # D side: package pending registrations for D workers to send out.
         if self._push_pending_registrations:

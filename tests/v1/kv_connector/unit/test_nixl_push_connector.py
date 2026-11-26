@@ -39,6 +39,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+    NixlPushConnector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -326,6 +329,45 @@ class TestPushScheduler:
         assert d_req.request_id not in sched._push_registration_deadlines
         assert d_req.request_id not in sched._push_pending_registrations
         assert d_req.request_id not in meta.push_registrations
+        stats = sched.get_kv_connector_stats()
+        assert stats is not None
+        assert stats.data["num_registration_expired"] == [1]
+        assert sched.get_kv_connector_stats() is None
+
+    def test_registration_watchdog_no_expiry_records_nothing(self):
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+
+        d_req = _make_request(request_id="req-d-fresh")
+        sched.update_state_after_alloc(
+            d_req, _BlocksMock(([7, 8],)), num_external_tokens=32
+        )
+
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_new_reqs = []
+        scheduler_output.scheduled_cached_reqs = MagicMock(
+            req_ids=[], resumed_req_ids=set()
+        )
+        with patch.object(
+            sched.__class__.__mro__[1],
+            "build_connector_meta",
+            return_value=NixlConnectorMetadata(),
+        ):
+            sched.build_connector_meta(scheduler_output)
+
+        assert sched.get_kv_connector_stats() is None
+
+    def test_scheduler_role_connector_reports_scheduler_stats(self):
+        sched = make_nixl_push_scheduler()
+        sched._xfer_stats.record_registration_expired()
+        connector = NixlPushConnector.__new__(NixlPushConnector)
+        connector.connector_worker = None
+        connector.connector_scheduler = sched
+
+        stats = connector.get_kv_connector_stats()
+
+        assert stats is not None
+        assert stats.data["num_registration_expired"] == [1]
 
 
 # ----------------------------------------------------------------- #
