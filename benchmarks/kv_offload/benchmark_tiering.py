@@ -11,7 +11,7 @@ metrics. The tier configuration is set with `--mode`:
 
 Run the quick scenarios against the FS tier:
     python benchmarks/kv_offload/benchmark_tiering.py --mode fs \
-        --fs-dir /mnt/nvme bench
+        --fs-dir /mnt/nvme --fs-read-threads 16 --fs-write-threads 16 bench
 
 Run all scenarios against the FS tier:
     python benchmarks/kv_offload/benchmark_tiering.py --mode fs \
@@ -140,6 +140,24 @@ class Capacity:
 
     def is_materialized(self) -> bool:
         return all([x is not None for x in [self.bytes, self.requests]])
+
+
+@dataclass(frozen=True)
+class FsOptions:
+    root_dir: Path
+    n_read_threads: int | None
+    n_write_threads: int | None
+
+    def tier_config(self) -> dict[str, str | int]:
+        config: dict[str, str | int] = {
+            "type": "fs",
+            "root_dir": str(self.root_dir) + "/",
+        }
+        if self.n_read_threads is not None:
+            config["n_read_threads"] = self.n_read_threads
+        if self.n_write_threads is not None:
+            config["n_write_threads"] = self.n_write_threads
+        return config
 
 
 @dataclass
@@ -354,10 +372,10 @@ class BenchmarkRun:
         session_dir: Path,
         port: int,
         max_seconds: int,
-        fs_dir: Path | None = None,
+        fs_options: FsOptions | None = None,
     ) -> None:
+        self.fs_options = fs_options
         self.spec = spec
-        self.fs_dir = fs_dir
         self.port = port
         self.max_seconds = max_seconds
         self.mode = mode
@@ -403,8 +421,10 @@ class BenchmarkRun:
 
     def _cleanup(self) -> None:
         if self.mode == "fs":
-            self.fs_dir.mkdir(parents=True, exist_ok=True)
-            for entry in self.fs_dir.iterdir():
+            assert self.fs_options is not None
+            root_dir = self.fs_options.root_dir
+            root_dir.mkdir(parents=True, exist_ok=True)
+            for entry in root_dir.iterdir():
                 if entry.is_dir():
                     shutil.rmtree(entry)
                 else:
@@ -422,12 +442,8 @@ class BenchmarkRun:
             "block_size": self.spec.offload_block_size,
         }
         if self.mode == "fs":
-            extra["secondary_tiers"] = [
-                {
-                    "type": "fs",
-                    "root_dir": str(self.fs_dir) + "/",
-                }
-            ]
+            assert self.fs_options is not None
+            extra["secondary_tiers"] = [self.fs_options.tier_config()]
         config = {
             "kv_connector": "OffloadingConnector",
             "kv_role": "kv_both",
@@ -447,9 +463,9 @@ class BenchmarkSession:
         specs: list[Scenario],
         port: int,
         max_seconds: int,
-        fs_dir: Path | None = None,
+        fs_options: FsOptions | None = None,
     ) -> None:
-        self.fs_dir = fs_dir
+        self.fs_options = fs_options
         self.specs = specs
         self.port = port
         self.max_seconds = max_seconds
@@ -478,7 +494,7 @@ class BenchmarkSession:
                 self.session_dir,
                 self.port,
                 self.max_seconds,
-                self.fs_dir,
+                self.fs_options,
             ).execute()
             self.results.append(result)
             self._checkpoint()
@@ -547,6 +563,33 @@ def main() -> None:
         sys.exit(f"ERROR: {e}")
 
 
+def add_fs_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("Filesystem tier options")
+    group.add_argument("--fs-dir", type=Path, help="folder backing the FS tier")
+    group.add_argument(
+        "--fs-read-threads",
+        type=int,
+        default=16,
+        help="number of read-priority I/O threads",
+    )
+    group.add_argument(
+        "--fs-write-threads",
+        type=int,
+        default=16,
+        help="number of write-priority I/O threads",
+    )
+
+
+def parse_fs_options(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> FsOptions | None:
+    if args.mode != "fs":
+        return None
+    if args.fs_dir is None:
+        parser.error("--mode fs requires --fs-dir")
+    return FsOptions(args.fs_dir, args.fs_read_threads, args.fs_write_threads)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -569,11 +612,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="fs",
         help="tier configuration (default: %(default)s)",
     )
-    parser.add_argument(
-        "--fs-dir",
-        type=Path,
-        help="folder backing the FS tier (fs mode only)",
-    )
+    add_fs_args(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     bench = subparsers.add_parser(
@@ -633,7 +672,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
 
     by_name = {sc.name: sc for sc in SCENARIOS}
     if args.command == "list":
@@ -652,11 +692,7 @@ def _main() -> None:
         print(f"PER_GROUP_BLOCK_BYTES={per_group_block_bytes}")
         return
 
-    if args.mode == "fs":
-        if args.fs_dir is None:
-            sys.exit("--mode fs requires an fs_dir")
-    elif args.fs_dir is not None:
-        sys.exit(f"--mode {args.mode} does not use an fs_dir")
+    fs_options = parse_fs_options(parser, args)
 
     if args.command == "run":
         specs = [
@@ -697,7 +733,7 @@ def _main() -> None:
     except (RuntimeError, subprocess.CalledProcessError) as e:
         sys.exit(f"Preflight failed: {e}")
 
-    BenchmarkSession(args.mode, specs, args.port, args.bench_seconds, args.fs_dir).run()
+    BenchmarkSession(args.mode, specs, args.port, args.bench_seconds, fs_options).run()
 
 
 if __name__ == "__main__":
