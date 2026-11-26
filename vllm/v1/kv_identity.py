@@ -80,7 +80,7 @@ def kv_config_digest(vllm_config: VllmConfig) -> str:
 
 def compute_kv_identity(vllm_config: VllmConfig, config_digest: str) -> KVIdentity:
     """Compute the identity, with the weights identified by the model path and
-    revision."""
+    resolved revision."""
     weights = path_checkpoint_digest(vllm_config.model_config, vllm_config.load_config)
 
     components = {

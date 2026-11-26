@@ -12,7 +12,8 @@ def path_checkpoint_digest(
     factors: dict[str, object] = {
         "model": model_config.model,
         "model_weights": model_config.model_weights,
-        "revision": model_config.revision,
+        # The commit a branch such as `main` resolved to.
+        "revision": getattr(model_config.revision, "resolved", model_config.revision),
         "load_format": str(load_config.load_format),
     }
     return {"weights": hash_factors(factors), "weights_source": "path"}

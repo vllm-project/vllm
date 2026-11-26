@@ -6,6 +6,7 @@ identity must change with what computes the KV and nothing else."""
 import dataclasses
 
 import pytest
+from huggingface_hub import ResolvedRevision
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.v1.kv_identity import (
@@ -60,6 +61,16 @@ def test_settings_outside_kv_keep_identity(kwargs):
 )
 def test_settings_that_change_kv_change_identity(kwargs):
     assert _identity(**kwargs) != _identity()
+
+
+def test_moving_branch_identifies_weights_by_commit():
+    """Two commits behind `main` hold different weights."""
+    config = VllmConfig(model_config=ModelConfig(MODEL))
+    weights = set()
+    for commit in ("a" * 40, "b" * 40):
+        config.model_config.revision = ResolvedRevision(commit, initial="main")
+        weights.add(compute_kv_identity(config, "").components["weights"])
+    assert len(weights) == 2
 
 
 def test_engine_reports_identity(vllm_runner):
