@@ -108,6 +108,51 @@ def test_flex_attention_full_cudagraphs(vllm_runner):
     )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
+)
+def test_flex_attention_full_cudagraphs_mixed_sliding_windows(vllm_runner):
+    """Full CUDA graphs match eager when sliding window and full attention
+    layers share one KV cache group."""
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+    num_layers = 28
+    hf_overrides = {
+        "use_sliding_window": True,
+        "sliding_window": 16,
+        "max_window_layers": num_layers,
+        "layer_types": [
+            "full_attention" if i % 4 == 3 else "sliding_attention"
+            for i in range(num_layers)
+        ],
+    }
+    prompts = [
+        f"Write a short story about the number {i}." * (1 + i % 7) for i in range(64)
+    ]
+    outputs = {}
+    for enforce_eager in (True, False):
+        set_random_seed(42)
+        with vllm_runner(
+            model_name,
+            runner="generate",
+            max_model_len=4096,
+            enforce_eager=enforce_eager,
+            gpu_memory_utilization=0.85,
+            hf_overrides=hf_overrides,
+            disable_hybrid_kv_cache_manager=True,
+            attention_config={"backend": "FLEX_ATTENTION"},
+            compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
+        ) as llm:
+            outputs[enforce_eager] = llm.generate_greedy_logprobs(prompts, 32, 5)
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[True],
+        outputs_1_lst=outputs[False],
+        name_0="eager",
+        name_1="full_cudagraphs",
+    )
+
+
 def windowed_causal_mask_mod(b, h, q_idx, kv_idx):
     return (kv_idx <= q_idx) & (q_idx - kv_idx < 4)
 

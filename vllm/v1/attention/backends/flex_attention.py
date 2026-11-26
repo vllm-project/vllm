@@ -4,7 +4,7 @@
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import Any, ClassVar, NamedTuple
 
@@ -404,6 +404,10 @@ class FlexAttentionMetadata:
     # generated tokens. Both must be set to enable.
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+
+    # Block masks built ahead of time for each sliding window in the KV cache
+    # group, so layers can switch windows inside a full CUDA graph.
+    window_block_masks: dict[int | None, BlockMask] | None = None
 
     @cached_property
     def logical_block_ids(self):
@@ -857,12 +861,19 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             != AttentionType.ENCODER_ONLY
         )
         uses_paged_kv = self.uses_paged_kv
-        sliding_windows = {
+        self.sliding_windows = {
             getattr(layer.impl, "sliding_window", None) for layer in layers.values()
         }
         self.sliding_window = (
-            sliding_windows.pop() if len(sliding_windows) == 1 else None
+            next(iter(self.sliding_windows)) if len(self.sliding_windows) == 1 else None
         )
+        # A layer's block_sparsity_hint rebuilds the mask into the shared buffer
+        # in forward, which would overwrite a prebuilt mask.
+        self.prebuild_window_masks = len(self.sliding_windows) > 1 and all(
+            getattr(layer, "block_sparsity_hint", None) is None
+            for layer in layers.values()
+        )
+        self.window_kv_buffers: dict[int | None, tuple[torch.Tensor, torch.Tensor]] = {}
         self.direct_build: bool = True
 
         self.q_block_size, self.kv_block_size = self._get_block_sizes(
@@ -1143,7 +1154,37 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             else:
                 out.block_mask = out.build_block_mask()
 
+        if (
+            self._uses_full_cudagraphs()
+            and self.prebuild_window_masks
+            and out.direct_build
+            and not use_rswa
+        ):
+            out.window_block_masks = {out.sliding_window: out.block_mask}
+            for window in self.sliding_windows - {out.sliding_window}:
+                out.window_block_masks[window] = self._build_window_block_mask(
+                    out, window
+                )
+
         return out
+
+    def _build_window_block_mask(
+        self, metadata: FlexAttentionMetadata, window: int | None
+    ) -> BlockMask:
+        if window not in self.window_kv_buffers:
+            self.window_kv_buffers[window] = (
+                torch.empty_like(self.persistent_kv_indices),
+                torch.empty_like(self.persistent_kv_num_blocks),
+            )
+        kv_indices, kv_num_blocks = self.window_kv_buffers[window]
+        return replace(
+            metadata,
+            sliding_window=window,
+            block_mask=None,
+            window_block_masks=None,
+            persistent_kv_indices=kv_indices,
+            persistent_kv_num_blocks=kv_num_blocks,
+        )._build_block_mask_direct()
 
 
 class FlexAttentionImpl(AttentionImpl):
@@ -1299,7 +1340,12 @@ class FlexAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         needs_rebuild_block_mask = False
-        if attn_metadata.sliding_window != self.sliding_window:
+        window_block_masks = attn_metadata.window_block_masks
+        if window_block_masks and self.sliding_window in window_block_masks:
+            attn_metadata.sliding_window = self.sliding_window
+            attn_metadata.block_mask = window_block_masks[self.sliding_window]
+            attn_metadata.mask_mod = attn_metadata.block_mask.mask_mod
+        elif attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
                 # update mask mod in attention metadata
