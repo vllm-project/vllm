@@ -510,22 +510,7 @@ class VllmConfig:
     additional_config: dict | SupportsCompileFactors = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
-    you are using. Contents must be hashable.
-
-    Known keys:
-    - `audio_bucket_seconds` (`list[float]`): enable encoder length
-      bucketing for padded audio encoders by bucketing items into these
-      second-length rungs (e.g. `[2, 4, 8, 16, 30]`). Off by default; a model opts
-      in by declaring an encoder bucketing spec, which `qwen2_audio` does today.
-      Its encoder is mask-aware, so the crop is bit-exact.
-    - `audio_bucket_budget` (`int`): enable compute-budget merging by
-      bounding the compute (items x padded frames) of one encoder call.
-      Oversized groups split into balanced chunks while under-filled groups
-      fold into their larger neighbor (trigger = `budget // 6`), so long
-      rungs get small per-call batches and short rungs large ones. Off by
-      default (unset = one call per rung). A budget of 16 x the largest rung in
-      frames is a good starting point.
-    """
+    you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
     optimization_level: OptimizationLevel = OptimizationLevel.O2

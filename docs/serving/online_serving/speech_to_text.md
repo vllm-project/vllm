@@ -236,8 +236,5 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 ## Encoder Length Bucketing
 
 Batching clips of different durations makes every item pay for the longest one's
-padding. Encoder length bucketing regroups such a batch by true item length and
-is opt-in via `additional_config.audio_bucket_seconds`; it currently applies to
-Qwen2-Audio. See
-[Encoder Length Bucketing](../../configuration/optimization.md#encoder-length-bucketing)
-for usage, configuration, losslessness and measured gains.
+padding; [encoder length bucketing](../../configuration/optimization.md#encoder-length-bucketing)
+regroups such a batch by true item length (opt-in, currently Qwen2-Audio).
