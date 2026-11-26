@@ -1431,7 +1431,7 @@ def test_skip_mm_cache_avoids_receiver_eviction_and_drift():
     """skip_mm_cache=True reuses processor-only cache without updating receiver cache.
 
     Covers both direct renderer + _mm_processor_only_cache behavior and
-    pre-rendered features passed via mm_input(..., skip_mm_cache=True),
+    pre-rendered features passed via mm_input(...),
     verifying P1 receiver cache is neither mutated nor evicted and later
     cache-hit lookups still succeed.
     """
@@ -1483,24 +1483,26 @@ def test_skip_mm_cache_avoids_receiver_eviction_and_drift():
     assert "image_SKIP_LOCAL" not in receiver._cache
     assert list(receiver._cache.order) == ["image_A", "image_B"]
 
-    # 3. Pre-rendered /generate features path via mm_input(..., skip_mm_cache=True):
-    # bypasses local sender cache, propagates skip_mm_cache=True through
-    # MultiModalInput -> MultiModalFeatureSpec, and leaves P1 untouched.
+    # 3. Pre-rendered /generate features path via mm_input(...): the per-feature
+    # skip flag leaves P1 untouched.
     built_input = mm_input(
         prompt_token_ids=[1, 2, 3],
         mm_kwargs=MultiModalKwargsItems({"image": [item_skip_features]}),
         mm_hashes={"image": ["image_SKIP_FEATURES"]},
         mm_placeholders={"image": [PlaceholderRange(offset=1, length=1)]},
-        skip_mm_cache=True,
     )
-    assert built_input.get("skip_mm_cache") is True
+    for elem in built_input["mm_kwargs"]["image"][0].values():
+        elem.skip_mm_cache = True
 
     out_features = receiver.get_and_update_features(
         [
             _feature(
                 "image_SKIP_FEATURES",
                 built_input["mm_kwargs"]["image"][0],
-                skip_mm_cache=bool(built_input.get("skip_mm_cache", False)),
+                skip_mm_cache=all(
+                    elem.skip_mm_cache
+                    for elem in built_input["mm_kwargs"]["image"][0].values()
+                ),
             )
         ]
     )
