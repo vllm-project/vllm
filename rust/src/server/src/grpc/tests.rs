@@ -3740,6 +3740,10 @@ async fn render_raw_chat_returns_rendered_prompt_token_ids_and_reasoning_gate() 
         render_token_ids("user: Weather in Paris?\nassistant:")
     );
     assert_eq!(rendered.structured_output, None);
+    assert_eq!(
+        rendered.render_fingerprint,
+        "rf1:0000000000000000000000000000000000000000000000000000000000000000:vllm-rs/test;renderer=hf;tokenizer=vllm-tokenizer/test"
+    );
     let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
     assert_eq!(
         gate.chat_template_kwargs,
