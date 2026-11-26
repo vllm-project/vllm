@@ -23,20 +23,10 @@ use super::{
 };
 
 impl FrontendConfig {
-    fn engine_core(&self) -> &EngineCoreConfig {
-        let LlmSource::EngineCore(config) = &self.llm_source else {
-            panic!("expected engine-core config");
-        };
-        config
-    }
-
     /// Validate both halves, as the server does before starting.
     fn validate(&self) -> anyhow::Result<()> {
         self.server.validate()?;
-        if let LlmSource::EngineCore(config) = &self.llm_source {
-            config.validate(&self.server)?;
-        }
-        Ok(())
+        self.engine_core.validate(&self.server)
     }
 }
 
@@ -1118,7 +1108,7 @@ fn serve_args_forward_stream_interval_to_frontend_config() {
     };
     let frontend_config =
         args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
-    assert_eq!(frontend_config.engine_core().stream_interval.get(), 4);
+    assert_eq!(frontend_config.engine_core.stream_interval.get(), 4);
 
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -1149,7 +1139,7 @@ fn queue_limits_reach_frontend_config() {
     let frontend_config =
         args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert_eq!(
-        frontend_config.engine_core().admission_limits,
+        frontend_config.engine_core.admission_limits,
         AdmissionLimits {
             max_num_queued_reqs: Some(64),
             max_num_queued_tokens: Some(32_000),
@@ -1174,7 +1164,7 @@ fn queue_limits_reach_frontend_config() {
         panic!("expected frontend args");
     };
     assert_eq!(
-        args.into_config().engine_core().admission_limits,
+        args.into_config().engine_core.admission_limits,
         AdmissionLimits {
             max_num_queued_reqs: None,
             max_num_queued_tokens: Some(8192),
@@ -1200,10 +1190,10 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     assert_eq!(config.server.api_server_options.max_n_sequences, 16384);
     assert!(!config.server.keep_alive_on_engine_death);
     assert_eq!(
-        config.engine_core().log_stats_interval,
+        config.engine_core.log_stats_interval,
         Some(Duration::from_secs(10))
     );
-    assert!(!config.engine_core().disable_request_id_randomization);
+    assert!(!config.engine_core.disable_request_id_randomization);
     assert!(!config.server.api_server_options.skip_model_name_validation);
     assert_eq!(
         config.server.api_server_options.request_body_limit_bytes,
@@ -1239,10 +1229,10 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     assert_eq!(config.server.api_server_options.max_n_sequences, 8);
     assert!(config.server.keep_alive_on_engine_death);
     assert_eq!(
-        config.engine_core().log_stats_interval,
+        config.engine_core.log_stats_interval,
         Some(Duration::from_millis(2500))
     );
-    assert!(config.engine_core().disable_request_id_randomization);
+    assert!(config.engine_core.disable_request_id_randomization);
     assert!(config.server.api_server_options.skip_model_name_validation);
     assert_eq!(
         config.server.api_server_options.request_body_limit_bytes,
@@ -1453,10 +1443,7 @@ fn remote_generation_resolves_frontend_only_config() {
     };
     for (flag, expected) in [(None, None), (Some("1K"), Some(1024))] {
         serve.managed_engine.max_model_len = flag.map(String::from);
-        let FrontendConfig {
-            llm_source: LlmSource::RemoteGrpc(url),
-            server,
-        } = serve.remote_frontend_config().unwrap().unwrap()
+        let (server, LlmSource::RemoteGrpc(url)) = serve.remote_frontend_config().unwrap().unwrap()
         else {
             panic!("expected a frontend with a remote gRPC source");
         };
@@ -1659,11 +1646,7 @@ fn default_mm_loras_reach_config_and_managed_engine() {
     };
     let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert_eq!(
-        config
-            .engine_core()
-            .default_mm_loras
-            .get(&MmModality::Audio)
-            .map(String::as_str),
+        config.engine_core.default_mm_loras.get(&MmModality::Audio).map(String::as_str),
         Some("org/speech-lora")
     );
     let engine = args.to_managed_engine_config(5555, &topology(&args), None);
@@ -1695,11 +1678,7 @@ fn default_mm_loras_reach_config_and_managed_engine() {
     };
     let config = args.into_config();
     assert_eq!(
-        config
-            .engine_core()
-            .default_mm_loras
-            .get(&MmModality::Image)
-            .map(String::as_str),
+        config.engine_core.default_mm_loras.get(&MmModality::Image).map(String::as_str),
         Some("org/vision-lora")
     );
 }
@@ -2179,7 +2158,7 @@ fn serve_args_parse_lora_modules_in_both_forms() {
             },
         ]
     "#]]
-    .assert_debug_eq(&config.engine_core().lora_modules);
+    .assert_debug_eq(&config.engine_core.lora_modules);
 }
 
 #[test]
@@ -2221,7 +2200,7 @@ fn frontend_args_json_passes_lora_modules_into_config() {
     };
     let config = args.into_config();
     assert_eq!(
-        config.engine_core().lora_modules,
+        config.engine_core.lora_modules,
         vec![LoraModulePath {
             name: "alice".to_string(),
             path: "org/alice".to_string(),
@@ -2600,7 +2579,7 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.max_logprobs, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
     assert_eq!(
-        args.into_config().engine_core().transport_mode.data_parallel_size(),
+        args.into_config().engine_core.transport_mode.data_parallel_size(),
         4
     );
 }
@@ -3258,8 +3237,8 @@ fn custom_histogram_buckets_reach_frontend_config() {
     let frontend_config = args.into_config();
 
     assert_eq!(
-        serve_config.engine_core().custom_histogram_buckets,
-        frontend_config.engine_core().custom_histogram_buckets
+        serve_config.engine_core.custom_histogram_buckets,
+        frontend_config.engine_core.custom_histogram_buckets
     );
     expect![[r#"
         CustomHistogramBuckets(
@@ -3271,7 +3250,7 @@ fn custom_histogram_buckets_reach_frontend_config() {
             },
         )
     "#]]
-    .assert_debug_eq(&serve_config.engine_core().custom_histogram_buckets);
+    .assert_debug_eq(&serve_config.engine_core.custom_histogram_buckets);
 
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -3801,10 +3780,10 @@ fn serve_rank_zero_frontend_hosts_the_coordinator_for_its_single_rank() {
     // Coordinated DP spans both ranks even though this frontend connects to one.
     let config = args.to_frontend_config("tcp://127.0.0.1:13345".to_string(), &topology(&args));
     assert_eq!(
-        config.engine_core().effective_coordinator_mode(true),
+        config.engine_core.effective_coordinator_mode(true),
         Some(EngineCoreCoordinatorMode::InProc)
     );
-    assert_eq!(config.engine_core().effective_coordinator_mode(false), None);
+    assert_eq!(config.engine_core.effective_coordinator_mode(false), None);
 }
 
 #[test]
@@ -3840,7 +3819,7 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
         data_parallel_size,
         local_input_address,
         ..
-    } = &config.engine_core().transport_mode
+    } = &config.engine_core.transport_mode
     else {
         panic!("expected handshake-owned transport");
     };
@@ -3854,7 +3833,7 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
             .as_deref()
             .is_some_and(|address| address.starts_with("ipc://"))
     );
-    assert_eq!(config.engine_core().effective_coordinator_mode(true), None);
+    assert_eq!(config.engine_core.effective_coordinator_mode(true), None);
 
     // The engines dial the rank-0 handshake and this frontend's local one.
     let engine =
@@ -3895,7 +3874,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         "serve",
         "Qwen/Qwen3-0.6B",
         "--handshake-host",
-        "192.0.2.10",
+        "10.99.48.128",
         "--data-parallel-size",
         "4",
     ])
@@ -3904,21 +3883,27 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let mut config =
-        args.to_frontend_config("tcp://192.0.2.10:29550".to_string(), &topology(&args));
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
 
-    let LlmSource::EngineCore(engine_core) = &mut config.llm_source else {
-        panic!("expected engine-core config");
-    };
     let TransportMode::HandshakeOwner {
+        handshake_address,
+        advertised_host,
+        engine_start_index,
+        engine_count,
+        data_parallel_size,
+        ready_timeout,
         local_input_address,
         local_output_address,
-        ..
-    } = &mut engine_core.transport_mode
+    } = &config.engine_core.transport_mode
     else {
         panic!("expected handshake-owned transport");
     };
 
+    assert_eq!(handshake_address, "tcp://10.99.48.128:29550");
+    assert_eq!(advertised_host, "10.99.48.128");
+    assert_eq!(*engine_start_index, 0);
+    assert_eq!(*engine_count, 4);
+    assert_eq!(*data_parallel_size, 4);
     assert!(
         local_input_address
             .as_deref()
@@ -3930,8 +3915,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             .is_some_and(|address| address.starts_with("ipc://"))
     );
     assert_ne!(local_input_address, local_output_address);
-    *local_input_address = Some("<ipc input>".into());
-    *local_output_address = Some("<ipc output>".into());
 
     expect![[r#"
         FrontendConfig {
@@ -4013,45 +3996,58 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 keep_alive_on_engine_death: false,
                 keep_alive_timeout: 5s,
             },
-            llm_source: EngineCore(
-                EngineCoreConfig {
-                    transport_mode: HandshakeOwner {
-                        handshake_address: "tcp://192.0.2.10:29550",
-                        advertised_host: "192.0.2.10",
-                        engine_start_index: 0,
-                        engine_count: 4,
-                        data_parallel_size: 4,
-                        ready_timeout: 600s,
-                        local_input_address: Some(
-                            "<ipc input>",
-                        ),
-                        local_output_address: Some(
-                            "<ipc output>",
-                        ),
-                    },
-                    coordinator_mode: MaybeInProc,
-                    lora_modules: [],
-                    default_mm_loras: {},
-                    stream_interval: 1,
-                    admission_limits: AdmissionLimits {
-                        max_num_queued_reqs: None,
-                        max_num_queued_tokens: None,
-                    },
-                    disable_log_stats: false,
-                    log_stats_interval: Some(
-                        10s,
+            engine_core: EngineCoreConfig {
+                transport_mode: HandshakeOwner {
+                    handshake_address: "tcp://10.99.48.128:29550",
+                    advertised_host: "10.99.48.128",
+                    engine_start_index: 0,
+                    engine_count: 4,
+                    data_parallel_size: 4,
+                    ready_timeout: 600s,
+                    local_input_address: Some(
+                        "<ipc input>",
                     ),
-                    custom_histogram_buckets: CustomHistogramBuckets(
-                        {},
+                    local_output_address: Some(
+                        "<ipc output>",
                     ),
-                    disable_request_id_randomization: false,
-                    manages_engine: true,
-                    profiler: None,
                 },
-            ),
+                coordinator_mode: MaybeInProc,
+                lora_modules: [],
+                default_mm_loras: {},
+                stream_interval: 1,
+                admission_limits: AdmissionLimits {
+                    max_num_queued_reqs: None,
+                    max_num_queued_tokens: None,
+                },
+                disable_log_stats: false,
+                log_stats_interval: Some(
+                    10s,
+                ),
+                custom_histogram_buckets: CustomHistogramBuckets(
+                    {},
+                ),
+                disable_request_id_randomization: false,
+                manages_engine: true,
+                profiler: None,
+            },
         }
     "#]]
-    .assert_debug_eq(&config);
+    .assert_debug_eq(&FrontendConfig {
+        engine_core: EngineCoreConfig {
+            transport_mode: TransportMode::HandshakeOwner {
+                handshake_address: handshake_address.clone(),
+                advertised_host: advertised_host.clone(),
+                engine_start_index: 0,
+                engine_count: *engine_count,
+                data_parallel_size: *engine_count,
+                ready_timeout: *ready_timeout,
+                local_input_address: Some("<ipc input>".to_string()),
+                local_output_address: Some("<ipc output>".to_string()),
+            },
+            ..config.engine_core.clone()
+        },
+        ..config.clone()
+    });
 }
 
 #[test]
@@ -4154,38 +4150,36 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 keep_alive_on_engine_death: false,
                 keep_alive_timeout: 5s,
             },
-            llm_source: EngineCore(
-                EngineCoreConfig {
-                    transport_mode: HandshakeOwner {
-                        handshake_address: "tcp://10.99.48.128:29550",
-                        advertised_host: "10.99.48.128",
-                        engine_start_index: 0,
-                        engine_count: 4,
-                        data_parallel_size: 4,
-                        ready_timeout: 600s,
-                        local_input_address: None,
-                        local_output_address: None,
-                    },
-                    coordinator_mode: MaybeInProc,
-                    lora_modules: [],
-                    default_mm_loras: {},
-                    stream_interval: 1,
-                    admission_limits: AdmissionLimits {
-                        max_num_queued_reqs: None,
-                        max_num_queued_tokens: None,
-                    },
-                    disable_log_stats: false,
-                    log_stats_interval: Some(
-                        10s,
-                    ),
-                    custom_histogram_buckets: CustomHistogramBuckets(
-                        {},
-                    ),
-                    disable_request_id_randomization: false,
-                    manages_engine: true,
-                    profiler: None,
+            engine_core: EngineCoreConfig {
+                transport_mode: HandshakeOwner {
+                    handshake_address: "tcp://10.99.48.128:29550",
+                    advertised_host: "10.99.48.128",
+                    engine_start_index: 0,
+                    engine_count: 4,
+                    data_parallel_size: 4,
+                    ready_timeout: 600s,
+                    local_input_address: None,
+                    local_output_address: None,
                 },
-            ),
+                coordinator_mode: MaybeInProc,
+                lora_modules: [],
+                default_mm_loras: {},
+                stream_interval: 1,
+                admission_limits: AdmissionLimits {
+                    max_num_queued_reqs: None,
+                    max_num_queued_tokens: None,
+                },
+                disable_log_stats: false,
+                log_stats_interval: Some(
+                    10s,
+                ),
+                custom_histogram_buckets: CustomHistogramBuckets(
+                    {},
+                ),
+                disable_request_id_randomization: false,
+                manages_engine: true,
+                profiler: None,
+            },
         }
     "#]]
     .assert_debug_eq(&config);
@@ -4232,7 +4226,7 @@ fn serve_frontend_config_does_not_manage_engine_without_local_engines() {
     };
     let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
 
-    assert!(!config.engine_core().manages_engine);
+    assert!(!config.engine_core.manages_engine);
 }
 
 #[test]
@@ -4416,38 +4410,36 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 keep_alive_on_engine_death: false,
                 keep_alive_timeout: 5s,
             },
-            llm_source: EngineCore(
-                EngineCoreConfig {
-                    transport_mode: Bootstrapped {
-                        input_listener_fd: 999999,
-                        output_listener_fd: 999998,
-                        engine_start_index: 3,
-                        engine_count: 1,
-                        data_parallel_size: 4,
-                        ready_timeout: 600s,
-                    },
-                    coordinator_mode: External {
-                        address: "tcp://127.0.0.1:7000",
-                    },
-                    lora_modules: [],
-                    default_mm_loras: {},
-                    stream_interval: 1,
-                    admission_limits: AdmissionLimits {
-                        max_num_queued_reqs: None,
-                        max_num_queued_tokens: None,
-                    },
-                    disable_log_stats: false,
-                    log_stats_interval: Some(
-                        10s,
-                    ),
-                    custom_histogram_buckets: CustomHistogramBuckets(
-                        {},
-                    ),
-                    disable_request_id_randomization: false,
-                    manages_engine: false,
-                    profiler: None,
+            engine_core: EngineCoreConfig {
+                transport_mode: Bootstrapped {
+                    input_listener_fd: 999999,
+                    output_listener_fd: 999998,
+                    engine_start_index: 3,
+                    engine_count: 1,
+                    data_parallel_size: 4,
+                    ready_timeout: 600s,
                 },
-            ),
+                coordinator_mode: External {
+                    address: "tcp://127.0.0.1:7000",
+                },
+                lora_modules: [],
+                default_mm_loras: {},
+                stream_interval: 1,
+                admission_limits: AdmissionLimits {
+                    max_num_queued_reqs: None,
+                    max_num_queued_tokens: None,
+                },
+                disable_log_stats: false,
+                log_stats_interval: Some(
+                    10s,
+                ),
+                custom_histogram_buckets: CustomHistogramBuckets(
+                    {},
+                ),
+                disable_request_id_randomization: false,
+                manages_engine: false,
+                profiler: None,
+            },
         }
     "#]]
     .assert_debug_eq(&config);
@@ -4563,7 +4555,7 @@ fn frontend_args_json_enables_profiling_when_profiler_config_set() {
     };
     assert_eq!(args.runtime.profiler().as_deref(), Some("torch"));
     let config = args.into_config();
-    assert_eq!(config.engine_core().profiler.as_deref(), Some("torch"));
+    assert_eq!(config.engine_core.profiler.as_deref(), Some("torch"));
 }
 
 #[test]
@@ -4587,7 +4579,7 @@ fn frontend_args_json_disables_profiling_when_profiler_config_absent() {
     };
     assert_eq!(args.runtime.profiler(), None);
     let config = args.into_config();
-    assert_eq!(config.engine_core().profiler, None);
+    assert_eq!(config.engine_core.profiler, None);
 }
 
 #[test]
@@ -4611,7 +4603,7 @@ fn frontend_args_json_disables_profiling_when_profiler_type_is_null() {
     };
     assert_eq!(args.runtime.profiler(), None);
     let config = args.into_config();
-    assert_eq!(config.engine_core().profiler, None);
+    assert_eq!(config.engine_core.profiler, None);
 }
 
 #[test]

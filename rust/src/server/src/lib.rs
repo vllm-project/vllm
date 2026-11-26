@@ -295,8 +295,6 @@ fn remote_llm_info(max_model_len: u32) -> LlmInfo {
 }
 
 /// Where the server's [`Llm`] comes from.
-#[derive(educe::Educe)]
-#[educe(Debug)]
 #[allow(
     clippy::large_enum_variant,
     reason = "built once per server, so boxing the config would only burden callers"
@@ -315,7 +313,7 @@ pub enum LlmSource {
     /// The server shuts it down after serving. If startup fails or is
     /// cancelled, it is dropped without [`Llm::shutdown`], so its `Drop` must
     /// release what it holds.
-    Provided(#[educe(Debug(ignore))] Box<dyn Llm>),
+    Provided(Box<dyn Llm>),
 }
 
 /// The OpenAI-compatible HTTP server, with an optional gRPC server.

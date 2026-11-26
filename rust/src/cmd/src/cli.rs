@@ -887,16 +887,17 @@ pub struct SharedRuntimeArgs {
     pub unsupported: UnsupportedArgs,
 }
 
-/// Server settings and the source of its LLM.
-#[derive(Debug)]
+/// The server and engine-core settings of one Rust frontend.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontendConfig {
     pub server: ServerConfig,
-    llm_source: LlmSource,
+    pub engine_core: EngineCoreConfig,
 }
 
 impl FrontendConfig {
+    /// Build the server that serves this engine-core engine.
     pub fn into_server(self) -> Server {
-        Server::new(self.server, self.llm_source)
+        Server::new(self.server, LlmSource::EngineCore(self.engine_core))
     }
 }
 
@@ -1090,7 +1091,7 @@ impl SharedRuntimeArgs {
                 keep_alive_on_engine_death: self.keep_alive_on_engine_death,
                 keep_alive_timeout,
             },
-            llm_source: LlmSource::EngineCore(EngineCoreConfig {
+            engine_core: EngineCoreConfig {
                 transport_mode: TransportMode::Bootstrapped {
                     input_listener_fd,
                     output_listener_fd,
@@ -1114,7 +1115,7 @@ impl SharedRuntimeArgs {
                 // The engine is launched and supervised by another process.
                 manages_engine: false,
                 profiler,
-            }),
+            },
         }
     }
 
@@ -1485,7 +1486,9 @@ pub struct ServeArgs {
 
 impl ServeArgs {
     /// Build the frontend configuration when generation runs on a remote gRPC endpoint.
-    pub(super) fn remote_frontend_config(&self) -> anyhow::Result<Option<FrontendConfig>> {
+    pub(super) fn remote_frontend_config(
+        &self,
+    ) -> anyhow::Result<Option<(ServerConfig, LlmSource)>> {
         let Some(url) = self.remote_generation_url.as_ref() else {
             return Ok(None);
         };
@@ -1501,10 +1504,7 @@ impl ServeArgs {
             server.max_model_len = Some(limit);
         }
 
-        Ok(Some(FrontendConfig {
-            server,
-            llm_source: LlmSource::RemoteGrpc(url.clone()),
-        }))
+        Ok(Some((server, LlmSource::RemoteGrpc(url.clone()))))
     }
 
     /// Build the server and engine-core settings for `serve` when the frontend
@@ -1516,9 +1516,7 @@ impl ServeArgs {
     ) -> FrontendConfig {
         FrontendConfig {
             server: self.to_server_config(),
-            llm_source: LlmSource::EngineCore(
-                self.to_engine_core_config(handshake_address, topology),
-            ),
+            engine_core: self.to_engine_core_config(handshake_address, topology),
         }
     }
 
