@@ -788,11 +788,11 @@ steps:
 
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
 
-- label: ":amd: (MI300) Distributed Comm Ops" # TBD
+- label: ":amd: (MI300 DPX) Distributed Comm Ops" # TBD
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
-  agent_pool: mi300_2
+  agent_pool: mi300_dpx_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -928,11 +928,11 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
 
-- label: ":amd: (MI300) Distributed Torchrun + Shutdown" # TBD
+- label: ":amd: (MI300 DPX) Distributed Torchrun + Shutdown" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
-  agent_pool: mi300_2
+  agent_pool: mi300_dpx_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1211,11 +1211,11 @@ steps:
   commands:
   - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: ":amd: (MI300) MoE Kernels Shard %N" # TBD
+- label: ":amd: (MI300 DPX) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
-  agent_pool: mi300_1
+  agent_pool: mi300_dpx
   optional: true
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
@@ -1941,12 +1941,12 @@ steps:
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
-- label: ":amd: (MI300) Quantization Shard %N"
+- label: ":amd: (MI300 DPX) Quantization Shard %N"
   timeout_in_minutes: 115
   parallelism: 4
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
-  agent_pool: mi300_1
+  agent_pool: mi300_dpx
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
@@ -2078,11 +2078,11 @@ steps:
   - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
   - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
 
-- label: ":amd: (MI300) Batch Invariance (Distributed)" # TBD
+- label: ":amd: (MI300 DPX) Batch Invariance (Distributed)" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
-  agent_pool: mi300_4
+  agent_pool: mi300_dpx_4
   num_gpus: 4
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -5978,6 +5978,7 @@ steps:
   - >-
     pytest -v -s -rs
     "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_restore_matches_recompute[tp2]"
+    "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_synchronous_restore_survives_block_zeroing[mixed-precision-tp2]"
     "v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py::test_objects_outlive_the_writer_and_restore_on_another_gpu"
 
 - label: ":amd: (MI355 DPX) V1 Attention Shard %N" # TBD
