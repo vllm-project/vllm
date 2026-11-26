@@ -10,8 +10,8 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_metrics::{
-    EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
-    U64Counter, WatermarkStatusLabels,
+    AdmissionRejectionLabels, EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS,
+    PromptTokenSourceLabels, U64Counter, WatermarkStatusLabels,
 };
 
 use crate::FinishReason;
@@ -229,6 +229,35 @@ impl WatermarkRequestCounters {
             (_, true) => &self.watermarked,
             (true, false) => &self.skipped,
             (false, false) => &self.not_watermarked,
+        }
+    }
+}
+
+/// `vllm:admission_rejections` counters, one per queue limit.
+#[derive(Debug)]
+pub(crate) struct AdmissionRejectionCounters {
+    /// Rejections by `--max-num-queued-reqs`.
+    pub(crate) queued_reqs: U64Counter,
+    /// Rejections by `--max-num-queued-tokens`.
+    pub(crate) queued_tokens: U64Counter,
+}
+
+impl AdmissionRejectionCounters {
+    /// Create the series for both limits, whether or not they are set, like
+    /// Python's `PrometheusStatLogger`.
+    pub(crate) fn resolve(model_name: &str) -> Self {
+        let counter = |reason| {
+            METRICS
+                .request
+                .admission_rejections
+                .get_or_create_owned(&AdmissionRejectionLabels {
+                    model_name: model_name.to_string(),
+                    reason,
+                })
+        };
+        Self {
+            queued_reqs: counter("max_num_queued_reqs"),
+            queued_tokens: counter("max_num_queued_tokens"),
         }
     }
 }
