@@ -34,9 +34,6 @@ vllm serve <model-path> \
   --sp-config '{"enable": true}'
 ```
 
-SP currently runs in eager mode only. If torch.compile is enabled (the
-default without `--enforce-eager`), vLLM logs a warning and disables SP.
-
 SP is intended for sufficiently large batch/token counts. By default, vLLM
 enables it only when the padded token count reaches `threshold` (default:
 256). Smaller batches fall back to the normal tensor-parallel path.
