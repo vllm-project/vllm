@@ -2193,9 +2193,17 @@ class MambaManager(SingleTypeKVCacheManager):
             and checkpoint_idx == query_start // self.block_size
         )
         blocks = self.req_to_blocks[request_id]
+        # The worker's append-only block table keeps a speculative block at
+        # this column even after it is relocated, so reserve it whatever
+        # `prefill_end` says rather than let the worker export into it.
+        num_blocks = len(blocks)
+        holds_speculative_block = (
+            request_id in self._allocated_block_reqs
+            and num_blocks - self.num_speculative_blocks <= checkpoint_idx < num_blocks
+        )
         return (
             self.has_prefill_checkpoint_blocks
-            and query_end >= prefill_end
+            and (query_end >= prefill_end or holds_speculative_block)
             and is_mamba_prefill_checkpoint_valid(
                 query_start=query_start,
                 query_end=query_end,
@@ -2209,10 +2217,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 reuses_resumed_block
                 or checkpoint_idx >= len(blocks)
                 or blocks[checkpoint_idx].is_null
-                or (
-                    request_id in self._allocated_block_reqs
-                    and checkpoint_idx >= len(blocks) - self.num_speculative_blocks
-                )
+                or holds_speculative_block
             )
         )
 
@@ -2281,7 +2286,8 @@ class MambaManager(SingleTypeKVCacheManager):
             # `compute_mamba_prefill_checkpoints`, which writes the state there.
             # The helper returns a boundary strictly below its input, so every
             # chunk has one; under sparse retention only the prefill-end chunk's
-            # is kept, so `prefill_end` skips reserving blocks for the others.
+            # is kept, so `prefill_end` skips reserving blocks for the others
+            # outside speculative columns.
             checkpoint_position = get_reusable_prefix_length(
                 num_tokens,
                 num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
