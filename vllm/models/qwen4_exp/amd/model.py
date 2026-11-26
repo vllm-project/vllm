@@ -494,6 +494,13 @@ class Qwen4ExpModel(nn.Module):
         else:
             self._mtp_hidden_buffer = None
 
+    def process_weights_after_loading(self) -> None:
+        buffer = self._mtp_hidden_buffer
+        if buffer is not None and buffer.is_meta:
+            assert self.hyper_connection_mixer is not None
+            device = self.hyper_connection_mixer.hc_norm.weight.device
+            torch.utils.swap_tensors(buffer, torch.empty_like(buffer, device=device))
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -999,6 +1006,13 @@ class Qwen4ExpForConditionalGeneration(
                 "len(deepstack_visual_indexes)"
             )
         self.set_moe_parameters(self.language_model.model.layers)
+
+    def process_weights_after_loading(self) -> None:
+        if self.use_deepstack and self.deepstack_input_embeds[0].is_meta:
+            self.deepstack_input_embeds = [
+                torch.zeros_like(embed, device=self.visual.device)
+                for embed in self.deepstack_input_embeds
+            ]
 
     def embed_input_ids(
         self,

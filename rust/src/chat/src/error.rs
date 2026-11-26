@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use thiserror::Error;
-use thiserror_ext::{AsReport as _, Macro};
+use thiserror_ext::{AsReport as _, Construct, Macro};
 pub use vllm_text::ErrorKind;
 
 use crate::RendererSelection;
 
-type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
-#[derive(Debug, Error, Macro)]
+#[derive(Debug, Error, Construct, Macro)]
 #[thiserror_ext(macro(path = "crate::error"))]
 pub enum Error {
     #[error("chat request must contain at least one message")]
@@ -108,6 +108,22 @@ pub enum Error {
         name: String,
         #[source]
         error: BoxedError,
+    },
+    /// A parser that `auto` matched by model name but cannot build for the
+    /// model. This refuses the start rather than serving without the parser:
+    /// a managed engine gets the same selection, and would still wait for the
+    /// end of reasoning that the frontend no longer parses before applying
+    /// structured outputs.
+    #[error(
+        "{kind} parser `{name}` was selected automatically for model `{model_id}` but cannot be used with it; select a parser explicitly, or pass `{disable}` to disable {kind} parsing"
+    )]
+    UnusableAutoParser {
+        kind: &'static str,
+        name: String,
+        model_id: String,
+        disable: &'static str,
+        #[source]
+        error: Box<Error>,
     },
     #[error("failed to initialize request output parser")]
     OutputParserInitialization {
@@ -215,6 +231,7 @@ impl Error {
             | Self::IncompatibleParserSelections { .. }
             | Self::ParserUnavailableByName { .. }
             | Self::ParserInitialization { .. }
+            | Self::UnusableAutoParser { .. }
             | Self::OutputParserInitialization { .. }
             | Self::HarmonyParserOverrideUnsupported { .. }
             | Self::HarmonyOutputParsing { .. }
