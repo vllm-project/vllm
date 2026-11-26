@@ -168,8 +168,15 @@ class _FakeOp:
         x, out_rows = args[0], args[10]
         batch = out_rows.size(0)
         tokens = x.size(0) // batch
-        out = torch.arange(batch * tokens * HEADS * 64, dtype=x.dtype)
-        return out.view(batch, tokens, HEADS, 64)
+        values = torch.arange(batch * tokens * HEADS * 64, dtype=x.dtype)
+        values = values.view(batch, tokens, HEADS, 64)
+        # zero_inactive_out: padding requests (NULL_BLOCK_ID) get +0.
+        values[out_rows == 0] = 0
+        out = kwargs.get("out")
+        if out is None:
+            return values
+        assert out.shape == values.shape and out.is_contiguous()
+        return out.copy_(values)
 
 
 @pytest.fixture
@@ -349,9 +356,11 @@ def _spec_metadata(slots, query_lens, num_accepted, num_spec):
     return SimpleNamespace(
         num_actual_tokens=tokens,
         spec_sequence_masks=torch.ones(len(slots), dtype=torch.bool),
+        spec_sequence_masks_cpu=torch.ones(len(slots), dtype=torch.bool),
         num_prefills=0,
         num_decodes=0,
         num_spec_decodes=len(slots),
+        num_spec_decode_tokens=tokens,
         spec_token_indx=torch.arange(tokens),
         non_spec_token_indx=torch.empty(0, dtype=torch.long),
         spec_state_indices_tensor=torch.tensor(slots, dtype=torch.int32)
@@ -437,7 +446,9 @@ def test_decode_and_prefill_rows_without_spec(
 
     def fake_prefill(*args):
         prefill_calls.append(args)
-        return torch.full((3, HEADS, 64), 7.0, dtype=torch.bfloat16)
+        out = args[10]
+        assert out is not None and out.shape == (3, HEADS, 64)
+        return out.fill_(7.0)
 
     monkeypatch.setattr(first, "_prefill", fake_prefill)
     metadata = SimpleNamespace(
@@ -484,3 +495,129 @@ def test_eager_batches_pad_to_a_captured_size(forward_context, fake_op):
     assert not args[0][8:].any()
     assert args[4].tolist() == [5, 7, 0, 0] and args[13].tolist() == [4, 4, 0, 0]
     assert torch.equal(core_out.flatten(), torch.arange(8 * HEADS * 64).to(core_out))
+
+
+def _conv_rows_of(rows: torch.Tensor) -> int:
+    """Where a view of in_proj rows starts its conv channels."""
+    return rows.data_ptr() + HEADS * 64 * 2
+
+
+def test_profile_runs_zero_the_output(forward_context, fake_op):
+    first, _ = _replay_group(num_spec=3)
+    first._gdn_metadata = lambda: None
+    core_out = torch.full((4, HEADS, 64), float("nan"), dtype=torch.bfloat16)
+    first._forward_replay(_projected(4), core_out)
+    assert not fake_op.calls and not core_out.any()
+
+
+def test_full_windows_write_the_layer_output_in_place(forward_context, fake_op):
+    """The op writes the layer's output buffer itself; graph padding rows past
+    the step's tokens are zeroed."""
+    first, _ = _replay_group(num_spec=3)
+    metadata = _spec_metadata([5, 7], [4, 4], [1, 1], num_spec=3)
+    projected = _projected(10)
+    core_out = torch.full((10, HEADS, 64), float("nan"), dtype=torch.bfloat16)
+    first._gdn_metadata = lambda: metadata
+    first._forward_replay(projected, core_out)
+
+    args, kwargs = fake_op.calls[0]
+    assert kwargs["out"].data_ptr() == core_out.data_ptr()
+    assert args[0].data_ptr() == _conv_rows_of(projected) and args[0].size(0) == 8
+    assert torch.equal(
+        core_out[:8].flatten(), torch.arange(8 * HEADS * 64).to(core_out)
+    )
+    assert not core_out[8:].any()
+
+
+def _mixed_metadata(spec_first: bool):
+    """Two spec requests (blocks 5 and 7, 4 tokens each) and a 3-token prefill
+    (block 9): either after the spec requests, or between them."""
+    masks = [True, True, False] if spec_first else [True, False, True]
+    lens = [4, 4, 3] if spec_first else [4, 3, 4]
+    spec_tokens = [
+        t
+        for r, (spec, n) in enumerate(zip(masks, lens))
+        for t in range(sum(lens[:r]), sum(lens[:r]) + n)
+        if spec
+    ]
+    prefill_tokens = [t for t in range(11) if t not in spec_tokens]
+    return SimpleNamespace(
+        num_actual_tokens=11,
+        spec_sequence_masks=torch.tensor(masks),
+        spec_sequence_masks_cpu=torch.tensor(masks),
+        num_prefills=1,
+        num_decodes=0,
+        num_prefill_tokens=3,
+        num_decode_tokens=0,
+        num_spec_decodes=2,
+        num_spec_decode_tokens=8,
+        spec_token_indx=torch.tensor(spec_tokens),
+        non_spec_token_indx=torch.tensor(prefill_tokens),
+        spec_state_indices_tensor=torch.tensor([[5] * 4, [7] * 4], dtype=torch.int32),
+        spec_query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+        non_spec_query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        non_spec_state_indices_tensor=torch.tensor([9], dtype=torch.int32),
+        has_initial_state=torch.tensor([False]),
+    )
+
+
+def _fake_prefill(mixer, monkeypatch):
+    calls = []
+
+    def fake_prefill(*args):
+        calls.append(args)
+        out = args[10]
+        return (out if out is not None else args[0].new_empty(3, HEADS, 64)).fill_(7)
+
+    monkeypatch.setattr(mixer, "_prefill", fake_prefill)
+    return calls
+
+
+@pytest.mark.parametrize("spec_first", [True, False])
+def test_mixed_steps_place_spec_and_prefill_rows(
+    forward_context, fake_op, monkeypatch, spec_first
+):
+    """With the spec requests first (the batch reorder's usual order), both
+    parts read their in_proj rows and write their outputs in place; otherwise
+    their rows are gathered and scattered."""
+    first, _ = _replay_group(num_spec=3)
+    prefill_calls = _fake_prefill(first, monkeypatch)
+    metadata = _mixed_metadata(spec_first)
+    projected = _projected(12)
+    core_out = _run(first, metadata, projected)
+
+    (args, kwargs), (prefill_args,) = fake_op.calls[0], prefill_calls
+    in_place = (
+        args[0].data_ptr() == _conv_rows_of(projected),
+        kwargs["out"] is not None,
+        prefill_args[0].data_ptr() == _conv_rows_of(projected[8]),
+        prefill_args[10] is not None,
+    )
+    assert in_place == (spec_first,) * 4
+    spec = torch.arange(8 * HEADS * 64).view(8, HEADS, 64).to(core_out)
+    assert torch.equal(core_out[metadata.spec_token_indx], spec)
+    assert torch.all(core_out[metadata.non_spec_token_indx] == 7)
+    assert not core_out[11:].any()
+    # The prefilled block starts over.
+    assert first.gdp_replay_trackers.hist_len[9] == 0
+
+
+def test_padding_requests_take_the_rows_that_follow(
+    forward_context, fake_op, monkeypatch
+):
+    """An eager step pads to a captured batch size with the rows after the
+    spec rows when the buffers have them, instead of copying."""
+    first, _ = _replay_group(num_spec=3)
+    first.replay_capture_sizes = [16]
+    _fake_prefill(first, monkeypatch)
+    projected = _projected(20)
+    core_out = _run(first, _mixed_metadata(True), projected)
+
+    args, kwargs = fake_op.calls[0]
+    assert args[0].data_ptr() == _conv_rows_of(projected) and args[0].size(0) == 16
+    assert kwargs["out"].data_ptr() == core_out.data_ptr()
+    assert args[4].tolist() == [5, 7, 0, 0]
+    spec = torch.arange(8 * HEADS * 64).view(8, HEADS, 64).to(core_out)
+    assert torch.equal(core_out[:8], spec)
+    assert torch.all(core_out[8:11] == 7) and not core_out[11:].any()

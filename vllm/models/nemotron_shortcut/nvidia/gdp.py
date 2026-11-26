@@ -270,6 +270,21 @@ def _pad_spec_window(t: torch.Tensor, dst: torch.Tensor, size: int) -> torch.Ten
     return t.new_zeros((size, *t.shape[1:])).index_copy_(0, dst, t)
 
 
+_SPEC_ROWS_LEAD = "_gdp_spec_rows_lead"
+
+
+def _spec_rows_lead(metadata: GDNAttentionMetadata) -> bool:
+    """Whether a mixed step's spec requests are its leading requests, so that
+    their tokens are the step's first `num_spec_decode_tokens` rows and the
+    other requests' tokens follow. Read from the host masks once per step."""
+    lead = getattr(metadata, _SPEC_ROWS_LEAD, None)
+    if lead is None:
+        masks = metadata.spec_sequence_masks_cpu
+        lead = masks is not None and bool(masks[: metadata.num_spec_decodes].all())
+        setattr(metadata, _SPEC_ROWS_LEAD, lead)
+    return lead
+
+
 def _make_gdp_sharded_weight_loader(
     blocks: list[tuple[int, int]], tp_size: int, tp_rank: int
 ):
@@ -549,7 +564,9 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             dim=-1,
         )
         # Zeros: the op leaves padded rows, and all rows of profile runs, unwritten.
-        core_out = torch.zeros(
+        # The replay path zeroes the rows it leaves unwritten itself, which in a
+        # captured decode step is none.
+        core_out = (torch.empty if self.use_gdp_replayssm else torch.zeros)(
             (num_tokens, self.num_heads, self.head_dim),
             dtype=projected.dtype,
             device=projected.device,
@@ -620,6 +637,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         """
         md = self._gdn_metadata()
         if md is None:
+            core_out.zero_()
             return
         assert self.gate_params is not None and self.gdp_replay_trackers is not None
         commits = self.gdp_replay_trackers.claim(md)
@@ -630,36 +648,14 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             raise RuntimeError(
                 f"{self.prefix}: A_log / dt_bias no longer alias the replay gate params"
             )
+        # Rows past the step's tokens pad a captured graph; nothing below writes
+        # them.
+        core_out[md.num_actual_tokens :].zero_()
+        if md.spec_sequence_masks is not None:
+            self._forward_replay_spec(md, projected, core_out, commits)
+            return
         projected = projected[: md.num_actual_tokens]
         core_out = core_out[: md.num_actual_tokens]
-
-        if md.spec_sequence_masks is not None:
-            assert md.spec_token_indx is not None
-            assert md.non_spec_token_indx is not None
-            only_spec = md.num_prefills == 0 and md.num_decodes == 0
-            spec_rows = (
-                projected
-                if only_spec
-                else projected.index_select(0, md.spec_token_indx)
-            )
-            spec_out = self._replay_spec(md, spec_rows, commits)
-            if only_spec:
-                core_out.copy_(spec_out)
-                return
-            core_out.index_copy_(0, md.spec_token_indx, spec_out)
-            # With spec decode on, every non-spec row is a prefill.
-            assert md.non_spec_query_start_loc is not None
-            assert md.non_spec_state_indices_tensor is not None
-            prefill_out = self._replay_prefill(
-                projected.index_select(0, md.non_spec_token_indx),
-                md.non_spec_query_start_loc,
-                md.non_spec_state_indices_tensor,
-                md.has_initial_state,
-                conv_metadata=md,
-                commits=commits,
-            )
-            core_out.index_copy_(0, md.non_spec_token_indx, prefill_out)
-            return
 
         num_decode_tokens = md.num_decode_tokens
         if md.num_decodes > 0:
@@ -683,8 +679,8 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
                 tokens=1,
                 num_rows=num_decode_tokens,
             )
-            core_out[:num_decode_tokens] = self._replay(
-                projected[:num_decode_tokens], step
+            self._replay(
+                projected[:num_decode_tokens], step, core_out[:num_decode_tokens]
             )
         if md.num_prefills > 0:
             if md.num_decodes > 0:
@@ -703,21 +699,85 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
                 state_indices = md.non_spec_state_indices_tensor
                 has_initial_state = md.has_initial_state
                 conv_metadata = md
-            core_out[num_decode_tokens:] = self._replay_prefill(
+            self._replay_prefill(
                 projected[num_decode_tokens:],
                 loc,
                 state_indices,
                 has_initial_state,
                 conv_metadata,
                 commits,
+                out=core_out[num_decode_tokens:],
             )
 
-    def _replay_spec(
-        self, md: GDNAttentionMetadata, rows: torch.Tensor, commits: bool
+    def _forward_replay_spec(
+        self,
+        md: GDNAttentionMetadata,
+        projected: torch.Tensor,
+        core_out: torch.Tensor,
+        commits: bool,
+    ) -> None:
+        """A spec-decode step: the replay op on the spec rows, the regular
+        prefill on the others (with spec decode on, every non-spec row is a
+        prefill).
+
+        The batch reorder puts decoding requests first, so the spec rows are
+        usually the step's leading tokens and the prefill tokens follow. Both
+        parts then read their rows and write their outputs in place. A short
+        prefill chunk can sort among the decodes; such a step gathers and
+        scatters its rows."""
+        num_spec_tokens = md.num_spec_decode_tokens
+        only_spec = md.num_prefills == 0 and md.num_decodes == 0
+        if only_spec or _spec_rows_lead(md):
+            # The prefill runs after the replay, so it overwrites the +0 the op
+            # stores for padding requests on rows that are the prefill's.
+            self._replay_spec(md, projected, num_spec_tokens, core_out, commits)
+            if not only_spec:
+                rows = slice(num_spec_tokens, md.num_actual_tokens)
+                self._spec_step_prefill(md, projected[rows], commits, core_out[rows])
+            return
+        spec_idx, prefill_idx = md.spec_token_indx, md.non_spec_token_indx
+        assert spec_idx is not None and prefill_idx is not None
+        spec_rows = projected.index_select(0, spec_idx)
+        spec_out = self._replay_spec(md, spec_rows, num_spec_tokens, None, commits)
+        core_out.index_copy_(0, spec_idx, spec_out)
+        prefill_rows = projected.index_select(0, prefill_idx)
+        prefill_out = self._spec_step_prefill(md, prefill_rows, commits)
+        core_out.index_copy_(0, prefill_idx, prefill_out)
+
+    def _spec_step_prefill(
+        self,
+        md: GDNAttentionMetadata,
+        rows: torch.Tensor,
+        commits: bool,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Verify windows of up to 1 + num_spec tokens per request. The op wants
-        them rectangular, so ragged windows are padded and the padding is
-        dropped from the output."""
+        """The prefill rows of a spec-decode step."""
+        assert md.non_spec_query_start_loc is not None
+        assert md.non_spec_state_indices_tensor is not None
+        return self._replay_prefill(
+            rows,
+            md.non_spec_query_start_loc,
+            md.non_spec_state_indices_tensor,
+            md.has_initial_state,
+            conv_metadata=md,
+            commits=commits,
+            out=out,
+        )
+
+    def _replay_spec(
+        self,
+        md: GDNAttentionMetadata,
+        rows: torch.Tensor,
+        num_rows: int,
+        out: torch.Tensor | None,
+        commits: bool,
+    ) -> torch.Tensor:
+        """Verify windows of up to 1 + num_spec tokens per request: the first
+        `num_rows` of `rows`. The op wants them rectangular, so ragged windows
+        are padded and the padding is dropped from the output. With `out`, full
+        windows write their output there (rows of padding requests get +0);
+        `rows` and `out` past `num_rows` may serve as the padding requests'
+        rows, which the op does not read."""
         assert md.spec_state_indices_tensor is not None
         assert md.spec_query_start_loc is not None
         assert md.num_accepted_tokens is not None
@@ -729,12 +789,15 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             md.spec_query_start_loc,
             md.num_accepted_tokens[:batch],
             tokens=self.num_spec + 1,
-            num_rows=rows.size(0),
+            num_rows=num_rows,
         )
-        if step.dst is not None:
-            rows = _pad_spec_window(rows, step.dst, batch * step.tokens)
-        out = self._replay(rows, step)
-        return out if step.dst is None else out.index_select(0, step.dst)
+        if step.dst is None:
+            return self._replay(rows, step, out)
+        rows = _pad_spec_window(rows[:num_rows], step.dst, batch * step.tokens)
+        result = self._replay(rows, step).index_select(0, step.dst)
+        if out is not None:
+            out[:num_rows].copy_(result)
+        return result
 
     def _replay_step(
         self,
@@ -767,20 +830,38 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             md, slots, query_start_loc, num_accepted, tokens, padded, num_rows
         )
 
-    def _replay(self, rows: torch.Tensor, step: GdpReplayStep) -> torch.Tensor:
+    def _replay(
+        self,
+        rows: torch.Tensor,
+        step: GdpReplayStep,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Run `gdp_conv_replay` on whole in_proj rows, `step.tokens` per
-        request, with the step's planned inputs."""
+        request, with the step's planned inputs; returns the live requests'
+        output rows.
+
+        The padding requests take the rows of `rows` past the live ones, which
+        the op does not read, or zero rows if `rows` ends first. When `out` has
+        room for every request's rows, the op writes there (+0 on padding
+        requests); otherwise the live rows are copied into it."""
         from flashinfer.gdp_conv_replay_decode import gdp_conv_replay
 
         trackers = self.gdp_replay_trackers
         assert trackers is not None and self.gate_params is not None
-        if step.padded > step.batch:
-            pad = (step.padded - step.batch) * step.tokens
-            rows = torch.cat([rows, rows.new_zeros(pad, rows.size(1))])
+        live = step.batch * step.tokens
+        size = step.padded * step.tokens
+        if rows.size(0) < size:
+            rows = torch.cat([rows[:live], rows.new_zeros(size - live, rows.size(1))])
+        rows = rows[:size]
+        op_out = None
+        if out is not None and out.size(0) >= size:
+            op_out = out[:size].view(
+                step.padded, step.tokens, self.num_heads, self.head_dim
+            )
         conv_start = self.value_dim
         gates_start = conv_start + self.conv_dim
         conv_state, state, k_ring, u_ring, g_ring = self.kv_cache
-        out = gdp_conv_replay(
+        result = gdp_conv_replay(
             rows[:, conv_start:gates_start],
             rows[:, gates_start:],
             self.conv1d.weight.view(self.conv_dim, self.conv_kernel_size),
@@ -805,8 +886,12 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             null_block_id=NULL_BLOCK_ID,
             # The norm and out_proj read every row, padding included.
             zero_inactive_out=True,
+            out=op_out,
         )
-        return out.view(-1, self.num_heads, self.head_dim)[: step.batch * step.tokens]
+        result = result.view(-1, self.num_heads, self.head_dim)[:live]
+        if out is not None and op_out is None:
+            out[:live].copy_(result)
+        return result
 
     def _replay_prefill(
         self,
@@ -816,11 +901,12 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         has_initial_state: torch.Tensor | None,
         conv_metadata: GDNAttentionMetadata | None,
         commits: bool,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """The regular prefill on whole in_proj rows; then, with `commits`, zero
-        the trackers of the prefilled blocks, whose checkpoint is now the
-        post-prompt state and whose conv rows 0..2 hold the last three prompt
-        inputs."""
+        """The regular prefill on whole in_proj rows, into `out` if given;
+        then, with `commits`, zero the trackers of the prefilled blocks, whose
+        checkpoint is now the post-prompt state and whose conv rows 0..2 hold
+        the last three prompt inputs."""
         _, mixed_vkq, b, a = rows.split(
             [
                 self.value_dim,
@@ -843,6 +929,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             state_indices,
             has_initial_state,
             conv_metadata,
+            out,
         )
         if commits:
             assert self.gdp_replay_trackers is not None

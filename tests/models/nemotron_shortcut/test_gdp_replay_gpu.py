@@ -28,6 +28,7 @@ from vllm.models.nemotron_shortcut.nvidia.gdp import (
 from vllm.models.nemotron_shortcut.nvidia.gdp_replay import GdpReplayTrackers
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 
 from .utils import make_config
 
@@ -95,6 +96,8 @@ def _metadata(blocks: torch.Tensor, num_accepted: torch.Tensor) -> SimpleNamespa
         num_prefills=0,
         num_decodes=0,
         num_spec_decodes=BATCH,
+        num_spec_decode_tokens=tokens,
+        spec_sequence_masks_cpu=torch.ones(BATCH, dtype=torch.bool),
         spec_token_indx=torch.arange(tokens, device="cuda"),
         non_spec_token_indx=torch.empty(0, dtype=torch.long, device="cuda"),
         spec_state_indices_tensor=blocks,
@@ -466,3 +469,89 @@ def test_commit_step_kernel_matches_the_reference(tokens, padded):
                 getattr(kernel, name).cpu(), getattr(reference, name)
             )
         prev = valid.to(torch.int64)
+
+
+def _mixed_metadata(batch: int, prompt: int, accepted: torch.Tensor):
+    """`batch` spec requests (blocks 1..batch) followed by a fresh `prompt`-token
+    prefill (block batch + 1), as the batch reorder lays out a mixed step."""
+    md = _metadata(
+        (1 + torch.arange(batch, dtype=torch.int32, device="cuda"))
+        .unsqueeze(1)
+        .repeat(1, TOKENS),
+        accepted,
+    )
+    spec_tokens = batch * TOKENS
+    masks = torch.ones(batch + 1, dtype=torch.bool)
+    masks[-1] = False
+    loc = torch.tensor([0, prompt], dtype=torch.int32)
+    nums_dict, batch_ptr, offsets = compute_causal_conv1d_metadata(
+        loc, device=torch.device("cuda")
+    )
+    md.__dict__.update(
+        num_actual_tokens=spec_tokens + prompt,
+        num_prefills=1,
+        num_prefill_tokens=prompt,
+        num_decode_tokens=0,
+        spec_sequence_masks=masks.cuda(),
+        spec_sequence_masks_cpu=masks,
+        non_spec_token_indx=torch.arange(
+            spec_tokens, spec_tokens + prompt, device="cuda"
+        ),
+        non_spec_query_start_loc=loc.cuda(),
+        non_spec_state_indices_tensor=torch.tensor(
+            [batch + 1], dtype=torch.int32, device="cuda"
+        ),
+        has_initial_state=torch.zeros(1, dtype=torch.bool, device="cuda"),
+        nums_dict=nums_dict,
+        batch_ptr=batch_ptr,
+        token_chunk_offset_ptr=offsets,
+    )
+    return md
+
+
+def test_a_mixed_step_in_place_matches_the_gathered_one(forward_context):
+    """A spec + prefill step with the spec requests first reads views of its
+    rows, writes its outputs in place, and pads the op's batch with the
+    prefill's rows. It must give the bytes of the gather / scatter path, which
+    pads with zero rows: the op does not read a padding request's rows."""
+    torch.manual_seed(0)
+    prompt, steps = 37, 3
+    weights = _shared_weights(HEADS)
+    checkpoint = (torch.randn(BATCH, HEADS, 64, 128, device="cuda") * 0.05).half()
+    taps = torch.randn(BATCH, 3, HEADS * 704, device="cuda").to(torch.bfloat16)
+    rows = [
+        torch.randn(BATCH * TOKENS + prompt + 5, _width(HEADS), device="cuda")
+        .mul(4)
+        .to(torch.bfloat16)
+        for _ in range(steps)
+    ]
+    accepted = [
+        torch.randint(1, TOKENS + 1, (BATCH,), dtype=torch.int32, device="cuda")
+        for _ in range(steps)
+    ]
+    runs = []
+    for in_place in (True, False):
+        mixer = _replay_mixer(HEADS, f"mixed_{in_place}", weights, BATCH + 1)
+        # 8 requests' rows: the op pads the 4 spec requests with 4 more.
+        mixer.replay_capture_sizes = [8 * TOKENS]
+        blocks = 1 + torch.arange(BATCH, device="cuda")
+        mixer.kv_cache[1][blocks] = checkpoint
+        mixer.kv_cache[0][blocks, :3] = taps
+        outs = []
+        for step in range(steps):
+            md = _mixed_metadata(BATCH, prompt, accepted[step])
+            if not in_place:
+                md._gdp_spec_rows_lead = False
+            mixer._gdn_metadata = _returning(md)
+            out = torch.full(
+                (rows[step].size(0), HEADS, 64), float("nan"), dtype=torch.bfloat16
+            ).cuda()
+            mixer._forward_replay(rows[step].clone(), out)
+            outs.append(out)
+        runs.append((outs, [t.clone() for t in mixer.kv_cache]))
+    (in_place_outs, in_place_cache), (gathered_outs, gathered_cache) = runs
+    for step, (a, b) in enumerate(zip(in_place_outs, gathered_outs)):
+        assert torch.equal(a, b), f"step {step}"
+        assert not a[BATCH * TOKENS + prompt :].any()
+    for a, b in zip(in_place_cache, gathered_cache):
+        assert torch.equal(a, b)
