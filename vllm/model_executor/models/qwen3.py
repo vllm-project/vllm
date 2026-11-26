@@ -74,6 +74,10 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
+from .qwen3_amd.specialized_decode import (
+    Qwen3DenseSpecializedDecode,
+    specialized_decode_config,
+)
 
 logger = init_logger(__name__)
 
@@ -481,6 +485,12 @@ class Qwen3ForCausalLM(
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode = (
+            None
+            if self.specialized_decode_config is None
+            else Qwen3DenseSpecializedDecode(self, self.specialized_decode_config)
+        )
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -496,6 +506,15 @@ class Qwen3ForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if self.specialized_decode is not None:
+            hidden_states = self.specialized_decode.maybe_forward(
+                input_ids,
+                positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )
+            if hidden_states is not None:
+                return hidden_states
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -505,6 +524,8 @@ class Qwen3ForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        if self.specialized_decode is not None:
+            self.specialized_decode.check_hidden_states(hidden_states)
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
