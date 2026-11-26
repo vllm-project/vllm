@@ -1886,8 +1886,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             if request.session_id is not None:
                 # Keep a session on one engine so later turns reuse its prefix
                 # cache, unless that engine's known load is more than one
-                # request above the lowest. The engine is a hash of the
-                # session id, so every API server process picks the same one.
+                # request per API server process above the lowest. The engine
+                # is a hash of the session id, so every API server process
+                # picks the same one.
                 digest = hashlib.blake2b(
                     request.session_id.encode(), digest_size=8
                 ).digest()
