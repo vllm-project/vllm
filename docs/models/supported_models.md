@@ -802,9 +802,6 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
 
-!!! note
-    For `openbmb/MiniCPM-V-4_6`, `openbmb/MiniCPM-V-4_7` and `openbmb/MiniCPM-OCR-1.0`, images with an aspect ratio above 200:1 and video frames above 50:1 are rejected. The startup budget covers every accepted image at the configured `mm_processor_kwargs`.
-
 #### Transcription
 
 Speech2Text models trained specifically for Automatic Speech Recognition.
