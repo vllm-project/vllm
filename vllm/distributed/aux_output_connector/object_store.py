@@ -171,11 +171,16 @@ def read_aux_rows(
     timeout_s: float = 600.0,
 ) -> np.ndarray:
     """Concatenate `field` of the objects `keys`; wait up to `timeout_s` in
-    total for objects that are still being written."""
+    total for objects still being written, unless their namespace has a drop."""
     deadline = time.monotonic() + timeout_s
     parts = []
     for key in keys:
         while (data := store.get(key)) is None:
+            if (reason := store.get(_drop_marker(key))) is not None:
+                raise BlockObjectStoreError(
+                    f"auxiliary-output object {key!r} is missing, and the engine "
+                    f"dropped objects of its namespace: {reason.decode()}"
+                )
             if time.monotonic() >= deadline:
                 raise BlockObjectStoreError(
                     f"auxiliary-output object {key!r} is missing after {timeout_s}s"
@@ -183,6 +188,10 @@ def read_aux_rows(
             time.sleep(0.05)
         parts.append(load(data)[field])
     return np.concatenate(parts) if parts else np.empty(0)
+
+
+def _drop_marker(key: str) -> str:
+    return f"{key.rpartition('/')[0]}/dropped"
 
 
 _RETRY_INTERVAL_S = 0.2
@@ -205,7 +214,8 @@ class AuxObjectWriter:
     the store refused it until then (refusals are retried every
     `_RETRY_INTERVAL_S`), or it was still queued behind a put that had not
     returned. A batch whose put fails otherwise is dropped at once. Its keys
-    are missing; nothing else changes. Queuing waits while
+    are missing, and its namespaces get a drop marker that readers stop at;
+    nothing else changes. Queuing waits while
     `_MAX_QUEUED_BATCHES` batches are queued, at most until the first of them
     is written or misses its deadline. Once a batch has missed its deadline,
     until a put succeeds, queuing never waits: a full queue drops the batch."""
@@ -218,6 +228,7 @@ class AuxObjectWriter:
         # The batches not written yet, in queue order.
         self._pending: deque[_Batch] = deque()
         self._failing = False
+        self._markers: dict[str, bytes] = {}
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="vllm-aux-object-writer"
         )
@@ -232,7 +243,9 @@ class AuxObjectWriter:
                 self._cond.wait(self._pending[0].deadline - time.monotonic())
                 self._expire(time.monotonic())
             if len(self._pending) >= _MAX_QUEUED_BATCHES:
-                _drop(objects, "the queue is full after a write missed its deadline")
+                self._drop(
+                    objects, "the queue is full after a write missed its deadline"
+                )
                 return
             batch = _Batch(objects, time.monotonic() + self._timeout_s)
             self._pending.append(batch)
@@ -244,7 +257,7 @@ class AuxObjectWriter:
             if batch.deadline > now:
                 break
             if batch.objects is not None:
-                _drop(batch.objects, f"not written within {self._timeout_s:g} s")
+                self._drop(batch.objects, f"not written within {self._timeout_s:g} s")
                 batch.objects = None
                 self._failing = True
 
@@ -263,14 +276,33 @@ class AuxObjectWriter:
                     if objects is not None and error is None:
                         self._failing = False
                     elif error is not None and batch.objects is not None:
-                        _drop(batch.objects, error)
+                        self._drop(batch.objects, error)
                         batch.objects = None
                         self._failing |= late
                     self._expire(time.monotonic())
                     self._pending.popleft()
                     self._cond.notify_all()
+                    markers, self._markers = self._markers, {}
+                if markers:
+                    self._write_markers(markers)
         finally:
             self._store.close()
+
+    def _drop(self, objects: AuxObjects, reason: object) -> None:
+        logger.error(
+            "%d auxiliary-output objects from %r are not written: %s",
+            len(objects),
+            objects[0][0],
+            reason,
+        )
+        for key, _ in objects:
+            self._markers.setdefault(_drop_marker(key), str(reason).encode() or b"?")
+
+    def _write_markers(self, markers: dict[str, bytes]) -> None:
+        try:
+            self._store.put_batch(list(markers), list(markers.values()))
+        except Exception as e:
+            logger.error("Drop markers %s are not written: %s", list(markers), e)
 
     def _write(self, deadline: float, objects: AuxObjects) -> object:
         keys = [key for key, _ in objects]
@@ -293,12 +325,3 @@ class AuxObjectWriter:
         deadline = pending or time.monotonic() + self._timeout_s
         self._queue.put(None)
         self._thread.join(max(deadline - time.monotonic(), 0.0))
-
-
-def _drop(objects: AuxObjects, reason: object) -> None:
-    logger.error(
-        "%d auxiliary-output objects from %r are not written: %s",
-        len(objects),
-        objects[0][0],
-        reason,
-    )
