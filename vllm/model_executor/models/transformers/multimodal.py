@@ -193,11 +193,11 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         except (ValueError, KeyError, IndexError, AttributeError):
             return []
         empty, nonempty = ids
-        tail = cached_encode(self.get_tokenizer(), "")
-        split = len(empty) - len(tail)
+        tokenizer_ids = cached_encode(self.get_tokenizer(), "")
+        split = len(empty) - len(tokenizer_ids)
         prefix = empty[:split]
         # Text tells a prefix apart from tokens added after it
-        if split > 0 and empty[split:] == tail and nonempty[:split] == prefix:
+        if split > 0 and empty[split:] == tokenizer_ids and nonempty[:split] == prefix:
             return prefix
         return []
 
