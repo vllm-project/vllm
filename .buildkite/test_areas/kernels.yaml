@@ -458,6 +458,7 @@ steps:
           kernels/test_kpool_decode_update_batched.py
           kernels/test_minimax_m3_amd_ops.py
           kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+          kernels/test_muse_spark_rocm_decode_moe.py
           kernels/test_muse_spark_router_bf16x3.py
           kernels/test_onednn.py
           kernels/test_relu2_fp8_quant.py
@@ -693,10 +694,10 @@ steps:
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
   mirror:
     amd:
-      label: ":amd: (MI300) MoE Kernels"
+      label: ":amd: (MI300 DPX) MoE Kernels"
       automatic_shard: true
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 55
       source_file_dependencies:
       - csrc/quantization/w8a8/cutlass/moe/
