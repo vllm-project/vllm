@@ -30,6 +30,7 @@ def _accumulate_kernel(
     pred_ptr,
     pred_stride,
     counts_ptr,
+    surprise_counts_ptr,
     num_reqs,
     BLOCK_R: tl.constexpr,
 ):
@@ -100,6 +101,11 @@ def _accumulate_kernel(
     tl.store(info_ptr + step * 6 + 5, tl.load(info_ptr + step * 6 + 5) + b1)
     tl.store(grad_ptr + step * 3 + 2, tl.load(grad_ptr + step * 3 + 2) + g_extra)
     tl.store(counts_ptr + step, tl.load(counts_ptr + step) + count)
+    surprise_count = tl.sum(tl.where(observed & (extra > 0.0), 1.0, 0.0), axis=0)
+    tl.store(
+        surprise_counts_ptr + step,
+        tl.load(surprise_counts_ptr + step) + surprise_count,
+    )
 
 
 @triton.jit
@@ -112,6 +118,7 @@ def _refit_kernel(
     grad_ptr,
     grad_row_stride,
     counts_ptr,
+    surprise_counts_ptr,
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     L2: tl.constexpr,
     DAMPING: tl.constexpr,
@@ -129,6 +136,7 @@ def _refit_kernel(
     g1_k = tl.load(grad_ptr + k * grad_row_stride + 1, mask=mask, other=0.0)
     g0 = tl.sum(g0_k, axis=0)
     n = tl.load(counts_ptr + k, mask=mask, other=0.0)
+    n_surprise = tl.load(surprise_counts_ptr + k, mask=mask, other=0.0)
 
     # Load the current shared slope and per-position intercepts.
     w = tl.load(slope_ptr)
@@ -149,17 +157,22 @@ def _refit_kernel(
     step_w = (v0 * m11 - v1 * m01) / det
     step_extra = (v1 * m00 - v0 * m01) / det
 
-    # The slope learns from every position, so it is damped by the round's
-    # total sample count.
+    # The peak slope learns from every observation; the surprise slope only
+    # learns from nonzero predecessor surprises.
     total_n = tl.sum(n, axis=0)
+    surprise_n = tl.sum(n_surprise, axis=0)
     step_w *= total_n / (total_n + DAMPING)
-    # Mask out non-finite steps and steps that would drive the slope negative.
-    # A NaN check alone would let +inf through, as w + inf >= 0.
+    step_extra *= surprise_n / (surprise_n + DAMPING)
+    # Rounding can make the Schur determinant nonpositive. Reject those steps,
+    # non-finite steps, and steps that would drive the peak slope negative.
     step_w = tl.where(
-        (tl.abs(step_w) < float("inf")) & (w + step_w >= 0.0), step_w, 0.0
+        (det > 0.0) & (tl.abs(step_w) < float("inf")) & (w + step_w >= 0.0),
+        step_w,
+        0.0,
     )
-    step_extra *= total_n / (total_n + DAMPING)
-    step_extra = tl.where(tl.abs(step_extra) < float("inf"), step_extra, 0.0)
+    step_extra = tl.where(
+        (det > 0.0) & (tl.abs(step_extra) < float("inf")), step_extra, 0.0
+    )
     tl.store(surprise_slope_ptr, tl.load(surprise_slope_ptr) + step_extra)
     # Update the shared slope.
     new_w = w + step_w
@@ -186,6 +199,7 @@ def _refit_kernel(
         tl.store(info_ptr + k * info_row_stride + col, 0.0, mask=mask)
     tl.store(grad_ptr + k * grad_row_stride + 2, 0.0, mask=mask)
     tl.store(counts_ptr + k, 0.0, mask=mask)
+    tl.store(surprise_counts_ptr + k, 0.0, mask=mask)
 
 
 @triton.jit
@@ -528,6 +542,7 @@ class OnlineAcceptanceEstimator:
         self.counts = torch.zeros(
             num_speculative_steps, dtype=torch.float32, device=device
         )
+        self.surprise_counts = torch.zeros_like(self.counts)
 
     def step(
         self,
@@ -549,6 +564,7 @@ class OnlineAcceptanceEstimator:
             self.predictions,
             self.predictions.stride(0),
             self.counts,
+            self.surprise_counts,
             num_reqs,
             BLOCK_R=self._accumulate_block_r,
             num_warps=1 if self._accumulate_block_r <= 256 else 4,
@@ -570,6 +586,7 @@ class OnlineAcceptanceEstimator:
         self.info.zero_()
         self.grad.zero_()
         self.counts.zero_()
+        self.surprise_counts.zero_()
         self._steps_since_refit = 0
         self._refit()
 
@@ -583,6 +600,7 @@ class OnlineAcceptanceEstimator:
             self.grad,
             self.grad.stride(0),
             self.counts,
+            self.surprise_counts,
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             L2=self.L2,
             DAMPING=self.DAMPING_OBSERVATIONS,

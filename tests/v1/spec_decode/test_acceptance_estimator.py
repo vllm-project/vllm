@@ -527,7 +527,9 @@ def test_warmup_covers_every_batch_size_and_the_refit():
     num_accepted = torch.ones(REFIT_NUM_REQS, device=device)
     features = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device)
     _drive_round(estimator, features[:1], num_accepted[:1], slots[:1])
+    estimator.surprise_counts.fill_(1.0)
     estimator.warmup()
+    assert not estimator.surprise_counts.any()
     warmed = compiled_variants()
 
     for num_reqs in (8, 300):
@@ -681,7 +683,9 @@ def test_joint_refit_matches_dense_newton_step(all_rejected):
     counts = observed.sum(axis=0)
     total = counts.sum()
     damp = estimator.DAMPING_OBSERVATIONS
-    delta[:2] *= total / (total + damp)
+    surprise_n = np.count_nonzero(observed & (predecessor > 0.0))
+    delta[0] *= total / (total + damp)
+    delta[1] *= surprise_n / (surprise_n + damp)
     initial = np.r_[
         estimator.slope.cpu(),
         estimator.surprise_slope.cpu(),
@@ -706,6 +710,7 @@ def test_joint_refit_matches_dense_newton_step(all_rejected):
     assert not estimator.info.any()
     assert not estimator.grad.any()
     assert not estimator.counts.any()
+    assert not estimator.surprise_counts.any()
 
 
 @pytest.mark.parametrize("parallel", [False, True])
@@ -843,10 +848,84 @@ def test_refit_rejects_non_finite_surprise_step(gradient):
     estimator.grad[:, 1] = 0.5
     estimator.grad[0, 2] = gradient
     estimator.counts[:] = estimator.DAMPING_OBSERVATIONS
+    estimator.surprise_counts[:] = estimator.DAMPING_OBSERVATIONS
     before = estimator.intercepts.clone()
     empty = torch.empty(0, dtype=torch.int32, device=device)
     estimator.step(empty, empty, empty)
     assert estimator.surprise_slope.item() == 0.0
     torch.testing.assert_close(
         estimator.intercepts, before + 0.25 / (1.0 + estimator.L2)
+    )
+
+
+def test_surprise_step_damping_uses_nonzero_observations():
+    """Three surprising draws must not borrow evidence from 1000 top-1 draws."""
+    device = current_platform.device_type
+    num_reqs = 1003
+    estimator = OnlineAcceptanceEstimator(num_reqs, 2, device)
+    estimator.REFIT_INTERVAL = 2
+    slots = torch.arange(num_reqs, device=device, dtype=torch.int32)
+    logits = torch.tensor([[0.0, -0.1], [0.0, 0.0]], device=device).repeat(num_reqs, 1)
+    logits[1::2, 1] = -torch.linspace(0.0, 2.0, num_reqs, device=device)
+    steps = torch.arange(2, device=device).repeat(num_reqs)
+    draws = torch.zeros(num_reqs, 2, dtype=torch.int64, device=device)
+    draws[-3:, 0] = 1
+    confidence = torch.empty(num_reqs, 2, device=device)
+    estimator.predict(
+        logits,
+        slots.repeat_interleave(2),
+        steps,
+        confidence,
+        torch.ones(num_reqs, device=device),
+        draws.flatten(),
+    )
+    # All requests reach the second position; only the three surprising ones
+    # are rejected there.
+    accepted = torch.full((num_reqs,), 2, device=device, dtype=torch.int32)
+    accepted[-3:] = 1
+    estimator.step(slots, accepted + 1, 2 - accepted)
+    assert estimator.counts.tolist() == [num_reqs, num_reqs]
+    assert estimator.surprise_counts.tolist() == [0, 3]
+
+    # Dense Newton reference, before applying the sparse feature's damping.
+    design = np.column_stack(
+        (
+            estimator.features.cpu().numpy().flatten(),
+            estimator.predecessor_surprise.cpu().numpy().flatten(),
+            np.tile(np.eye(2), (num_reqs, 1)),
+        )
+    )
+    probs = confidence.cpu().numpy().flatten().astype(np.float64)
+    labels = (np.arange(2) < accepted.cpu().numpy()[:, None]).flatten()
+    hessian = design.T @ ((probs * (1 - probs))[:, None] * design)
+    hessian += estimator.L2 * np.eye(4)
+    raw = np.linalg.solve(hessian, design.T @ (labels - probs))[1]
+    expected = raw * 3 / (3 + estimator.DAMPING_OBSERVATIONS)
+    empty = torch.empty(0, dtype=torch.int32, device=device)
+    estimator.step(empty, empty, empty)
+    assert estimator.surprise_slope.item() == pytest.approx(expected, rel=2e-4)
+    assert not estimator.surprise_counts.any()
+
+
+def test_refit_rejects_nonpositive_schur_determinant():
+    """An indefinite Schur system must not produce a finite reverse step."""
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    # Deliberately indefinite shared-slope moments: |m01| > sqrt(m00*m11).
+    estimator.info[:, 0] = 1.0
+    estimator.info[:, 2] = 1.0
+    estimator.info[:, 3] = 2.0
+    estimator.info[:, 4] = 1.0
+    estimator.grad[:] = 0.5
+    estimator.counts[:] = estimator.DAMPING_OBSERVATIONS
+    estimator.surprise_counts[:] = estimator.DAMPING_OBSERVATIONS
+    before_slope = estimator.slope.clone()
+    before_bias = estimator.intercepts.clone()
+    empty = torch.empty(0, dtype=torch.int32, device=device)
+    estimator.step(empty, empty, empty)
+    torch.testing.assert_close(estimator.slope, before_slope, rtol=0, atol=0)
+    assert estimator.surprise_slope.item() == 0.0
+    torch.testing.assert_close(
+        estimator.intercepts, before_bias + 0.25 / (1.0 + estimator.L2)
     )
