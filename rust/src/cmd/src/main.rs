@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
 use vllm_mm_cache::MmProcessorShmCache;
-use vllm_server::Config;
 use vllm_tracing::LogLevel;
 
 use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
@@ -162,7 +161,7 @@ fn main() -> ExitCode {
 
 async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Frontend(args) => vllm_server::serve(args.into_config(), shutdown_signal()).await,
+        Command::Frontend(args) => args.into_config().into_server().serve(shutdown_signal()).await,
         Command::Bench(BenchCommand::Serve(bench_args)) => {
             vllm_bench::prepare_process();
             vllm_bench::run(bench_args).await
@@ -184,7 +183,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     "running Rust frontend without a managed local Python engine"
                 );
                 let config = args.to_frontend_config(handshake_address, &topology);
-                return vllm_server::serve(config, shutdown_signal()).await;
+                return config.into_server().serve(shutdown_signal()).await;
             }
 
             let shutdown_timeout = args.runtime.shutdown_timeout();
@@ -225,13 +224,11 @@ async fn async_main(cli: Cli) -> Result<()> {
                     Ok(())
                 })
             } else {
-                let config = Config {
-                    mm_processor_cache: mm_cache.clone(),
-                    ..args.to_frontend_config(handshake_address, &topology)
-                };
+                let mut config = args.to_frontend_config(handshake_address, &topology);
+                config.engine_core.mm_processor_cache = mm_cache;
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let result = vllm_server::serve(config, shutdown).await;
+                    let result = config.into_server().serve(shutdown).await;
                     if result.is_ok() {
                         info!("OpenAI server shut down gracefully");
                     }
