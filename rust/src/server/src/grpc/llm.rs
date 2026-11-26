@@ -1,28 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::sync::{Arc, Mutex};
+
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{Stream, StreamExt, TryStreamExt};
-use std::{
-    collections::HashMap,
-    num::NonZeroU32,
-    sync::{Arc, Mutex},
-};
+use serde_json::Value;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use tonic::{
     Code, Request, Status, Streaming,
     transport::{Channel, Endpoint},
 };
+use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::{
     BoxGenerateOutputStream, Error, FinishReason, GenerateOutput, GeneratePromptInfo,
-    GenerateRequest, Llm, LlmInfo, Result,
+    GenerateRequest, Llm, LlmInfo, PromptCacheUsage, Result, WeightVersions,
 };
-use vllm_proto::{self as pb, inference_client::InferenceClient};
 
-use tokio_util::task::AbortOnDropHandle;
-use uuid::Uuid;
+use super::pb::inference_client::InferenceClient;
+use super::{convert, pb};
 
 struct InflightRequest {
     external_request_id: String,
@@ -121,8 +122,7 @@ fn status_to_llm_error(status: Status) -> Error {
     }
 }
 
-fn numbers_fit_protobuf_struct(value: &serde_json::Value) -> bool {
-    use serde_json::Value;
+fn numbers_fit_protobuf_struct(value: &Value) -> bool {
     match value {
         // Struct stores numbers as f64. Compare integer values in i128 so even
         // a u64::MAX rounded up to 2^64 is detected.
@@ -177,13 +177,13 @@ fn to_grpc_request(
         .reasoning_parser_kwargs
         .filter(|k| !k.chat_template_kwargs.is_empty())
         .map(|k| {
-            let value = serde_json::Value::Object(k.chat_template_kwargs.into_iter().collect());
+            let value = Value::Object(k.chat_template_kwargs.into_iter().collect());
             if !numbers_fit_protobuf_struct(&value) {
                 return Err(Error::Unsupported {
                     field: "chat_template_kwargs number outside protobuf Struct precision",
                 });
             }
-            Ok(super::convert::json_to_proto_struct(&value).expect("JSON object"))
+            Ok(convert::json_to_proto_struct(&value).expect("JSON object"))
         })
         .transpose()?;
     let mut grpc_request = Request::new(pb::GenerateRequest {
@@ -326,11 +326,11 @@ async fn generate_outputs_from_proto(
         y.yield_ok(GenerateOutput {
             request_id: request_id.clone(),
             prompt_info: prompt.take(),
-            weight_versions: vllm_llm::WeightVersions::new(None, out.token_ids.len()),
+            weight_versions: WeightVersions::new(None, out.token_ids.len()),
             token_ids: out.token_ids,
             logprobs: None,
             finish_reason,
-            prompt_cache_usage: vllm_llm::PromptCacheUsage {
+            prompt_cache_usage: PromptCacheUsage {
                 cached_token_count: terminal.and_then(|f| f.num_cached_tokens).unwrap_or_default()
                     as usize,
                 ..Default::default()
