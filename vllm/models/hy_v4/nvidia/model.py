@@ -83,6 +83,7 @@ from .attention import (
 )
 from .hc import HYV4HCHeadLayer, HYV4HCLayer, IHCBoundary
 from .moe import HYV4FeedForward, HYV4MoEFused
+from .triton_ihc import triton_ihc_post_pre, triton_ihc_post_pre_supported
 
 logger = init_logger(__name__)
 
@@ -286,11 +287,37 @@ class HYV4DecoderLayer(nn.Module):
                 if use_ihc_sequence_parallel
                 else tensor_model_parallel_all_reduce(hidden_states)
             )
-        hidden_states = self.hc_attn_layer.post(hidden_states, residual, post_gates)
-
-        hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
-        hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        can_fuse_norm = (
+            self.post_attention_layernorm.variance_size_override is None
+            and self.post_attention_layernorm.has_weight
+            and self.post_attention_layernorm.weight.dtype
+            in (hidden_states.dtype, torch.float32)
+        )
+        if (
+            can_fuse_norm
+            and triton_ihc_post_pre_supported(hidden_states)
+            and self.hc_attn_layer.hc_post.hpc_op is None
+            and self.hc_mlp_layer.hc_pre.hpc_op is None
+        ):
+            pre = self.hc_mlp_layer.hc_pre
+            residual, hidden_states, post_gates = triton_ihc_post_pre(
+                hidden_states,
+                residual,
+                post_gates,
+                pre.hc_fn.weight,
+                pre.hc_scale,
+                pre.hc_base,
+                pre.magnitude,
+                pre.hc_eps,
+                pre.layernorm_epsilon,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
+            )
+        else:
+            hidden_states = self.hc_attn_layer.post(hidden_states, residual, post_gates)
+            hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
+            hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
+            hidden_states = self.post_attention_layernorm(hidden_states)
         if use_ihc_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.mlp(hidden_states)
