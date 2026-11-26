@@ -720,9 +720,11 @@ def test_store_short_write_names_likely_cause(tmp_path, monkeypatch, use_c_ext):
     assert os.listdir(tmp_path) == []
 
 
-def test_wait_idle_blocks_until_tasks_complete():
+def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
     """wait_idle must not return while a task is still in flight."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    worker_notify_all = MagicMock(wraps=pool._condition.notify_all)
+    monkeypatch.setattr(pool._condition, "notify_all", worker_notify_all)
     gate = threading.Event()
     pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
 
@@ -734,6 +736,7 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.set()
         waiter.join(timeout=5.0)
         assert not waiter.is_alive(), "wait_idle did not unblock"
+        worker_notify_all.assert_not_called()
     finally:
         gate.set()
         pool.shutdown(wait=True)
@@ -1187,8 +1190,8 @@ def test_events_require_global_kv_events_flag(tmp_path):
 
 
 def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
-    """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event via the
-    TieringOffloadingManager's aggregated take_events()."""
+    """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event in the
+    TieringOffloadingManager's aggregated StepResult."""
     from vllm.v1.kv_offload.tiering.manager import (
         CPUPrimaryTierOffloadingManager,
         TieringOffloadingManager,
@@ -1222,8 +1225,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and not events:
-            manager.on_schedule_end(ctx)
-            events.extend(manager.take_events())
+            events.extend(manager.on_schedule_end(ctx).events)
             time.sleep(0.01)
 
         fs_events = [e for e in events if e.medium == Medium.STORAGE]

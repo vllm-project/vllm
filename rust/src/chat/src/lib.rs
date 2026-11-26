@@ -17,7 +17,7 @@ pub use backend::{
     ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, LoadModelBackendsOptions,
     LoadedModelBackends, NewChatOutputProcessorOptions, load_model_backends,
 };
-pub use error::{Error, Result};
+pub use error::{Error, ErrorKind, Result};
 pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
     AssistantToolCall, ChatEvent, ChatTokenUsage,
@@ -266,6 +266,12 @@ impl ChatRequestProcessor {
             arrival_time: Some(arrival_time),
         };
         Ok((text_request, prompt_text))
+    }
+
+    /// Render an OpenAI completions `prompt` and `suffix` into the model's
+    /// fill-in-the-middle prompt text, or `None` if the model has none.
+    pub fn render_completion_suffix(&self, prompt: &str, suffix: &str) -> Option<String> {
+        self.backend.chat_renderer().render_completion_suffix(prompt, suffix)
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
@@ -583,7 +589,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, muse, musespark, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss, step5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, muse, musespark, qwen3_coder, qwen3_json, qwen3_xml, seed_oss, step5)"].assert_eq(&error.to_report_string());
     }
 
     #[test]

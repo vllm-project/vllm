@@ -484,11 +484,12 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 // Errors
 // ========================================================================================
 
-/// Media that cannot be fetched or preprocessed is the request's fault, as in
-/// the HTTP render route.
+/// Media that cannot be fetched or preprocessed is still treated as the
+/// request's fault on gRPC render (aligning with HTTP's client/server split is
+/// tracked as a follow-up).
 fn chat_error_to_status(error: vllm_chat::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error()
+    if error.kind().is_invalid_request()
         || matches!(
             error,
             vllm_chat::Error::Multimodal(_) | vllm_chat::Error::Media(_)
@@ -524,8 +525,9 @@ mod tests {
 
     use super::*;
 
-    /// A media fetch that failed on the host's side is still the request's
-    /// error here, as in HTTP render; only chat routes tell it apart.
+    /// A media fetch that failed on the host's side is still treated as
+    /// `INVALID_ARGUMENT` on gRPC render; HTTP routes distinguish client vs
+    /// server media faults.
     #[test]
     fn media_fetch_timeout_is_invalid_argument() {
         let error = vllm_chat::Error::from(MediaConnectorError::Timeout {

@@ -52,6 +52,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    KVCacheStage,
     KVCacheTensor,
     MambaSpec,
 )
@@ -1604,6 +1605,112 @@ def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 4b: CPU prefixes are requeued by last use, tail first
+# ---------------------------------------------------------------------------
+def _same_prompt(request: Request, request_id: str) -> Request:
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=request.prompt_token_ids,
+        sampling_params=request.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=request._block_hasher,
+    )
+
+
+def _cpu_hit_tokens(sched: SimpleCPUOffloadScheduler, request: Request) -> int:
+    probe = _same_prompt(request, f"{request.request_id}-probe")
+    hit_tokens, _ = sched.get_num_new_matched_tokens(probe, num_computed_tokens=0)
+    sched.request_finished(probe, block_ids=[])  # drop the lookup pin
+    return hit_tokens or 0
+
+
+def _store(fix: SchedulerFixture, request: Request, num_blocks: int) -> KVCacheBlocks:
+    """Store a request's first `num_blocks` blocks in one step."""
+    sched = fix.scheduler
+    kv_blocks = _alloc_and_register(fix, request, num_blocks)
+    sched.update_state_after_alloc(request, kv_blocks, num_external_tokens=0)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {request.request_id: num_blocks * BLOCK_SIZE},
+            new_reqs={request.request_id: kv_blocks.get_block_ids()},
+        )
+    )
+    assert len(meta.store_cpu_blocks) == num_blocks
+    simulate_store_completion(sched, meta.store_event)
+    return kv_blocks
+
+
+def _store_and_finish(
+    fix: SchedulerFixture, request: Request, num_blocks: int
+) -> KVCacheBlocks:
+    kv_blocks = _store(fix, request, num_blocks)
+    fix.scheduler.request_finished_all_groups(request, kv_blocks.get_block_ids())
+    return kv_blocks
+
+
+def test_cpu_prefix_refresh_waits_for_final_flush() -> None:
+    """A prompt stored in two steps, the last by the finish-time flush, is
+    requeued tail first after the flush lands, so eviction keeps its head."""
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    req_a = make_request(num_blocks=3)
+    kv_a = _alloc_and_register(fix, req_a, 3, confirmed=False)
+    ids_a = kv_a.get_block_ids()
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    req_a.num_computed_tokens = 2 * BLOCK_SIZE
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_a.request_id: 2 * BLOCK_SIZE}, new_reqs={req_a.request_id: ids_a}
+        )
+    )
+    simulate_store_completion(sched, meta.store_event)
+
+    req_a.num_computed_tokens = 3 * BLOCK_SIZE
+    sched.request_finished_all_groups(req_a, ids_a)
+    flush = sched.build_connector_meta(make_scheduler_output({}))
+    assert len(flush.store_cpu_blocks) == 1
+    simulate_store_completion(sched, flush.store_event)
+
+    # Takes the one empty CPU block and A's last block.
+    _store_and_finish(fix, make_request(num_blocks=2), 2)
+
+    assert _cpu_hit_tokens(sched, req_a) == 2 * BLOCK_SIZE
+
+
+@pytest.mark.parametrize("via", ["load", "lookup"])
+def test_cpu_hit_release_requeues_tail_first(via: str) -> None:
+    """CPU blocks pinned by a hit go back to the free queue tail first, when
+    the load lands or when the lookup pin is dropped, so the eviction does not
+    take block 0 first."""
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    req_a = make_request(num_blocks=4)
+    _store(fix, req_a, 4)  # A keeps running: no finish-time refresh
+
+    reader = _same_prompt(req_a, "req-a-reader")
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(reader, 0)
+    assert (hit_tokens, is_async) == (4 * BLOCK_SIZE, True)
+    if via == "load":
+        kv_reader = KVCacheBlocks(blocks=(fix.gpu_block_pool.get_new_blocks(4),))
+        sched.update_state_after_alloc(reader, kv_reader, hit_tokens)
+        meta = sched.build_connector_meta(
+            make_scheduler_output(
+                {reader.request_id: 1},
+                new_reqs={reader.request_id: kv_reader.get_block_ids()},
+            )
+        )
+        assert len(meta.load_cpu_blocks) == 4
+        simulate_load_completion(sched, {reader.request_id})
+    else:
+        sched.request_finished(reader, block_ids=[])
+
+    _store_and_finish(fix, make_request(num_blocks=2), 2)  # evicts 2 of A's 4
+
+    assert _cpu_hit_tokens(sched, req_a) == 2 * BLOCK_SIZE
+
+
+# ---------------------------------------------------------------------------
 # Test 5: Preemption no CPU block leak
 # ---------------------------------------------------------------------------
 def test_preemption_no_cpu_block_leak() -> None:
@@ -2759,11 +2866,16 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
 # ---------------------------------------------------------------------------
 # Test 18: PP / spec-decode sizing alignment
 # ---------------------------------------------------------------------------
-def test_scheduler_uses_worker_aligned_num_cpu_blocks() -> None:
-    """Authoritative worker-aligned sizing overrides config-only estimates."""
+def test_scheduler_sizes_by_the_largest_pipeline_stage() -> None:
+    """The scheduler holds stage 0's config, but sizes the pool by the stage
+    whose blocks are largest, as every worker does."""
     num_gpu_blocks = 16
     cpu_capacity = 4 * _BYTES_PER_BLOCK
     light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
+    light.pipeline_stages = (
+        KVCacheStage(_BYTES_PER_BLOCK),
+        KVCacheStage(3 * _BYTES_PER_BLOCK),
+    )
 
     sched = SimpleCPUOffloadScheduler(
         vllm_config=_make_vllm_config(),
@@ -2771,7 +2883,6 @@ def test_scheduler_uses_worker_aligned_num_cpu_blocks() -> None:
         cpu_capacity_bytes=cpu_capacity,
         scheduler_block_size=BLOCK_SIZE,
         hash_block_size=BLOCK_SIZE,
-        aligned_num_cpu_blocks=1,
     )
     assert sched.num_cpu_blocks == 1
 
