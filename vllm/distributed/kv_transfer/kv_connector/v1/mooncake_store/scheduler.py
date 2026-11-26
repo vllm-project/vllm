@@ -9,9 +9,6 @@ from collections.abc import Sequence
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import get_max_offload_tokens
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     MooncakeStoreCoordinator,
 )
@@ -320,7 +317,7 @@ class MooncakeStoreScheduler:
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
+    ) -> MooncakeStoreConnectorMetadata:
         """Build connector metadata for this scheduler step."""
         is_consumer = self.kv_role == "kv_consumer"
         can_process_cached = not is_consumer or self.save_decode_cache
