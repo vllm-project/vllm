@@ -350,7 +350,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def is_supported_config(
         cls, moe_config, weight_key, activation_key, activation_format
     ):
-        if not current_platform.is_rocm():
+        if not cls._supports_current_device():
             return False, (
                 f"kernel does not support current device {current_platform.device_name}"
             )
