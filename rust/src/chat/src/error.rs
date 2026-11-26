@@ -14,16 +14,34 @@ pub(crate) type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 pub enum Error {
     #[error("chat request must contain at least one message")]
     EmptyMessages,
-    #[error("cannot continue the final message when the last message is not from the assistant")]
-    ContinueFinalAssistantWithoutFinalAssistant,
     #[error("{renderer} renderer does not support continue_final_message")]
     UnsupportedContinueFinalMessage { renderer: &'static str },
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
+    /// The chat template could not be loaded or compiled, or this renderer
+    /// failed; request-caused refusals use the typed variants below.
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    /// The chat template failed while rendering this request, including its
+    /// `raise_exception`. The request's values usually cause it (a template
+    /// filter given a list instead of a string), and a template that is broken
+    /// for every request fails every request anyway, so it is the request's
+    /// error, as in Python.
     #[error("{message}")]
-    ChatTemplateThrown { message: String },
+    ChatTemplateRender { message: String },
+    /// The request's own `chat_template` failed to compile.
+    #[error("{message}")]
+    InvalidRequestChatTemplate { message: String },
+    /// `continue_final_message` without a final assistant message to
+    /// continue, or the template dropped the final message.
+    #[error("{message}")]
+    InvalidContinueFinalMessage { message: String },
+    /// The messages break a rule of the model's prompt format, such as a tool
+    /// result without a matching tool call.
+    #[error("{message}")]
+    InvalidMessages { message: String },
+    #[error("{message}")]
+    InvalidChatTemplateKwargs { message: String },
     #[error("{0}")]
     InvalidReasoningEffort(String),
     #[error("{message}")]
@@ -178,9 +196,10 @@ impl Error {
             Self::MediaAfterPreprocessed { source, .. } => source.kind(),
             Self::EmptyMessages
             | Self::UnsupportedChatRole { .. }
-            | Self::ToolReferenceNotFound { .. } => ErrorKind::invalid_param("messages"),
-            Self::ContinueFinalAssistantWithoutFinalAssistant
-            | Self::UnsupportedContinueFinalMessage { .. } => {
+            | Self::ToolReferenceNotFound { .. }
+            | Self::InvalidMessages { .. } => ErrorKind::invalid_param("messages"),
+            Self::UnsupportedContinueFinalMessage { .. }
+            | Self::InvalidContinueFinalMessage { .. } => {
                 ErrorKind::invalid_param("continue_final_message")
             }
             Self::InvalidReasoningEffort(_) => ErrorKind::invalid_param("reasoning_effort"),
@@ -190,10 +209,13 @@ impl Error {
             Self::ToolChoiceRequiresTools | Self::ToolChoiceFunctionNotFound { .. } => {
                 ErrorKind::invalid_param("tool_choice")
             }
-            Self::UntrustedRequestChatTemplate | Self::UnsupportedRequestChatTemplate => {
-                ErrorKind::invalid_param("chat_template")
+            Self::UntrustedRequestChatTemplate
+            | Self::UnsupportedRequestChatTemplate
+            | Self::InvalidRequestChatTemplate { .. } => ErrorKind::invalid_param("chat_template"),
+            Self::InvalidChatTemplateKwargs { .. } => {
+                ErrorKind::invalid_param("chat_template_kwargs")
             }
-            Self::ChatTemplateThrown { .. }
+            Self::ChatTemplateRender { .. }
             | Self::InvalidReasoningControl { .. }
             | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
