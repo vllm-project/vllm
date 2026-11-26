@@ -50,6 +50,9 @@ class ECMooncakeConnectorMetadata(ECConnectorMetadata):
     pushes: list[ECMooncakePushSpec] = field(default_factory=list)
     freed: list[str] | None = None
     store_candidates: dict[str, TensorSpec] = field(default_factory=dict)
+    store_lookups: dict[str, dict[str, TensorSpec]] = field(default_factory=dict)
+    store_lookup_cancels: set[str] = field(default_factory=set)
+    store_lookup_consumers: dict[str, set[str]] = field(default_factory=dict)
 
 
 @dataclass

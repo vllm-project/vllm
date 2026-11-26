@@ -81,6 +81,11 @@ class ECMooncakeScheduler:
 
         self._store_candidates: list[tuple[str, str, TensorSpec]] = []
         self._cross_encoder_cache = config.cross_encoder_cache
+        self._lookup_prefetch = config.store_lookup_prefetch
+        self._lookup_sequence = 0
+        self._lookup_requests: dict[str, str] = {}
+        self._lookups: dict[str, dict[str, TensorSpec]] = {}
+        self._lookup_cancels: set[str] = set()
         self._is_producer = config.is_producer
         self._is_consumer = config.is_consumer
         self._control_addr = config.control_addr
@@ -364,6 +369,20 @@ class ECMooncakeScheduler:
                 return str(item["transfer_id"])
         return None
 
+    def on_new_request(self, request: Any) -> None:
+        if not self._lookup_prefetch or request.request_id in self._lookup_requests:
+            return
+        expected = {
+            feature.identifier: self._encoder_output_spec(request, index)
+            for index, feature in enumerate(request.mm_features or [])
+            if feature.modality == "image"
+        }
+        if expected:
+            tag = f"{self._lookup_sequence}:{request.request_id}"
+            self._lookup_sequence += 1
+            self._lookup_requests[request.request_id] = tag
+            self._lookups[tag] = expected
+
     def ensure_cache_available(self, request: Any, num_computed_tokens: int) -> bool:
         if self._is_producer:
             for index, feature in enumerate(request.mm_features):
@@ -492,6 +511,13 @@ class ECMooncakeScheduler:
             freed=scheduler_output.free_encoder_mm_hashes
         )
         preempted = scheduler_output.preempted_req_ids or set()
+        meta.store_lookups, self._lookups = self._lookups, {}
+        meta.store_lookup_cancels, self._lookup_cancels = self._lookup_cancels, set()
+        for request_id, identifier, _ in self._store_candidates:
+            if request_id not in preempted:
+                tag = self._lookup_requests.get(request_id)
+                if tag is not None:
+                    meta.store_lookup_consumers.setdefault(tag, set()).add(identifier)
         meta.store_candidates = {
             identifier: output
             for request_id, identifier, output in self._store_candidates
@@ -525,6 +551,10 @@ class ECMooncakeScheduler:
         return self._scheduler_pending_work
 
     def request_finished(self, request: Any) -> tuple[bool, dict[str, Any] | None]:
+        tag = self._lookup_requests.pop(request.request_id, None)
+        if tag is not None:
+            self._lookups.pop(tag, None)
+            self._lookup_cancels.add(tag)
         if self._is_consumer:
             for index in range(len(request.mm_features)):
                 transfer_id = self._request_transfer_id(request, index)
@@ -568,6 +598,9 @@ class ECMooncakeScheduler:
         reset concurrency-safe.
         """
         self._local_cache.clear()
+        self._lookup_cancels.update(self._lookup_requests.values())
+        self._lookup_requests.clear()
+        self._lookups.clear()
         self._transfers.invalidate_local(time.monotonic())
         self._scheduler_pending_work = False
         self._pushes_to_prepare.clear()

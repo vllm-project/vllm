@@ -70,10 +70,15 @@ class MooncakeECConfig:
     push_wait_timeout_s: float
     pool_size: int
     cross_encoder_cache: bool = False
+    store_lookup_prefetch: bool = True
+    """Query inputs early by default when cross-Encoder reuse is enabled."""
+    store_lookup_prefetch_ttl_s: float = 2.0
+    """Maximum age of an early lookup result before a normal lookup is required."""
     store_max_pending_items: int = 32
     store_max_pending_bytes: int = 2 * 1024**3
     store_read_buffer_bytes: int = 128 * 1024**2
     store_disk_staging_budget_bytes: int | None = None
+    """Per-GET owner staging allowance; unset uses 128 MiB for SSD, None for RAM."""
     store_disk_use_uring: bool | None = False
     """Match MOONCAKE_OFFLOAD_USE_URING on the SSD owners when configuring Mooncake.
 
@@ -108,6 +113,11 @@ class MooncakeECConfig:
         shared_reuse = get("cross_encoder_cache", False)
         if not isinstance(shared_reuse, bool):
             raise ValueError("cross_encoder_cache must be a boolean")
+        lookup_prefetch = get("store_lookup_prefetch", shared_reuse)
+        if not isinstance(lookup_prefetch, bool):
+            raise ValueError("store_lookup_prefetch must be a boolean")
+        if lookup_prefetch and not shared_reuse:
+            raise ValueError("store_lookup_prefetch requires cross_encoder_cache")
         disk_use_uring = get("store_disk_use_uring", False)
         if disk_use_uring is not None and not isinstance(disk_use_uring, bool):
             raise ValueError("store_disk_use_uring must be a boolean or None")
@@ -151,6 +161,10 @@ class MooncakeECConfig:
             ),
             pool_size=registered_buffer_size,
             cross_encoder_cache=shared_reuse,
+            store_lookup_prefetch=lookup_prefetch,
+            store_lookup_prefetch_ttl_s=_positive_float(
+                "store_lookup_prefetch_ttl_s", get("store_lookup_prefetch_ttl_s", 2.0)
+            ),
             store_max_pending_items=_positive_int(
                 "store_max_pending_items", get("store_max_pending_items", 32)
             ),

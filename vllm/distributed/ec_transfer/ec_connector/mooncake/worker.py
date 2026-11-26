@@ -55,6 +55,8 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data imp
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
 
+from ..mooncake_store_embedding.prefetch import StoreLookupPrefetcher
+
 logger = init_logger(__name__)
 
 _T = TypeVar("_T")
@@ -110,6 +112,9 @@ class ECMooncakeWorker:
             else None
         )
         self._output_store: MooncakeEmbeddingStoreBackend | None = None
+        self._lookup_prefetch_enabled = config.store_lookup_prefetch
+        self._lookup_prefetch_ttl_s = config.store_lookup_prefetch_ttl_s
+        self._lookup_prefetcher: StoreLookupPrefetcher | None = None
         self.is_producer = config.is_producer
         self.is_consumer = config.is_consumer
         self._buffer_device = config.buffer_device
@@ -224,6 +229,12 @@ class ECMooncakeWorker:
                 max_pending_items=max_items,
                 max_pending_bytes=max_bytes,
             )
+            if self._lookup_prefetch_enabled:
+                self._lookup_prefetcher = StoreLookupPrefetcher(
+                    self._output_store.lookup_inputs,
+                    max_items=max_items,
+                    ttl_s=self._lookup_prefetch_ttl_s,
+                )
         if not self.is_consumer or self._control_server is not None:
             return
         self._resolve_consumer_rank()
@@ -503,6 +514,11 @@ class ECMooncakeWorker:
         **kwargs: Any,
     ) -> None:
         self._collecting_sources = True
+        if self._lookup_prefetcher is not None:
+            for tag in metadata.store_lookup_cancels:
+                self._lookup_prefetcher.cancel(tag)
+            for tag, expected in metadata.store_lookups.items():
+                self._lookup_prefetcher.submit(tag, expected)
         new: dict[str, list[ProducerPushRecord]] = {}
         for spec in metadata.pushes:
             try:
@@ -522,8 +538,25 @@ class ECMooncakeWorker:
             if tensor is not None:
                 self._bind_push_source(tensor, mm_hash)
         if self._output_store is not None:
+            hints: dict[str, bool] = {}
+            if self._lookup_prefetcher is not None:
+                for tag, identifiers in metadata.store_lookup_consumers.items():
+                    expected = {
+                        key: metadata.store_candidates[key]
+                        for key in identifiers
+                        if key in metadata.store_candidates and key not in encoder_cache
+                    }
+                    if not expected:
+                        self._lookup_prefetcher.cancel(tag)
+                        continue
+                    result = self._lookup_prefetcher.take(tag, expected)
+                    if result is not None:
+                        hints.update(result)
             loaded = self._output_store.resolve_inputs(
-                metadata.store_candidates, encoder_cache, self._buffer_device
+                metadata.store_candidates,
+                encoder_cache,
+                self._buffer_device,
+                lookup_hints=hints,
             )
             # Loaded entries precede the runner's new-output snapshot, so they
             # need explicit P2P source binding here.
@@ -971,6 +1004,8 @@ class ECMooncakeWorker:
         before the receive slab is prepared.
         """
         self._consumer_memory.invalidate_published()
+        if self._lookup_prefetcher is not None:
+            self._lookup_prefetcher.reset()
 
     def close(self) -> None:
         if self._shutdown:
@@ -1015,5 +1050,7 @@ class ECMooncakeWorker:
         self._producer_memory.close()
         self._transfer.close()
         if self._output_store is not None:
+            if self._lookup_prefetcher is not None:
+                self._lookup_prefetcher.shutdown()
             self._output_store.shutdown()
             self._output_store = None

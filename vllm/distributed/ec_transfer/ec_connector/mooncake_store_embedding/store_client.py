@@ -127,10 +127,7 @@ def create_mooncake_embedding_store_client(
             "cross_encoder_cache SSD offload requires mode='standalone-store'"
         )
     if config.enable_offload and disk_staging_budget_bytes is None:
-        raise ValueError(
-            "cross_encoder_cache SSD offload requires "
-            "store_disk_staging_budget_bytes sized for the owner staging buffer"
-        )
+        disk_staging_budget_bytes = 128 * 1024**2
     segment = rdma_utils.get_configured_preferred_segment(
         {"preferred_segment": preferred_segment}
     )

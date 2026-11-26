@@ -33,6 +33,9 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding import (
     backend as store_backend,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding import (
+    prefetch as store_prefetch,
+)
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding import (
     store_client,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
@@ -150,10 +153,10 @@ class MemoryStore:
 
 
 @pytest.fixture
-def backend():
+def backend(request):
     instance = store_backend.MooncakeEmbeddingStoreBackend(
         store_client.MooncakeEmbeddingStoreClient(
-            MemoryStore(), read_buffer_bytes=1024
+            MemoryStore(), read_buffer_bytes=1024, **getattr(request, "param", {})
         ),
         KEY,
         max_pending_items=32,
@@ -327,9 +330,11 @@ def test_disk_staging_budget_requires_positive_integer(budget):
 @pytest.mark.parametrize(
     ("offload", "mode", "budget", "error"),
     [
+        (False, "standalone-store", None, None),
         (False, "standalone-store", 12288, None),
         (True, "standalone-store", 12288, None),
-        (True, "standalone-store", None, "store_disk_staging_budget_bytes"),
+        (True, "standalone-store", None, None),
+        (True, "standalone-store", 256 * 1024**2, None),
         (True, "embedded", 12288, "standalone-store"),
     ],
 )
@@ -376,7 +381,10 @@ def test_store_factory_connects_configured_ssd_and_preserves_ram(
         restored = client.load_tensors({"key": SPEC}, "cpu")
         assert torch.equal(restored["key"], tensor)
         assert replication.preferred_segment == "owner:50053"
-        assert client._disk_staging_budget_bytes == (12288 if offload else None)
+        expected_budget = (
+            (128 * 1024**2 if budget is None else budget) if offload else None
+        )
+        assert client._disk_staging_budget_bytes == expected_budget
         assert client._disk_use_uring is (use_uring if offload else None)
     finally:
         client.close()
@@ -527,7 +535,7 @@ def test_non_matrix_output_is_rejected_before_registration(backend):
     client.store.register_buffer.assert_not_called()
 
 
-def make_worker(backend, monkeypatch):
+def make_worker(backend, monkeypatch, prefetcher=None):
     from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import (
         ECMooncakeWorker,
     )
@@ -536,6 +544,7 @@ def make_worker(backend, monkeypatch):
     worker.is_producer = True
     worker.is_consumer = False
     worker._output_store = backend
+    worker._lookup_prefetcher = prefetcher
     worker._buffer_device = "cpu"
     worker._producer_pushes = MagicMock()
     worker._producer_pushes.reserve.return_value = (MagicMock(), True)
@@ -972,3 +981,297 @@ def test_readiness_and_shutdown_do_not_block_p2p_completion(backend, monkeypatch
     assert backend.store_client.store.objects[make_embedding_key(KEY, "a")][
         24:
     ] == struct.pack("<4f", 0, 1, 2, 3)
+
+
+def test_lookup_prefetch_does_not_get_or_allocate_receive_memory(backend, monkeypatch):
+    native = backend.store_client.store
+    tensor = torch.ones(2, 2)
+    backend.store_client.put_tensor(make_embedding_key(KEY, "cat"), tensor)
+    original_exists = native.batch_is_exist
+    exists_calls, get_calls = [], []
+    original_get = native.batch_get_into
+    started, release = threading.Event(), threading.Event()
+
+    def exists(keys):
+        exists_calls.append(keys)
+        started.set()
+        assert release.wait(5)
+        return original_exists(keys)
+
+    def get(*args):
+        get_calls.append(args[0])
+        return original_get(*args)
+
+    monkeypatch.setattr(native, "batch_is_exist", exists)
+    monkeypatch.setattr(native, "batch_get_into", get)
+    lookup = store_prefetch.StoreLookupPrefetcher(
+        backend.lookup_inputs,
+        max_items=2,
+        ttl_s=2,
+    )
+    connector = make_worker(backend, monkeypatch, lookup)
+    try:
+        connector.bind_connector_metadata(
+            ECMooncakeConnectorMetadata(
+                store_lookups={"request": {"cat": SPEC}},
+            )
+        )
+        connector.start_save_caches(encoder_cache={})
+        assert started.wait(5)
+        assert backend.store_client._read_buffer is None
+        assert get_calls == []
+        release.set()
+        lookup._entries["request"].future.result(timeout=5)
+        connector.bind_connector_metadata(
+            ECMooncakeConnectorMetadata(
+                store_candidates={"cat": SPEC},
+                store_lookup_consumers={"request": {"cat"}},
+            )
+        )
+        cache: dict[str, torch.Tensor] = {}
+        connector.start_save_caches(encoder_cache=cache)
+        assert torch.equal(cache["cat"], tensor)
+        assert len(exists_calls) == len(get_calls) == 1
+    finally:
+        release.set()
+        lookup.shutdown()
+
+
+def test_lookup_prefetch_stale_hit_and_cached_miss_keep_encoding_fallback(
+    backend, monkeypatch
+):
+    native = backend.store_client.store
+    key = make_embedding_key(KEY, "cat")
+    backend.store_client.put_tensor(key, torch.ones(2, 2))
+    lookup = store_prefetch.StoreLookupPrefetcher(
+        backend.lookup_inputs,
+        max_items=2,
+        ttl_s=2,
+    )
+    try:
+        assert lookup.submit("request", {"cat": SPEC, "missing": SPEC})
+        lookup._entries["request"].future.result(timeout=5)
+        native.objects.pop(key)
+        hints = lookup.take("request", {"cat": SPEC, "missing": SPEC})
+        assert hints == {"cat": True, "missing": False}
+        cache: dict[str, torch.Tensor] = {}
+        assert (
+            backend.resolve_inputs(
+                {"cat": SPEC, "missing": SPEC},
+                cache,
+                "cpu",
+                lookup_hints=hints,
+            )
+            == set()
+        )
+        assert cache == {}
+    finally:
+        lookup.shutdown()
+
+
+def test_expired_lookup_is_rechecked_instead_of_used(backend, monkeypatch):
+    lookup = store_prefetch.StoreLookupPrefetcher(
+        backend.lookup_inputs,
+        max_items=1,
+        ttl_s=2,
+    )
+    try:
+        assert lookup.submit("request", {"cat": SPEC})
+        _, completed = lookup._entries["request"].future.result(timeout=5)
+        monkeypatch.setattr(store_prefetch.time, "monotonic", lambda: completed + 3)
+        backend.store_client.put_tensor(
+            make_embedding_key(KEY, "cat"), torch.ones(2, 2)
+        )
+        hints = lookup.take("request", {"cat": SPEC})
+        assert hints is None
+        cache: dict[str, torch.Tensor] = {}
+        assert backend.resolve_inputs(
+            {"cat": SPEC}, cache, "cpu", lookup_hints=hints
+        ) == {"cat"}
+    finally:
+        lookup.shutdown()
+
+
+def test_cancelled_running_lookup_remains_bounded_and_cannot_feed_new_request(
+    backend, monkeypatch
+):
+    started, release = threading.Event(), threading.Event()
+    native = backend.store_client.store
+    original = native.batch_is_exist
+
+    def exists(keys):
+        started.set()
+        assert release.wait(5)
+        return original(keys)
+
+    monkeypatch.setattr(native, "batch_is_exist", exists)
+    lookup = store_prefetch.StoreLookupPrefetcher(
+        backend.lookup_inputs,
+        max_items=1,
+        ttl_s=2,
+    )
+    try:
+        assert lookup.submit("old", {"cat": SPEC})
+        future = lookup._entries["old"].future
+        assert started.wait(5)
+        lookup.cancel("old")
+        assert lookup.take("old", {"cat": SPEC}) is None
+        assert not lookup.submit("new", {"cat": SPEC})
+        release.set()
+        future.result(timeout=5)
+        assert lookup.submit("new", {"cat": SPEC})
+        assert lookup.take("new", {"cat": SPEC}) == {"cat": False}
+        assert backend.store_client._read_buffer is None
+    finally:
+        release.set()
+        lookup.shutdown()
+
+
+def test_lookup_result_does_not_apply_to_incompatible_output_spec(backend):
+    lookup = store_prefetch.StoreLookupPrefetcher(
+        backend.lookup_inputs,
+        max_items=1,
+        ttl_s=2,
+    )
+    try:
+        assert lookup.submit("request", {"cat": SPEC})
+        assert (
+            lookup.take("request", {"cat": TensorSpec((1, 4), "torch.float32", 16)})
+            == {}
+        )
+    finally:
+        lookup.shutdown()
+
+
+@pytest.mark.parametrize(
+    "enabled,reuse,error",
+    [
+        (True, False, "requires cross_encoder_cache"),
+        ("true", True, "must be a boolean"),
+        (True, True, None),
+        (False, False, None),
+    ],
+)
+def test_lookup_prefetch_requires_shared_reuse(enabled, reuse, error):
+    config = create_ec_vllm_config(ec_role="ec_producer")
+    config.model_config.multimodal_config = None
+    config.lora_config = None
+    config.ec_transfer_config.ec_connector_extra_config.update(
+        cross_encoder_cache=reuse,
+        store_lookup_prefetch=enabled,
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            MooncakeECConfig.from_vllm_config(config)
+    else:
+        assert (
+            MooncakeECConfig.from_vllm_config(config).store_lookup_prefetch is enabled
+        )
+
+
+def test_local_cache_hit_does_not_wait_for_pending_lookup(backend, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    native = backend.store_client.store
+
+    def exists(keys):
+        started.set()
+        assert release.wait(5)
+        return [0] * len(keys)
+
+    monkeypatch.setattr(native, "batch_is_exist", exists)
+    lookup = store_prefetch.StoreLookupPrefetcher(
+        backend.lookup_inputs,
+        max_items=1,
+        ttl_s=2,
+    )
+    connector = make_worker(backend, monkeypatch, lookup)
+    try:
+        lookup.submit("request", {"cat": SPEC})
+        assert started.wait(5)
+        connector.bind_connector_metadata(
+            ECMooncakeConnectorMetadata(
+                store_candidates={"cat": SPEC},
+                store_lookup_consumers={"request": {"cat"}},
+            )
+        )
+        tensor = torch.ones(2, 2)
+        cache = {"cat": tensor}
+        connector.start_save_caches(encoder_cache=cache)
+        assert cache["cat"] is tensor and not release.is_set()
+        assert backend.store_client._read_buffer is None
+        assert "request" not in lookup._entries
+    finally:
+        release.set()
+        lookup.shutdown()
+
+
+def test_scheduler_dispatches_lookup_without_deferring_encoding(monkeypatch):
+    from vllm.distributed.ec_transfer.ec_connector.mooncake import scheduler
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+    from vllm.v1.request import Request
+
+    monkeypatch.setattr(scheduler, "ensure_mooncake_available", lambda: None)
+    config = create_ec_vllm_config(ec_role="ec_producer")
+    config.model_config.multimodal_config = None
+    config.lora_config = None
+    config.ec_transfer_config.ec_connector_extra_config.update(
+        cross_encoder_cache=True,
+        store_lookup_prefetch=True,
+    )
+    instance = scheduler.ECMooncakeScheduler(config)
+    request = Request(
+        "request",
+        [1, 2],
+        SamplingParams(max_tokens=1),
+        None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier="cat",
+                mm_position=PlaceholderRange(offset=0, length=2),
+            )
+        ],
+    )
+    output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    try:
+        instance.on_new_request(request)
+        assert instance.ensure_cache_available(request, 0)
+        instance.update_state_after_alloc(request, 0)
+        meta = instance.build_connector_meta(output)
+        assert isinstance(meta, ECMooncakeConnectorMetadata)
+        (tag,) = meta.store_lookups
+        assert meta.store_lookup_consumers == {tag: {"cat"}}
+        assert not instance.has_pending_push_work()
+        instance.request_finished(request)
+        instance.on_new_request(request)
+        meta = instance.build_connector_meta(output)
+        assert isinstance(meta, ECMooncakeConnectorMetadata)
+        assert meta.store_lookup_cancels == {tag}
+        assert tag not in meta.store_lookups
+        instance.reset()
+        assert not instance._lookup_requests
+    finally:
+        instance.close()
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_lookup_prefetch_default_follows_cross_encoder_cache(reuse):
+    config = create_ec_vllm_config(ec_role="ec_producer")
+    config.model_config.multimodal_config = None
+    config.lora_config = None
+    config.ec_transfer_config.ec_connector_extra_config["cross_encoder_cache"] = reuse
+    assert MooncakeECConfig.from_vllm_config(config).store_lookup_prefetch is reuse
+    config.ec_transfer_config.ec_connector_extra_config["store_lookup_prefetch"] = False
+    assert not MooncakeECConfig.from_vllm_config(config).store_lookup_prefetch

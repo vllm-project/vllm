@@ -72,6 +72,8 @@ class MooncakeEmbeddingStoreBackend:
         expected_tensors: Mapping[str, TensorSpec],
         encoder_cache: dict[str, torch.Tensor],
         device: torch.device | str,
+        *,
+        lookup_hints: Mapping[str, bool] | None = None,
     ) -> set[str]:
         """Load outputs before encoding; unresolved items retain normal computation."""
         self.reap()
@@ -84,7 +86,10 @@ class MooncakeEmbeddingStoreBackend:
             make_embedding_key(self.namespace, identifier) for identifier in candidates
         ]
         try:
-            exists = self.store_client.batch_exists(pool_keys)
+            hints = {} if lookup_hints is None else lookup_hints
+            unknown = [key for key in candidates if key not in hints]
+            fresh = self.lookup_inputs({key: expected_tensors[key] for key in unknown})
+            exists = [hints[key] if key in hints else fresh[key] for key in candidates]
         except (EmbeddingStoreOperationError, OSError):
             logger.warning(
                 "Mooncake embedding Store lookup failed; falling back to encoder",
@@ -113,6 +118,15 @@ class MooncakeEmbeddingStoreBackend:
                 encoder_cache[identifier] = tensors[pool_key]
                 loaded.add(identifier)
         return loaded
+
+    def lookup_inputs(self, expected: Mapping[str, TensorSpec]) -> dict[str, bool]:
+        if not expected:
+            return {}
+        identifiers = list(expected)
+        exists = self.store_client.batch_exists(
+            [make_embedding_key(self.namespace, key) for key in identifiers]
+        )
+        return dict(zip(identifiers, exists, strict=True))
 
     def _enqueue_save(self, identifier: str, tensor: torch.Tensor) -> bool:
         """Admit contiguous outputs, charging each retained storage once."""

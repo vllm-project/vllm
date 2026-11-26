@@ -88,6 +88,10 @@ class ECMooncakeConnector(ECConnectorBase):
         assert self._scheduler is not None
         return self._scheduler.has_cache_item(identifier)
 
+    def on_new_request(self, request: Request) -> None:
+        assert self._scheduler is not None
+        self._scheduler.on_new_request(request)
+
     def ensure_cache_available(
         self, request: Request, num_computed_tokens: int
     ) -> bool:
