@@ -26,7 +26,7 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
-use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::stats::{PrefillStats, SchedulerStats};
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -1306,6 +1306,24 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                 )
                 .await;
 
+                // The scheduler also preempted a request that was then aborted,
+                // whose PREEMPTED event never reaches the frontend. Stats are
+                // recorded after a batch's outputs are delivered, so report
+                // them before the final output.
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        engine_index: 4,
+                        scheduler_stats: Some(Box::new(SchedulerStats {
+                            num_preempted_reqs: 2,
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
                 send_outputs(
                     push,
                     RequestBatchOutputs {
@@ -1366,8 +1384,10 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     assert!(rendered.contains(&format!(
         "vllm:corrupted_requests_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
+    // The counter follows the scheduler; the event feeds only this request's
+    // histogram.
     assert!(rendered.contains(&format!(
-        "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+        "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 2"
     )));
     assert!(rendered.contains(&format!(
         "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"4\"}} 1.0"

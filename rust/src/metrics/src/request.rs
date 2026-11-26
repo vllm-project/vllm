@@ -48,7 +48,6 @@ pub struct RequestMetrics {
     pub iteration_tokens_total: BucketHistogramFamily,
 
     // Request-derived counters.
-    pub num_preemptions: Family<EngineLabels, U64Counter>,
     pub prompt_tokens: Family<EngineLabels, U64Counter>,
     pub prompt_tokens_by_source: PromptTokenSourceCounterFamily,
     pub prompt_tokens_cached: Family<EngineLabels, U64Counter>,
@@ -95,13 +94,6 @@ impl RequestMetrics {
         );
 
         // Request-derived counters.
-        let num_preemptions = Family::default();
-        registry.register(
-            "vllm:num_preemptions",
-            "Cumulative number of preemption events.",
-            num_preemptions.clone(),
-        );
-
         let prompt_tokens = Family::default();
         registry.register(
             "vllm:prompt_tokens",
@@ -267,7 +259,6 @@ impl RequestMetrics {
 
         Self {
             iteration_tokens_total,
-            num_preemptions,
             prompt_tokens,
             prompt_tokens_by_source,
             prompt_tokens_cached,
