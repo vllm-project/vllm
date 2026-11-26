@@ -724,7 +724,7 @@ def test_prepare_load_preserves_key_order():
     manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
 
 
-@pytest.fixture(params=tuple(CachePolicyFactory._registry))
+@pytest.fixture(params=("lru", "arc"))
 def retention_policy_name(request):
     return request.param
 

@@ -18,18 +18,19 @@ class _DummyCachePolicy(CachePolicy):
     tests/v1/kv_offload/test_factory.py's SingleArgExternalOffloadingSpec)."""
 
     def __init__(self, cache_capacity: int) -> None:
-        self.cache_capacity = cache_capacity
+        super().__init__(cache_capacity)
+        self.chunks: dict[OffloadKey, ChunkStatus] = {}
 
     def get(self, key: OffloadKey) -> ChunkStatus | None:
-        return None
+        return self.chunks.get(key)
 
     def insert(
         self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
     ) -> None:
-        pass
+        self.chunks[key] = chunk
 
     def remove(self, key: OffloadKey) -> None:
-        pass
+        del self.chunks[key]
 
     def on_request_finished(
         self,
@@ -43,10 +44,36 @@ class _DummyCachePolicy(CachePolicy):
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
-        return None
+        candidates = [
+            (key, chunk)
+            for key, chunk in self.chunks.items()
+            if chunk.ref_cnt == 0 and key not in protected
+        ][:n]
+        if len(candidates) < n:
+            return None
+        for key, _ in candidates:
+            self.remove(key)
+        return candidates
 
     def clear(self) -> None:
-        pass
+        self.chunks.clear()
+
+
+def test_external_policy_can_ignore_retention():
+    policy = _DummyCachePolicy(2)
+    ctx = ReqContext(req_id="store")
+    oldest, newest = OffloadKey(b"old"), OffloadKey(b"new")
+    first, second = ChunkStatus(0), ChunkStatus(1)
+    for key, chunk in ((oldest, first), (newest, second)):
+        chunk.ref_cnt = 0
+        policy.insert(key, chunk, ctx)
+
+    first.lease_cnt = 1
+    policy.on_retention_changed(oldest, first.retained)
+
+    assert policy.evict(1, set()) == [(oldest, first)]
+    assert policy.get(oldest) is None
+    assert policy.get(newest) is second
 
 
 @pytest.fixture(autouse=True)
