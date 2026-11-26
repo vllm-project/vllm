@@ -334,9 +334,17 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         """NixlConnector does not save explicitly."""
         pass
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        # Runs before the forward pass, which may overwrite newly allocated blocks.
+        if self.connector_worker is not None:
+            assert isinstance(connector_metadata, NixlConnectorMetadata)
+            self.connector_worker.apply_kv_meta_before_forward(connector_metadata)
+
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.apply_kv_meta_after_forward(self._connector_metadata)
         if self.connector_worker.use_host_buffer and self.connector_worker.copy_blocks:
             self.connector_worker.save_kv_to_host(self._connector_metadata)
 

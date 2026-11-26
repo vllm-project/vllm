@@ -1,6 +1,8 @@
 # NIXL KV Block Content Validation
 
-> **Status:** Draft. Sections marked _TODO_ are still to be written.
+> **Status:** Draft. A first implementation (pull mode only) is described in
+> [Implementation status](#implementation-status). Sections marked _TODO_ are
+> still open.
 
 This document describes adding a **KV block metadata pool** to `NixlConnector`.
 Every KV data block gets a small metadata entry that records which content the
@@ -82,8 +84,9 @@ _TODO: add concrete incidents and repro notes, if any._
 - **R5. Validation stage on D.** After the transfer completes, D compares each
   received metadata entry with the hash it expects and reports any mismatching
   block.
-- **R6. Failure policy:** `log` (count and warn), `recompute` (treat the blocks
-  as a failed load), or `fail` (abort the request with a clear error).
+- **R6. Failure policy:** `log` (count and warn), or `enforce` (fail the load,
+  which then follows the existing `kv_load_failure_policy`: recompute or fail
+  the request).
 - **R7. Compatibility.** P and D must agree in the handshake that both have the
   metadata pool, and must agree on the hash function. Otherwise validation is
   disabled or the handshake is rejected, according to configuration. It never
@@ -111,13 +114,15 @@ _TODO: add concrete incidents and repro notes, if any._
 
 ### Configuration
 
-_TODO: finalize names._
-
 ```json
 "kv_connector_extra_config": {
-  "kv_block_validation": "off | log | recompute | fail"
+  "kv_block_validation": "off | log | enforce"
 }
 ```
+
+`off` is the default. Set the same value on producer and consumer: the
+producer maintains the pool only when validation is on, and the consumer skips
+(with a warning) peers that do not advertise one.
 
 ## Design
 
@@ -185,21 +190,21 @@ content together with its whole prefix.
 
 ### Metadata entry layout
 
-A fixed-size, aligned entry (proposal: 64 B):
+A fixed-size 64 B entry. The first implementation uses:
 
-| Field       | Size | Meaning                                                      |
-|-------------|------|--------------------------------------------------------------|
-| `state`     | 4 B  | `INVALID` = 0, `VALID_FULL` = 1, `VALID_PARTIAL` = 2         |
-| `group_id`  | 4 B  | KV cache group (sanity check against group mix-ups)          |
-| `num_tokens`| 4 B  | Number of valid tokens in the block (partial blocks)         |
-| `reserved`  | 4 B  | Generation counter / future data checksum                    |
-| `hash`      | 32 B | Block hash (sha256), or truncated/zero-padded for other algos|
-| `pad`       | 16 B | Alignment                                                    |
+| Field      | Size | Meaning                                                 |
+|------------|------|---------------------------------------------------------|
+| `state`    | 4 B  | `INVALID` = 0 (an all-zero entry), `VALID` = 1          |
+| `hash_len` | 4 B  | Length of the stored hash                               |
+| `hash`     | 56 B | Block hash, zero-padded (truncated if longer)           |
 
-The pool is a GPU tensor `[num_blocks, 64]` of `uint8` per KV cache group, on
-the same device as the KV cache. For the host-buffer path it lives in the
-pinned host region next to the host KV buffer. _TODO: decide whether one pool
-per group or a single pool with a group dimension._
+Proposed later additions (in the hash padding or a wider entry): `group_id`,
+`num_tokens` for partial blocks, and a data checksum.
+
+The pool is a GPU tensor `[num_blocks, 64]` of `uint8`, on the same device as
+the KV cache. For the host-buffer path it would live in the pinned host region
+next to the host KV buffer. _TODO: decide whether one pool per group or a
+single pool with a group dimension._
 
 ### Producer side: maintaining the metadata pool
 
@@ -207,28 +212,32 @@ The scheduler owns block allocation and hashing. The worker owns the GPU
 writes. The scheduler tells the worker what to write through the connector
 metadata of each step (`NixlConnectorMetadata`):
 
-- **Invalidate list.** Block IDs newly handed out this step, from
-  `BlockPool.get_new_blocks` / `_maybe_evict_cached_block`. Every reallocation
-  is invalidated, not only evictions of cached blocks, so a block that was
-  never hashed cannot carry an old valid entry.
-- **Publish list.** `(block_id, group_id, hash, num_tokens)` for blocks that
-  became full in this step (`cache_full_blocks`), plus the partial last block of
-  requests that finish prefill and will be transferred.
+- **Invalidate list.** Block IDs newly handed out this step: every block of a
+  scheduled request past its computed tokens (`scheduled_new_reqs`), every
+  `new_block_ids` entry of a running request, and the local blocks a pull is
+  about to overwrite. Every reallocation is invalidated, not only evictions of
+  cached blocks, so a block that was never hashed cannot carry an old valid
+  entry.
+- **Publish list.** `(block_id, hash)` for blocks that this step's forward pass
+  fills (`num_computed_tokens` to `num_computed_tokens + num_scheduled_tokens`),
+  for every request, so that prefix-cache hits served later are valid too. The
+  scheduler-side `KVBlockMetaTracker` keeps each request's block table and its
+  `Request.block_hashes` for this.
 
 The worker applies them on the compute stream:
 
-1. Before the forward pass (`start_load_kv` / `bind_connector_metadata`):
-   write `INVALID` for the invalidate list.
-2. After the last layer has written its KV (`wait_for_save` / end of the
-   step): write `VALID(...)` for the publish list.
+1. Before the forward pass, in `bind_connector_metadata` (called from the
+   model runner's `pre_forward`): write `INVALID` for the invalidate list.
+   `start_load_kv` is not used: it runs after the forward pass for async loads.
+2. After the forward pass, in `wait_for_save` (`post_forward`, or
+   `finalize_step` with a speculator, still within the same step): write
+   `VALID(...)` for the publish list.
 
-Both writes are one small scatter kernel or `index_copy_` each. Because they
-run in stream order with the attention kernels, R2 and R3 hold without any host
-sync.
-
-_TODO: confirm the hook points. They must be ordered on the same stream as all
-KV writes, including CUDA graphs, DBO / micro-batching, and async scheduling
-where step N+1's metadata can arrive before step N's forward pass completes._
+Both writes are one `index_fill_` / `index_copy_` from a pinned, asynchronous
+host-to-device copy. The model runner launches the forward pass on the current
+stream, so the updates are ordered with all KV writes, including CUDA graph
+replays and async scheduling, without any host sync. Blocks completed only by
+speculative tokens have no hash yet and stay unpublished.
 
 The host-buffer path (`save_kv_to_host`) copies the matching metadata entries
 after the KV host copy, with the same publish-after-data rule.
@@ -377,11 +386,13 @@ version.
 
 ### Metrics
 
-- `vllm:nixl_kv_block_validation_mismatch_total` (labels: reason =
-  invalid / hash_mismatch / group_mismatch; mode = pull / push).
-- `vllm:nixl_kv_block_validation_blocks_total`.
-- `vllm:nixl_kv_block_validation_seconds` (validation stage latency).
-- Wired into `NixlKVConnectorStats` (`stats.py`).
+- `vllm:nixl_num_kv_block_validation_failures`: received requests whose blocks
+  held unexpected content (in `NixlKVConnectorStats`, `stats.py`). Each one is
+  also logged with the request, peer engine and rank, the first bad block, and
+  whether its entry was `INVALID` or named other content.
+- Metadata reads are kept out of the NIXL transfer histograms, so the existing
+  transfer metrics still describe KV data only.
+- _Later:_ validated-block count and validation-stage latency.
 
 ### Testing plan
 
@@ -451,6 +462,28 @@ If the enabled cost exceeds the budget, mitigations to evaluate:
   to the reserved field to catch bit-level corruption.
 - Reuse the metadata pool for other KV movers (offload tiers, P2P) that copy
   blocks by ID.
+
+## Implementation status
+
+The first PR implements the pull path for the common deployment:
+
+- `kv_validation.py`: entry encoding, the scheduler-side `KVBlockMetaTracker`,
+  the worker-side `KVBlockMetaPool`, and the consumer-side `KVBlockValidator`.
+- Ordering option 1 (two dependent transfers): the data READ is posted without
+  its notification, and the metadata READ is posted once the data landed and
+  polled once right away. The producer is notified after the metadata read,
+  including when validation fails (the read itself completed).
+- Each source rank reads into its own host staging buffer indexed by local
+  block, so heterogeneous TP reads validate every source rank.
+- Validated blocks are published in the consumer's own pool.
+- `NIXL_CONNECTOR_VERSION` 18 adds `kv_meta_base_addr`, `kv_meta_num_entries`
+  and `kv_meta_hash_identity` (a digest of the hash algorithm and seed) to
+  `NixlAgentMetadata`.
+
+Not covered yet, rejected at startup: push mode, more than one KV cache group
+(HMA), Mamba, `kv_buffer_device="cpu"`, bidirectional transfer, DCP/PCP and PP.
+Reads that need different P/D block sizes or block-size conversion are not
+validated (warned once). Partial last blocks are not validated.
 
 ## Open questions
 
