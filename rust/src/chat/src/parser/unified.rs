@@ -6,9 +6,9 @@
 use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::unified::{
-    BeamUnifiedParser, Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser, HyV3UnifiedParser,
-    HyV4UnifiedParser, InklingUnifiedParser, KimiK3UnifiedParser, MuseUnifiedParser,
-    ResponseTemplate, UnifiedParser,
+    BeamUnifiedParser, Cohere4UnifiedParser, Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser,
+    HyV3UnifiedParser, HyV4UnifiedParser, InklingUnifiedParser, KimiK3UnifiedParser,
+    MuseUnifiedParser, ResponseTemplate, UnifiedParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -18,6 +18,7 @@ use crate::request::ChatTool;
 
 /// Canonical public names for registered unified parsers.
 pub mod names {
+    pub const COHERE_COMMAND4: &str = "cohere_command4";
     pub const GEMMA4: &str = "gemma4";
     pub const HY_V3: &str = "hy_v3";
     pub const HY_V4: &str = "hy_v4";
@@ -59,6 +60,7 @@ impl UnifiedParserFactory {
     pub fn new() -> Self {
         let mut factory = Self::default();
 
+        factory.register_parser::<Cohere4UnifiedParser>(names::COHERE_COMMAND4);
         factory.register_parser::<Gemma4UnifiedParser>(names::GEMMA4);
         factory.register_parser::<HyV3UnifiedParser>(names::HY_V3);
         factory.register_parser::<HyV4UnifiedParser>(names::HY_V4);
@@ -149,6 +151,24 @@ mod tests {
             .with_regular_token("<|content_thinking|>", 200008)
             .with_regular_token("<|end_message|>", 200010)
             .with_regular_token("<|content_invoke_tool_json|>", 200049)
+    }
+
+    #[test]
+    fn factory_registers_cohere_command4() {
+        let factory = UnifiedParserFactory::new();
+        let tokenizer = TestTokenizer::new()
+            .with_special_token("<|START_THINKING|>", 256)
+            .with_special_token("<|END_THINKING|>", 257);
+
+        assert!(factory.contains(names::COHERE_COMMAND4));
+        factory
+            .create(
+                names::COHERE_COMMAND4,
+                &[],
+                Arc::new(tokenizer),
+                &Err(HfTemplateError::Missing),
+            )
+            .unwrap();
     }
 
     #[test]

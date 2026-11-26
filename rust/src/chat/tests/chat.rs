@@ -1638,3 +1638,87 @@ async fn processor_excludes_request_tools_for_tool_choice_none_when_configured()
         "tools: get_weather,lookup"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_streams_cohere_command4_parser() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-cohere-command4".to_vec();
+    let request_id = "chat-cohere-command4";
+    let first = bytes_to_token_ids(
+        b"Need tool.<|END_THINKING|><|START_ACTION|>[\n    {\"tool_call_id\": \"0\", \"tool_name\": \"get_weather\", \"parameters\": {\"ci",
+    );
+    let second = bytes_to_token_ids(
+        b"ty\": \"Paris\"}},\n    {\"tool_call_id\": \"1\", \"tool_name\": \"get_weather\", ",
+    );
+    let third =
+        bytes_with_special_stop_token(b"\"parameters\": {\"city\": \"Tokyo\"}}\n]<|END_ACTION|>");
+
+    let (shutdown_tx, engine_task) =
+        spawn_mock_engine_task(handshake_address.clone(), engine_id, move |dealer, push| {
+            Box::pin(async move {
+                let _ = recv_engine_message(dealer).await;
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![
+                            request_output(request_id, first, None, None),
+                            request_output(request_id, second, None, None),
+                            request_output(
+                                request_id,
+                                third,
+                                Some(EngineCoreFinishReason::Stop),
+                                Some(StopReason::TokenId(SPECIAL_STOP_TOKEN_ID)),
+                            ),
+                        ],
+                        finished_requests: Some(BTreeSet::from([request_id.to_string()])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        });
+
+    let parser = || ParserSelection::Explicit("cohere_command4".to_string());
+    let backend: Arc<dyn ChatTextBackend> =
+        Arc::new(FakeChatBackend::new().with_parser_selections(parser(), parser()));
+    let chat = connect_chat_llm_with_ipc(
+        EngineCoreClientConfig::new_single(handshake_address),
+        &ipc,
+        backend,
+    )
+    .await;
+    let mut stream = chat.chat(sample_tool_request(request_id)).await.unwrap();
+
+    let mut tool_start_names = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            ChatEvent::ToolCallStart { name, .. } => tool_start_names.push(name),
+            ChatEvent::Done { message, .. } => {
+                assert_eq!(message.reasoning().as_deref(), Some("Need tool."));
+                assert_eq!(message.text(), "");
+                let tool_calls = message.tool_calls().collect::<Vec<_>>();
+                assert_eq!(tool_calls.len(), 2);
+                assert_eq!(tool_calls[0].name, "get_weather");
+                assert_eq!(tool_calls[0].id, "0");
+                assert_eq!(tool_calls[1].id, "1");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&tool_calls[0].arguments).unwrap(),
+                    serde_json::json!({"city": "Paris"})
+                );
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&tool_calls[1].arguments).unwrap(),
+                    serde_json::json!({"city": "Tokyo"})
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(tool_start_names, vec!["get_weather"; 2]);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    chat.shutdown().await.unwrap();
+}

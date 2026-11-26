@@ -4,6 +4,7 @@
 //! Unified parser interface for reasoning and tool-call deltas.
 
 mod beam;
+mod cohere_4;
 mod combined;
 mod gemma4;
 mod hf;
@@ -13,6 +14,7 @@ mod kimi_k3;
 mod muse;
 
 pub use beam::BeamUnifiedParser;
+pub use cohere_4::Cohere4UnifiedParser;
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
 pub use hf::{HfPosition, HfTemplateError, HfUnifiedParser, ResponseTemplate};
