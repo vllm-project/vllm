@@ -122,9 +122,9 @@ Example: [examples/rl/routed_experts_e2e.py](../../../examples/rl/routed_experts
 
 ## Namespaces: delivering routed experts through a shared object store
 
-With inline return the client must hold every row it received and hand it to each request or trainer worker that needs the same prefix. With a namespace the engine writes the rows once to a shared object store and the response lists object keys; any process that can reach the store reads them. Requests without a namespace keep the inline behavior above. The design, its guarantees and its limits are in [Aux Outputs for RL](../../design/rl_aux_output.md).
+With inline return the client must hold every row it received and hand it to each request or trainer worker that needs the same prefix. With a namespace the engine writes the rows once to a shared object store and the response lists object keys; any process that can reach the store reads them. Requests without a namespace keep the inline behavior above. The design, its guarantees and its limits are in [Aux Outputs for RL](aux_outputs.md).
 
-Start the server with an object store and a new key prefix per start. The default store is Mooncake in standalone-store mode (`"mode": "standalone-store"` and `"global_segment_size": 0` in its configuration file), separate from any Mooncake KV store; `object_store` names another implementation of `AuxObjectStore` ([the store](../../design/rl_aux_output.md#the-store)):
+Start the server with an object store and a new key prefix per start. The default store is Mooncake in standalone-store mode (`"mode": "standalone-store"` and `"global_segment_size": 0` in its configuration file), separate from any Mooncake KV store; `object_store` names another implementation of `AuxObjectStore` ([the store](aux_outputs.md#the-store)):
 
 ```bash
 vllm serve <model> --aux-output-config \
@@ -136,7 +136,7 @@ Send `aux_namespace` inside `sampling_params` on `/inference/v1/generate`, or as
 
 - **Namespace.** Chosen per rollout as in [choosing a namespace](#choosing-a-namespace). A namespace is any non-empty string; `/` nests one in another for release. A namespace request is rejected with `n > 1`, with `stop` strings (use `stop_token_ids`), and as a streaming-input request.
 - **Response.** The final output carries `aux_objects`: `[key, start, end]` entries, the rows of positions `[start, end)` being the first `end - start` rows of object `key`. They cover `[aux_prompt_start, num_tokens - 1)`, the prefix-cache hits included.
-- **Turns.** Send `aux_prompt_start = min(positions held, longest common token prefix of the new prompt and the held tokens, prompt length - 1)`, and splice each listing onto the trajectory with the earlier copy winning ([turns and splicing](../../design/rl_aux_output.md#turns-and-splicing)).
+- **Turns.** Send `aux_prompt_start = min(positions held, longest common token prefix of the new prompt and the held tokens, prompt length - 1)`, and splice each listing onto the trajectory with the earlier copy winning ([turns and splicing](aux_outputs.md#turns-and-splicing)).
 - **Reading.** `object_store.read_aux_rows(store, keys, "routed_experts")` from `vllm.distributed.aux_output_connector`, with `store = object_store.create_aux_object_store("mooncake", {"config_path": ...})`, reads the objects in order and concatenates their rows. Writes have no barrier: wait for a training batch's keys no shorter than the write deadline, 80% of `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`; a key still missing then is lost, and the samples that need it are masked.
 - **Release.** Once every sample of a namespace is settled and none of its requests runs or will be sent, remove it with `store.remove_prefix(object_store.aux_namespace_prefix(object_key_prefix, aux_namespace))`, which also removes the namespaces under its prefix. Never send a released namespace again.
 - **KV cache layout.** Hybrid layouts are supported. With `object_key_prefix`, the engine refuses to start without prefix caching or with prefix replay (pass `--no-swa-bounded-replay` on DeepSeek-V4.1).
