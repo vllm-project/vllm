@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 
+import regex as re
 import torch
 
 import vllm.envs as envs
@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_embed_norm import (
 )
 from vllm.model_executor.layers.fused_moe import (
     RoutedScaleMode,
-    fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import (
@@ -54,6 +53,12 @@ from vllm.v1.attention.backends.mla.index_group import (
 )
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
+
+_EXPERTS_WEIGHT_RE = re.compile(r"^layers\.(\d+)\.mlp\.experts\.(.+)$")
+"""Matches a decoder-layer routed-expert tensor, e.g.
+`layers.3.mlp.experts.gate_up_proj.weight_packed`; group 2 is the name
+relative to the MoE's `experts` module (per-expert `3.gate_proj.weight`
+and fused `gate_up_proj.weight_packed` layouts alike)."""
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -372,29 +377,41 @@ class DeepseekV32Model(torch.nn.Module):
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
-            num_redundant_experts=self.num_redundant_experts,
-        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # Expert weights load through each MoE's runner so both per-expert
+        # and stacked (fused) checkpoint layouts are handled, including the
+        # compact rows of MoNE-pruned checkpoints.
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             # MTP / nextn layers are loaded by the MTP model, not here.
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
                 continue
+            experts_match = _EXPERTS_WEIGHT_RE.match(name)
+            if experts_match is not None:
+                layer_idx = int(experts_match.group(1))
+                layer = self.layers[layer_idx] if layer_idx < len(self.layers) else None
+                if isinstance(layer, DeepseekV32DecoderLayer) and isinstance(
+                    layer.mlp, DeepseekV2MoE
+                ):
+                    loaded_params.update(
+                        f"layers.{layer_idx}.mlp.experts.{loaded}"
+                        for loaded in layer.mlp.experts.load_weights(
+                            ((experts_match.group(2), loaded_weight),)
+                        )
+                    )
+                    continue
+                if isinstance(layer, PPMissingLayer):
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # Experts are handled below; skip here before the name rewrite.
-                if ("mlp.experts." in name) and name not in params_dict:
+                # Experts are handled above through the MoE runner; skip
+                # here before the name rewrite.
+                if "mlp.experts." in name:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
                 if (
@@ -410,43 +427,16 @@ class DeepseekV32Model(torch.nn.Module):
                 param.weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
-                    if weight_name not in name:
-                        continue
-                    is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    param = params_dict[name_mapped]
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        continue
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
-                    if name is None:
-                        continue
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    loader = getattr(param, "weight_loader", default_weight_loader)
-                    loader(param, loaded_weight)
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
+                if name is None:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                loader = getattr(param, "weight_loader", default_weight_loader)
+                loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 

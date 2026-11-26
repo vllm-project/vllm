@@ -684,13 +684,21 @@ steps:
   - tests/single_rank_group.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/model_loader/reload/
+  - vllm/model_executor/models/expert_substitution.py
+  - tests/model_executor/model_loader/test_expert_substitution.py
+  - vllm/models/deepseek_v32/nvidia/model.py
+  - vllm/models/glm5next/common/model.py
   - vllm/models/muse_spark/common/
   - vllm/models/muse_spark/nvidia/
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py
+    - >-
+      pytest -v -s
+      kernels/moe
+      model_executor/model_loader/test_expert_substitution.py
+      --ignore=kernels/moe/test_modular_oai_triton_moe.py
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
   mirror:
     amd:
@@ -1229,6 +1237,7 @@ steps:
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
+    - pytest -v -s 'kernels/moe/test_expert_substitution.py::test_constant_substitution_is_added_once_with_tp2[triton]'
   mirror:
     amd:
       label: ":amd: (MI355) FusedMoE Layer Kernels"
@@ -1270,12 +1279,24 @@ steps:
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/models/expert_substitution.py
+  - tests/model_executor/model_loader/test_expert_substitution.py
   - vllm/distributed/device_communicators/
+  - vllm/models/deepseek_v32/nvidia/model.py
+  - vllm/models/glm5next/common/model.py
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
     - pytest -v -s kernels/moe/test_deepep_v2_async_finalize.py
+    - >-
+      pytest -v -s
+      kernels/moe/test_expert_substitution.py
+      kernels/moe/test_unquantized_backend_selection.py
+      kernels/moe/test_routed_experts_capture_monolithic.py
+      model_executor/model_loader/test_expert_substitution.py
+      --deselect='kernels/moe/test_expert_substitution.py::test_constant_substitution_is_added_once_with_tp2[triton]'
+      --deselect='model_executor/model_loader/test_expert_substitution.py::test_generation_includes_loaded_novices[triton]'
   mirror:
     amd:
       automatic_shard: true

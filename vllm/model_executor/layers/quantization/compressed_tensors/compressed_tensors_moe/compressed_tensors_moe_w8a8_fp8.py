@@ -54,6 +54,11 @@ logger = init_logger(__name__)
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     """W8A8 FP8 MoE quantization using compressed tensors."""
 
+    @property
+    def supports_expert_substitution(self) -> bool:
+        # Weights and scales are allocated and repacked by physical expert row.
+        return True
+
     def __init__(
         self,
         weight_quant: QuantizationArgs,
@@ -373,6 +378,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -389,6 +395,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            routing_replay_out=routing_replay_out,
         )
 
     def apply(

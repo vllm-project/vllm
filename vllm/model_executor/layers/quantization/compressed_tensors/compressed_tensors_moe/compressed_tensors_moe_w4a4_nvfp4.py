@@ -92,6 +92,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     def supports_eplb(self) -> bool:
         return self.nvfp4_backend in _EPLB_SUPPORTED_NVFP4_BACKENDS
 
+    @property
+    def supports_expert_substitution(self) -> bool:
+        # Every NVFP4 tensor (packed weights, group scales, global scales)
+        # is stored per expert row, so compact physical rows load through
+        # the expert-ID mapping like unquantized weights.
+        return True
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -321,6 +328,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -338,6 +346,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            routing_replay_out=routing_replay_out,
         )
 
     def apply(

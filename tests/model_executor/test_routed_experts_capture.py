@@ -310,22 +310,28 @@ class _ToyMonolithicExperts(CPUExpertsInt4):
     moe_config = _SINK_CONFIG
     quant_config = None
 
-    def __init__(self, offset: int = 0, supports_capture: bool = True):
+    def __init__(self, offset: int = 0):
         self.offset = offset
-        self.supports_capture = supports_capture
 
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
 
-    def supports_routing_replay_capture(self) -> bool:
-        return self.supports_capture
+    @staticmethod
+    def supports_routing_replay_capture() -> bool:
+        return True
 
     def apply(self, hidden_states, *args, routing_replay_out=None, **kwargs):
         if routing_replay_out is not None:
             t = torch.arange(hidden_states.shape[0])
             routing_replay_out[: len(t)] = torch.stack([t, t + 1], 1) + self.offset
         return hidden_states
+
+
+class _ToyMonolithicExpertsWithoutCapture(_ToyMonolithicExperts):
+    @staticmethod
+    def supports_routing_replay_capture() -> bool:
+        return False
 
 
 class _MonolithicMoE:
@@ -369,9 +375,7 @@ def test_public_binding_gives_monolithic_layers_a_sink(monkeypatch):
 
 def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
     with pytest.raises(ValueError, match="monolithic MoE kernel"):
-        _bind_monolithic(
-            monkeypatch, _ToyMonolithicExperts(supports_capture=False), Mock()
-        )
+        _bind_monolithic(monkeypatch, _ToyMonolithicExpertsWithoutCapture(), Mock())
 
 
 @pytest.mark.parametrize(
@@ -423,7 +427,7 @@ def test_monolithic_capture_survives_kernel_rebuilds():
         forward(_ToyMonolithicExperts(offset))
         assert captured[-1] == [[t + offset, t + offset + 1] for t in range(3)]
     with pytest.raises(ValueError, match="not supported"):
-        forward(_ToyMonolithicExperts(supports_capture=False))
+        forward(_ToyMonolithicExpertsWithoutCapture())
 
 
 def test_routed_experts_capturer_single_dp_no_metadata():

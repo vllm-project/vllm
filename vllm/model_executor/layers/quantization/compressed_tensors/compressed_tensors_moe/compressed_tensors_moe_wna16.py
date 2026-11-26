@@ -49,6 +49,11 @@ logger = init_logger(__name__)
 
 
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
+    @property
+    def supports_expert_substitution(self) -> bool:
+        # The MXINT4 layout repacks weights and group scales by physical row.
+        return self.num_bits == 4 and self.group_size == 32 and self.symmetric
+
     def __init__(
         self,
         weight_quant: QuantizationArgs,
@@ -493,6 +498,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -510,6 +516,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            routing_replay_out=routing_replay_out,
         )
 
     def apply(

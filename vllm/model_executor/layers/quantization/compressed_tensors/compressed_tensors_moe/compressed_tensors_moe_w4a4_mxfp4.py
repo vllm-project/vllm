@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     B12X_BACKENDS,
     FLASHINFER_MOE_EP_MXFP4_BACKENDS,
+    TRTLLM_BACKENDS,
     Mxfp4MoeBackend,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
@@ -68,6 +69,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         if (
             moe.moe_backend == "b12x"
             or moe.moe_backend == "deep_gemm"
+            or moe.moe_backend == "flashinfer_trtllm"
             or is_flashinfer_moe_ep_backend(moe.moe_backend)
         ):
             self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
@@ -84,6 +86,11 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         else:
             logger.info_once("Using MarlinExperts for MXFP4 MoE")
             self.experts_cls = MarlinExperts
+
+    @property
+    def supports_expert_substitution(self) -> bool:
+        # Packed weights and group scales share the compact expert dimension.
+        return True
 
     @property
     def supports_eplb(self) -> bool:
@@ -208,6 +215,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(layer, "w2_weight_scale", torch.stack(swizzled_w2))
         elif (
             self.mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4
+            or self.mxfp4_backend in TRTLLM_BACKENDS
             or self.mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS
         ):
             w13, w2, w13_scale, w2_scale, _, _ = (
@@ -218,6 +226,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                     w2_weight=layer.w2_weight,
                     w13_weight_scale=layer.w13_weight_scale,
                     w2_weight_scale=layer.w2_weight_scale,
+                    _cache_permute_indices={},
                 )
             )
             replace_parameter(layer, "w13_weight", w13)
@@ -247,6 +256,32 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
             self.moe_kernel.fused_experts.keep_constants(layer)
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
+    def apply_monolithic(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        routing_replay_out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
+            routing_replay_out=routing_replay_out,
+        )
 
     def apply(
         self,

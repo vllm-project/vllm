@@ -276,7 +276,7 @@ def FusedMoEFactory(
     )
     if expert_substitution is not None:
         # Route over all logical experts but allocate only the retained ones.
-        global_num_experts -= len(expert_substitution.substituted_expert_ids)
+        global_num_experts -= num_experts - expert_substitution.num_compute_experts
 
     # Initialize EPLB manager (or None?)
     eplb_state: EplbLayerState | None = None
@@ -399,8 +399,17 @@ def FusedMoEFactory(
         routing_method=router.kernel_routing_method_type,
         has_hash_routing=hash_indices_table is not None,
         require_decomposed_backend=(
-            expert_substitution is not None or not router.supports_monolithic_kernels
+            not router.supports_monolithic_kernels
+            or (
+                expert_substitution is not None
+                and not expert_substitution.supports_monolithic_routing(
+                    router.kernel_routing_method_type,
+                    use_grouped_topk=use_grouped_topk,
+                )
+            )
         ),
+        require_partial_expert_execution=expert_substitution is not None,
+        require_routing_replay_capture=expert_substitution is not None,
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,

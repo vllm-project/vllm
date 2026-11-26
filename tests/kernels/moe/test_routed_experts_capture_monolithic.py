@@ -11,6 +11,7 @@ checks the reported experts against that answer and not just their range.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 import torch
@@ -22,12 +23,19 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
+    mxfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
     TrtLlmBf16ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsMonolithic,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+    TrtLlmMxfp4ExpertsMonolithic,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
+    TrtLlmMxint4ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
     TrtLlmNvFp4ExpertsMonolithic,
@@ -215,24 +223,30 @@ def _fp8_block_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     return experts, forward
 
 
+def _nvfp4_weights(
+    w: torch.Tensor, global_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Packed FP4 values and FP8 per-16 block scales, `(E, M, K/16)`."""
+    from flashinfer import fp4_quantize
+
+    q, scale = fp4_quantize(
+        w, global_scale, 16, sf_use_ue8m0=False, is_sf_swizzled_layout=False
+    )
+    return q, scale.view(torch.float8_e4m3fn).reshape(*w.shape[:2], -1)
+
+
 def _nvfp4_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     from flashinfer import fp4_quantize
 
     block = 16
     global_scale = torch.tensor(1.0, device=DEVICE)
-
-    def quantize(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Packed fp4 values and their fp8 per-16 block scales, (E, M, K/16)."""
-        q, scale = fp4_quantize(
-            w, global_scale, block, sf_use_ue8m0=False, is_sf_swizzled_layout=False
-        )
-        return q, scale.view(torch.float8_e4m3fn).reshape(*w.shape[:2], -1)
-
-    w13, w13_scale = quantize(
-        torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN, device=DEVICE).bfloat16()
+    w13, w13_scale = _nvfp4_weights(
+        torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN, device=DEVICE).bfloat16(),
+        global_scale,
     )
-    w2, w2_scale = quantize(
-        torch.randn(NUM_EXPERTS, HIDDEN, INTERMEDIATE, device=DEVICE).bfloat16()
+    w2, w2_scale = _nvfp4_weights(
+        torch.randn(NUM_EXPERTS, HIDDEN, INTERMEDIATE, device=DEVICE).bfloat16(),
+        global_scale,
     )
     ones = torch.ones(NUM_EXPERTS, device=DEVICE)
     experts = TrtLlmNvFp4ExpertsMonolithic(
@@ -327,3 +341,208 @@ def test_routing_replay_reports_the_routed_experts(
     else:
         assert torch.equal(reported, planted), (reported, planted)
     assert (routing_replay_out[num_tokens:] == -1).all()
+
+
+PARTIAL_KERNELS: dict[str, type[FusedMoEExpertsMonolithic]] = {
+    "bf16": TrtLlmBf16ExpertsMonolithic,
+    "fp8": TrtLlmFp8ExpertsMonolithic,
+    "nvfp4": TrtLlmNvFp4ExpertsMonolithic,
+    "mxfp4": TrtLlmMxfp4ExpertsMonolithic,
+    "mxint4": TrtLlmMxint4ExpertsMonolithic,
+}
+
+
+def _partial_experts(kernel, config):
+    """Identical sparse MLPs make local-range filtering exactly checkable."""
+    count = config.num_local_experts
+    w13 = torch.zeros(
+        count, 2 * INTERMEDIATE, HIDDEN, dtype=torch.bfloat16, device=DEVICE
+    )
+    w2 = torch.zeros(count, HIDDEN, INTERMEDIATE, dtype=torch.bfloat16, device=DEVICE)
+    w13[:, 0, 0] = 16
+    w13[:, INTERMEDIATE, 0] = 1
+    w2[:, :, 0] = 1 / 16
+    if kernel == "bf16":
+        from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+            convert_moe_weights_to_flashinfer_trtllm_block_layout,
+        )
+
+        convert_moe_weights_to_flashinfer_trtllm_block_layout({}, w13, w2)
+        quant = FusedMoEQuantConfig.make(quant_dtype=None)
+    elif kernel == "nvfp4":
+        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+            prepare_static_weights_for_trtllm_fp4_moe,
+            reorder_w1w3_to_w3w1,
+        )
+
+        global_scale = torch.tensor(1.0, device=DEVICE)
+        w13, s13 = _nvfp4_weights(w13, global_scale)
+        w2, s2 = _nvfp4_weights(w2, global_scale)
+        w13, s13 = reorder_w1w3_to_w3w1(w13, s13)
+        w13, s13, w2, s2 = prepare_static_weights_for_trtllm_fp4_moe(
+            w13, w2, s13, s2, HIDDEN, INTERMEDIATE, count, True
+        )
+        ones = torch.ones(count, device=DEVICE)
+        quant = FusedMoEQuantConfig.make(
+            quant_dtype="nvfp4",
+            w1_scale=s13,
+            w2_scale=s2,
+            g1_alphas=ones,
+            g2_alphas=ones,
+            a1_gscale=global_scale,
+            a2_gscale=ones,
+        )
+    elif kernel == "fp8":
+        from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+            _shuffle_deepseek_fp8_moe_weights,
+        )
+
+        w13, w2 = _shuffle_deepseek_fp8_moe_weights(
+            w13.to(torch.float8_e4m3fn), w2.to(torch.float8_e4m3fn)
+        )
+        quant = fp8_w8a8_moe_quant_config(
+            w1_scale=torch.ones(
+                count, 2 * INTERMEDIATE // 128, HIDDEN // 128, device=DEVICE
+            ),
+            w2_scale=torch.ones(
+                count, HIDDEN // 128, INTERMEDIATE // 128, device=DEVICE
+            ),
+            block_shape=[128, 128],
+        )
+    elif kernel == "mxfp4":
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            Mxfp4MoeBackend,
+            convert_weight_to_mxfp4_moe_kernel_format,
+        )
+        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+            mxfp4_quantize,
+        )
+
+        w13, s13 = mxfp4_quantize(w13)
+        w2, s2 = mxfp4_quantize(w2)
+        w13, w2, s13, s2, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+            torch.nn.Module(),
+            w13,
+            w2,
+            s13,
+            s2,
+            _cache_permute_indices={},
+        )
+        quant = mxfp4_w4a16_moe_quant_config(s13, s2)
+    else:
+        from tests.kernels.moe.test_marlin_vs_trtllm_mxint4 import (
+            mxint4_quantize_moe_weights,
+        )
+        from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (  # noqa: E501
+            prepare_static_weights_for_trtllm_mxint4_moe,
+        )
+
+        w13, s13 = mxint4_quantize_moe_weights(w13)
+        w2, s2 = mxint4_quantize_moe_weights(w2)
+        packed = prepare_static_weights_for_trtllm_mxint4_moe(w13, s13, w2, s2)
+        w13, w2 = packed["gemm1_weights"], packed["gemm2_weights"]
+        quant = FusedMoEQuantConfig.make(
+            quant_dtype=None,
+            weight_dtype="int4",
+            w1_scale=packed["gemm1_scales"],
+            w2_scale=packed["gemm2_scales"],
+        )
+    return PARTIAL_KERNELS[kernel](config, quant), w13, w2
+
+
+@pytest.mark.parametrize("kernel", list(PARTIAL_KERNELS))
+@pytest.mark.parametrize(
+    "routing_method",
+    [RoutingMethodType.Renormalize, RoutingMethodType.RenormalizeNaive],
+)
+def test_partial_execution_preserves_weights_and_captures_nonlocal_ids(
+    kernel, routing_method
+):
+    """Only local weights exist; nonlocal routes keep their original weight."""
+    # A nonzero offset distinguishes global and local expert IDs.
+    ep_rank = 1
+    config = _moe_config(2, routing_method)
+    config = replace(
+        config,
+        num_local_experts=NUM_EXPERTS // 2,
+        router_logits_dtype=torch.bfloat16,
+        moe_parallel_config=replace(
+            config.moe_parallel_config, ep_size=2, ep_rank=ep_rank, use_ep=True
+        ),
+    )
+    assert PARTIAL_KERNELS[kernel].supports_partial_expert_execution(config)
+    experts, w13, w2 = _partial_experts(kernel, config)
+    local = ep_rank * config.num_local_experts
+    remote = (1 - ep_rank) * config.num_local_experts
+    pairs = torch.tensor(
+        [
+            [local, local + 1],
+            [local, remote],
+            [remote, remote + 1],
+            [remote, local + 1],
+        ],
+        device=DEVICE,
+    )
+    logits = torch.full((4, NUM_EXPERTS), -1000.0, dtype=torch.bfloat16, device=DEVICE)
+    logits.scatter_(1, pairs, 0)
+    reference_logits = torch.full_like(logits, -1000)
+    reference_logits[:, local : local + 2] = 0
+    inputs = torch.zeros(4, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
+    inputs[:, 0] = 1
+    if kernel == "fp8":
+        inputs = inputs.to(torch.float8_e4m3fn)
+        scales = torch.ones(4, HIDDEN // 128, device=DEVICE)
+    elif kernel == "nvfp4":
+        from flashinfer import fp4_quantize
+
+        input_scale = experts.quant_config.a1_gscale
+        assert input_scale is not None
+        inputs, scales = fp4_quantize(
+            inputs,
+            input_scale,
+            16,
+            sf_use_ue8m0=False,
+            is_sf_swizzled_layout=False,
+        )
+    else:
+        scales = None
+    ids = torch.empty(4, 2, dtype=torch.int16, device=DEVICE)
+
+    def forward(scores):
+        return experts.apply(
+            hidden_states=inputs,
+            w1=w13,
+            w2=w2,
+            router_logits=scores,
+            activation=MoEActivation.SILU,
+            global_num_experts=NUM_EXPERTS,
+            expert_map=None,
+            a1q_scale=scales,
+            apply_router_weight_on_input=False,
+            routing_replay_out=ids,
+        )
+
+    reference = forward(reference_logits).clone()
+    assert reference.abs().min() > 0
+    expected = (
+        reference
+        * torch.tensor([1, 0.5, 0, 0.5], dtype=reference.dtype, device=DEVICE)[:, None]
+    )
+    torch.testing.assert_close(forward(logits), expected, atol=0, rtol=0)
+    torch.testing.assert_close(ids.long().sort(-1).values, pairs.sort(-1).values)
+    torch.testing.assert_close(
+        forward(logits[2:3].expand_as(logits).contiguous()),
+        torch.zeros_like(reference),
+        atol=0,
+        rtol=0,
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = forward(logits)
+    logits.copy_(logits.flip(0))
+    graph.replay()
+    torch.testing.assert_close(output, expected.flip(0), atol=0, rtol=0)
+    torch.testing.assert_close(
+        ids.long().sort(-1).values, pairs.flip(0).sort(-1).values
+    )

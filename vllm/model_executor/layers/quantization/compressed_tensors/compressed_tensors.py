@@ -228,6 +228,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         transform_config: dict[str, Any] | None = None,
         total_num_heads: int | None = None,
         total_num_kv_heads: int | None = None,
+        moe_sparsity_config: dict[str, Any] | None = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -238,6 +239,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.config = config
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
+        # Preserve MoNE pruning metadata when a text sub-model's HF config
+        # lacks the outer checkpoint's quantization_config.
+        self.moe_sparsity_config = moe_sparsity_config
 
         if transform_config:
             self.transform_config = TransformConfig.model_validate(transform_config)
@@ -406,6 +410,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             kv_cache_scheme=config.get("kv_cache_scheme"),
             total_num_heads=config.get("total_num_heads"),
             total_num_kv_heads=config.get("total_num_kv_heads"),
+            moe_sparsity_config=config.get("moe_sparsity_config"),
         )
 
     @classmethod

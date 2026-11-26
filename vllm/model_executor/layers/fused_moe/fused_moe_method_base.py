@@ -35,6 +35,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
     @property
+    def supports_expert_substitution(self) -> bool:
+        """Whether constant novice experts can replace expert weight rows.
+
+        Requires every per-expert tensor (weights and scales)
+        to load through the expert-ID mapping so compact physical rows stay
+        consistent. Execution backend capabilities are checked separately.
+        """
+        return False
+
+    @property
     def supports_internal_mk(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
@@ -173,6 +183,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Apply the MoE operation using monolithic kernels.
 
@@ -181,6 +192,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             x: Input tensor
             router_logits: Router logits (routing done internally)
             input_ids: Token ids, for routers that condition on them
+            routing_replay_out: Optional GPU buffer for selected logical expert IDs
 
         Returns:
             Finalized routed states or a deferred-finalize output.

@@ -65,6 +65,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def supports_eplb(self) -> bool:
         return True
 
+    @property
+    def supports_expert_substitution(self) -> bool:
+        return True
+
     def create_weights(
         self,
         layer: "RoutedExperts",
@@ -336,6 +340,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -353,4 +358,5 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            routing_replay_out=routing_replay_out,
         )

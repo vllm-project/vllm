@@ -135,6 +135,12 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
     return round_up(topk + kpool - 1, 128)
 
 
+_EXPERTS_WEIGHT_RE = re.compile(r"^layers\.(\d+)\.mlp\.experts\.(.+)$")
+"""Matches a decoder-layer expert tensor; group 2 is relative to the MoE.
+
+For example, `layers.3.mlp.experts.gate_up_proj.weight_packed`.
+"""
+
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
 checkpoint nor `Glm5NextTextConfig` carries."""
@@ -1078,7 +1084,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             (".conv1d", ".k_conv1d", 1),
             (".conv1d", ".v_conv1d", 2),
         ]
-        if _is_moe(self.config):
+        if self.use_mega_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
             # EPLB: the mapping enumerates physical experts, so it must cover
@@ -1104,12 +1110,14 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
                 num_experts=self.config.n_routed_experts + num_fused_shared,
                 num_redundant_experts=num_redundant_experts,
-                routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
+                routed_experts_prefix="",
             )
         else:
             expert_params_mapping = []
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # Runner-based MoEs accept per-expert and stacked compact MoNE tensors;
+        # the native MegaMoE path keeps expert_params_mapping above.
 
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
         # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
@@ -1144,6 +1152,23 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
+            experts_match = _EXPERTS_WEIGHT_RE.match(name)
+            if experts_match is not None and not self.use_mega_moe:
+                layer_idx = int(experts_match.group(1))
+                layer = self.layers[layer_idx] if layer_idx < len(self.layers) else None
+                if isinstance(layer, Glm5NextDecoderLayer) and isinstance(
+                    layer.mlp, Glm5NextMoE
+                ):
+                    loaded_params.update(
+                        f"layers.{layer_idx}.mlp.experts.{loaded}"
+                        for loaded in layer.mlp.experts.load_weights(
+                            ((experts_match.group(2), loaded_weight),)
+                        )
+                    )
+                    continue
+                if isinstance(layer, PPMissingLayer):
+                    continue
+
             name, loaded_weight = _mla_proj_checkpoint_tensor(
                 name, loaded_weight, params_dict, self.config, kv_a_pad_size
             )
@@ -1151,12 +1176,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name_mapped = name.replace(weight_name, param_name)

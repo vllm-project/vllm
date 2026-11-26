@@ -1369,6 +1369,10 @@ class FusedMoEConfig:
     has_hash_routing: bool = False
     # Routes are adjusted between routing and expert execution.
     require_decomposed_backend: bool = False
+    # Monolithic routing must ignore selections outside the local expert range.
+    require_partial_expert_execution: bool = False
+    # Monolithic routing must expose its selected logical expert IDs.
+    require_routing_replay_capture: bool = False
     shared_expert_prefix: str | None = None
 
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
