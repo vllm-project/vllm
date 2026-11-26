@@ -145,6 +145,10 @@ class XpuCommunicator(DeviceCommunicatorBase):
         dist.all_gather_single(output, reduced, group=self.device_group)
         return output[:numel].view(input_.shape)
 
+    @property
+    def supports_sharded_sequential_sampling(self) -> bool:
+        return True
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT:
             # XCCL changes its reduction order with message size. Both paths

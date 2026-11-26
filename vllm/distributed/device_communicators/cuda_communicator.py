@@ -386,6 +386,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             scope="global",
         )
 
+    @property
+    def supports_sharded_sequential_sampling(self) -> bool:
+        return self.pynccl_comm is not None and not self.pynccl_comm.disabled
+
     def all_reduce(self, input_):
         fi_ar_comm = self.fi_ar_comm
         use_fi_ar = (
