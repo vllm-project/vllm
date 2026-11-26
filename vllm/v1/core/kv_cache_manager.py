@@ -3,8 +3,7 @@
 
 import itertools
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
 from typing import Final, Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
@@ -19,6 +18,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     KVCacheBlockCopy,
+    get_block_hash,
     make_block_hash_with_group_id,
     trim_null_head,
 )
@@ -30,37 +30,16 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    get_reusable_prefix_length,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
-
-class _TipState(Enum):
-    """Sentinel marking a cached tip already extended once (t-1 fallback)."""
-
-    FALLBACK = 0
-
-
-_FALLBACK: Final = _TipState.FALLBACK
-
-
-@dataclass(slots=True)
-class _MambaTipGroup:
-    """Shared tip-chain tracker for Mamba groups with the same pool and block size.
-
-    `tips` maps each tracked raw `BlockHash` to:
-      - `None`: leaf tip with no tracked predecessor
-      - `BlockHash`: leaf tip whose `t-1` rollback fallback is that hash
-      - `_FALLBACK`: `t-1` fallback (already extended by one child)
-    Shared-prefix junctions and multi-branch fork points are popped so they
-    stay in normal LRU order.
-    """
-
-    leader: MambaManager
-    group_ids: tuple[int, ...]
-    tips: dict[BlockHash, BlockHash | _TipState | None] = field(default_factory=dict)
+# Sentinel value in `KVCacheManager._mamba_tips` marking a cached Mamba tip
+# that has already been extended once (retained as a one-turn rollback fallback).
+_FALLBACK_TIP: Final = BlockHash(b"")
 
 
 @dataclass
@@ -217,24 +196,30 @@ class KVCacheManager:
             for manager in self.coordinator.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.shared_prefix_checkpoint = True
-        self._mamba_tip_groups: list[_MambaTipGroup] = []
-        if enable_caching and deprioritize_superseded_mamba_states:
-            grouped: dict[tuple[int, int], list[MambaManager]] = {}
-            for manager in self.coordinator.single_type_managers:
-                if isinstance(manager, MambaManager) and manager.prefix_caching:
-                    key = (id(manager.block_pool), manager.block_size)
-                    grouped.setdefault(key, []).append(manager)
-            for managers in grouped.values():
-                leader = managers[0]
-                leader._track_tip_transitions = True
-                self._mamba_tip_groups.append(
-                    _MambaTipGroup(
-                        leader=leader,
-                        group_ids=tuple(m.kv_cache_group_id for m in managers),
-                    )
-                )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        mamba_managers = [
+            m
+            for m in self.coordinator.single_type_managers
+            if isinstance(m, MambaManager)
+            and m.prefix_caching
+            and m.block_pool is self.block_pool
+        ]
+        self._mamba_group_ids: tuple[int, ...] = (
+            tuple(
+                m.kv_cache_group_id
+                for m in mamba_managers
+                if m.block_size == mamba_managers[0].block_size
+            )
+            if enable_caching
+            and deprioritize_superseded_mamba_states
+            and mamba_managers
+            else ()
+        )
+        # Tracks Mamba tip chains (None = root tip, BlockHash = t-1 fallback,
+        # _FALLBACK_TIP = already extended once). Shared junctions/forks are popped.
+        self._mamba_tips: dict[BlockHash, BlockHash | None] = {}
+        self._req_mamba_hit: dict[str, BlockHash] = {}
         # Called when an allocation is short; returns True only if it can now proceed.
         self.reclaim_blocks: Callable[[str, int, int], bool] | None = None
         self.retained_hit_group_ids = tuple(
@@ -664,6 +649,17 @@ class KVCacheManager:
             return None
 
         if (
+            self._mamba_group_ids
+            and num_new_computed_tokens > 0
+            and request.request_id not in self._req_mamba_hit
+        ):
+            mamba_hits = new_computed_block_list[self._mamba_group_ids[0]]
+            if mamba_hits and mamba_hits[-1].block_hash is not None:
+                self._req_mamba_hit[request.request_id] = get_block_hash(
+                    mamba_hits[-1].block_hash
+                )
+
+        if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
         ):
@@ -752,69 +748,94 @@ class KVCacheManager:
         return blocks
 
     def _deprioritize_superseded_mamba_states(self, request: Request) -> None:
-        if not self._mamba_tip_groups:
+        if not self._mamba_group_ids:
             return
-        finished = request.is_finished()
+        hit_hash = self._req_mamba_hit.pop(request.request_id, None)
+        if not request.is_finished():
+            return
+
+        block_pool = self.block_pool
+        get_cached = block_pool.cached_block_hash_to_block.get_one_block
         block_hashes = request.block_hashes
-        for group in self._mamba_tip_groups:
-            hit_hash, tip_hash = group.leader.take_tip_transition(request.request_id)
-            if not finished:
-                continue
-            block_pool = group.leader.block_pool
-            alignment = group.leader.cache_hit_alignment_tokens
-            junction_idx = (
-                request.shared_prefix_boundary
-                // alignment
-                * alignment
-                // block_pool.hash_block_size
-                - 1
-            )
-            junction_hash = (
-                block_hashes[junction_idx]
-                if 0 <= junction_idx < len(block_hashes)
-                else None
-            )
-            tips = group.tips
-            if junction_hash is not None:
-                tips.pop(junction_hash, None)
-            if tip_hash is None or tip_hash in (hit_hash, junction_hash):
-                continue
+        hash_block_size = block_pool.hash_block_size
+        leader_gid = self._mamba_group_ids[0]
+        leader = self.coordinator.single_type_managers[leader_gid]
+        alignment = leader.cache_hit_alignment_tokens
 
-            new_prev: BlockHash | None = None
-            if hit_hash is not None and hit_hash in tips:
-                prev = tips[hit_hash]
-                if prev is _FALLBACK:
-                    # Shared fork point: stop tracking so it stays in normal LRU.
-                    tips.pop(hit_hash)
-                else:
-                    tips[hit_hash] = _FALLBACK
-                    new_prev = hit_hash
-                    if prev is not None and prev in tips:
-                        tips.pop(prev)
-                        get_cached = block_pool.cached_block_hash_to_block.get_one_block
-                        stale_blocks = [
-                            block
-                            for gid in group.group_ids
-                            if (
-                                block := get_cached(
-                                    make_block_hash_with_group_id(prev, gid)
-                                )
+        junction_idx = (
+            request.shared_prefix_boundary // alignment * alignment // hash_block_size
+            - 1
+        )
+        junction_hash = (
+            block_hashes[junction_idx]
+            if 0 <= junction_idx < len(block_hashes)
+            else None
+        )
+        tips = self._mamba_tips
+        if junction_hash is not None:
+            tips.pop(junction_hash, None)
+
+        # Deepest cached Mamba state is either a decode-crossed block boundary
+        # or the prompt tail checkpoint.
+        computed = min(request.num_computed_tokens, len(block_hashes) * hash_block_size)
+        prompt_tok = get_reusable_prefix_length(
+            request.num_prompt_tokens,
+            num_hash_lookahead_tokens=block_pool.num_hash_lookahead_tokens,
+            alignment_tokens=alignment,
+        )
+        tip_hash: BlockHash | None = None
+        for tok in sorted(
+            {
+                computed // leader.block_size * leader.block_size,
+                min(prompt_tok, computed),
+            },
+            reverse=True,
+        ):
+            idx = tok // hash_block_size - 1
+            if (
+                0 <= idx < len(block_hashes)
+                and get_cached(
+                    make_block_hash_with_group_id(block_hashes[idx], leader_gid)
+                )
+                is not None
+            ):
+                tip_hash = block_hashes[idx]
+                break
+
+        if tip_hash is None or tip_hash in (hit_hash, junction_hash):
+            return
+
+        new_prev: BlockHash | None = None
+        if hit_hash is not None and hit_hash in tips:
+            prev = tips[hit_hash]
+            if prev == _FALLBACK_TIP:
+                # Shared fork point: stop tracking so it stays in normal LRU.
+                tips.pop(hit_hash)
+            else:
+                tips[hit_hash] = _FALLBACK_TIP
+                new_prev = hit_hash
+                if prev is not None and prev in tips:
+                    tips.pop(prev)
+                    stale_blocks = [
+                        block
+                        for gid in self._mamba_group_ids
+                        if (
+                            block := get_cached(
+                                make_block_hash_with_group_id(prev, gid)
                             )
-                            is not None
-                        ]
-                        if stale_blocks:
-                            block_pool.deprioritize_blocks(stale_blocks, defer=True)
+                        )
+                        is not None
+                    ]
+                    if stale_blocks:
+                        block_pool.deprioritize_blocks(stale_blocks)
 
-            tips[tip_hash] = new_prev
-            if len(tips) > block_pool.num_gpu_blocks:
-                leader_gid = group.group_ids[0]
-                get_cached = block_pool.cached_block_hash_to_block.get_one_block
-                group.tips = {
-                    h: v
-                    for h, v in tips.items()
-                    if get_cached(make_block_hash_with_group_id(h, leader_gid))
-                    is not None
-                }
+        tips[tip_hash] = new_prev
+        if len(tips) > block_pool.num_gpu_blocks:
+            self._mamba_tips = {
+                h: v
+                for h, v in tips.items()
+                if get_cached(make_block_hash_with_group_id(h, leader_gid)) is not None
+            }
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
@@ -837,10 +858,8 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
-        for group in self._mamba_tip_groups:
-            group.tips.clear()
-            group.leader._req_hit_hash.clear()
-            group.leader._req_tip.clear()
+        self._mamba_tips.clear()
+        self._req_mamba_hit.clear()
         if self.collect_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True

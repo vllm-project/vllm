@@ -7200,8 +7200,7 @@ def test_mamba_deprioritize_superseded_state(deprioritize):
         deprioritize_superseded_mamba_states=deprioritize,
     )
     if deprioritize:
-        assert len(manager._mamba_tip_groups) == 1
-        assert manager._mamba_tip_groups[0].group_ids == (1, 2)
+        assert manager._mamba_group_ids == (1, 2)
     older = make_request("o", [9] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
     turn1 = make_request("t1", [1] * 40, block_size, sha256)
@@ -7277,9 +7276,9 @@ def test_mamba_deprioritize_keeps_shared_prefix_junction():
     assert pool.get_cached_block(writer.block_hashes[1], [1]) is not None
 
 
-def test_mamba_deprioritize_deferred_and_cancelled_by_touch():
-    """A superseded state still referenced at finish is deprioritized once its
-    last reference is freed, unless touched by a prefix hit first."""
+def test_mamba_deprioritize_skips_referenced_state():
+    """A superseded state still referenced by another reader is left untouched
+    and returns to normal LRU when released."""
     block_size = 16
     manager = make_kv_cache_manager(
         _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
@@ -7299,32 +7298,14 @@ def test_mamba_deprioritize_deferred_and_cancelled_by_touch():
     pool = manager.block_pool
     t1_blocks = pool.get_cached_block(turn1.block_hashes[1], [1])
     assert t1_blocks is not None
-    # Hold an external reference (e.g. KV connector) while turn3 supersedes turn1.
+    # Hold an external reference while turn3 supersedes turn1.
     pool.touch(t1_blocks)
     turn3 = make_request("t3", [1] * 40 + [2] * 40 + [3] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, turn3, [112, 120]) == 80
-    assert t1_blocks[0].block_id in pool._deprioritize_on_free_ids
 
-    # Releasing the last reference places it in the deprioritized tier.
+    # Releasing the reference returns turn1 to the normal LRU tail.
     pool.free_blocks(t1_blocks)
-    assert t1_blocks[0].block_id not in pool._deprioritize_on_free_ids
-    num_uncached = sum(
-        b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
-    )
-    pool.get_new_blocks(num_uncached + 1)
-    assert pool.get_cached_block(turn1.block_hashes[1], [1]) is None
-
-    # A touch on a deferred block cancels its pending deprioritization.
-    older_blocks = pool.get_cached_block(older.block_hashes[1], [1])
-    assert older_blocks is not None
-    pool.touch(older_blocks)
-    pool.deprioritize_blocks(older_blocks, defer=True)
-    assert older_blocks[0].block_id in pool._deprioritize_on_free_ids
-    pool.touch(older_blocks)
-    assert older_blocks[0].block_id not in pool._deprioritize_on_free_ids
-    pool.free_blocks(older_blocks)
-    pool.free_blocks(older_blocks)
-    assert pool.free_block_queue.get_all_free_blocks()[-1] is older_blocks[0]
+    assert pool.free_block_queue.get_all_free_blocks()[-1] is t1_blocks[0]
 
 
 def test_mamba_deprioritize_preempted_request_keeps_old_state():
@@ -7356,9 +7337,7 @@ def test_mamba_deprioritize_preempted_request_keeps_old_state():
     # Preempted (not finished): free without deprioritizing turn1's state.
     turn3.status = RequestStatus.PREEMPTED
     manager.free(turn3)
-    leader = manager._mamba_tip_groups[0].leader
-    assert turn3.request_id not in leader._req_hit_hash
-    assert turn3.request_id not in leader._req_tip
+    assert turn3.request_id not in manager._req_mamba_hit
 
     pool = manager.block_pool
     num_uncached = sum(

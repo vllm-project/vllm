@@ -13,12 +13,10 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
     BlockHashList,
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
-    get_block_hash,
     resolve_block_hashes,
     trim_null_head,
 )
@@ -1931,11 +1929,6 @@ class MambaManager(SingleTypeKVCacheManager):
             self.enable_caching and self.retention_interval is not None
         )
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
-        # Enabled on one leader MambaManager per (block_pool, block_size) group
-        # to record each active request's resumed and deepest cached raw hashes.
-        self._track_tip_transitions = False
-        self._req_hit_hash: dict[str, BlockHash] = {}
-        self._req_tip: dict[str, tuple[int, BlockHash]] = {}
         if self.prefix_caching:
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -2462,42 +2455,6 @@ class MambaManager(SingleTypeKVCacheManager):
             ]
         return super().pop_blocks_for_free(request_id)
 
-    def add_local_computed_blocks(
-        self,
-        request_id: str,
-        new_computed_blocks: Sequence[KVCacheBlock],
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-    ) -> None:
-        if self._track_tip_transitions and new_computed_blocks:
-            hit_block = new_computed_blocks[-1]
-            if not hit_block.is_null and hit_block.block_hash is not None:
-                self._req_hit_hash[request_id] = get_block_hash(hit_block.block_hash)
-        super().add_local_computed_blocks(
-            request_id,
-            new_computed_blocks,
-            num_local_computed_tokens,
-            num_external_computed_tokens,
-        )
-
-    def _record_req_tip(self, request_id: str, block: KVCacheBlock) -> None:
-        if block.block_hash is None or block.block_hash_num_tokens is None:
-            return
-        prev = self._req_tip.get(request_id)
-        if prev is None or block.block_hash_num_tokens >= prev[0]:
-            self._req_tip[request_id] = (
-                block.block_hash_num_tokens,
-                get_block_hash(block.block_hash),
-            )
-
-    def take_tip_transition(
-        self, request_id: str
-    ) -> tuple[BlockHash | None, BlockHash | None]:
-        """Pop and return `(hit_hash, deepest_cached_tip_hash)` for a request."""
-        hit_hash = self._req_hit_hash.pop(request_id, None)
-        tip = self._req_tip.pop(request_id, None)
-        return hit_hash, (tip[1] if tip is not None else None)
-
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only
         need to keep the state of the last computed token, so we return
@@ -2532,14 +2489,6 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             if partial_hash is not None:
                 self.cached_blocks_this_step.add(partial_hash)
-                if self._track_tip_transitions:
-                    partial_block = (
-                        self.block_pool.cached_block_hash_to_block.get_one_block(
-                            partial_hash
-                        )
-                    )
-                    if partial_block is not None:
-                        self._record_req_tip(request.request_id, partial_block)
         if num_cached_blocks_after > num_cached_blocks_before:
             blocks = self.req_to_blocks[request.request_id]
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
@@ -2551,8 +2500,6 @@ class MambaManager(SingleTypeKVCacheManager):
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
-                if self._track_tip_transitions:
-                    self._record_req_tip(request.request_id, block)
                 if self.prefix_caching:
                     assert block.block_hash_num_tokens is not None
                     # Offer every retained boundary with its exact block.
@@ -2612,8 +2559,6 @@ class MambaManager(SingleTypeKVCacheManager):
             block_size=self.block_size,
             kv_cache_group_id=self.kv_cache_group_id,
         )
-        if self._track_tip_transitions:
-            self._record_req_tip(request.request_id, blocks[idx])
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
