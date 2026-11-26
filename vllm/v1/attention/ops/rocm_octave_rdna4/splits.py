@@ -31,6 +31,7 @@ def recommend_splits(
     prefill=False,
     head_dim,
     specialized_fast,
+    budget=DEFAULT_WORKSPACE_BYTES,
 ):
     """Return a power of two in 1..256 without reading device tensor values.
 
@@ -43,9 +44,7 @@ def recommend_splits(
     ):
         return 1
     group = heads // kv_heads
-    maximum = min(
-        256, _floor2(DEFAULT_WORKSPACE_BYTES // (tokens * heads * (head_dim + 2) * 4))
-    )
+    maximum = min(256, _floor2(budget // (tokens * heads * (head_dim + 2) * 4)))
     if not specialized_fast:
         rows = 16
         head_tile = min(group, rows)

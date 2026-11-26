@@ -232,8 +232,7 @@ void prefill_expanded(const Tensor& out, const Tensor& query, const Tensor& key,
              v = activation(value, device, dtype);
   const auto requests = lengths.numel();
   check_chunk(key, value, block_table, x, requests);
-  TORCH_CHECK_VALUE(x.heads == 6 * x.cache.heads && std::isfinite(scale) &&
-                        scale > 0 && key_tmp.dim() == 4,
+  TORCH_CHECK_VALUE(std::isfinite(scale) && scale > 0 && key_tmp.dim() == 4,
                     "Invalid RDNA4 expanded prefill arguments");
   const auto capacity = key_tmp.size(2);
   TORCH_CHECK_VALUE(capacity > 0 && capacity % 32 == 0,
@@ -293,8 +292,7 @@ void prefill_streamed(const Tensor& out, const Tensor& query, const Tensor& key,
   check_chunk(key, value, table, x, requests);
   TORCH_CHECK_VALUE(partials.dim() == 4 && partials.size(0) >= 1 &&
                         partials.size(0) <= 32 && x.cache.page_size % 16 == 0 &&
-                        x.heads == x.cache.heads * 6 && std::isfinite(scale) &&
-                        scale > 0,
+                        std::isfinite(scale) && scale > 0,
                     "Invalid streamed prefill geometry");
   const int splits = partials.size(0);
   check_buffer(partials, {splits, x.tokens, x.heads, kHeadDim + 2}, at::kFloat,

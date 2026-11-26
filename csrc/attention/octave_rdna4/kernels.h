@@ -67,10 +67,18 @@ int launch_prefix_tiles(const int8_t* query, const float* query_scale,
                         const int32_t* starts, const int32_t* lengths,
                         float* partials, float scale, int requests, int heads,
                         int tokens, int splits, int format, hipStream_t stream);
+int launch_dense_prefill(float* out, const _Float16* query,
+                         const _Float16* keys, const _Float16* residual,
+                         const float* errors, const _Float16* values,
+                         const int32_t* starts, const int32_t* lengths,
+                         int requests, int tokens, int kv_heads, int group,
+                         int capacity, float scale, uint8_t* repair,
+                         hipStream_t stream);
 int launch_chunk_only(float* out, Activation query, Activation keys,
                       Activation values, void* packed_chunk, float* chunk_lse,
                       const int32_t* starts, int requests, int tokens,
-                      int kv_heads, float scale, int dtype, hipStream_t stream);
+                      int kv_heads, int group, float scale, int dtype,
+                      hipStream_t stream);
 int launch_prefill_streamed(float* out, Activation query, Activation key,
                             Activation value, PagedCache cache,
                             const int32_t* table, int64_t table_stride,

@@ -6,8 +6,9 @@ from functools import lru_cache
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionImpl,
     AttentionLayer,
@@ -18,9 +19,10 @@ from vllm.v1.attention.backends.rocm_octave_attn import (
     RocmOctaveMetadata,
     RocmOctaveMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import find_attention_impl_variant
 from vllm.v1.attention.ops import rocm_octave as sq
 from vllm.v1.attention.ops.rocm_octave_rdna4 import OctaveGeometry, TunedHipOctave
-from vllm.v1.attention.ops.rocm_octave_rdna4.splits import DEFAULT_WORKSPACE_BYTES
+from vllm.v1.attention.ops.rocm_octave_rdna4.tuned import startup_scratch_bytes
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -34,27 +36,18 @@ def _engine(head_size: int, rope_dim: int, arch: str) -> TunedHipOctave:
     return TunedHipOctave(head_size, rope_dim, arch)
 
 
-def _scratch_workspace_bytes(config: VllmConfig, head_size: int) -> int:
-    tokens = config.scheduler_config.max_num_batched_tokens
-    heads = config.model_config.get_num_attention_heads(config.parallel_config)
-    return min(DEFAULT_WORKSPACE_BYTES, tokens * heads * 256 * (head_size + 2) * 4)
-
-
-def _reserve_workspace(config: VllmConfig, head_size: int) -> None:
-    if not is_workspace_manager_initialized():
-        return
-    tokens = config.scheduler_config.max_num_batched_tokens
-    heads = config.model_config.get_num_attention_heads(config.parallel_config)
-    current_workspace_manager().get_simultaneous(
-        ((tokens, heads, head_size), torch.float32),
-        ((_scratch_workspace_bytes(config, head_size) // 4,), torch.float32),
-    )
-
-
 class RocmOctaveRdna4MetadataBuilder(RocmOctaveMetadataBuilder):
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        _reserve_workspace(vllm_config, kv_cache_spec.head_size)
+        layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            layer_names,
+        )
+        for layer in layers.values():
+            impl = find_attention_impl_variant(layer.impl, RocmOctaveRdna4AttentionImpl)
+            if impl is not None:
+                impl._reserve_workspace()
 
     def build(
         self,
@@ -116,7 +109,15 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.config = get_current_vllm_config()
-        self._scratch_workspace_bytes = _scratch_workspace_bytes(self.config, head_size)
+        scheduler = self.config.scheduler_config
+        self._scratch_workspace_bytes = startup_scratch_bytes(
+            tokens=scheduler.max_num_batched_tokens,
+            heads=self.num_heads,
+            kv=self.num_kv_heads,
+            dim=head_size,
+            requests=scheduler.max_num_seqs,
+            capacity=self.config.model_config.max_model_len,
+        )
         rope_dim = sq.rope_dim_from_hf_config(
             self.config.model_config.hf_text_config, head_size
         )
@@ -138,6 +139,14 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
             self.num_kv_heads,
             kv_cache_dtype,
         )
+
+    def _reserve_workspace(self) -> None:
+        if is_workspace_manager_initialized():
+            tokens = self.config.scheduler_config.max_num_batched_tokens
+            current_workspace_manager().get_simultaneous(
+                ((tokens, self.num_heads, self.head_size), torch.float32),
+                ((self._scratch_workspace_bytes,), torch.uint8),
+            )
 
     def _signs(self, device: torch.device) -> torch.Tensor:
         if self._sign_words is None or self._sign_words.device != device:
@@ -201,6 +210,7 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 prefill=key is not None,
                 context_capacity=context_capacity if key is not None else None,
+                budget=self._scratch_workspace_bytes,
             )
             scratch_shape = (*query.shape[:2], splits, self.head_size + 2)
             workspace = ((scratch_shape if splits > 1 else (0,), torch.float32),)
@@ -283,7 +293,7 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("ROCM_OCTAVE (RDNA4) does not fuse output quant")
         if attn_metadata is None:
-            _reserve_workspace(self.config, self.head_size)
+            self._reserve_workspace()
             self._signs(query.device)
             return output.zero_()
         md = attn_metadata

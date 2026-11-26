@@ -10,7 +10,58 @@ from vllm.utils.math_utils import cdiv, round_up
 
 from .geometry import OctaveGeometry
 from .hip import HipOctave
-from .splits import recommend_splits
+from .splits import DEFAULT_WORKSPACE_BYTES, recommend_splits
+
+_DEFAULT_MAX_STREAMED_SPLITS = 16
+
+
+def _workspace_bytes(buffers):
+    return sum(round_up(prod(shape) * dtype.itemsize, 256) for shape, dtype in buffers)
+
+
+def _streamed_aux_buffers(tokens, heads, kv, dim, requests):
+    # Query digits and raw K/V tiles occupy staging at different times.
+    staging = max(
+        2 * tokens * heads * dim, (tokens // 32 + requests) * 32 * kv * dim * 4
+    )
+    return (
+        ((staging,), torch.int8),
+        ((tokens, heads), torch.float32),
+        ((tokens, heads), torch.uint8),
+    )
+
+
+def _expanded_buffers(tokens, heads, kv, dim, requests, capacity):
+    expanded = (requests, kv, capacity, dim)
+    correction = 2 * prod(expanded) + 32 * 4 * requests * kv
+    return (
+        (expanded, torch.float16),
+        (expanded, torch.float16),
+        ((tokens, heads, dim), torch.float16),
+        ((tokens, heads, 2), torch.uint8),
+        ((correction,), torch.uint8),
+    )
+
+
+def startup_scratch_bytes(
+    *, tokens: int, heads: int, kv: int, dim: int, requests: int, capacity: int
+) -> int:
+    """Budget shared by streamed, expanded, and split packed attention."""
+    requests = min(tokens, requests)
+    capacity = round_up(capacity, 32)
+    split_bytes = tokens * heads * (dim + 2) * 4
+    streamed = _workspace_bytes(_streamed_aux_buffers(tokens, heads, kv, dim, requests))
+    partials = _DEFAULT_MAX_STREAMED_SPLITS * round_up(split_bytes, 256)
+    if heads == 1 and tokens >= 128:
+        # A single workgroup of up to 160 MHA rows can use 32 prefix splits.
+        single_tile_splits = min(32, cdiv(capacity, 256))
+        tile_bytes = round_up(min(tokens, 160) * (dim + 2) * 4, 256)
+        partials = max(partials, single_tile_splits * tile_bytes)
+    streamed += partials
+    expanded = _workspace_bytes(
+        _expanded_buffers(tokens, heads, kv, dim, requests, capacity)
+    )
+    return min(DEFAULT_WORKSPACE_BYTES, 256 * split_bytes, max(streamed, expanded))
 
 
 class TunedHipOctave(HipOctave):
@@ -95,6 +146,7 @@ class TunedHipOctave(HipOctave):
         *,
         prefill=False,
         context_capacity=None,
+        budget=DEFAULT_WORKSPACE_BYTES,
     ):
         if query.ndim != 3 or cache.ndim != 4 or block_table.ndim != 2:
             raise ValueError("Expected 3D query, 4D cache and 2D page table")
@@ -110,6 +162,7 @@ class TunedHipOctave(HipOctave):
             cache_dtype=cache_dtype,
             prefill=prefill,
             head_dim=self.head_dim,
+            budget=budget,
             specialized_fast=not self._use_geometry(query, cache, block_table, prefill),
         )
 
@@ -117,17 +170,19 @@ class TunedHipOctave(HipOctave):
         """Bound the prefix partials by the existing per-layer scratch budget."""
         tokens, heads, dim = query.shape
         kv = cache.shape[1]
-        rows = tokens * heads
-        # The two INT8 query digits share staging with the later raw K/V tiles.
-        staging = max(2 * rows * dim, (tokens // 32 + requests) * 32 * kv * dim * 4)
-        overhead = sum(round_up(n, 256) for n in (staging, 4 * rows, rows))
-        per_split = rows * (dim + 2) * 4
+        aux = _streamed_aux_buffers(tokens, heads, kv, dim, requests)
+        overhead = _workspace_bytes(aux)
+        per_split = tokens * heads * (dim + 2) * 4
         # The occupancy targets below are calibrated in units of 128 query vectors.
         work_units = cdiv(cdiv(tokens, requests) * (heads // kv), 128) * kv
         # Short chunks need more independent prefix tiles to fill the GPU.
         target = 512 if capacity >= 32768 else 256 if capacity >= 8192 else 64
         # Long single-request chunks already have enough query parallelism.
-        max_splits = 4 if requests == 1 and tokens >= 512 and capacity >= 32768 else 16
+        max_splits = (
+            4
+            if requests == 1 and tokens >= 512 and capacity >= 32768
+            else _DEFAULT_MAX_STREAMED_SPLITS
+        )
         splits = min(max_splits, cdiv(target, work_units))
         if requests == 1 and 128 <= tokens <= 448:
             groups = cdiv(tokens * (heads // kv), 160) * kv
@@ -140,7 +195,7 @@ class TunedHipOctave(HipOctave):
                 ):
                     splits = 1
                 elif full <= 4 or capacity >= 32768:
-                    splits = min(16, full)
+                    splits = min(_DEFAULT_MAX_STREAMED_SPLITS, full)
                 else:
                     first = 32 // groups
                     splits = first if first * groups >= 28 else 64 // groups
@@ -153,9 +208,7 @@ class TunedHipOctave(HipOctave):
             return ()
         return (
             ((splits, tokens, heads, dim + 2), torch.float32),
-            ((staging,), torch.int8),
-            ((tokens, heads), torch.float32),
-            ((tokens, heads), torch.uint8),
+            *aux,
         )
 
     def prefill_workspace(
@@ -165,27 +218,23 @@ class TunedHipOctave(HipOctave):
         requests, pages = table.shape
         kv = cache.shape[1]
         if (
-            heads != 6 * kv
-            or tokens < 32
+            kv <= 0
+            or heads <= 0
+            or heads % kv != 0
+            or not tokens
             or not requests
             or not pages
-            or not context_capacity
-            or context_capacity < 0
             or not isfinite(scale)
             or scale <= 0
         ):
             return "packed", ()
 
-        capacity = round_up(min(context_capacity, pages * cache.shape[2]), 32)
-        expanded = (requests, kv, capacity, dim)
-        correction_bytes = 2 * prod(expanded) + 32 * 4 * requests * kv
-        fits = (
-            4 * prod(expanded)
-            + round_up(correction_bytes, 256)
-            + 2 * query.numel()
-            + round_up(2 * tokens * heads, 256)
-            <= budget
-        )
+        capacity = pages * cache.shape[2]
+        if context_capacity is not None and context_capacity > 0:
+            capacity = min(context_capacity, capacity)
+        capacity = round_up(capacity, 32)
+        expanded = _expanded_buffers(tokens, heads, kv, dim, requests, capacity)
+        fits = _workspace_bytes(expanded) <= budget
         chunk = tokens // requests
         # Short batches underfill expanded attention. Long, thin requests can
         # also use less scratch by reading the quantized pages directly.
@@ -193,27 +242,22 @@ class TunedHipOctave(HipOctave):
         long_prefix = requests > 1 and (
             prefix >= max(32768, 192 * chunk) or prefix >= max(98304, 128 * chunk)
         )
+        # For single requests the prefix kernel covers 160 query/head rows
+        # per workgroup. Wider chunks can reuse expanded K/V across tiles.
         short_single = (
             requests == 1
             and tokens <= 448
             and cdiv(tokens * (heads // kv), 160) * kv <= 32
         )
-        if (
-            cache.shape[2] % 16 == 0
-            and tokens >= 16 * requests
-            and (tokens <= 384 or short_single or not fits or long_prefix)
+        short_chunk = tokens < 256 or (tokens <= 384 and prefix <= chunk)
+        if cache.shape[2] % 16 == 0 and (
+            short_chunk or short_single or not fits or long_prefix
         ):
             shapes = self.streamed_workspace(query, cache, requests, capacity, budget)
             if shapes:
                 return "streamed", shapes
-        if tokens >= 256 and fits:
-            return "expanded", (
-                (expanded, torch.float16),
-                (expanded, torch.float16),
-                (tuple(query.shape), torch.float16),
-                ((tokens, heads, 2), torch.uint8),
-                ((correction_bytes,), torch.uint8),
-            )
+        if fits:
+            return "expanded", expanded
         return "packed", ()
 
     def prefill_streamed(

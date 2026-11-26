@@ -31,8 +31,8 @@ to dense attention and the QSA path. Other head-size/RoPE combinations are
 rejected during geometry validation. The specialized HIP kernels provide
 cache storage and a small fixed set of scalar and WMMA kernels for decode,
 verification, and prefill. This includes grouped-prefill fast paths for GQA
-groups 1 and 2 and GQA-6 reuse paths for all three cache formats. The geometry
-HIP kernels handle the remaining multi-query prefill cases and sparse QSA
+groups 1 and 2 and GQA-6 reuse paths for all three cache formats. Packed
+prefill can also use the geometry HIP kernels, which handle sparse QSA
 attention. Both use the existing Octave wire formats and causal
 metadata. QSA supports tagged exact K/V for selected tokens among the first
 four and last 64. A missing tag uses packed KV.
@@ -42,13 +42,26 @@ decode and matrix rows, and geometry prefill selects request tiling at runtime.
 The grouped-prefill guard remains separate to preserve ragged-request
 performance. These choices retain the tuned WMMA paths and numerical checks.
 
-The scheduler's host maximum sequence length guides prefill split selection
-within the 2 GiB split workspace budget. Native kernels resolve live lengths
-on the device.
+At startup, RDNA4 reserves shared GPU workspace using the layer's local query
+and KV head counts, the scheduler's token and request limits, and the maximum
+sequence length. The scratch budget covers the larger of FP16 expansion and
+streamed prefill with its split buffers, subject to a 2 GiB ceiling and the
+packed kernel's 256-split limit. The FP32 output is reserved alongside it.
+Decode and prefill choose splits within that budget. Captured graphs reuse
+the reserved addresses, and native kernels resolve live lengths on the device.
 
-GQA-6 prefill reads short batches and long, thin prefixes directly from packed
-pages. Loader waves stage 16 cached keys at a time. Each rotated query uses two
-signed base-256 digits. Integer WMMA accumulates their dot products with the
+Streamed and FP16-expanded dense prefill support any positive integer ratio of
+query heads to KV heads per GPU. Dispatch chooses between them using the
+chunk size, prefix length, number of query/head tiles, and available workspace.
+Small chunks, ragged batches, and long, thin prefixes can stream directly from
+packed pages. When the scheduler supplies no sequence-length hint, dispatch uses
+the page table capacity. For standard serving geometry and a positive finite
+scale, the whole batch uses packed attention only when neither FP16 expansion
+nor a single streamed split fits the scratch budget. Packed attention can run
+with one split and no split scratch.
+
+In streamed prefill, loader waves stage 16 cached keys at a time. Each
+rotated query uses two signed base-256 digits. Integer WMMA accumulates their dot products with the
 original codebook entries before applying the stored K scale. A partner wave
 computes PV using FP16 WMMA and FP32 accumulation. The live chunk uses its raw
 K/V and the finish kernel combines both softmax normalizers.

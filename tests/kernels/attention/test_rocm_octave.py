@@ -370,8 +370,17 @@ def test_rdna4_geometry_rejects_unsupported_head_and_rope(head_dim, rope_dim):
     ]
     + (
         [
-            (cache_dtype, [129, 1, 517], 6, path)
-            for cache_dtype in CACHE_DTYPES
+            (cache_dtype, query_lens, group, path)
+            for cache_dtype, query_lens, group in (
+                [(fmt, [129, 1, 517], 6) for fmt in CACHE_DTYPES]
+                + [
+                    ("octave_k3v3", [7, 1, 13], 1),
+                    ("octave_k3v4", [19, 1, 35], 4),
+                    ("octave_k3v3", [31, 1, 33], 5),
+                    ("octave_k3v3_compact", [17, 1, 31], 8),
+                    ("octave_k3v4", [3, 1, 5], 321),
+                ]
+            )
             for path in ("expanded", "streamed")
         ]
         if ARCH == "rdna4"
@@ -385,8 +394,8 @@ def test_prefill_matches_reference(cache_dtype, query_lens, dtype, group, path, 
     torch.manual_seed(3)
     dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
-    hkv = 1
-    ctx_lens = [4096, 0, 4096][: len(query_lens)]
+    hkv = 2 if path != "packed" and group != 6 else 1
+    ctx_lens = ([67, 0, 97] if hkv > 1 else [4096, 0, 4096])[: len(query_lens)]
     seq_lens = [c + n for c, n in zip(ctx_lens, query_lens)]
     max_blocks = max(math.ceil(n / BLOCK) for n in seq_lens)
     nblk = sum(math.ceil(n / BLOCK) for n in seq_lens) + 8
@@ -565,6 +574,191 @@ def test_expanded_prefill_keeps_small_weights_on_large_values(cache_dtype, kerne
     assert error.amax().item() < 1.5e-3
 
 
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 prefill dispatch")
+@pytest.mark.parametrize(
+    "group,batch,prefix,budget,path",
+    [
+        (1, 1, 512, 2 << 30, "streamed"),
+        (4, 1, 20480, 2 << 30, "streamed"),
+        (5, 1, 0, 2 << 30, "streamed"),
+        (8, 1, 0, 2 << 30, "streamed"),
+        (8, 1, 20480, 2 << 30, "expanded"),
+        (4, 4, 20480, 2 << 30, "expanded"),
+        (8, 1, 20480, 16 << 20, "streamed"),
+        (8, 1, 20480, 1 << 20, "packed"),
+    ],
+)
+def test_prefill_dispatch_by_work_and_budget(
+    group, batch, prefix, budget, path, kernel
+):
+    from vllm.utils.math_utils import round_up
+
+    chunk, kv = 256, 4
+    pages = math.ceil((chunk + prefix) / BLOCK)
+    query = torch.empty((batch * chunk, kv * group, HEAD), device="meta")
+    slot = kernel.layout("octave_k3v4").slot_bytes
+    cache = torch.empty((pages * batch, kv, BLOCK, slot), device="meta")
+    table = torch.empty((batch, pages), device="meta")
+    selected, buffers = kernel.prefill_workspace(
+        query, cache, table, chunk + prefix, 1 / 16, budget, prefix
+    )
+    assert selected == path
+    assert (
+        sum(
+            round_up(math.prod(shape) * dtype.itemsize, 256) for shape, dtype in buffers
+        )
+        <= budget
+    )
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 streamed prefill")
+def test_startup_budget_preserves_single_head_split_count(kernel):
+    from vllm.v1.attention.ops.rocm_octave_rdna4.tuned import startup_scratch_bytes
+
+    tokens, capacity = 160, 8192
+    q = torch.empty((tokens, 1, HEAD), device="meta")
+    cache = torch.empty(
+        (capacity // BLOCK, 1, BLOCK, kernel.layout("octave_k3v4").slot_bytes),
+        device="meta",
+    )
+    table = torch.empty((1, capacity // BLOCK), device="meta")
+    budget = startup_scratch_bytes(
+        tokens=tokens, heads=1, kv=1, dim=HEAD, requests=1, capacity=capacity
+    )
+    path, buffers = kernel.prefill_workspace(q, cache, table, capacity, 1 / 16, budget)
+    assert path == "streamed"
+    partials, *_ = buffers
+    assert partials[0][0] == 32
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 graph workspace")
+def test_serving_reserves_bounded_workspace_before_capture(
+    tmp_path, vllm_runner, enable_pickle
+):
+    from transformers import LlamaConfig
+
+    from vllm import SamplingParams
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=128,
+        intermediate_size=256,
+        head_dim=HEAD,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+        num_hidden_layers=1,
+        max_position_embeddings=4096,
+        partial_rotary_factor=ROPE / HEAD,
+        vocab_size=128,
+    ).save_pretrained(tmp_path)
+
+    def workspace_bytes(_model):
+        from vllm.v1.worker.workspace import current_workspace_manager
+
+        (view,) = current_workspace_manager().get_simultaneous(((1,), torch.uint8))
+        return view.untyped_storage().nbytes()
+
+    with vllm_runner(
+        str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        attention_backend="ROCM_OCTAVE",
+        kv_cache_dtype="octave_k3v4",
+        max_model_len=4096,
+        max_num_batched_tokens=1024,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=64 << 20,
+        gpu_memory_utilization=0.5,
+        enable_chunked_prefill=True,
+        compilation_config={
+            "mode": 0,
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "decode_cudagraph_capture_request_sizes": [1, 2],
+        },
+    ) as runner:
+        (before,) = runner.llm.apply_model(workspace_bytes)
+        # A shared reservation below 300 MiB covers both prefill routes and decode.
+        assert 0 < before <= 300 << 20
+        for length in (250, 694):
+            (result,) = runner.llm.generate(
+                [{"prompt_token_ids": [7] * length}],
+                SamplingParams(
+                    temperature=0, max_tokens=3, ignore_eos=True, detokenize=False
+                ),
+            )
+            assert len(result.outputs[0].token_ids) == 3
+        assert runner.llm.apply_model(workspace_bytes) == [before]
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 prefill workspace")
+@pytest.mark.parametrize(
+    "tokens,requests,pages,hint,budget,path",
+    [
+        (8, 1, 33, None, 2 << 30, "streamed"),
+        (159, 16, 73, 1153, 2 << 30, "streamed"),
+        # Expansion can fit even when one streamed split is too large.
+        (128, 1, 8, 128, 3 << 20, "expanded"),
+        (256, 1, 1296, 20736, 1 << 20, "packed"),
+        (32768, 128, 4096, 65536, 2 << 30, "packed"),
+    ],
+)
+def test_prefill_fallback_needs_workspace(
+    tokens, requests, pages, hint, budget, path, kernel
+):
+    heads = 64 if tokens == 32768 else 32
+    q = torch.empty((tokens, heads, HEAD), device="meta")
+    cache = torch.empty(
+        (pages, 4, BLOCK, kernel.layout("octave_k3v4").slot_bytes), device="meta"
+    )
+    table = torch.empty((requests, pages), device="meta")
+    selected, _ = kernel.prefill_workspace(q, cache, table, hint, 1 / 16, budget)
+    assert selected == path
+    if path == "packed":
+        assert (
+            kernel.suggest_splits(
+                q,
+                cache,
+                table,
+                "octave_k3v4",
+                prefill=True,
+                context_capacity=hint,
+                budget=budget,
+            )
+            == 1
+        )
+
+
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 FP32 prefill repair")
+@pytest.mark.parametrize("path", ["streamed", "expanded"])
+def test_prefill_preserves_finite_bf16_values_above_fp16_range(path, kernel):
+    fmt = kernel.layout("octave_k3v4")
+    tokens = 129
+    q = torch.zeros((tokens, 4, HEAD), device="cuda", dtype=torch.bfloat16)
+    k = torch.zeros_like(q[:, :1])
+    v = torch.full_like(k, 131072)
+    pages = math.ceil(tokens / BLOCK)
+    cache = torch.zeros(
+        (pages, 1, BLOCK, fmt.slot_bytes), device="cuda", dtype=torch.uint8
+    )
+    table = torch.arange(pages, device="cuda", dtype=torch.int32)[None]
+    starts = torch.tensor([0, tokens], device="cuda", dtype=torch.int32)
+    out = _prefill(
+        cache,
+        q,
+        k,
+        v,
+        table,
+        starts,
+        starts[1:],
+        sq.sign_bits(HEAD).to("cuda"),
+        fmt,
+        kernel,
+        path=path,
+    )
+    torch.testing.assert_close(out, torch.full_like(out, 131072), rtol=1e-6, atol=0)
+
+
 @pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 packed-prefix dispatch")
 def test_uniform_cached_prefill_dispatch_uses_shortest_prefix(kernel):
     from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
@@ -614,11 +808,12 @@ def test_uniform_cached_prefill_dispatch_uses_shortest_prefix(kernel):
 
 @pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 chunked prefill")
 @pytest.mark.parametrize("path", ["expanded", "streamed"])
-def test_prefill_replay_changes_live_prefix_and_repair_rows(path, kernel):
+@pytest.mark.parametrize("heads", [5, 6])
+def test_prefill_replay_changes_live_prefix_and_repair_rows(path, heads, kernel):
     torch.manual_seed(22)
     device, dtype = "cuda", torch.bfloat16
     fmt = kernel.layout("octave_k3v4")
-    tokens, heads, max_prefix = 64, 6, 528
+    tokens, max_prefix = 64, 528
     signs = sq.sign_bits(HEAD).to(device)
 
     # Strided activations and padded table rows, as in mixed batches.

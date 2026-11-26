@@ -2815,15 +2815,6 @@ __global__ void finish_prefill(float* out, const float* partials,
 
 }  // namespace
 
-namespace octave_rdna4 {
-int launch_dense_prefill(float* out, const _Float16* query,
-                         const _Float16* keys, const _Float16* residual,
-                         const float* errors, const _Float16* values,
-                         const int32_t* starts, const int32_t* lengths,
-                         int requests, int tokens, int kv_heads, int capacity,
-                         float scale, uint8_t* repair, hipStream_t stream);
-}  // namespace octave_rdna4
-
 int octave_rdna4::launch_prefill_expanded(
     float* out, void* keys, void* values, const void* query_fp16,
     Activation query, Activation key, Activation value, PagedCache cache,
@@ -2832,8 +2823,9 @@ int octave_rdna4::launch_prefill_expanded(
     int tokens, int heads, float scale, int dtype, int format, void* correction,
     uint8_t* repair, hipStream_t stream) {
   if (requests <= 0 || tokens <= 0 || capacity <= 0 || capacity % 32 ||
-      cache.heads <= 0 || heads != cache.heads * 6 || !(scale > 0.f) ||
-      (dtype != 0 && dtype != 1) || (format != 3 && format != 4 && format != 19))
+      cache.heads <= 0 || heads <= 0 || heads % cache.heads != 0 ||
+      !(scale > 0.f) || (dtype != 0 && dtype != 1) ||
+      (format != 3 && format != 4 && format != 19))
     return hipErrorInvalidValue;
   auto* keys_fp16 = static_cast<_Float16*>(keys);
   auto* residual = static_cast<_Float16*>(correction);
@@ -2852,7 +2844,7 @@ int octave_rdna4::launch_prefill_expanded(
   status = octave_rdna4::launch_dense_prefill(
       out, static_cast<const _Float16*>(query_fp16), keys_fp16, residual,
       errors, values_fp16, starts, lengths, requests, tokens, cache.heads,
-      capacity, scale, repair, stream);
+      heads / cache.heads, capacity, scale, repair, stream);
   if (status != hipSuccess) return status;
 
   return dispatch(dtype, format, [&](auto scalar, auto layout) {
@@ -2883,9 +2875,9 @@ int octave_rdna4::launch_prefill_streamed(
                           prefix_capacity, starts, lengths, partials, scale,
                           requests, heads, tokens, splits, format, stream);
   if (status != hipSuccess) return status;
-  status =
-      launch_chunk_only(out, query, key, value, staging, chunk_lse, starts,
-                        requests, tokens, cache.heads, scale, dtype, stream);
+  status = launch_chunk_only(out, query, key, value, staging, chunk_lse, starts,
+                             requests, tokens, cache.heads, heads / cache.heads,
+                             scale, dtype, stream);
   if (status != hipSuccess) return status;
   return dispatch(dtype, format, [&](auto scalar, auto layout) {
     finish_prefill<decltype(scalar), decltype(layout), true>

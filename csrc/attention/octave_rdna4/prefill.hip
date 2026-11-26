@@ -14,7 +14,6 @@ using Float4 = float __attribute__((ext_vector_type(4)));
 using Float8 = float __attribute__((ext_vector_type(8)));
 
 constexpr int kHead = 256;
-constexpr int kGroup = 6;
 constexpr int kFragment = 16;
 constexpr int kWave = 32;
 // Each expanded-prefill wave owns 16 query/head rows and their full output.
@@ -38,11 +37,11 @@ __device__ __forceinline__ float other_half(float value) {
 
 template <int BatchTile>
 __device__ __forceinline__ int prefill_request(int block, const int32_t* starts,
-                                               int requests) {
+                                               int requests, int group) {
   int low = 0, high = requests;
   while (low + 1 < high) {
     const int mid = (low + high) / 2;
-    if (starts[mid] / BatchTile + mid <= block) {
+    if (int64_t(starts[mid]) * group / BatchTile + mid <= block) {
       low = mid;
     } else {
       high = mid;
@@ -68,7 +67,7 @@ __global__ __launch_bounds__(128) void stage_chunk(
     _Float16* k_out, _Float16* v_out, Activation key, Activation value,
     const int32_t* starts, int requests) {
   const int tile = blockIdx.x, kv = blockIdx.y;
-  const int req = prefill_request<kKeyTile>(tile, starts, requests);
+  const int req = prefill_request<kKeyTile>(tile, starts, requests, 1);
   const int start = starts[req], end = starts[req + 1];
   const int base = start + (tile - start / kKeyTile - req) * kKeyTile;
   if (base >= end) return;
@@ -105,23 +104,30 @@ __launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
     float* out, Activation query, Activation keys, Activation values,
     const _Float16* residual, const float* errors, float* chunk_lse,
     uint8_t* repair, const int32_t* starts, const int32_t* lengths,
-    int requests, int kv_heads, int capacity, float scale) {
+    int requests, int kv_heads, int group, int capacity, float scale) {
   constexpr int kDimParts = ChunkOnly ? 2 : 1;
-  constexpr int kQueries = RowWaves * kFragment / kGroup;
+  constexpr int RowTile = RowWaves * kFragment;
   constexpr int kThreads = RowWaves * kDimParts * kWave;
   constexpr int Keys = kKeyTile / kFragment;
   constexpr int Steps = kHead / (kDimParts * kFragment);
   constexpr int Vectors = kHead / 8;
 
   const int block = blockIdx.x;
-  const int req = prefill_request<kQueries>(block, starts, requests);
+  const int req = prefill_request<RowTile>(block, starts, requests, group);
   const int start = starts[req], end = starts[req + 1];
-  const int q_base = start + (block - start / kQueries - req) * kQueries;
-  if (q_base >= end) return;
-  const int q_count = min(kQueries, end - q_base);
+  // Tiles span query/head rows within one request and one KV head. A tile
+  // can begin or end in the middle of a token, including for group > RowTile.
+  const int64_t first_row =
+      (block - int64_t(start) * group / RowTile - req) * RowTile;
+  const int live_rows =
+      min(int64_t(RowTile), int64_t(end - start) * group - first_row);
+  if (live_rows <= 0) return;
   const int length = ChunkOnly ? end - start : lengths[req];
   const int prefix = length - (end - start);
-  const int key_end = prefix + q_base - start + q_count;
+  const int first_token = first_row / group;
+  const int head_in_group = first_row - int64_t(first_token) * group;
+  const int key_end =
+      prefix + first_token + (head_in_group + live_rows - 1) / group + 1;
   const int kv_head = blockIdx.y;
 
   const int tid = threadIdx.x, lane = tid % kWave;
@@ -129,14 +135,16 @@ __launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
   const int column = lane % kFragment, half = lane / kFragment;
   const int row = (wave / kDimParts) * kFragment + column;
   const int part = wave % kDimParts;
-  const int q = q_base + min(row / kGroup, q_count - 1);
-  const int q_head = kv_head * kGroup + row % kGroup;
+  const int local_row = head_in_group + min(row, live_rows - 1);
+  const int token_delta = local_row / group;
+  const int q = start + first_token + token_delta;
+  const int q_head = kv_head * group + (local_row - token_delta * group);
   const int query_end = prefix + q - start + 1;
   const int64_t head_offset = int64_t(req * kv_heads + kv_head) * capacity * kHead;
-  const int64_t row_offset = (int64_t(q) * kv_heads * kGroup + q_head) * kHead;
+  const int64_t row_offset = (int64_t(q) * kv_heads * group + q_head) * kHead;
   if constexpr (!ChunkOnly) {
     if (prefix < 0 || length > capacity) {
-      if (row < q_count * kGroup && half == 0) {
+      if (row < live_rows && half == 0) {
         repair[2 * (row_offset / kHead)] = 1;
         repair[2 * (row_offset / kHead) + 1] = 0;
       }
@@ -193,7 +201,7 @@ __launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
   const bool query_safe = query_max == 0.f ||
       (query_max >= 1.e-4f && query_max * scale <= 2.f);
   if constexpr (!ChunkOnly) {
-    if (row < q_count * kGroup && half == 0) {
+    if (row < live_rows && half == 0) {
       repair[2 * (row_offset / kHead)] = !query_safe;
       repair[2 * (row_offset / kHead) + 1] = 0;
     }
@@ -277,7 +285,7 @@ __launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
         }
       }
     }
-    if (key_start + kKeyTile > prefix + q_base - start + 1) {
+    if (key_start + kKeyTile > prefix + first_token + 1) {
 #pragma unroll
       for (int k = 0; k < Keys; ++k) {
 #pragma unroll
@@ -332,7 +340,7 @@ __launch_bounds__(kWave * RowWaves * (ChunkOnly ? 2 : 1)) void dense_prefill(
     }
     prefill_lds_barrier();
   }
-  if (row >= q_count * kGroup) return;
+  if (row >= live_rows) return;
   if constexpr (ChunkOnly) {
     if (half == 0 && part == 0)
       chunk_lse[row_offset / kHead] = running_max + log2f(running_mass);
@@ -353,16 +361,18 @@ int launch_dense_prefill(float* out, const _Float16* query,
                          const _Float16* keys, const _Float16* residual,
                          const float* errors, const _Float16* values,
                          const int32_t* starts, const int32_t* lengths,
-                         int requests, int tokens, int kv_heads, int capacity,
-                         float scale, uint8_t* repair, hipStream_t stream) {
-  const Activation q{query, int64_t(kv_heads) * kGroup * kHead, kHead};
+                         int requests, int tokens, int kv_heads, int group,
+                         int capacity, float scale, uint8_t* repair,
+                         hipStream_t stream) {
+  const Activation q{query, int64_t(kv_heads) * group * kHead, kHead};
   auto launch = [&](auto waves) {
     constexpr int W = decltype(waves)::value;
-    const dim3 grid(tokens / (W * kFragment / kGroup) + requests, kv_heads);
+    const dim3 grid(int64_t(tokens) * group / (W * kFragment) + requests,
+                    kv_heads);
     auto issue = [&](auto kernel) {
       kernel<<<grid, W * kWave, 0, stream>>>(
           out, q, {keys, 0, 0}, {values, 0, 0}, residual, errors, nullptr,
-          repair, starts, lengths, requests, kv_heads, capacity, scale);
+          repair, starts, lengths, requests, kv_heads, group, capacity, scale);
     };
     issue(dense_prefill<_Float16, false, false, W>);
     issue(dense_prefill<_Float16, false, true, W>);
@@ -374,8 +384,8 @@ int launch_dense_prefill(float* out, const _Float16* query,
     // prefix. Prefer the narrowest tile that fills the fewest 32-group waves.
     const int groups_per_head = std::max(1, 32 / kv_heads);
     auto passes = [&](int waves) {
-      const int width = groups_per_head * (waves * kFragment / kGroup);
-      return (tokens + width - 1) / width;
+      const int width = groups_per_head * waves * kFragment;
+      return (int64_t(tokens) * group + width - 1) / width;
     };
     if (requests > 1 || passes(12) <= passes(20))
       launch(std::integral_constant<int, 12>{});
@@ -390,10 +400,10 @@ int launch_dense_prefill(float* out, const _Float16* query,
 int launch_chunk_only(float* out, Activation query, Activation keys,
                       Activation values, void* packed_chunk, float* chunk_lse,
                       const int32_t* starts, int requests, int tokens,
-                      int kv_heads, float scale, int dtype,
+                      int kv_heads, int group, float scale, int dtype,
                       hipStream_t stream) {
   constexpr int RowWaves = 4;
-  const dim3 grid(tokens / (RowWaves * kFragment / kGroup) + requests,
+  const dim3 grid(int64_t(tokens) * group / (RowWaves * kFragment) + requests,
                   kv_heads);
   const int tiles = tokens / kKeyTile + requests;
   auto* k = static_cast<_Float16*>(packed_chunk);
@@ -412,7 +422,7 @@ int launch_chunk_only(float* out, Activation query, Activation keys,
     dense_prefill<decltype(scalar), true, false, RowWaves>
         <<<grid, RowWaves * 2 * kWave, 0, stream>>>(
             out, query, {k, 0, 0}, {v, 0, 0}, nullptr, nullptr, chunk_lse,
-            nullptr, starts, nullptr, requests, kv_heads, 0, scale);
+            nullptr, starts, nullptr, requests, kv_heads, group, 0, scale);
   };
   if (dtype == 0)
     launch(_Float16{});
