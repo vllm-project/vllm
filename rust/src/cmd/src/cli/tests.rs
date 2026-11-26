@@ -30,7 +30,7 @@ impl ServeArgs {
         topology: &DataParallelTopology,
     ) -> FrontendConfig {
         FrontendConfig {
-            server: self.to_server_config(),
+            server: self.to_server_config().unwrap(),
             engine_core: self.to_engine_core_config(handshake_address, topology),
         }
     }
@@ -274,12 +274,12 @@ fn serve_args_forward_python_flags_with_separator() {
         Cli {
             command: Serve(
                 ServeArgs {
-                    remote_generation_url: None,
                     headless: false,
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
                     grpc_port: None,
+                    remote_generation_url: None,
                     runtime: SharedRuntimeArgs {
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
@@ -1499,7 +1499,8 @@ fn serve_parses_remote_generation_and_model_limit() {
         panic!("expected serve args");
     };
     assert_eq!(serve.remote_generation_url.as_deref(), Some(url));
-    assert_eq!(serve.remote_max_model_len().unwrap().unwrap().get(), 1024);
+    let config = serve.to_server_config().unwrap();
+    assert_eq!(config.max_model_len.map(|n| n.get()), Some(1024));
 }
 
 #[test]
@@ -2997,6 +2998,7 @@ fn serve_args_forward_auto_max_model_len_to_managed_engine() {
         panic!("expected serve args");
     };
     assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("auto"));
+    assert_eq!(args.to_server_config().unwrap().max_model_len, None);
 
     let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
@@ -3656,12 +3658,12 @@ fn serve_args_accept_handshake_aliases() {
         Cli {
             command: Serve(
                 ServeArgs {
-                    remote_generation_url: None,
                     headless: false,
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
                     grpc_port: None,
+                    remote_generation_url: None,
                     runtime: SharedRuntimeArgs {
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
