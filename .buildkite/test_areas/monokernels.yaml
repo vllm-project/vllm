@@ -115,6 +115,7 @@ steps:
   - tests/models/common/specialized_decode/harness.py
   - tests/models/common/specialized_decode/inputs.py
   - tests/models/common/specialized_decode/reference.py
+  - tests/models/common/test_specialized_decode_layers.py
   commands:
   - >-
     pytest -v -s
@@ -126,6 +127,10 @@ steps:
     tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
     tests/kernels/models/amd/test_dsv41_mono_gfx942.py
     tests/models/deepseek_v41/amd/mono/test_primitives.py
+  # The float64 layer definitions the numerics contract measures against.
+  # CPU-only and plain torch, so it rides the cheapest step that already
+  # watches `specialized_decode/` rather than asking for a GPU of its own.
+  - pytest -v -s tests/models/common/test_specialized_decode_layers.py
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd
