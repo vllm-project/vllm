@@ -28,9 +28,11 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.models.hy_v4.common.sinks import gather_full_sinks_
+from vllm.models.hy_v4.nvidia import sparse_mla_decode as splitk
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
@@ -114,6 +116,19 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         # (set per step by `_forward_bf16_kv`).
         self._decode_rows = 0
         self._decode_page_rows = 64
+        # On SM90, the rows of short BF16 calls go to the split-K decode kernel
+        # (`sparse_mla_decode.py`), which splits each row's top-k across CTAs.
+        self._splitk_decode = (
+            splitk.splitk_decode_supported(num_heads)
+            and self.dcp_world_size == 1
+            and not self.need_to_return_lse_for_decode
+            and kv_cache_dtype not in QUANTIZED_DS_MLA_CACHE_FORMATS
+        )
+        if (
+            self._splitk_decode
+            and get_current_vllm_config().kernel_config.enable_jit_warmup
+        ):
+            splitk.sparse_mla_decode.register_warmup(heads=num_heads)
 
     @staticmethod
     def _validate_sinks(sinks: torch.Tensor | None, num_heads: int) -> None:
@@ -149,6 +164,8 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
 
     def reserve_workspace(self) -> None:
         super().reserve_workspace()
+        if self._splitk_decode:
+            splitk.reserve_workspace()
         if not self._flashinfer_decode:
             return
         from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
@@ -403,7 +420,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         topk_length: torch.Tensor | None = None,
         actual_num_heads: int | None = None,
         out: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
@@ -412,6 +429,18 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         # DCP can all-gather heads before this call.
         if actual_num_heads is None:
             actual_num_heads = q.shape[1]
+        if out is None and self._splitk_decode and actual_num_heads == self.num_heads:
+            # No caller reads the LSE without DCP, which this path excludes.
+            output = splitk.sparse_mla_decode(
+                q[:, :actual_num_heads],
+                kv_c_and_k_pe_cache,
+                topk_indices.view(num_tokens, 1, -1),
+                self.softmax_scale,
+                self.sinks,
+                topk_length,
+            )
+            if output is not None:
+                return output, None
         padded_num_heads = (
             (actual_num_heads + self.prefill_padding - 1)
             // self.prefill_padding

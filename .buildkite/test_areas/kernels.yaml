@@ -210,6 +210,17 @@ steps:
       commands:
       - pytest -v -s kernels/test_bf16x3_router_gemm_rocm.py
 
+- label: ":nvidia: (H100) HY V4 SM90 Sparse MLA Decode"
+  key: kernels-hy-v4-sm90-sparse-mla-decode-h100
+  timeout_in_minutes: 20
+  device: h100
+  source_file_dependencies:
+  - vllm/models/hy_v4/nvidia/sparse_mla_decode.py
+  - vllm/models/hy_v4/nvidia/flashmla_sparse.py
+  - tests/kernels/test_hy_v4_sm90_sparse_decode.py
+  commands:
+    - pytest -v -s kernels/test_hy_v4_sm90_sparse_decode.py
+
 - label: ":nvidia: (H100) FlashInfer CuTe-DSL SM90 MoE"
   key: kernels-flashinfer-cutedsl-sm90-moe-h100
   automatic_shard: true

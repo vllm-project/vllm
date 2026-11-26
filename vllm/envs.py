@@ -327,6 +327,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
+    VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE: bool = False
     VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 0
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
@@ -2261,6 +2262,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # SM100 kernel as the routed FP4 experts.
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
+    ),
+    # Emergency rollback for the HY4 SM90 split-K sparse MLA decode. By default,
+    # on SM90 with a BF16 KV cache, HY V4 attention layers with 8 or 16 local
+    # heads (HY4-Flash at TP4) run decode steps of up to 40 (DSA) or 16 (SWA)
+    # query rows on a Triton kernel that splits each row's top-k across CTAs,
+    # instead of FlashMLA's one CTA per row. Set to 1 to use FlashMLA for every
+    # call, e.g. if the kernel's fail-loud trap (a CUDA error on misuse of its
+    # workspace counters) ever fires.
+    "VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE", "0"))
     ),
     # Size cap for the lm_head skinny-GEMM (wvSplitK) weight guard: weights
     # larger than this skip the skinny path at 1 < n <= 5 (see
