@@ -130,6 +130,7 @@ from .ops.mhc import (
     supports_mhc_overlap,
     use_ampere_mhc,
 )
+from .ops.o_proj import HopperWoBGemmRs
 from .pipeline import PipelineBoundary, PipelineRelay, get_pipeline_boundaries
 from .quantization import DeferringMarlinExperts
 from .specialized_decode import records_decode_metadata, specialized_decode_config
@@ -140,7 +141,6 @@ if typing.TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
-    from .ops.wo_b_gemm_rs import HopperWoBGemmRs
     from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
 
 logger = init_logger(__name__)
@@ -358,11 +358,7 @@ def maybe_init_gemm_rs(
         return None
 
     if is_hopper():
-        if enable_hopper:
-            from .ops.wo_b_gemm_rs import HopperWoBGemmRs
-
-            return HopperWoBGemmRs.try_init(vllm_config)
-        return None
+        return HopperWoBGemmRs.try_init(vllm_config) if enable_hopper else None
 
     # The kernel module pulls in cute_dsl, so import it only once opted in.
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (

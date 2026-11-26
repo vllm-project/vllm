@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from vllm.models.deepseek_v41.nvidia.ops.candidate_indexer import (
         CandidateIndexer,
     )
-    from vllm.models.deepseek_v41.nvidia.ops.wo_b_gemm_rs import HopperWoBGemmRs
+    from vllm.models.deepseek_v41.nvidia.ops.o_proj import HopperWoBGemmRs
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
