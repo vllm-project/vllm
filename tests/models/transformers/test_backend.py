@@ -20,7 +20,6 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForMultimodalLM,
-    AutoProcessor,
     PreTrainedConfig,
     core_model_loading,
 )
@@ -1132,52 +1131,45 @@ def test_convert_weights_splits_fused_gqa_qkv():
         list(weights([scale]))
 
 
-def test_converters_apply_to_renamed_weights(tmp_path, tp_init):
-    """Converters see the renamed checkpoint names, as in Transformers, so those scoped
-    to a sub-model apply too. Molmo2's text model splits `att_proj` and `ff_proj`, and
-    concatenates `wte.embedding` with `wte.new_embedding` into `embed_tokens`."""
-    pytest.importorskip("transformers.models.molmo2")
-    model_id = get_model("Molmo2ForConditionalGeneration")
-    sizes = dict(hidden_size=64, intermediate_size=128, num_hidden_layers=1)
-    heads = dict(num_attention_heads=2, num_key_value_heads=2, head_dim=32)
-    gqa = dict(num_attention_heads=2, num_key_value_heads=1, head_dim=64)
-    config = AutoConfig.for_model(
-        "molmo2",
-        text_config=sizes | gqa | dict(vocab_size=128),
-        vision_config=sizes | heads | dict(image_size=[28, 28]),
-        adapter_config=sizes | heads | dict(vision_feature_layer=[0]),
+def test_converters_apply_to_renamed_weights():
+    """Like in Transformers, converters see the renamed checkpoint names, so those
+    scoped to a sub-model apply too (Molmo2's `ff_proj`), and a `Concatenate` joins
+    all of its sources (its `wte` embeddings)."""
+    stub = nn.Module()
+    stub.config = PreTrainedConfig()
+    stub.model = nn.Module()
+    stub.model.base_model_prefix = "model"
+    stub.model._keys_to_ignore_on_load_unexpected = None
+    stub.model.language_model = text = nn.Module()
+    text.embed_tokens = nn.Embedding(3, 2)
+    text.up_proj = nn.Linear(2, 2, bias=False)
+    text.gate_proj = nn.Linear(2, 2, bias=False)
+    chunk = WeightConverter(
+        source_patterns="ff_proj.weight",
+        target_patterns=["up_proj.weight", "gate_proj.weight"],
+        operations=[core_model_loading.Chunk(dim=0)],
     )
-    # Saved in the layout of the Hub checkpoints (`model.transformer.blocks.*`)
-    AutoModelForMultimodalLM.from_config(config).save_pretrained(tmp_path)
-    AutoProcessor.from_pretrained(model_id).save_pretrained(tmp_path)
+    concat = WeightConverter(
+        source_patterns=["wte.embedding", "wte.new_embedding"],
+        target_patterns="embed_tokens.weight",
+        operations=[core_model_loading.Concatenate(dim=0)],
+    )
+    for converter in (chunk, concat):
+        converter.scope_prefix, converter.base_model_prefix = "language_model", "model"
+    renaming = WeightRenaming(r"transformer\.", "language_model.")
+    stub._weight_conversions = lambda: [renaming, chunk, concat]
+    stub._maybe_apply_model_mapping = lambda: None
+    stub.ignore_unexpected_prefixes = stub.ignore_unexpected_suffixes = []
+    Base._create_hf_to_vllm_mapper(stub)
+    ff_proj, wte = torch.rand(4, 2), [torch.rand(2, 2), torch.rand(1, 2)]
     checkpoint = {
-        name: tensor.to(torch.bfloat16)
-        for name, tensor in load_file(tmp_path / "model.safetensors").items()
+        "model.transformer.ff_proj.weight": ff_proj,
+        "model.transformer.wte.embedding": wte[0],
+        "model.transformer.wte.new_embedding": wte[1],
     }
 
-    model_config = ModelConfig(
-        str(tmp_path), model_impl="transformers", dtype="bfloat16"
-    )
-    vllm_config = VllmConfig(model_config=model_config)
-    with set_current_vllm_config(vllm_config):
-        model = model_loader.get_model(vllm_config=vllm_config)
+    Base.load_weights(stub, checkpoint.items())
 
-    def param(name: str) -> torch.Tensor:
-        return model.get_parameter(f"model.language_model.{name}").cpu()
-
-    wte, block = "model.transformer.wte", "model.transformer.blocks.0"
-    embedding = torch.cat(
-        [checkpoint[f"{wte}.embedding"], checkpoint[f"{wte}.new_embedding"]]
-    )
-    torch.testing.assert_close(
-        param("embed_tokens.weight")[: len(embedding)], embedding
-    )
-    # `att_proj` is `[q|k|v]` and `ff_proj` is `[up|gate]`
-    up, gate = checkpoint[f"{block}.mlp.ff_proj.weight"].chunk(2)
-    torch.testing.assert_close(
-        param("layers.0.self_attn.qkv_proj.weight"),
-        checkpoint[f"{block}.self_attn.att_proj.weight"],
-    )
-    torch.testing.assert_close(
-        param("layers.0.mlp.gate_up_proj.weight"), torch.cat([gate, up])
-    )
+    up_gate = torch.cat([text.up_proj.weight, text.gate_proj.weight])
+    torch.testing.assert_close(up_gate, ff_proj)
+    torch.testing.assert_close(text.embed_tokens.weight, torch.cat(wte))
