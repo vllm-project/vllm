@@ -133,10 +133,10 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   - pytest -v -s entrypoints/serve/instrumentator/test_basic.py
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
-  # run_batch drives the Python batch runner, not a server. test_metrics_exist needs
-  # vllm:admission_rejections (text) and image inputs (multimodal), which the Rust frontend lacks.
-  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist"
-  # /tokenizer_info returns 501 in the Rust frontend.
+  # run_batch drives the Python batch runner, not a server. The multimodal model (SmolVLM,
+  # Idefics3) has no Rust processor, so the Rust frontend refuses to start it.
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not multimodal"
+  # The Rust frontend does not implement /tokenizer_info.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
   # The Rust frontend loads runtime LoRA paths only under VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES and
   # rejects beam search.

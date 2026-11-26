@@ -3,7 +3,7 @@
 
 from typing import TYPE_CHECKING, Literal
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
@@ -29,6 +29,15 @@ class FaultToleranceConfig:
     Passing `params={"abort": true}` to the `retry` instruction discards
     queued requests even when the policy is 'recompute'.
     """
+
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
+
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
+        """
+        return {}
 
 
 def ft_tp_barrier_required(parallel_config: "ParallelConfig") -> bool:
