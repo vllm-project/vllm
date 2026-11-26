@@ -6,6 +6,10 @@ import json
 import openai  # use the official client for correctness check
 import pytest
 
+import vllm.envs as envs
+
+from .conftest import retry_for_tool_call
+
 MODEL_NAME = "Qwen/Qwen3-1.7B"
 tools = [
     {
@@ -525,3 +529,120 @@ async def test_function_calling_with_streaming_forced_tool_choice(
     assert args["location"] is not None
     # Forced tool choice should not leak tool-call JSON via output_text delta.
     assert "".join(text_deltas).strip() == ""
+
+
+# Client-executed tool search: the model calls `tool_search`, the client
+# returns the tools it found, and the model then calls one of them.
+TOOL_SEARCH = {"type": "tool_search", "execution": "client"}
+SEARCH_ISSUES = {
+    "type": "function",
+    "name": "search_issues",
+    "description": "Search Jira issues with a JQL query.",
+    "defer_loading": True,
+    "parameters": {
+        "type": "object",
+        "properties": {"jql": {"type": "string", "description": "The JQL query."}},
+        "required": ["jql"],
+        "additionalProperties": False,
+    },
+}
+JIRA = {
+    "type": "namespace",
+    "name": "jira",
+    "description": "Jira tools.",
+    "tools": [SEARCH_ISSUES],
+}
+TOOL_SEARCH_PROMPT = "Find a tool that can search Jira, then list my open bugs."
+
+rust_frontend_skip = pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="The Rust frontend does not support tool search yet.",
+)
+
+
+def _tool_search_history(call) -> list:
+    """The prompt, the model's search call and the client's search result."""
+    return [
+        {"role": "user", "content": TOOL_SEARCH_PROMPT},
+        {
+            "type": "tool_search_call",
+            "call_id": call.call_id,
+            "execution": "client",
+            "arguments": call.arguments,
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": call.call_id,
+            "execution": "client",
+            "tools": [JIRA],
+        },
+    ]
+
+
+@rust_frontend_skip
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "undeclared"])
+async def test_client_tool_search_round_trip(
+    client: openai.AsyncOpenAI, declared: bool
+):
+    # Turn 1: only `tool_search` is callable, so the model has to search.
+    response = await client.responses.create(
+        model=MODEL_NAME,
+        input=TOOL_SEARCH_PROMPT,
+        tools=[TOOL_SEARCH],
+        tool_choice="required",
+    )
+    [call] = [item for item in response.output if item.type == "tool_search_call"]
+    assert call.execution == "client"
+    assert call.call_id
+    assert isinstance(call.arguments, dict)
+
+    # Turn 2: the search result loads `jira.search_issues`, either a tool the
+    # request declares with `defer_loading` or one it does not declare at all.
+    response = await retry_for_tool_call(
+        client,
+        model=MODEL_NAME,
+        expected_tool_type="function_call",
+        input=_tool_search_history(call),
+        tools=[TOOL_SEARCH, JIRA] if declared else [TOOL_SEARCH],
+        tool_choice="required",
+    )
+    function_calls = [item for item in response.output if item.type == "function_call"]
+    assert function_calls, response.output
+    tool_call = function_calls[0]
+    assert (tool_call.namespace, tool_call.name) == ("jira", "search_issues")
+    assert json.loads(tool_call.arguments)["jql"]
+
+
+@rust_frontend_skip
+@pytest.mark.asyncio
+async def test_client_tool_search_streaming(client: openai.AsyncOpenAI):
+    stream = await client.responses.create(
+        model=MODEL_NAME,
+        input=TOOL_SEARCH_PROMPT,
+        tools=[TOOL_SEARCH],
+        tool_choice="required",
+        stream=True,
+    )
+    events = [event async for event in stream]
+
+    search_events = [
+        event
+        for event in events
+        if event.type.startswith("response.output_item.")
+        and event.item.type == "tool_search_call"
+    ]
+    assert [event.type for event in search_events] == [
+        "response.output_item.added",
+        "response.output_item.done",
+    ]
+    added, done = (event.item for event in search_events)
+    assert added.status == "in_progress"
+    assert (done.status, done.execution) == ("completed", "client")
+    assert (added.id, added.call_id) == (done.id, done.call_id)
+    assert isinstance(done.arguments, dict)
+    # The final response holds the same item.
+    [completed] = [e for e in events if e.type == "response.completed"]
+    assert [
+        item.type for item in completed.response.output if item.type != "reasoning"
+    ] == ["tool_search_call"]
