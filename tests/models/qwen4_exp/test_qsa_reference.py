@@ -109,18 +109,35 @@ def test_qsa_hisparse_starts_with_automatic_cache_layout(
         assert len(result.outputs[0].token_ids) == 2
 
 
+def _kv_cache_layout(worker):
+    return {
+        name: (config.manager_cls.__name__, repr(config.spec))
+        for name, config in worker.get_kv_cache_layer_configs().items()
+    }
+
+
 @requires_qsa_kernels
-def test_qsa_language_model_only_keeps_mrope(tmp_path, vllm_runner):
-    """Text-only decode must preserve the checkpoint's QSA position layout."""
+def test_qsa_kv_cache_spec_ignores_language_model_only(
+    tmp_path, vllm_runner, enable_pickle
+):
+    """A language-model-only decode must accept KV from a multimodal prefill."""
     from transformers import Qwen4ExpConfig
 
     Qwen4ExpConfig(
         architectures=["Qwen4ExpForConditionalGeneration"],
+        vision_config={
+            "depth": 1,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_heads": 2,
+            "out_hidden_size": 256,
+            "deepstack_visual_indexes": [],
+        },
         text_config={
             **_TINY_QSA_TEXT_CONFIG,
             "vocab_size": 128,
             "num_hidden_layers": 2,
-            "layer_types": ["linear_attention", "full_attention"],
+            "layer_types": ["linear_attention", "indexed_attention"],
             "linear_num_key_heads": 2,
             "linear_num_value_heads": 4,
             "output_gate_type": "sigmoid",
@@ -136,21 +153,25 @@ def test_qsa_language_model_only_keeps_mrope(tmp_path, vllm_runner):
             },
         },
     ).save_pretrained(tmp_path)
-    with vllm_runner(
-        str(tmp_path),
-        language_model_only=True,
-        skip_tokenizer_init=True,
-        load_format="dummy",
-        dtype="bfloat16",
-        enable_chunked_prefill=True,
-        enforce_eager=True,
-        max_model_len=128,
-        max_num_seqs=2,
-        kv_cache_memory_bytes=128 * 1024**2,
-    ) as runner:
-        rope = runner.llm.llm_engine.model_config.hf_text_config.rope_parameters
-        assert rope["mrope_section"] == [11, 11, 10]
-        assert rope["mrope_interleaved"] is True
+    layouts = []
+    for language_model_only in (False, True):
+        with vllm_runner(
+            str(tmp_path),
+            # The multimodal processor needs a tokenizer; no media is profiled.
+            tokenizer_name="Qwen/Qwen3-VL-2B-Instruct",
+            language_model_only=language_model_only,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            load_format="dummy",
+            dtype="bfloat16",
+            enable_chunked_prefill=True,
+            enforce_eager=True,
+            max_model_len=128,
+            max_num_seqs=2,
+            kv_cache_memory_bytes=128 * 1024**2,
+        ) as runner:
+            (layout,) = runner.llm.collective_rpc(_kv_cache_layout)
+            layouts.append(layout)
+    assert layouts[0] == layouts[1]
 
 
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
