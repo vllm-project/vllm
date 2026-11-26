@@ -227,7 +227,7 @@ class DeepseekV32Model(torch.nn.Module):
         speculative_config = vllm_config.speculative_config
         attention_config = vllm_config.attention_config
         # Preserve LoRA's global row mapping and auxiliary-state layouts.
-        self.shardq_sequence_parallel = (
+        self.use_residual_sequence_parallel = (
             parallel_config.tensor_parallel_size > 1
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
@@ -268,7 +268,7 @@ class DeepseekV32Model(torch.nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         full_num_tokens = positions.shape[0]
         use_sequence_parallel = self.use_sequence_parallel or (
-            self.shardq_sequence_parallel
+            self.use_residual_sequence_parallel
             and is_sequence_parallel_active(
                 True, full_num_tokens, self.shardq_min_tokens
             )

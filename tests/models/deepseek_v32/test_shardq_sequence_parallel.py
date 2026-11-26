@@ -273,7 +273,7 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
             assert all(layout[:6] == (2, 8, 2, 2, False, 2) for layout in layouts[-1])
             enabled = runner.llm.collective_rpc(
                 lambda worker: (
-                    worker.model_runner.model.model.shardq_sequence_parallel,
+                    worker.model_runner.model.model.use_residual_sequence_parallel,
                     worker.model_runner.model.model.layers[0].self_attn.use_shardq,
                 )
             )
