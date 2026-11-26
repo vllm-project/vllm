@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from tests.single_rank_group import SingleRankGroup, override_parallel_groups
-from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
@@ -636,9 +636,9 @@ def test_quark_ocp_mx_dense_rejects_unaligned_input_partition():
 
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
-    reason="gemm_with_dynamic_quant is registered only with AITER.",
+    reason="rocm_aiter_mxfp4_gemm_dynamic_quant is registered only with AITER.",
 )
-def test_gemm_with_dynamic_quant_fake_dtype():
+def test_mxfp4_gemm_dynamic_quant_fake_dtype():
     """torch.compile sizes the op's output from its fake; a fake that reports
     another dtype than the real op makes the compiled graph read past it."""
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -647,7 +647,7 @@ def test_gemm_with_dynamic_quant_fake_dtype():
         x = torch.empty(16, 64, dtype=torch.bfloat16)
         weight = torch.empty(32, 32, dtype=torch.uint8)
         weight_scale = torch.empty(32, 2, dtype=torch.uint8)
-        y = torch.ops.vllm.gemm_with_dynamic_quant(
+        y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
             x, weight, weight_scale, True, torch.bfloat16, hadamard_rotate=True
         )
     assert y.dtype == torch.bfloat16

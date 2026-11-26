@@ -335,6 +335,24 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 
 ## KV Transfer Config
 
+### Per-request offload limit
+
+Set `kv_transfer_params.max_offload_tokens` to the integer `0` to disable all
+Mooncake writes for that request, including prefill, decode, and finish-time
+checkpoint saves. Store lookups and loads remain enabled.
+
+```json
+{
+  "kv_transfer_params": {"max_offload_tokens": 0}
+}
+```
+
+Positive integers cap writes at that token offset. For example,
+`max_offload_tokens=100` stores only complete blocks and checkpoints within the
+first 100 tokens. Partial-tail attention proofs must also fit within the cap.
+Omit the option or set it to `null` for no cap. Invalid values, including
+booleans, negatives, strings, and floats, are ignored with a warning.
+
 ### KV Role Options
 
 - **kv_producer**: For instances that store KV caches to the pool.
