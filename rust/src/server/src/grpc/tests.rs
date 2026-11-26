@@ -3781,7 +3781,11 @@ async fn render_raw_chat_rejects_trailing_bytes() {
         .expect_err("trailing bytes should fail");
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert!(status.message().contains("failed to parse chat completion request"));
+    assert!(
+        status.message().contains("trailing characters"),
+        "{}",
+        status.message()
+    );
 }
 
 #[tokio::test]
@@ -3796,7 +3800,11 @@ async fn render_raw_chat_rejects_malformed_json() {
         .expect_err("malformed json should fail");
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert!(status.message().contains("failed to parse chat completion request"));
+    assert!(
+        status.message().starts_with("Failed to parse the request body as JSON"),
+        "{}",
+        status.message()
+    );
 }
 
 #[tokio::test]

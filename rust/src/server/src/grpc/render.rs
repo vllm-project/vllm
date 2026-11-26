@@ -7,6 +7,7 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
+use axum::Json;
 use itertools::Itertools as _;
 use llm_multimodal::ImageDetail;
 use thiserror_ext::AsReport as _;
@@ -112,14 +113,10 @@ async fn render(
             pb::MmPayload::None => true,
         };
 
-    let mut deserializer = serde_json::Deserializer::from_slice(&request.body);
-    let body: ChatCompletionRequest =
-        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
-            Status::invalid_argument(format!("failed to parse chat completion request: {error}"))
-        })?;
-    deserializer.end().map_err(|error| {
-        Status::invalid_argument(format!("failed to parse chat completion request: {error}"))
-    })?;
+    // Parse exactly as the HTTP extractor does, so a body gets the same result
+    // and error on both protocols.
+    let Json(body) = Json::<ChatCompletionRequest>::from_bytes(&request.body)
+        .map_err(|rejection| api_error_to_status(rejection.into()))?;
 
     let LoweredChatRender { chat_request, .. } = lower_chat_render_request(state, body, None)
         .await
