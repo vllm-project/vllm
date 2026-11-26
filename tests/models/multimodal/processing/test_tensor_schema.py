@@ -233,11 +233,14 @@ def test_model_tensor_schema(model_id: str):
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     assert isinstance(model_cls, type)
 
-    if (
-        model_config.hf_config.model_type == "hy_v4_flash_vl"
-        and not current_platform.is_cuda()
-    ):
-        pytest.skip("HY4 Flash is only supported on CUDA")
+    if model_config.hf_config.model_type == "hy_v4_flash_vl":
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                pytest.skip("HY4 Flash on ROCm requires gfx950")
+        elif not current_platform.is_cuda():
+            pytest.skip("HY4 Flash is only supported on CUDA and ROCm")
 
     assert supports_multimodal(model_cls)
     factories = model_cls._processor_factory

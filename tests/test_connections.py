@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gzip
 import threading
+import time
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock, patch
 
@@ -14,22 +17,44 @@ import vllm.envs as envs
 from vllm.connections import (
     HTTPConnection,
     HTTPResponseSizeExceededError,
+    MediaFetchDeadlineExceededError,
     MediaRequestDownloadBudget,
 )
+from vllm.exceptions import VLLMUnprocessableEntityError
+from vllm.multimodal.media.connector import MediaConnector
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 _ONE_MIB = 1024 * 1024
 _SMALL_BODY = b"a" * (_ONE_MIB // 2)
 _LARGE_BODY = b"b" * (2 * _ONE_MIB)
+_GZIP_BODY = gzip.compress(_SMALL_BODY)
 _CHUNK_SIZE = 64 * 1024
 
 
 class _MediaHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        body = _LARGE_BODY if "large" in self.path else _SMALL_BODY
+        if self.path == "/drip":
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            try:
+                for _ in range(100):
+                    self.wfile.write(b"a")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            return
+        gzip_response = self.path == "/gzip"
+        if gzip_response:
+            body = _GZIP_BODY
+        else:
+            body = _LARGE_BODY if "large" in self.path else _SMALL_BODY
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
+        if gzip_response:
+            self.send_header("Content-Encoding", "gzip")
         if self.path != "/chunked-large":
             self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -138,9 +163,67 @@ def test_get_bytes_with_limit_streams_instead_of_materializing() -> None:
         stream=True,
         timeout=None,
         allow_redirects=True,
+        deadline=None,
     )
     assert response.content_accessed is False
     assert response.iterated == 2
+
+
+def test_get_bytes_decodes_gzip_with_deadline(local_media_server: str) -> None:
+    connection = HTTPConnection(reuse_client=False)
+    body = connection.get_bytes(
+        f"{local_media_server}/gzip", timeout=2, deadline=time.monotonic() + 5
+    )
+    assert body == _SMALL_BODY
+
+
+def test_get_bytes_interrupts_blocked_gzip_body_read_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    local_media_server: str,
+) -> None:
+    connection = HTTPConnection(reuse_client=False)
+    headers_sent = threading.Event()
+    release_body = threading.Event()
+    end_headers = _MediaHandler.end_headers
+    deadline = time.monotonic() + 1
+
+    def delay_response(handler: _MediaHandler) -> None:
+        # Spend part of the initial attempt timeout before the body read begins.
+        release_body.wait(timeout=max(0, deadline - 0.4 - time.monotonic()))
+        end_headers(handler)
+        headers_sent.set()
+        release_body.wait(timeout=5)
+
+    monkeypatch.setattr(_MediaHandler, "end_headers", delay_response)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        download = executor.submit(
+            connection.get_bytes,
+            f"{local_media_server}/gzip",
+            timeout=5,
+            deadline=deadline,
+        )
+        try:
+            assert headers_sent.wait(timeout=2)
+            with pytest.raises(MediaFetchDeadlineExceededError):
+                download.result(timeout=max(0, deadline + 0.35 - time.monotonic()))
+        finally:
+            release_body.set()
+
+
+def test_media_connector_deadline_interrupts_slow_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    local_media_server: str,
+) -> None:
+    monkeypatch.setattr(envs, "VLLM_IMAGE_FETCH_TIMEOUT", 0.2)
+    connector = MediaConnector(connection=HTTPConnection(reuse_client=False))
+    start = time.monotonic()
+
+    with pytest.raises(
+        VLLMUnprocessableEntityError, match="Media fetch exceeded its time limit"
+    ):
+        connector.fetch_image(f"{local_media_server}/drip")
+
+    assert time.monotonic() - start < 2
 
 
 @pytest.mark.asyncio
@@ -328,7 +411,7 @@ async def test_get_bytes_retries_incomplete_response(
     async def download() -> bytes:
         if use_async:
             return await connection.async_get_bytes(url, timeout=2)
-        return connection.get_bytes(url, timeout=2)
+        return connection.get_bytes(url, timeout=2, deadline=time.monotonic() + 10)
 
     try:
         if always_incomplete:
