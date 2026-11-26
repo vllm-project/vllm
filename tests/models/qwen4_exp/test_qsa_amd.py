@@ -593,6 +593,36 @@ def test_qsa_select_bounds_columns_to_max_seq_len(
         assert not top_block_selected(actual[0])
 
 
+@pytest.mark.parametrize(
+    "cdna_version,num_cus,base_programs,expected",
+    [
+        # MI350P: one (block_n, splits, warps) per program band.
+        (4, 128, 15, None),
+        (4, 128, 16, (128, 16, 2)),
+        (4, 128, 24, (32, 16, 4)),
+        (4, 128, 47, (64, 16, 1)),
+        (4, 128, 64, (64, 8, 1)),
+        (4, 128, 383, (32, 4, 1)),
+        (4, 128, 384, (128, 1, 1)),
+        (4, 128, 1 << 20, (128, 1, 1)),
+        (4, 80, 64, (64, 8, 1)),
+        # MI355X and gfx942 keep the shared FP8 rule.
+        (4, 256, 64, None),
+        (3, 128, 64, None),
+        (3, 304, 64, None),
+    ],
+)
+def test_qsa_fp8_few_cus_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    cdna_version: int,
+    num_cus: int,
+    base_programs: int,
+    expected: tuple[int, int, int] | None,
+) -> None:
+    monkeypatch.setattr(qsa_ops, "_num_compute_units", lambda: num_cus)
+    assert qsa_ops._fp8_few_cus_profile(base_programs, cdna_version) == expected
+
+
 @requires_qsa_kernels
 @pytest.mark.parametrize("cdna_version", [3, 4])
 @pytest.mark.parametrize("use_fp8", [False, True])

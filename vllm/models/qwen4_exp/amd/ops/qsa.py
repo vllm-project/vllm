@@ -44,6 +44,16 @@ def _num_compute_units() -> int:
     return current_platform.num_compute_units()
 
 
+def _fp8_few_cus_profile(
+    base_programs: int, cdna_version: int
+) -> tuple[int, ...] | None:
+    """(block_n, splits, warps) for FP8 dots on 128-CU CDNA4, else None."""
+    if cdna_version != 4 or _num_compute_units() > 128:
+        return None
+    profile = next(p for limit, *p in _FP8_FEW_CUS_PROFILES if base_programs < limit)
+    return tuple(profile) or None
+
+
 @triton.jit
 def _qsa_mqa_paged_kernel(
     q_ptr,
@@ -1149,11 +1159,9 @@ def qsa_sparse_paged_attention(
         block_m = max(block_m, 16)
     small_profile_limit = 8 if block_m <= 8 else 4
 
-    few_cus_profile = None
-    if fp8_dots and cdna_version == 4 and _num_compute_units() <= 128:
-        few_cus_profile = next(
-            (p for limit, *p in _FP8_FEW_CUS_PROFILES if base_programs < limit), None
-        )
+    few_cus_profile = (
+        _fp8_few_cus_profile(base_programs, cdna_version) if fp8_dots else None
+    )
     if few_cus_profile:
         block_n, target_splits, partial_warps = few_cus_profile
     elif fp8_dots and base_programs < 32:
