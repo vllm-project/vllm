@@ -86,9 +86,6 @@ from .moe import HYV4FeedForward, HYV4MoEFused
 
 logger = init_logger(__name__)
 
-# Smallest step that shards the iHC rows; shorter ones keep them replicated.
-_IHC_SP_MIN_TOKENS = 1024
-
 
 def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
     """Populate the aliases consumed by the shared MoE implementation."""
@@ -341,6 +338,7 @@ class HYV4Model(nn.Module):
         self.quant_config = quant_config
         self.enable_ihc = getattr(config, "enable_ihc", False)
         speculative_config = vllm_config.speculative_config
+        self.ihc_sp_min_tokens = envs.VLLM_RESIDUAL_SP_MIN_TOKENS
         self.ihc_sequence_parallel = (
             self.enable_ihc
             and self.supports_ihc_sequence_parallel
@@ -492,7 +490,7 @@ class HYV4Model(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         full_num_tokens = positions.shape[-1]
         use_ihc_sequence_parallel = is_sequence_parallel_active(
-            self.ihc_sequence_parallel, full_num_tokens, _IHC_SP_MIN_TOKENS
+            self.ihc_sequence_parallel, full_num_tokens, self.ihc_sp_min_tokens
         )
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
