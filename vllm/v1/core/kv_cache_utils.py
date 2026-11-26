@@ -8,7 +8,7 @@ import math
 import os
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -25,16 +25,10 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.hashing import xxhash, xxhash_cbor
-from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
+    KVCacheGroup,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 from vllm.v1.token_buffer import token_slice
 from vllm.v1.utils import tensor_data
@@ -140,7 +134,7 @@ def get_none_hash_seed() -> str:
     Components that must agree on NONE_HASH across processes (the P2P tier
     advertises this during its connect handshake) read the resolved seed here
     instead of re-deriving it, so they observe the random seed too. Falls back
-    to the deterministic seed before ``init_none_hash`` has run.
+    to the deterministic seed before `init_none_hash` has run.
     """
     if _NONE_HASH_SEED is None:
         return DEFAULT_NONE_HASH_SEED
@@ -176,10 +170,10 @@ class KVCacheBlock:
     )
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
-    _block_hash: BlockHashWithGroupId | None = None
-    # Number of prefix tokens covered by _block_hash. For full blocks this is
+    block_hash: BlockHashWithGroupId | None = None
+    # Number of prefix tokens covered by block_hash. For full blocks this is
     # the full block boundary; partial entries can end inside a cache block.
-    _block_hash_num_tokens: int | None = None
+    block_hash_num_tokens: int | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
@@ -189,29 +183,21 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
-    @property
-    def block_hash(self) -> BlockHashWithGroupId | None:
-        return self._block_hash
-
-    @property
-    def block_hash_num_tokens(self) -> int | None:
-        return self._block_hash_num_tokens
-
     def set_block_hash(
         self,
         block_hash: BlockHashWithGroupId,
         num_tokens: int | None = None,
     ) -> None:
-        assert self.block_hash is None and self._block_hash_num_tokens is None, (
+        assert self.block_hash is None and self.block_hash_num_tokens is None, (
             "The block already has a hash. This should not happen."
         )
-        self._block_hash = block_hash
-        self._block_hash_num_tokens = num_tokens
+        self.block_hash = block_hash
+        self.block_hash_num_tokens = num_tokens
 
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
-        self._block_hash = None
-        self._block_hash_num_tokens = None
+        self.block_hash = None
+        self.block_hash_num_tokens = None
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -221,8 +207,8 @@ class KVCacheBlock:
         return (
             f"KVCacheBlock(block_id={self.block_id}, "
             f"ref_cnt={self.ref_cnt}, "
-            f"_block_hash={self._block_hash!r}, "
-            f"_block_hash_num_tokens={self._block_hash_num_tokens}, "
+            f"block_hash={self.block_hash!r}, "
+            f"block_hash_num_tokens={self.block_hash_num_tokens}, "
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
@@ -249,7 +235,7 @@ _BlockSeq = TypeVar("_BlockSeq", list[KVCacheBlock], Sequence[KVCacheBlock])
 
 
 def trim_null_head(blocks: _BlockSeq) -> _BlockSeq:
-    """``blocks`` without its leading null blocks; ``blocks`` itself if none."""
+    """`blocks` without its leading null blocks; `blocks` itself if none."""
     nhl = null_head_len(blocks)
     return blocks[nhl:] if nhl else blocks
 
@@ -300,6 +286,9 @@ class FreeKVCacheBlockQueue:
         # in the queue has prev and next blocks.
         self.fake_free_list_head = KVCacheBlock(block_id=-1)
         self.fake_free_list_tail = KVCacheBlock(block_id=-1)
+        # First block inserted via append/append_n (the cached/evict-last tail).
+        # Maintained so middle-tier blocks can be spliced before it in O(1).
+        self._cached_head: KVCacheBlock | None = None
         if self.num_free_blocks > 0:
             # Connect fake_head and fake_tail to the first and last block
             # respectively.
@@ -342,6 +331,11 @@ class FreeKVCacheBlockQueue:
         head.next_free_block = next_block
         next_block.prev_free_block = head
 
+        if first_block is self._cached_head:
+            self._cached_head = (
+                next_block if next_block is not self.fake_free_list_tail else None
+            )
+
         # Remove the block from the linked list.
         first_block.prev_free_block = first_block.next_free_block = None
 
@@ -372,6 +366,10 @@ class FreeKVCacheBlockQueue:
             if next_block is not None:
                 self.fake_free_list_head.next_free_block = next_block
                 next_block.prev_free_block = self.fake_free_list_head
+            if curr_block is self._cached_head:
+                self._cached_head = (
+                    next_block if next_block is not self.fake_free_list_tail else None
+                )
             return [curr_block]
 
         # Pop n blocks from the head of the list
@@ -390,6 +388,10 @@ class FreeKVCacheBlockQueue:
             # the new first block.
             self.fake_free_list_head.next_free_block = curr_block
             curr_block.prev_free_block = self.fake_free_list_head
+        if self._cached_head is not None and self._cached_head.prev_free_block is None:
+            self._cached_head = (
+                curr_block if curr_block is not self.fake_free_list_tail else None
+            )
         return ret
 
     def remove(self, block: KVCacheBlock) -> None:
@@ -410,6 +412,11 @@ class FreeKVCacheBlockQueue:
         prev_block.next_free_block = next_block
         # Link the next block to the previous block.
         next_block.prev_free_block = prev_block
+
+        if block is self._cached_head:
+            self._cached_head = (
+                next_block if next_block is not self.fake_free_list_tail else None
+            )
 
         # Remove the block from the linked list.
         block.prev_free_block = block.next_free_block = None
@@ -436,6 +443,9 @@ class FreeKVCacheBlockQueue:
         # Connect the fake tail after the new block.
         block.next_free_block = tail
         tail.prev_free_block = block
+
+        if self._cached_head is None:
+            self._cached_head = block
 
         self.num_free_blocks += 1
 
@@ -485,7 +495,33 @@ class FreeKVCacheBlockQueue:
         last_block.next_free_block = tail
         tail.prev_free_block = last_block
 
+        if self._cached_head is None:
+            self._cached_head = blocks[0]
+
         self.num_free_blocks += len(blocks)
+
+    def insert_before_cached(self, blocks: list[KVCacheBlock]) -> None:
+        """Insert blocks right before the first appended block (or at the tail
+        if none exist), preserving FIFO order among inserted blocks."""
+        if not blocks:
+            return
+        target = (
+            self._cached_head
+            if self._cached_head is not None
+            else self.fake_free_list_tail
+        )
+        prev_block = target.prev_free_block
+        assert prev_block is not None
+        for block in blocks:
+            block.prev_free_block = prev_block
+            prev_block.next_free_block = block
+            prev_block = block
+        prev_block.next_free_block = target
+        target.prev_free_block = prev_block
+        self.num_free_blocks += len(blocks)
+
+    def reset_cached_head(self) -> None:
+        self._cached_head = None
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
@@ -686,7 +722,7 @@ def to_event_extra_keys(
     in KV events.
 
     External KV event consumers parse the pre-tagging shapes: bare LoRA names
-    and cache salts, ``(mm_identifier, offset)`` pairs and bare prompt-embeds
+    and cache salts, `(mm_identifier, offset)` pairs and bare prompt-embeds
     digests. Events keep that format until consumers handle the tagged keys.
 
     Args:
@@ -741,80 +777,83 @@ def hash_block_tokens(
     )
 
 
-def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
-    """Return the token span of a cache block under DCP."""
-    return spec.block_size * (dcp_world_size if spec.dcp_sharded else 1)
+def resolve_dcp_kv_block_size(group: KVCacheGroup, dcp_world_size: int) -> int:
+    """Return the token span of a group's cache block under DCP."""
+    return group.block_size * (dcp_world_size if group.dcp_sharded else 1)
 
 
-def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCacheSpec:
-    """Return a KV cache spec with block sizes adjusted for DCP."""
-    block_size = resolve_dcp_kv_block_size(spec, dcp_world_size)
-    if block_size == spec.block_size:
-        return spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return replace(
-            spec,
-            block_size=block_size,
-            kv_cache_specs={
-                name: resolve_dcp_kv_cache_spec(layer_spec, dcp_world_size)
-                for name, layer_spec in spec.kv_cache_specs.items()
-            },
-        )
-    return replace(spec, block_size=block_size)
+def is_mamba_group(group: KVCacheGroup) -> bool:
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    return issubclass(group.manager_cls, MambaManager)
+
+
+def is_mamba_prefix_caching_group(group: KVCacheGroup) -> bool:
+    """Whether `group` holds Mamba state with prefix caching enabled."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    config = group.manager_config
+    return (
+        isinstance(config.params, MambaManager.Params)
+        and config.params.enable_prefix_caching
+    )
+
+
+def _unsupported_fine_grained_managers(
+    kv_cache_groups: Sequence[KVCacheGroup],
+    hash_block_size: int,
+    dcp_world_size: int,
+    manager_classes: Sequence[type["SingleTypeKVCacheManager"]] | None = None,
+) -> list[str]:
+    classes = (
+        manager_classes
+        if manager_classes is not None
+        else [group.manager_cls for group in kv_cache_groups]
+    )
+    return sorted(
+        {
+            manager_cls.__name__
+            for group, manager_cls in zip(kv_cache_groups, classes)
+            if group.prefix_cacheable
+            and not manager_cls.supports_fine_grained_hash_lookup
+            and resolve_dcp_kv_block_size(group, dcp_world_size) != hash_block_size
+        }
+    )
 
 
 def partial_hash_hits_enabled(
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    kv_cache_groups: Sequence[KVCacheGroup],
     hash_block_size: int,
     dcp_world_size: int = 1,
     manager_classes: Sequence[type["SingleTypeKVCacheManager"]] | None = None,
 ) -> bool:
     """Whether aligned Mamba states support sub-block prefix-cache hits.
 
-    If ``manager_classes`` (one per group) is given, also require every other
+    If `manager_classes` (one per group) is given, also require every other
     prefix-cacheable group to support fine-grained lookups.
     """
     if not any(
-        isinstance(spec, MambaSpec)
-        and spec.mamba_cache_mode == "align"
+        is_mamba_prefix_caching_group(group)
         and (
-            (dcp_world_size == 1 and spec.block_size > hash_block_size)
-            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
+            (dcp_world_size == 1 and group.block_size > hash_block_size)
+            or (dcp_world_size > 1 and group.block_size >= hash_block_size)
         )
         for group in kv_cache_groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
     ):
         return False
     if manager_classes is None:
         return True
-    unsupported_managers = {
-        manager_cls.__name__
-        for group, manager_cls in zip(kv_cache_groups, manager_classes)
-        if group.kv_cache_spec.prefix_cacheable
-        and not manager_cls.supports_fine_grained_hash_lookup
-        and resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_world_size)
-        != hash_block_size
-    }
+    unsupported_managers = _unsupported_fine_grained_managers(
+        kv_cache_groups, hash_block_size, dcp_world_size, manager_classes
+    )
     if unsupported_managers:
         logger.warning_once(
             "Disabling fine-grained prefix-cache hits because these KV "
             "cache managers require block-aligned lookups: %s.",
-            ", ".join(sorted(unsupported_managers)),
+            ", ".join(unsupported_managers),
         )
         return False
     return True
-
-
-def eagle_proof_margin(
-    block_size: int, hash_block_size: int, fine_grained_lookup: bool
-) -> int:
-    """Tokens an EAGLE group matches past a cache hit before dropping them.
-
-    Fine-grained lookups drop one hash unit; others drop one cache block.
-    """
-    if fine_grained_lookup and block_size > hash_block_size:
-        return hash_block_size
-    return block_size
 
 
 def resolve_kv_cache_block_sizes(
@@ -823,26 +862,28 @@ def resolve_kv_cache_block_sizes(
 ) -> tuple[int, int]:
     """Resolve (scheduler_block_size, hash_block_size).
 
-    - ``scheduler_block_size`` is the token-alignment invariant used by the
-      scheduler (e.g. for ``num_computed_tokens`` rounding). Single group:
-      ``cache_config.block_size * dcp``. Multiple groups: LCM of every
+    - `scheduler_block_size` is the token-alignment invariant used by the
+      scheduler (e.g. for `num_computed_tokens` rounding). Single group:
+      `cache_config.block_size * dcp`. Multiple groups: LCM of every
       group's effective block size. Attention groups are scaled by DCP;
       Mamba groups keep their full per-rank state and are not scaled.
-    - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
+    - `hash_block_size` is the granularity at which `Request.block_hashes`
       is computed. Single group: equals scheduler block size, and any other
-      ``cache_config.prefix_match_unit`` is rejected while block hashing is
+      `cache_config.prefix_match_unit` is rejected while block hashing is
       active. Multiple groups:
-      ``cache_config.prefix_match_unit`` override if set, else the GCD of
+      `cache_config.prefix_match_unit` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
+      An explicit override is also rejected if prefix-cache hits would fall
+      back to `scheduler_block_size` instead of landing on it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
-      hashing is inactive or a mamba group is not using cache mode "align".
+      hashing is inactive, or prefix caching is off for a mamba group.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
-        if groups and not groups[0].kv_cache_spec.dcp_sharded:
+        if groups and not groups[0].dcp_sharded:
             dcp = 1
         bs = cache_config.block_size * dcp
         # Reject a prefix_match_unit that would otherwise be silently ignored.
@@ -861,9 +902,7 @@ def resolve_kv_cache_block_sizes(
             )
         return bs, bs
 
-    group_block_sizes = [
-        resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups
-    ]
+    group_block_sizes = [resolve_dcp_kv_block_size(g, dcp) for g in groups]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
     logger.info_once("kv cache group sizes %s", tuple(group_block_sizes))
@@ -876,20 +915,19 @@ def resolve_kv_cache_block_sizes(
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size, scheduler_block_size
 
-    # Mamba groups outside align mode break divisibility; back off to the
-    # scheduler block size. Read the mode from the resolved group spec because
-    # its block size may have been updated independently of cache_config.
+    # Mamba groups without prefix caching break divisibility; back off to the
+    # scheduler block size. Read the flag from the resolved group because its
+    # block size may have been updated independently of cache_config.
     if any(
-        isinstance(spec, MambaSpec) and spec.mamba_cache_mode != "align"
+        is_mamba_group(group) and not is_mamba_prefix_caching_group(group)
         for group in groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
     ):
         return scheduler_block_size, scheduler_block_size
 
     hashing_sizes = [
         block_size
         for group, block_size in zip(groups, group_block_sizes)
-        if group.kv_cache_spec.prefix_cacheable
+        if group.prefix_cacheable
     ] or group_block_sizes
     requested = cache_config.prefix_match_unit
     hash_block_size = requested if requested is not None else math.gcd(*hashing_sizes)
@@ -900,19 +938,43 @@ def resolve_kv_cache_block_sizes(
             f"Got group block sizes={group_block_sizes}, "
             f"prefix-cacheable={hashing_sizes}."
         )
+    has_mamba_partial_hits = partial_hash_hits_enabled(groups, hash_block_size, dcp)
+    unsupported_managers = (
+        _unsupported_fine_grained_managers(groups, hash_block_size, dcp)
+        if has_mamba_partial_hits
+        else []
+    )
+    cache_hit_alignment = (
+        hash_block_size
+        if has_mamba_partial_hits and not unsupported_managers
+        else scheduler_block_size
+    )
+    if (
+        cache_config.enable_prefix_caching
+        and requested is not None
+        and cache_hit_alignment != requested
+    ):
+        if unsupported_managers:
+            raise ValueError(
+                f"Invalid prefix_match_unit={requested}; partial cache hits "
+                "would be disabled because these KV cache managers require "
+                f"block-aligned lookups: {', '.join(unsupported_managers)}. "
+                f"Got group block sizes={group_block_sizes}."
+            )
+        if not connector_enabled:
+            raise ValueError(
+                f"Invalid prefix_match_unit={requested}; prefix-cache hits "
+                "for this layout land on the scheduler block size "
+                f"({scheduler_block_size}). Unset it or set it to "
+                f"{scheduler_block_size}."
+            )
     prefix_alignments = {
         spec.tokens_per_state
         for group in groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
-        if spec.prefix_cacheable
-        and isinstance(spec.tokens_per_state, int)
-        and spec.tokens_per_state > 1
+        if group.prefix_cacheable
+        for spec in group.kv_cache_specs.values()
+        if isinstance(spec.tokens_per_state, int) and spec.tokens_per_state > 1
     }
-    cache_hit_alignment = (
-        hash_block_size
-        if partial_hash_hits_enabled(groups, hash_block_size, dcp)
-        else scheduler_block_size
-    )
     if any(cache_hit_alignment % alignment for alignment in prefix_alignments):
         raise ValueError(
             f"Invalid prefix_match_unit={hash_block_size}; prefix-cache boundaries "
@@ -931,19 +993,13 @@ def resolve_cache_hit_alignment_tokens(
     """Token granularity at which prefix-cache hits land.
 
     Mirrors the alignment the hybrid KV cache coordinator pushes to its
-    managers: fine-grained hits land on ``hash_block_size``, all others on
-    ``scheduler_block_size``.
+    managers: fine-grained hits land on `hash_block_size`, all others on
+    `scheduler_block_size`.
     """
     groups = kv_cache_config.kv_cache_groups
     if not vllm_config.cache_config.enable_prefix_caching or len(groups) <= 1:
         return scheduler_block_size
-    manager_classes = []
-    for group in groups:
-        manager_cls = KVCacheSpecRegistry.get_manager_class(
-            group.kv_cache_spec, group.role
-        )
-        assert manager_cls is not None
-        manager_classes.append(manager_cls)
+    manager_classes = [group.manager_cls for group in groups]
     if partial_hash_hits_enabled(
         groups,
         hash_block_size,
@@ -962,15 +1018,15 @@ def get_request_block_hasher(
     """Returns a function which computes the list of un-computed block hashes
     of a request.
 
-    Hashes are computed at ``hash_block_size`` granularity and chained over the
+    Hashes are computed at `hash_block_size` granularity and chained over the
     full prefix, so each hash uniquely fingerprints the prefix ending at its
     boundary. Coarser group block sizes and partial-cache boundaries reuse
-    these hashes directly (see ``BlockHashListWithBlockSize``).
+    these hashes directly (see `BlockHashListWithBlockSize`).
 
-    With ``num_hash_lookahead_tokens`` (L) > 0, each hash also covers the L
+    With `num_hash_lookahead_tokens` (L) > 0, each hash also covers the L
     tokens after its block, which the drafter's KV at the block's last position
     depends on, so it is emitted only once those tokens exist. The block tokens
-    stay the hashed tokens; the extra keys become ``(E, *tokens)``, where ``E``
+    stay the hashed tokens; the extra keys become `(E, *tokens)`, where `E`
     covers the block and those tokens.
     """
 
@@ -1093,22 +1149,15 @@ def get_max_concurrency_for_kv_cache_config(
     """Get the maximum concurrency for the given KV cache configuration.
 
     A request at max_model_len consumes whole blocks from each group's block
-    table — cdiv(per-request bytes, page bytes) of the group's spec — and all
-    device groups draw those block ids from one shared pool, so the per-request
-    total is the sum over groups. The memory/page ratio is identical whether
-    a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
-    a representative per-layer spec (scheduler config), so both capacity
-    call sites agree.
+    table, and all device groups draw those block ids from one shared pool, so
+    the per-request total is the sum over groups.
 
     Host groups use a separate pool; the smaller concurrency limit applies.
     """
     num_blocks_per_request = 0
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
-        required = cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
+        required = group.max_allocated_blocks_per_request(vllm_config)
         if group.host_resident:
             host_blocks_per_request += required
         else:
@@ -1136,13 +1185,6 @@ def generate_scheduler_kv_cache_config(
     # Worker configs share scheduler geometry and the resolved zeroing
     # decision, so use an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
-    for group in cfg.kv_cache_groups:
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            # All layers in the UniformTypeKVCacheSpecs have the same type,
-            # so use an arbitrary one to initialize the scheduler.
-            group.kv_cache_spec = next(
-                iter(group.kv_cache_spec.kv_cache_specs.values())
-            )
     return cfg
 
 
@@ -1267,10 +1309,10 @@ def resolve_block_hashes(
     supports_fine_grained_hash_lookup: bool = False,
     alignment_tokens: int | None = None,
 ) -> BlockHashList:
-    """Resolve the block-hash view at ``block_size``.
+    """Resolve the block-hash view at `block_size`.
 
-    When ``block_size`` equals ``hash_block_size``, reuse the precomputed block
-    hashes directly; otherwise view them at ``block_size`` granularity.
+    When `block_size` equals `hash_block_size`, reuse the precomputed block
+    hashes directly; otherwise view them at `block_size` granularity.
     Fine-grained lookup keeps the original hashes for partial cache hits.
     """
     if block_size == hash_block_size:

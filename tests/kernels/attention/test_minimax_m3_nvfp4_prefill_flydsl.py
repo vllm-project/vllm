@@ -76,7 +76,7 @@ def _prefill(q, cache, topk, table, req, pos, hkv, k_scale=None, v_scale=None):
 
 
 def _fp64(q, cache, topk, table, req, pos, hkv, k_scale, v_scale, rows):
-    """fp64 attention of the token rows ``rows`` over the dequantized K / V."""
+    """fp64 attention of the token rows `rows` over the dequantized K / V."""
     k_data, k_sf, v_data, v_sf = nvfp4_kv_cache_token_major(cache)
     kv = [
         (dequant(data, sf) * s).to(torch.bfloat16).double()  # [pages, hkv, 128, 128]

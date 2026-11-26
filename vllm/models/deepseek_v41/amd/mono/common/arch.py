@@ -7,7 +7,7 @@ otherwise for the GPU it finds. The kernels were written for gfx950 (MI355X).
 gfx942 (MI300X, MI325X) lacks several instructions they use: the scaled
 f8f6f4 MFMA, the 16x16x32 bf16 MFMA, v_permlane16_swap / v_permlane32_swap
 and the OCP FP8 conversions. Its FP8 format is FNUZ (bias 8, no negative
-zero, 0x80 is NaN) instead of OCP. The helpers that differ test ``GFX942``
+zero, 0x80 is NaN) instead of OCP. The helpers that differ test `GFX942`
 and take another code path there.
 """
 

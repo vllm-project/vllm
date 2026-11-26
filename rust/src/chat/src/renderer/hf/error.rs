@@ -18,7 +18,7 @@ pub(crate) enum TemplateError {
     #[error("chat template looks like a file path but does not exist")]
     MissingTemplatePath,
     #[error("failed to parse chat_template.json")]
-    ParseTemplateJson(#[source] serde_json::Error),
+    ParseTemplateJson(#[source] vllm_tokenizer::CheckpointJsonError),
     #[error("chat_template.json does not contain a valid template")]
     InvalidTemplateJson,
 }

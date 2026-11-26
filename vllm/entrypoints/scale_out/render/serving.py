@@ -29,6 +29,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     ParseContext,
     ReasoningParserKwargs,
+    RenderedGenerateRequest,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
@@ -199,7 +200,7 @@ class ServingRender(BaseServing):
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
         )
 
-        return GenerateRequest(
+        return RenderedGenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
             features=self._extract_mm_features(
@@ -233,6 +234,7 @@ class ServingRender(BaseServing):
             tool_choice=request.tool_choice,
             parallel_tool_calls=request.parallel_tool_calls,
             include_reasoning=request.include_reasoning,
+            return_tokens_as_token_ids=request.return_tokens_as_token_ids,
             # Like the derenderer, Harmony output is parsed without template
             # kwargs.
             chat_template_kwargs=(
@@ -315,7 +317,7 @@ class ServingRender(BaseServing):
             request_id = base_id if len(result) == 1 else f"{base_id}-{i}"
 
             generate_requests.append(
-                GenerateRequest(
+                RenderedGenerateRequest(
                     request_id=request_id,
                     token_ids=token_ids,
                     features=self._extract_mm_features(
@@ -381,7 +383,7 @@ class ServingRender(BaseServing):
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
         kv_transfer_params, ec_transfer_params = _hoist_transfer_params(params)
 
-        return GenerateRequest(
+        return RenderedGenerateRequest(
             request_id=request.request_id,
             token_ids=list(token_ids),
             features=self._extract_mm_features(

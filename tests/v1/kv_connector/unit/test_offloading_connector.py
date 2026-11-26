@@ -51,7 +51,7 @@ elif current_platform.is_xpu():
 #
 # - Llama: tested with each attention backend and a custom block_size.
 # - Gemma-3: HMA (sliding window + full attention), default backend.
-# - Mamba-130m: HMA (attention-free, acts like sliding_window=1),
+# - Mamba2-130m: HMA (attention-free, acts like sliding_window=1),
 #   default backend.  Prefix caching must be force-enabled.
 # - Falcon-H1-0.5B-Instruct: HMA (parallel SSM/attention in every layer).
 #   After page-size unification the mamba and attention groups have
@@ -60,11 +60,10 @@ MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
     ("meta-llama/Llama-3.2-1B-Instruct", backend, CPU_BLOCK_SIZES, False)
     for backend in _ATTN_BACKENDS
 ]
-# HMA / Mamba models are only tested on CUDA (not ROCm).
-if current_platform.is_cuda():
+if current_platform.is_cuda_alike():
     MODEL_PARAMS += [
         ("google/gemma-3-1b-it", None, CPU_BLOCK_SIZES, True),
-        ("state-spaces/mamba-130m-hf", None, CPU_BLOCK_SIZES, True),
+        ("vllm-project/mamba2-130m-hf", None, CPU_BLOCK_SIZES, True),
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
@@ -138,8 +137,8 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
     """Wait for async offload transfers to finish so prefix cache can reset.
 
     The GPU-to-CPU offload runs on a CUDA stream asynchronously. While blocks
-    are still held by the offload worker, ``reset_prefix_cache`` returns
-    ``False``. Between retries we send a dummy single-token prefill to force
+    are still held by the offload worker, `reset_prefix_cache` returns
+    `False`. Between retries we send a dummy single-token prefill to force
     the engine to step, which polls the worker for completed transfers and
     frees GPU blocks.
     """
@@ -165,32 +164,44 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
     if current_platform.is_rocm():
         return
-    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params = SamplingParams(max_tokens=1, temperature=0)
 
     num_times_cpu_better_than_cold = 0
     num_tests = 10
     total_cold_time = 0.0
     total_gpu_hit_time = 0.0
     total_cpu_hit_time = 0.0
-    max_model_len = llm.llm_engine.vllm_config.model_config.max_model_len
-    # Use a long prompt that fits within the model's context window.
-    prompt_len = min(10001, max_model_len - 1)
-    prompt_token_ids = [0] * prompt_len
+    vllm_config = llm.llm_engine.vllm_config
+    max_model_len = vllm_config.model_config.max_model_len
+    assert vllm_config.kv_transfer_config is not None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    cpu_block_size = extra_config.get(
+        "block_size",
+        vllm_config.cache_config.block_size * extra_config.get("blocks_per_chunk", 1),
+    )
+    # Leave only the final token to recompute so partial-tail prefill cannot
+    # dominate the cache-hit timings.
+    prefix_len = min(10000, max_model_len - 2)
+    prefix_len -= prefix_len % cpu_block_size
+    assert prefix_len > 0
+    prompt_token_ids = [0] * (prefix_len + 1)
     for i in tqdm(range(num_tests), desc="Running tests"):
         prompt_token_ids[0] = i
         prompts = [TokensPrompt(prompt_token_ids=prompt_token_ids)]
 
         # run generation - this should trigger saving KV cache
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        cold_time = time.time() - start_time
+        start_time = time.perf_counter()
+        [cold] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        cold_time = time.perf_counter() - start_time
         total_cold_time += cold_time
+        assert cold.num_cached_tokens == 0
 
         # run generation again - should hit the GPU prefix cache
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        gpu_hit_time = time.time() - start_time
+        start_time = time.perf_counter()
+        [gpu_hit] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        gpu_hit_time = time.perf_counter() - start_time
         total_gpu_hit_time += gpu_hit_time
+        assert gpu_hit.num_cached_tokens == prefix_len
 
         # Wait for the async CPU offload to finish, then reset prefix cache
         # so the next generate() must reload from CPU rather than GPU.
@@ -205,14 +216,16 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
             )
 
         # run generation again - this should trigger loading from CPU
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        cpu_hit_time = time.time() - start_time
+        start_time = time.perf_counter()
+        [cpu_hit] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        cpu_hit_time = time.perf_counter() - start_time
         total_cpu_hit_time += cpu_hit_time
+        assert cpu_hit.num_cached_tokens == prefix_len
 
         if cpu_hit_time < cold_time:
             num_times_cpu_better_than_cold += 1
 
+    print(f"Reusable prefix length: {prefix_len}")
     print("Average times:")
     print(f"    Cold: {total_cold_time * 1000 / num_tests:.2f}ms")
     print(f"    GPU hit: {total_gpu_hit_time * 1000 / num_tests:.2f}ms")
@@ -223,6 +236,7 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
 
 def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):
     sampling_params = SamplingParams(max_tokens=1)
+    assert llm.llm_engine.vllm_config.kv_transfer_config is not None
     extra_config = (
         llm.llm_engine.vllm_config.kv_transfer_config.kv_connector_extra_config
     )
@@ -329,6 +343,7 @@ def test_cpu_offloading(
 
 def _sliding_window_partial_chunk_test(llm: LLM) -> None:
     vllm_config = llm.llm_engine.vllm_config
+    assert vllm_config.kv_transfer_config is not None
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     assert extra_config["store_threshold"] == 2
     blocks_per_chunk = extra_config["blocks_per_chunk"]
@@ -401,7 +416,9 @@ def test_cpu_offloading_sliding_window_partial_chunk() -> None:
         del llm
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 def test_cpu_offloading_metrics() -> None:
     """Verify that offloading Prometheus metrics (new flat and deprecated
     labeled) are emitted after stores and loads."""
@@ -546,6 +563,48 @@ def test_cpu_offloading_metrics() -> None:
         del llm
 
 
+@pytest.mark.parametrize("multiprocessing", [True, False])
+def test_sleep_keeps_offloaded_blocks_unless_reset(
+    monkeypatch: pytest.MonkeyPatch, multiprocessing: bool
+) -> None:
+    """A sleep that keeps the connector's cache serves the prompt from CPU
+    after the wake-up; a sleep that resets it does not."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", str(int(multiprocessing)))
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 256 << 20,
+            "block_size": CPU_BLOCK_SIZES,
+        },
+    )
+    # A prefix of whole offloaded blocks, plus the token to recompute.
+    prefix = [100 + i for i in range(4 * CPU_BLOCK_SIZES)]
+    prompt = TokensPrompt(prompt_token_ids=prefix + [7])
+    sampling_params = SamplingParams(temperature=0, max_tokens=1)
+
+    # Synchronous scheduling leaves the last step's stores unsubmitted when
+    # generate() returns, so the sleep must finish them itself.
+    llm = LLM(
+        model="facebook/opt-125m",
+        max_model_len=2048,
+        gpu_memory_utilization=0.2,
+        enable_sleep_mode=True,
+        async_scheduling=False,
+        kv_transfer_config=kv_transfer_config,
+    )
+    try:
+        expected = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+        for reset_connector, num_cached in ((False, len(prefix)), (True, 0)):
+            llm.sleep(level=1, reset_connector=reset_connector)
+            llm.wake_up()
+            output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+            assert output.num_cached_tokens == num_cached
+            assert output.outputs[0].token_ids == expected.outputs[0].token_ids
+    finally:
+        del llm
+
+
 def test_tiering_offloading() -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec."""
     extra_config: dict = {
@@ -638,17 +697,16 @@ def test_fs_tiering_offloading(tmp_path) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="HMA mamba-align CPU offload test is CUDA-only",
+    not current_platform.is_cuda_alike(),
+    reason="HMA mamba-align CPU offload test requires CUDA or ROCm",
 )
 @pytest.mark.parametrize(
     "model,block_size,tp_size",
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
-        # ("tiiuae/falcon-mamba-7b", 16, 1),
         # The chunk size must be a multiple of the GPU block size, which
         # defaults to 64 tokens.
-        ("state-spaces/mamba-1.4b-hf", 64, 1),
+        ("vllm-project/mamba2-1.3b-hf", 64, 1),
     ],
 )
 def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
@@ -663,6 +721,7 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
     llm = LLM(
         model=model,
         max_model_len=block_size * 10,
+        max_num_seqs=8,
         gpu_memory_utilization=0.85,
         tensor_parallel_size=tp_size,
         kv_transfer_config=kv_transfer_config,
@@ -676,7 +735,7 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
     )
 
     _PROMPT_SIZE: int = block_size * 2
-    # Cold prefill and offload-resume are not bit-exact (selective_scan_fn over
+    # Cold prefill and offload-resume are not bit-exact (the chunked scan over
     # the whole prompt vs selective_state_update for the recomputed token), so
     # exact-text equality only holds while the rounding difference never flips a
     # greedy argmax. Use a long, highly predictable prompt: it needs no "...."
@@ -859,6 +918,7 @@ def test_p2p_cache_reset_with_absent_decoder(monkeypatch):
         max_num_batched_tokens=256,
         gpu_memory_utilization=0.2,
         attention_config={"backend": "TRITON_ATTN"},
+        block_size=16,
         enforce_eager=True,
         async_scheduling=False,
         disable_log_stats=False,

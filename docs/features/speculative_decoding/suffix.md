@@ -2,15 +2,9 @@
 
 The following code configures vLLM to use speculative decoding where proposals are generated using Suffix Decoding ([technical report](https://arxiv.org/abs/2411.04975)).
 
-Like n-gram, Suffix Decoding can generate draft tokens by pattern-matching using the last `n` generated tokens. Unlike n-gram, Suffix Decoding (1) can pattern-match against both the prompt and previous generations, (2) uses frequency counts to propose the most likely continuations, and (3) speculates an adaptive number of tokens for each request at each iteration to get better acceptance rates.
+Like n-gram, Suffix Decoding generates draft tokens by pattern-matching on the last generated tokens. Unlike n-gram, Suffix Decoding (1) can pattern-match against both the request's own prompt and output and the responses of previous requests, and (2) uses frequency counts to propose the most likely continuations.
 
 Suffix Decoding can achieve better performance for tasks with high repetition, such as code-editing, agentic loops (e.g. self-reflection, self-consistency), and RL rollouts.
-
-!!! tip "Install Arctic Inference (V1 model runner only)"
-    On the V1 model runner, Suffix Decoding requires [Arctic Inference](https://github.com/snowflakedb/ArcticInference). You can install it with `pip install arctic-inference`. Model Runner V2 (the default) runs suffix decoding on the GPU and does not need it; see [below](#model-runner-v2).
-
-!!! tip "Suffix Decoding Speculative Tokens"
-    On the V1 model runner, Suffix Decoding speculates a dynamic number of tokens for each request at each decoding step, so `num_speculative_tokens` is the *maximum* number of speculative tokens, and a high number such as `16` or `32` works well. On Model Runner V2 every slot is verified unless adaptive verification trims it (see [below](#model-runner-v2)). The default is `8`.
 
 ```python
 from vllm import LLM, SamplingParams
@@ -23,7 +17,7 @@ llm = LLM(
     tensor_parallel_size=1,
     speculative_config={
         "method": "suffix",
-        "num_speculative_tokens": 32,
+        "num_speculative_tokens": 8,
     },
 )
 outputs = llm.generate(prompts, sampling_params)
@@ -34,19 +28,21 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-## Model Runner V2
+## How it works
 
-On Model Runner V2, `method: "suffix"` runs on the GPU, works with async scheduling and does not need Arctic Inference. It builds on [`ngram_gpu`](n_gram.md):
+Suffix decoding runs on the GPU and works with async scheduling. It builds on [`ngram_gpu`](n_gram.md):
 
 - Each request is matched against its own prompt and output using the longest matching suffix, up to `suffix_decoding_max_tree_depth` tokens, rather than a fixed n-gram window.
 - Responses of finished requests are kept in a GPU corpus (`suffix_decoding_corpus_tokens`, 1M tokens by default, oldest first out; `suffix_decoding_max_cached_requests: 0` disables it). Each step, every request looks up candidate positions in the corpus by its last 2 and last 4 tokens and extends them to the longest suffix match (so corpus matching needs `suffix_decoding_max_tree_depth` of at least 2); the continuation is chosen by how often each next token follows those matches.
 
-The longer match wins. The draft always has `num_speculative_tokens` tokens; slots without a match are filled with the last sampled token, and `suffix_decoding_max_spec_factor` and `suffix_decoding_min_token_prob` are not used. Without adaptive verification (below), Model Runner V2 verifies every slot, so keep `num_speculative_tokens` moderate (the default is `8`).
+The longer match wins. The draft always has `num_speculative_tokens` tokens; slots without a match are filled with the last sampled token. Without adaptive verification (below), every slot is verified, so keep `num_speculative_tokens` moderate (the default is `8`). `suffix_decoding_max_spec_factor` and `suffix_decoding_min_token_prob` are deprecated and have no effect.
 
 Seeded sampling isn't reproducible with suffix decoding: drafts come from previously finished requests, and with adaptive verification the number of verified slots depends on the batch. For reproducible seeded sampling, set `suffix_decoding_corpus_tokens: 0` and leave adaptive verification off.
 
 !!! warning "The corpus is shared"
-    Like the global suffix tree on V1, the corpus holds responses from all requests, whatever their `cache_salt` or LoRA adapter, and any request can draft from it. Drafts never change the output distribution, but how many are accepted shows in decode speed. Where requests must not influence each other, set `suffix_decoding_corpus_tokens: 0`.
+    The corpus holds responses from all requests, whatever their `cache_salt` or LoRA adapter, and any request can draft from it. Drafts never change the output distribution, but how many are accepted shows in decode speed. Where requests must not influence each other, set `suffix_decoding_corpus_tokens: 0`.
+
+## Adaptive verification
 
 ```python
 llm = LLM(

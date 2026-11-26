@@ -4,17 +4,17 @@
 
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size. For complete
-chunks, :class:`OffloadingEventsTracker` builds ``BlockStored`` from the
+chunks, `OffloadingEventsTracker` builds `BlockStored` from the
 originating request data carried by the raw event. A store may describe multiple
 blocks, and removals still expand to those block hashes using captured
 metadata. Partial tails also use captured metadata. Opt-in via
-``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
+`kv_connector_extra_config["self_describing_kv_events"]`; inert unless
 KV cache events are enabled. See the PR description for the full design.
 
 Recurrent (Mamba / linear-attention) state groups announce state checkpoints,
 not token ranges: an offloaded chunk holds the recurrent state at the chunk's
-last hash only. Their ``BlockStored`` therefore carries that single hash, its
-parent, an empty ``token_ids`` and ``kv_cache_spec_kind`` ``"mamba"``. A
+last hash only. Their `BlockStored` therefore carries that single hash, its
+parent, an empty `token_ids` and `kv_cache_spec_kind` `"mamba"`. A
 consumer aligns it by hash with the attention group's blocks, and a hybrid
 prefix is reusable only up to a boundary where every group has a residency.
 Windowed attention groups keep the legacy placeholder payload.
@@ -40,12 +40,11 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_block_hashes,
     to_event_extra_keys,
 )
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    MambaSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    MambaManager,
+    get_kv_cache_kind,
 )
+from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.kv_offload.base import (
     Medium,
     OffloadingEvent,
@@ -58,7 +57,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
         GroupOffloadConfig,
     )
     from vllm.lora.request import LoRARequest
@@ -80,12 +79,15 @@ class OffloadingEventGroupSpec(NamedTuple):
 
 
 def get_offloading_event_group_spec(
-    kv_cache_group: KVCacheGroupSpec,
+    kv_cache_group: KVCacheGroup,
 ) -> OffloadingEventGroupSpec:
-    kv_cache_spec = kv_cache_group.kv_cache_spec
     return OffloadingEventGroupSpec(
-        kv_cache_spec_kind=get_kv_cache_spec_kind(kv_cache_spec).value,
-        kv_cache_spec_sliding_window=get_kv_cache_spec_sliding_window(kv_cache_spec),
+        kv_cache_spec_kind=get_kv_cache_kind(
+            kv_cache_group.manager_config, kv_cache_group.distinct_specs
+        ).value,
+        kv_cache_spec_sliding_window=getattr(
+            kv_cache_group.manager_config.params, "sliding_window", None
+        ),
     )
 
 
@@ -95,10 +97,10 @@ class _OffloadEventMetadata(
 ):
     """BlockStored payload snapshot for one OffloadKey, captured while the
     Request is available and kept until the final matching removal event.
-    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent.
+    `medium` and `ownership` are forwarded from the OffloadingEvent.
 
     One is kept per offloaded chunk, so it is untracked by the cyclic GC: keep
-    fields free of tracked containers (``active_residencies`` is a bitmask)."""
+    fields free of tracked containers (`active_residencies` is a bitmask)."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -130,7 +132,7 @@ class _RequestEventContext:
 def describes_group(group_config: "GroupOffloadConfig") -> bool:
     """Whether the tracker builds self-describing payloads for this group.
 
-    Full-attention groups and recurrent state groups (``MambaSpec``) do;
+    Full-attention groups and recurrent state groups (`MambaManager`) do;
     windowed attention groups (sliding window, chunked local) keep the legacy
     placeholder because a window's hashes do not identify a reusable prefix.
     """
@@ -140,7 +142,7 @@ def describes_group(group_config: "GroupOffloadConfig") -> bool:
 
 
 def _is_recurrent_group(group_config: "GroupOffloadConfig") -> bool:
-    return isinstance(group_config.kv_cache_spec, MambaSpec)
+    return issubclass(group_config.manager_cls, MambaManager)
 
 
 def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
@@ -163,10 +165,10 @@ def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Builds complete stores from request context and expands removals.
 
-    The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
-    :meth:`record_lookup` for allocated primary-tier hits while the ``Request`` is
+    The store trigger handlers call `record_store` and the scheduler calls
+    `record_lookup` for allocated primary-tier hits while the `Request` is
     available. Unallocated and missing lookups add no state. Entries remain until
-    the final observed residency removal or :meth:`reset`.
+    the final observed residency removal or `reset`.
     """
 
     def __init__(
@@ -370,8 +372,8 @@ class OffloadingEventsTracker:
         retain the legacy placeholder payload so consumers can ignore them.
 
         Yields:
-            ``BlockStored`` or ``BlockRemoved`` events corresponding to
-            the underlying :class:`OffloadingEvent` stream.
+            `BlockStored` or `BlockRemoved` events corresponding to
+            the underlying `OffloadingEvent` stream.
 
         """
         removed_keys: set[OffloadKey] = set()
@@ -415,8 +417,8 @@ class OffloadingEventsTracker:
     ) -> _OffloadEventMetadata:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
-        per-block ``block_size``. A recurrent group's chunk is reduced to
-        its state checkpoint (see :func:`_as_state_checkpoint`)."""
+        per-block `block_size`. A recurrent group's chunk is reduced to
+        its state checkpoint (see `_as_state_checkpoint`)."""
         hashes_per_chunk = group_config.hashes_per_chunk
         assert hashes_per_chunk > 0
         assert chunk_idx >= 0

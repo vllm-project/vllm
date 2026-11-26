@@ -58,12 +58,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheTensor,
-    SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import RequestStatus
@@ -159,20 +162,23 @@ def test_every_kv_cache_layout_restores_blocks_exactly(
 ):
     """Restoring a stored block equals copying each layer's block, whatever the
     layout interleaves with it (LHBNC and BHLNC split pages per head)."""
-    shape = dict(block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16)
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16
+    )
+    full = FullAttentionManager.layer_config(spec)
+    window = SlidingWindowManager.layer_config(spec, sliding_window=32)
     groups = [
-        KVCacheGroupSpec(["a0", "a1"], FullAttentionSpec(**shape)),
-        KVCacheGroupSpec(["s0", "s1"], SlidingWindowSpec(**shape, sliding_window=32)),
+        KVCacheGroup.from_layers({"a0": full, "a1": full}),
+        KVCacheGroup.from_layers({"s0": window, "s1": window}),
     ]
     planner_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: layout,
-            num_gpu_blocks_override=4,
             prefix_cache_retention_interval=None,
         ),
         attention_config=SimpleNamespace(hisparse_config=None),
     )
-    config = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
+    config = get_kv_cache_config_from_groups(planner_config, groups, num_blocks=4)
     config.kv_cache_layout = layout.name
     kv_caches = allocate_kv_cache(config, torch.device("cpu"), layout)
 
@@ -262,10 +268,14 @@ def test_bulk_load_preserves_group_order_failures_and_new_buffers(
         )
         supplied = plans
         if batched:
+            group_ids: list[int] = []
+            for plan in plans:
+                assert plan.group_id is not None
+                group_ids.append(plan.group_id)
             supplied = BlockLoadBatch(
                 [p.key for p in plans],
                 [p.block_id for p in plans],
-                [p.group_id for p in plans],
+                group_ids,
                 "r",
             )
             monkeypatch.setattr(
@@ -323,10 +333,14 @@ def test_bulk_load_falls_back_for_entire_mixed_batch(bulk_worker, special):
         buffers["c"] = torch.empty((16, 32), dtype=torch.uint8)
         worker.register_kv_caches(buffers)
         if special == "batch-subblocks":
+            group_ids: list[int] = []
+            for plan in plans:
+                assert plan.group_id is not None
+                group_ids.append(plan.group_id)
             plans = BlockLoadBatch(
                 [p.key for p in plans],
                 [p.block_id for p in plans],
-                [p.group_id for p in plans],
+                group_ids,
                 "r",
             )
     else:
@@ -402,6 +416,7 @@ def test_runtime_config_resolves_total_embedded_capacity_per_rank():
     ).resolve_for_rank_count(4)
 
     runtime = EmbeddedRuntime.from_config(config)
+    assert isinstance(runtime, EmbeddedRuntime)
     assert runtime.options["capacity_bytes"] == 1024
     assert config.options["total_capacity_bytes"] == 4096
     assert "capacity_bytes" not in config.options
@@ -425,6 +440,7 @@ def test_lookup_sockets_separate_engines_and_data_parallel_ranks(socket_dir):
         handle = EmbeddedRuntime.from_config(
             replace(config, dp_index=dp_index)
         ).create_scheduler_handle("same-model", RankTopology(), None)
+        assert isinstance(handle, _MoriSchedulerHandle)
         return handle._paths[RankTopology().local_namespace]
 
     assert path({}) == path({})
@@ -511,18 +527,21 @@ def test_mori_scheduler_routes_lookup_and_clear_to_all_ranks(socket_dir, close_r
         assert scheduler.lookup([keys[1], "legacy-key", keys[0]]) == [True] * 3
         if close_rank is not None:
             servers[close_rank].close()
-            assert scheduler.lookup(keys) == [rank != close_rank for rank in range(2)]
+            assert scheduler.lookup(keys) == [
+                None if rank == close_rank else True for rank in range(2)
+            ]
             assert scheduler.last_lookup_diagnostics["unavailable_ranks"] == (
                 topology.all_namespaces()[close_rank],
             )
-            assert scheduler.last_lookup_diagnostics["missing_keys"] == (
-                keys[close_rank],
-            )
+            assert scheduler.last_lookup_diagnostics["missing_keys"] == ()
         assert scheduler.clear() is (close_rank is None)
         for rank, client in enumerate(clients):
             if rank != close_rank:
                 assert not client.keys
-        assert scheduler.lookup(keys + ["legacy-key"]) == [False] * 3
+        assert scheduler.lookup(keys + ["legacy-key"]) == [
+            *(None if rank == close_rank else False for rank in range(2)),
+            False,
+        ]
     finally:
         for server in servers:
             server.close()
@@ -547,7 +566,7 @@ def test_single_rank_lookup_returns_fresh_results(socket_dir):
         resident.add(keys[-1])
         assert scheduler.lookup(keys) == [False, False, True]
         server.close()
-        assert scheduler.lookup(keys) == [False] * len(keys)
+        assert scheduler.lookup(keys) == [None] * len(keys)
         assert scheduler.last_lookup_diagnostics["unavailable_ranks"] == (
             topology.local_namespace,
         )
@@ -678,6 +697,40 @@ def test_timeout_does_not_count_time_waiting_for_a_worker(blocked_transfer):
     assert handle.poll(queued).status is TransferJobStatus.COMPLETED
 
 
+@pytest.mark.parametrize("has_close", [False, True])
+def test_worker_close_releases_mori(monkeypatch, socket_dir, has_close):
+    """MORI builds without close() only get a final flush."""
+    monkeypatch.setitem(
+        sys.modules,
+        "mori.cpp",
+        SimpleNamespace(MemoryLocationType=SimpleNamespace(CPU=0, GPU=1)),
+    )
+    calls: list[str] = []
+
+    def flush() -> bool:
+        calls.append("flush")
+        return True
+
+    client = SimpleNamespace(
+        register_memory=lambda *a: True,
+        deregister_memory=lambda ptr: calls.append("deregister_memory"),
+        batch_exists=lambda keys: [True] * len(keys),
+        flush=flush,
+    )
+    if has_close:
+        client.close = lambda: calls.append("close")
+    handle = _MoriWorkerHandle(client, "release", RankTopology(), socket_dir, 1, 5)
+    handle.register_buffers({"layer0": torch.zeros(16, dtype=torch.uint8)})
+    scheduler = _MoriSchedulerHandle("release", RankTopology(), socket_dir)
+    try:
+        assert scheduler.lookup(["k"]) == [True]
+        handle.close()
+        assert scheduler.lookup(["k"]) == [None]
+    finally:
+        scheduler.close()
+    assert calls == ["deregister_memory", "close" if has_close else "flush"]
+
+
 def test_lookup_server_close_does_not_unlink_a_replacement(socket_dir):
     client = SimpleNamespace(batch_exists=lambda keys: [True] * len(keys))
     path = _lookup_socket_path("replaced", (0, 0, 0, 0), socket_dir)
@@ -727,12 +780,16 @@ def _run_to_completion(scheduler, worker) -> dict[str, int]:
 
 
 def _attention_and_sliding_window_config() -> KVCacheConfig:
-    shape = dict(block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16)
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
     groups = [
-        KVCacheGroupSpec(["full"], FullAttentionSpec(**shape)),
-        KVCacheGroupSpec(["window"], SlidingWindowSpec(**shape, sliding_window=64)),
+        KVCacheGroup.from_layers({"full": FullAttentionManager.layer_config(spec)}),
+        KVCacheGroup.from_layers(
+            {"window": SlidingWindowManager.layer_config(spec, sliding_window=64)}
+        ),
     ]
-    page_bytes = groups[0].kv_cache_spec.page_size_bytes
+    page_bytes = groups[0].page_size_bytes
     return KVCacheConfig(
         num_blocks=16,
         kv_cache_groups=groups,
@@ -821,4 +878,78 @@ def test_object_evicted_after_lookup_follows_failure_policy(
     # Blocks the failed load left unfilled must never serve a prefix hit.
     _, num_cached, _ = scheduler.kv_cache_manager.get_computed_blocks(same_prompt())
     assert num_cached == (0 if policy == "fail" else num_hit_tokens)
+    worker.shutdown()
+
+
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, load_fails):
+    """New blocks are zeroed on the forward stream, which a transfer is not
+    ordered behind. Blocks a synchronous load fills must skip that zeroing, and
+    blocks a failed load left unfilled must be zeroed when they are reused."""
+    runtime = install_memory_runtime(monkeypatch)
+    kv_cache_config = _kv_cache_config()
+    (group,) = kv_cache_config.kv_cache_groups
+    spec = group.kv_cache_specs["layer2"]
+    assert isinstance(spec, AttentionSpec)
+    # Mixed precision makes core zero new blocks.
+    mixed_specs = {
+        "layer1": group.kv_cache_specs["layer1"],
+        "layer2": replace(spec, dtype=torch.bfloat16),
+    }
+    kv_cache_config = replace(
+        kv_cache_config, kv_cache_groups=[replace(group, kv_cache_specs=mixed_specs)]
+    )
+    vllm_config = create_vllm_config(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "mode": "embedded",
+            "lookup_dir": socket_dir,
+            "load_async": False,
+        },
+        kv_load_failure_policy="fail",
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=kv_cache_config.num_blocks,
+        kv_cache_config=kv_cache_config,
+    )
+    worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    kv_caches = make_kv_caches()
+    worker.register_kv_caches(kv_caches)
+    handshake(scheduler.connector, worker)
+    num_tokens = 3 * scheduler.block_size + 1
+
+    def same_prompt():
+        return create_request(
+            num_tokens=num_tokens, common_prefix_len=num_tokens, max_tokens=1
+        )
+
+    scheduler.add_request(same_prompt())
+    _run_to_completion(scheduler, worker)
+    assert scheduler.reset_prefix_cache()
+
+    request = same_prompt()
+    scheduler.add_request(request)
+    output = _engine_step(
+        scheduler,
+        worker,
+        before_load=runtime.evict_all if load_fails else lambda: None,
+    )
+    (block_ids,) = output.scheduled_new_reqs[0].block_ids
+    loaded = output.kv_connector_metadata.load_requests[request.request_id].block_ids
+    assert loaded == block_ids[:3]
+    # The block the request computes itself is still zeroed.
+    assert output.new_block_ids_to_zero == block_ids[3:]
+
+    if load_fails:
+        assert request.status == RequestStatus.FINISHED_ERROR
+        scheduler.add_request(create_request(num_tokens=num_tokens, max_tokens=1))
+        reused = _engine_step(scheduler, worker)
+        (reused_ids,) = reused.scheduled_new_reqs[0].block_ids
+        assert set(loaded) <= set(reused_ids)
+        # Only the step that reallocates them zeroes them: a zeroing queued in
+        # any other step is not ordered against a later load into them.
+        assert reused.new_block_ids_to_zero == reused_ids
+    _run_to_completion(scheduler, worker)
     worker.shutdown()

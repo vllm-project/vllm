@@ -10,9 +10,12 @@ use thiserror_ext::AsReport as _;
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
 use crate::EffortValue;
+use crate::error::ErrorKind;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, tool_search_request,
+};
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
 fn render_request(request: &ChatRequest) -> String {
@@ -141,6 +144,35 @@ fn drop_thinking_keeps_last_developer() {
         "<｜begin▁of▁sentence｜><｜User｜>old question<｜Assistant｜></think>old answer<｜end▁of▁sentence｜><｜User｜>latest instruction<｜Assistant｜><think>"
     ]
     .assert_eq(&rendered);
+}
+
+/// An empty developer message and a non-boolean `drop_thinking` are the
+/// request's errors, as Python's encoder rejects the former with `ValueError`.
+#[test]
+fn request_refusals_name_their_parameter() {
+    let error = DeepSeekV4ChatRenderer::default()
+        .render(&thinking_request(vec![
+            ChatMessage::user("hi"),
+            ChatMessage::developer("", None),
+        ]))
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::invalid_param("messages"),
+        "{error:?}"
+    );
+
+    let mut request = thinking_request(vec![ChatMessage::user("hi")]);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("drop_thinking".to_string(), Value::from("no"));
+    let error = DeepSeekV4ChatRenderer::default().render(&request).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::invalid_param("chat_template_kwargs"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -838,7 +870,18 @@ fn custom_roles_are_rejected_as_request_errors() {
 
     let error = DeepSeekV4ChatRenderer::default().render(&request).unwrap_err();
 
-    assert!(error.is_request_validation_error());
+    assert!(error.kind().is_invalid_request());
     expect!["chat role `root` is not supported by this chat renderer"]
         .assert_eq(&error.to_report_string());
+}
+
+/// Like deepseek-recipe's Messages conversion: a tool reference is written as
+/// the tool's name, and V4 lists every tool, deferred ones included, up front.
+/// The expected prompt is deepseek-recipe's (`935817c`) for the same Messages
+/// request.
+#[test]
+fn tool_references_render_as_tool_names_like_deepseek_recipe() {
+    expect_file!["fixtures/tool_search_references.txt"].assert_eq(&render_request(
+        &tool_search_request(&["get_weather", "get_time"]),
+    ));
 }

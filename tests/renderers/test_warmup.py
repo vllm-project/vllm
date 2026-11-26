@@ -40,8 +40,8 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     render_chat is mocked to raise ChatTemplateResolutionError so the chat
     warmup block is skipped cleanly, keeping the test focused on MM warmup.
 
-    The processor is a mock at its I/O boundaries (``dummy_inputs`` and
-    ``apply``) but keeps the real ``get_dummy_mm_inputs``, since that is where
+    The processor is a mock at its I/O boundaries (`dummy_inputs` and
+    `apply`) but keeps the real `get_dummy_mm_inputs`, since that is where
     the warmup's seq_len capping and cache plumbing actually live.
     """
     renderer = MagicMock()
@@ -383,7 +383,7 @@ class TestEngineStartWarmupHook:
 
         mock_engine_core.assert_called_once()
         args, kwargs = mock_engine_core.call_args
-        assert len(args) == 3  # vllm_config, executor_class, log_stats
+        assert len(args) == 3  # vllm_config, executor_class, collect_stats
         assert "renderer" not in kwargs
         assert kwargs.get("executor_fail_callback") is callback
 
@@ -404,7 +404,7 @@ class TestEngineStartWarmupHook:
                 asyncio_mode=False,
                 vllm_config=cfg,
                 executor_class=MagicMock(),
-                log_stats=False,
+                collect_stats=False,
                 renderer=renderer,
             )
 
@@ -434,7 +434,7 @@ class TestEngineStartWarmupHook:
                 asyncio_mode=False,
                 vllm_config=cfg,
                 executor_class=MagicMock(),
-                log_stats=False,
+                collect_stats=False,
                 renderer=renderer,
             )
 
@@ -462,7 +462,7 @@ class TestEngineStartWarmupHook:
             cc.EngineCoreClient.make_async_mp_client(
                 cfg,
                 executor_class=MagicMock(),
-                log_stats=False,
+                collect_stats=False,
                 renderer=renderer,
             )
 

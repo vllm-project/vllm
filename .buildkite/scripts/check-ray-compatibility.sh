@@ -33,9 +33,9 @@ if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
     fi
 else
     if [ "${TORCH_NIGHTLY:-0}" = "1" ]; then
-        TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130"
+        TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu132"
     else
-        TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
+        TORCH_INDEX_URL="https://download.pytorch.org/whl/cu132"
     fi
 fi
 echo ">>> Using PyTorch index: ${TORCH_INDEX_URL:-PyPI default}"
@@ -161,7 +161,7 @@ uv pip compile \
     "${WORK_DIR}/llm-requirements.txt" \
     "${WORK_DIR}/llm-test-requirements.txt" \
     -c "${WORK_DIR}/vllm-constraints.txt" \
-    --python-version 3.12 \
+    --python-version 3.14 \
     --python-platform x86_64-manylinux_2_31 \
     "${EXTRA_INDEX_ARGS[@]}" \
     --index-strategy unsafe-best-match \

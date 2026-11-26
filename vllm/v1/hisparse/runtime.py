@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import math
-import mmap
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -16,10 +14,11 @@ import psutil
 import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import host_registration_ranges
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -32,8 +31,6 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
 )
 
 logger = init_logger(__name__)
-
-HOST_REGISTER_CHUNK_BYTES = 256 * 2**30
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
@@ -74,7 +71,7 @@ def _get_max_swap_rows(vllm_config: VllmConfig) -> int:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PagedCacheView:
     cache: torch.Tensor
     attention_cache: torch.Tensor
@@ -103,14 +100,16 @@ class PagedCacheView:
         )
         row_bytes = row_width * itemsize
         if block_stride % (block_size * row_bytes):
-            return cls(cache, cache, block_size, block_size)
+            # Blocks whole rows apart: kernels read the strided cache as flat rows.
+            assert block_stride % row_bytes == 0
+            return cls(cache, cache, block_size, block_stride // row_bytes)
         attention_cache = (
             raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
         )
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedHiSparseConfig:
     top_k: int
     device_buffer_size: int
@@ -292,7 +291,7 @@ def drop_hisparse_host_pool(vllm_config: VllmConfig) -> None:
 
 
 def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
-    """Whether replicated MLA host KV can share one local mmap."""
+    """Whether replicated MLA host KV can share one mmap per node."""
     parallel = vllm_config.parallel_config
     return (
         get_hisparse_backend().supports_shared_host_pool
@@ -302,8 +301,26 @@ def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
         and parallel.decode_context_parallel_size == 1
         and parallel.world_size == parallel.tensor_parallel_size
         and parallel.distributed_executor_backend == "mp"
-        and parallel.nnodes_within_dp == 1
     )
+
+
+def get_hisparse_host_leader_rank(
+    vllm_config: VllmConfig, tp_rank: int | None = None
+) -> int:
+    """TP rank that creates and writes this node's shared host pool.
+
+    Args:
+        vllm_config: Engine config; its `local_world_size` sets the node size.
+        tp_rank: TP rank to resolve; defaults to this process's TP rank.
+
+    Returns:
+        The first TP rank on `tp_rank`'s node.
+
+    """
+    if tp_rank is None:
+        tp_rank = get_tensor_model_parallel_rank()
+    local_world_size = vllm_config.parallel_config.local_world_size
+    return tp_rank // local_world_size * local_world_size
 
 
 def get_hisparse_host_block_stride(
@@ -314,91 +331,20 @@ def get_hisparse_host_block_stride(
     return page_size_bytes
 
 
-def _hisparse_registration_ranges(
-    tensor_sizes: list[int],
-    num_blocks: int,
-    host_block_stride: int,
-    max_chunk_bytes: int = HOST_REGISTER_CHUNK_BYTES,
-) -> tuple[tuple[int, int], ...]:
-    """Split a shared pool without bisecting any tensor's host block.
-
-    CUDA batch copies reject descriptors spanning adjacent registrations.
-    """
-    total_size = num_blocks * host_block_stride
-    if total_size % mmap.PAGESIZE:
-        raise ValueError("HiSparse host pool must be OS-page aligned.")
-    if max_chunk_bytes < mmap.PAGESIZE:
-        raise ValueError("HiSparse registration chunks must span at least one page.")
-
-    tensors: list[tuple[int, int, int]] = []
-    tensor_start = 0
-    for tensor_size in tensor_sizes:
-        if tensor_size % num_blocks:
-            raise ValueError(
-                f"HiSparse host tensor size {tensor_size} is not divisible by "
-                f"{num_blocks} blocks."
-            )
-        tensor_end = tensor_start + tensor_size
-        tensors.append((tensor_start, tensor_end, tensor_size // num_blocks))
-        tensor_start = tensor_end
-    if tensor_start > total_size:
-        raise ValueError("HiSparse host tensors exceed the shared host pool.")
-
-    def last_safe_boundary(lower: int, upper: int) -> int | None:
-        best = None
-        for start, end, block_bytes in tensors:
-            first_block = max(0, (lower - start) // block_bytes + 1)
-            last_block = min(num_blocks, (min(upper, end) - start) // block_bytes)
-            if first_block > last_block:
-                continue
-            divisor = math.gcd(block_bytes, mmap.PAGESIZE)
-            if start % divisor:
-                continue
-            period = mmap.PAGESIZE // divisor
-            if period == 1:
-                residue = 0
-            else:
-                # Find block boundaries that are also OS-page boundaries.
-                residue = (
-                    (-start // divisor) * pow(block_bytes // divisor, -1, period)
-                ) % period
-            block = last_block - (last_block - residue) % period
-            if block >= first_block:
-                candidate = start + block * block_bytes
-                best = candidate if best is None else max(best, candidate)
-
-        if upper >= tensor_start:
-            candidate = upper // mmap.PAGESIZE * mmap.PAGESIZE
-            if candidate >= tensor_start and candidate > lower:
-                best = candidate if best is None else max(best, candidate)
-        return best
-
-    ranges: list[tuple[int, int]] = []
-    start = 0
-    while total_size - start > max_chunk_bytes:
-        end = last_safe_boundary(start, start + max_chunk_bytes)
-        if end is None:
-            raise ValueError(
-                "A HiSparse host block is too large for the registration chunk limit."
-            )
-        ranges.append((start, end))
-        start = end
-    ranges.append((start, total_size))
-    return tuple(ranges)
-
-
 def allocate_hisparse_host_pools(
     vllm_config: VllmConfig,
     tensor_sizes: list[int],
     num_blocks: int,
     host_block_stride: int,
 ) -> tuple[list[torch.Tensor], SharedOffloadRegion]:
-    """Allocate one host mmap shared by local TP ranks."""
+    """Allocate one host mmap shared by each node's TP ranks."""
     tp_group = get_tp_group()
+    local_world_size = vllm_config.parallel_config.local_world_size
     region = SharedOffloadRegion(
         engine_id=(
             f"hisparse_{vllm_config.instance_id}_"
-            f"dp{vllm_config.parallel_config.data_parallel_index}"
+            f"dp{vllm_config.parallel_config.data_parallel_index}_"
+            f"tp{get_hisparse_host_leader_rank(vllm_config)}"
         ),
         num_chunks=1,
         rank=0,
@@ -406,13 +352,13 @@ def allocate_hisparse_host_pools(
         cpu_page_size=sum(tensor_sizes),
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
-        populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        populate_shard=(tp_group.rank_in_group % local_world_size, local_world_size),
         num_segments=REGION_SEGMENTS,
     )
     pinned: list[torch.Tensor] = []
     try:
-        for start, end in _hisparse_registration_ranges(
-            tensor_sizes, num_blocks, host_block_stride
+        for start, end in host_registration_ranges(
+            tensor_sizes, num_blocks, num_blocks * host_block_stride
         ):
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)
@@ -508,7 +454,7 @@ def hisparse_prefill_staging_remap(
     return new_bt, row_ids
 
 
-@dataclass
+@dataclass(slots=True)
 class HiSparsePrefillStagingPlan:
     block_table: torch.Tensor
     row_ids: torch.Tensor
@@ -528,11 +474,11 @@ class HiSparsePrefillStagingPlan:
     ) -> None:
         """Resolve which staged rows can be served from the resident cache.
 
-        ``resident_state_rows`` is a resident group's persistent table by
-        request state row and ``state_indices`` holds each staged request's
+        `resident_state_rows` is a resident group's persistent table by
+        request state row and `state_indices` holds each staged request's
         state row. Computed once per plan and resident group (every layer in
         the group shares the table); non-null resident pages become
-        miss_mask=0 rows gathered device-to-device by ``gather_prefill_cache``.
+        miss_mask=0 rows gathered device-to-device by `gather_prefill_cache`.
         """
         source_key = (resident_state_rows.data_ptr(), resident_block_size)
         if self.gpu_source_key == source_key:
@@ -587,6 +533,10 @@ class HiSparsePrefillStagingPlan:
         self.gpu_row_ids = torch.where(hit, gpu_rows, -1).reshape(1, -1).to(torch.int32)
         self.miss_mask = ((self.gpu_row_ids < 0) & valid_rows.view(1, -1)).int()
         self.gpu_source_key = source_key
+
+
+def hisparse_staging_block_capacity(seq_lens_cpu: torch.Tensor, block_size: int) -> int:
+    return int(((seq_lens_cpu + block_size - 1) // block_size).sum())
 
 
 def build_hisparse_prefill_staging_plan(
@@ -799,8 +749,19 @@ class HiSparseRuntime:
         num_blocks: int,
         block_size: int,
         block_table: torch.Tensor,
+        owner: HiSparseRuntime | None = None,
     ) -> None:
-        """Bind this runtime's strided view into the shared GPU HMA slab."""
+        """Bind this runtime's strided view into the shared GPU HMA slab.
+
+        A cross-layer KV-sharing layer binds its target's hot rows and passes
+        the target as `owner`: both then track the rows in the owner's slot map.
+        """
+        if owner is not None:
+            assert self.is_group_leader and not self.index_group.followers
+            group, owner_group = self.index_group, owner.index_group
+            group.device_global_indices = owner_group.device_global_indices
+            group.lru_slots = owner_group.lru_slots
+            group.swap_stats = owner_group.swap_stats
         self.hot = PagedCacheView.bind(
             raw_tensor,
             dtype=self.kv_dtype,
@@ -1158,7 +1119,7 @@ def update_hisparse_residency(
 ) -> None:
     """Apply scheduled requests' residency changes.
 
-    ``residency`` is ``[resident groups, state rows, pages]``: the GPU block of
+    `residency` is `[resident groups, state rows, pages]`: the GPU block of
     each page, or block 0 when the page is read from the host.
     """
     if not updates:
@@ -1288,6 +1249,30 @@ class HiSparseCacheHandle:
         )
         self.block_table = block_table
         self.slot_mapping = slot_mapping
+
+    def ensure_prefill_gpu_sources(
+        self, plan: HiSparsePrefillStagingPlan, num_decodes: int
+    ) -> None:
+        assert self.view is not None and self.block_table is not None
+        state_indices = self.runtime.request_state_indices
+        assert state_indices is not None
+        plan.ensure_gpu_sources(
+            self.block_table, state_indices[num_decodes:], self.view.block_size
+        )
+
+    def stage_prefill_rows(
+        self,
+        source_cache: torch.Tensor,
+        plan: HiSparsePrefillStagingPlan,
+        num_decodes: int,
+    ) -> torch.Tensor:
+        resident_cache = None
+        if self.view is not None and self.block_table is not None:
+            self.ensure_prefill_gpu_sources(plan, num_decodes)
+            resident_cache = self.view.cache
+        return self.runtime.gather_prefill_cache(
+            source_cache, plan, resident_cache=resident_cache
+        )
 
     def swap_in(
         self,

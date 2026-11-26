@@ -8,18 +8,18 @@ approximate hardware math, bf16 / fp8 packing, buffer resources, the
 execution-model constants and the kernel symbol naming.
 
 Ported from the FlyDSL GLM-5 layer kernel (ROCm/FlyDSL branch
-``glm5-mla-moe-layer-monokernel`` @ 1e28fd8a,
-``kernels/mla_moe_layer/shared_reuse_moe_kernel.py``). Only published flydsl APIs
-and aiter's vendored ``buffer_ops`` / ``dpp_utils`` are used.
+`glm5-mla-moe-layer-monokernel` @ 1e28fd8a,
+`kernels/mla_moe_layer/shared_reuse_moe_kernel.py`). Only published flydsl APIs
+and aiter's vendored `buffer_ops` / `dpp_utils` are used.
 
-Every function but ``kernel_symbol`` is traced inside a ``@flyc.kernel`` body.
+Every function but `kernel_symbol` is traced inside a `@flyc.kernel` body.
 
 Raw boundaries kept, for want of an equivalent on the pinned FlyDSL:
-``buffer_ops`` loads / stores (the kernels take raw Int64 addresses, no tensors
-for ``make_buffer_tensor``); raw MFMA intrinsics (hand-laid operands: permlane
-transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (``expect``,
-``s_memrealtime``, the approximate rsq / rcp / exp2) and the struct unpacking of
-``permlane*_swap``.
+`buffer_ops` loads / stores (the kernels take raw Int64 addresses, no tensors
+for `make_buffer_tensor`); raw MFMA intrinsics (hand-laid operands: permlane
+transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (`expect`,
+`s_memrealtime`, the approximate rsq / rcp / exp2) and the struct unpacking of
+`permlane*_swap`.
 """
 
 from __future__ import annotations
@@ -51,9 +51,9 @@ CM_NT = 2
 
 
 def kernel_symbol(stem, **params):
-    """Kernel symbol that profilers demangle to ``atom::<stem>_<params>``. The
-    amdhsa assembler rejects ``::`` in a symbol, so it is Itanium-mangled, as
-    aiter's ``_ZN5aiter...E`` kernels are."""
+    """Kernel symbol that profilers demangle to `atom::<stem>_<params>`. The
+    amdhsa assembler rejects `::` in a symbol, so it is Itanium-mangled, as
+    aiter's `_ZN5aiter...E` kernels are."""
     name = f"{stem}_{kernel_signature(**params)}"
     return f"_ZN4atom{len(name)}{name}E"
 
@@ -78,14 +78,14 @@ def permlane_swap(off, x, y):
 
 
 def lane_gather(v, src_lane):
-    """Lane ``src_lane``'s value of v, a source lane a lane (ds_bpermute)."""
+    """Lane `src_lane`'s value of v, a source lane a lane (ds_bpermute)."""
     return fx.Int32(
         rocdl.ds_bpermute(T.i32, fx.Int32(src_lane) * 4, fx.Int32(v).ir_value())
     )
 
 
 def readlane(v, src_lane):
-    """Lane ``src_lane``'s value of v (wave-uniform)."""
+    """Lane `src_lane`'s value of v (wave-uniform)."""
     bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
     r = fx.Int32(rocdl.readlane(T.i32, bits, fx.Int32(src_lane)))
     return r.bitcast(fx.Float32) if isinstance(v, fx.Float32) else r
@@ -97,7 +97,7 @@ def memrealtime():
 
 
 def unlikely(cond):
-    """``cond`` marked cold (llvm.expect): LLVM lays the branch out of the hot
+    """`cond` marked cold (llvm.expect): LLVM lays the branch out of the hot
     path. A rare path's code inline among the hot stages costs them even when it
     never runs (the long-context selection: S = 16, 3k context +1.4 us)."""
     return fx.Boolean(
@@ -112,10 +112,10 @@ def unlikely(cond):
 
 
 def fresh(v):
-    """``v`` (a per-lane Int32) through an opaque move, here: the lane math built
+    """`v` (a per-lane Int32) through an opaque move, here: the lane math built
     on it is computed at its use, where LLVM would otherwise hoist it out of a task
     loop or CSE it across stages into registers held for the whole kernel (spills,
-    and a kernel with scratch is refused: ``runtime.widths``)."""
+    and a kernel with scratch is refused: `runtime.widths`)."""
     return fx.Int32(
         llvm.inline_asm(
             T.i32, [fx.Int32(v).ir_value()], "v_mov_b32 $0, $1", "=v,v",
@@ -148,15 +148,15 @@ def hw_exp2(x):
 
 
 def div_rn(x, d, r):
-    """``x / d`` rounded to nearest, bit-identical to the IEEE division, given
-    ``r = 1.0 / d`` from one true division per divisor (Markstein: a quotient
+    """`x / d` rounded to nearest, bit-identical to the IEEE division, given
+    `r = 1.0 / d` from one true division per divisor (Markstein: a quotient
     within 1 ulp plus its exact fma residual times RN(1/d) rounds correctly)."""
     q = x * r
     return fx.Float32(fmath.fma(fx.Float32(fmath.fma(-q, d, x)), r, q))
 
 
 def xshfl(v, off):
-    """Value of lane ``lane ^ off``: offsets 32 / 16 via v_permlane*_swap, in-row
+    """Value of lane `lane ^ off`: offsets 32 / 16 via v_permlane*_swap, in-row
     offsets via DPP (VALU latency, not LDS). Powers of two only: any other
     offset would take the lane ^ 1 path."""
     assert off in (1, 2, 4, 8, 16, 32), off
@@ -208,7 +208,7 @@ def wave_sum(v):
 
 
 def traced(fn):
-    """Apply flydsl's AST rewriting to a helper, so its ``while`` / ``if`` over
+    """Apply flydsl's AST rewriting to a helper, so its `while` / `if` over
     traced values lower to scf ops. Kernels rewrite only their own body."""
     return ASTRewriter.transform(fn)
 
@@ -219,7 +219,7 @@ def wave_max(v):
 
 @traced
 def block_max(v, lane, wave, red):
-    """Max of v over the CTA's WAVES waves; ``red`` needs WAVES words."""
+    """Max of v over the CTA's WAVES waves; `red` needs WAVES words."""
     wv = wave_max(v)
     gpu.barrier()
     if lane == 0:
@@ -239,8 +239,8 @@ def row_shr(v, lane, k):
 
 
 def _xpartner(v, off, lane):
-    """Lane ``lane ^ off``'s v: DPP within a row, v_permlane*_swap across rows
-    (``xshfl`` takes ``shuffle_xor`` there)."""
+    """Lane `lane ^ off`'s v: DPP within a row, v_permlane*_swap across rows
+    (`xshfl` takes `shuffle_xor` there)."""
     if off < 16:
         return xshfl(v, off)
     a, b = permlane_swap(off, v, v)
@@ -259,7 +259,7 @@ def wave_incl_scan(v, lane):
 
 @traced
 def block_excl_scan(v, lane, wave, buf):
-    """(exclusive prefix of v over the CTA in thread order, CTA total); ``buf``
+    """(exclusive prefix of v over the CTA in thread order, CTA total); `buf`
     needs WAVES words."""
     incl = wave_incl_scan(v, lane)
     gpu.barrier()
@@ -276,9 +276,9 @@ def block_excl_scan(v, lane, wave, buf):
 
 
 def global_load(addr, words=1, nt=False):
-    """``words`` i32 (1, 2 or 4) at the 64-bit global address ``addr``. A pool
+    """`words` i32 (1, 2 or 4) at the 64-bit global address `addr`. A pool
     past 4 GiB is reached only this way: a buffer load's offset (index x stride
-    included) is 32 bits. ``nt``: nontemporal."""
+    included) is 32 bits. `nt`: nontemporal."""
     i32 = ir.IntegerType.get_signless(32)
     ty = i32 if words == 1 else ir.VectorType.get([words], i32)
     ptr = llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr<1>"), as_ir_value(fx.Int64(addr)))
@@ -288,19 +288,19 @@ def global_load(addr, words=1, nt=False):
 
 
 def ld_i32(ptr, i):
-    """Word ``i`` of a buffer, a plain Int32 load."""
+    """Word `i` of a buffer, a plain Int32 load."""
     return fx.Int32(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.i32))
 
 
 def row_live(batch_ids, k):
-    """Whether row k of the step is a request's: its ``batch_id_per_q_token``
+    """Whether row k of the step is a request's: its `batch_id_per_q_token`
     entry, -1 on a CUDA-graph pad row (wave-uniform for a uniform k). A pad row
     runs like any other but joins no decision another row's work depends on."""
     return uniform(ld_i32(batch_ids, k)) >= 0
 
 
 def ld_dev(ptr, i, words=1):
-    """``words`` i32 (1, 2 or 4) of a buffer from word ``i``, at device scope
+    """`words` i32 (1, 2 or 4) of a buffer from word `i`, at device scope
     (past the per-XCD L2)."""
     return bo.buffer_load(
         rsrc(ptr), i, vec_width=words, dtype=T.i32, cache_modifier=CM_DEV
@@ -313,8 +313,8 @@ LOAD_BATCH = 4  # rounds of a strided loop whose loads go out together
 @traced
 def batched_rounds(tid, n, load, use, batch=LOAD_BATCH):
     """A CTA's strided loop over elements v = tid + THREADS i < n (n a Python
-    int): ``load(v)`` of ``batch`` rounds issued before any ``use(v, loaded)``.
-    A round whose ``use`` stores to global memory keeps the next round's loads
+    int): `load(v)` of `batch` rounds issued before any `use(v, loaded)`.
+    A round whose `use` stores to global memory keeps the next round's loads
     behind it (they may alias), so the rounds' loads would go out in series. A
     round past n loads element n - 1 (in range) and uses nothing."""
     rounds = -(-n // THREADS)
@@ -328,9 +328,9 @@ def batched_rounds(tid, n, load, use, batch=LOAD_BATCH):
 
 
 def rows_to_lds(tid, src, rows, row_words, dst, dst_row):
-    """``rows`` rows of ``row_words`` words (a multiple of 4) read at device scope
-    from address ``src`` -> LDS ``dst``, a row every ``dst_row`` words: 16 B a
-    lane, the loads batched (``batched_rounds``)."""
+    """`rows` rows of `row_words` words (a multiple of 4) read at device scope
+    from address `src` -> LDS `dst`, a row every `dst_row` words: 16 B a
+    lane, the loads batched (`batched_rounds`)."""
     assert row_words % 4 == 0, row_words
     batched_rounds(
         tid, rows * row_words // 4,
@@ -346,8 +346,8 @@ def mfma_bf16(a, b, c):
 
 
 def row_sum(red, r, t, waves=None):
-    """Row r, token t of the waves' 16x16 MFMA accumulators (wave w's at ``red``
-    + (w * 64 + lane) * 4), summed in wave order from 0 (``waves``: which, in
+    """Row r, token t of the waves' 16x16 MFMA accumulators (wave w's at `red`
+    + (w * 64 + lane) * 4), summed in wave order from 0 (`waves`: which, in
     order; all of them by default)."""
     tot = fx.Float32(0.0)
     for w in waves if waves is not None else range(WAVES):
@@ -356,14 +356,14 @@ def row_sum(red, r, t, waves=None):
 
 
 def mfma_fp8(a, b, c):
-    """16x16x32 fp8 x fp8 MFMA, unscaled: ``a`` / ``b`` an i64 of 8 E4M3 each."""
+    """16x16x32 fp8 x fp8 MFMA, unscaled: `a` / `b` an i64 of 8 E4M3 each."""
     return fx.Vector(
         rocdl.mfma_f32_16x16x32_fp8_fp8(T.vec(4, T.f32), [a, b, c, 0, 0, 0])
     )
 
 
 def ballot(pred):
-    """The wave's lanes where ``pred`` holds, a bit a lane."""
+    """The wave's lanes where `pred` holds, a bit a lane."""
     return fx.Int64(rocdl.ballot(T.i64, as_ir_value(pred)))
 
 
@@ -372,13 +372,13 @@ def popcount(x):
 
 
 def lanes_below(bal, lane):
-    """How many of the lanes in ballot ``bal`` are below ``lane``."""
+    """How many of the lanes in ballot `bal` are below `lane`."""
     return popcount(bal & ((fx.Int64(1) << fx.Int64(lane)) - 1))
 
 
 def load_ptr64(table, i):
-    """Entry ``i`` of an i64 table in memory, wave-uniform (each half through
-    ``uniform``): a peer's buffer base, a kernel argument block's pointer."""
+    """Entry `i` of an i64 table in memory, wave-uniform (each half through
+    `uniform`): a peer's buffer base, a kernel argument block's pointer."""
     pw = fx.Vector(bo.buffer_load(rsrc(table), i * 2, vec_width=2, dtype=T.i32))
     return (fx.Int64(uniform(pw[1])) << 32) | fx.Int64(fx.Uint32(uniform(pw[0])))
 
@@ -410,7 +410,7 @@ def bf16_pair(a, b):
 
 
 def lds_bytes(struct) -> int:
-    """The LDS an ``fx.struct`` class takes, alignment included."""
+    """The LDS an `fx.struct` class takes, alignment included."""
     return struct.__dsl_size_of__()
 
 

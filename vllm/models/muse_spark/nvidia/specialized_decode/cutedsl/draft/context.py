@@ -3,15 +3,15 @@
 """The Muse Spark DSpark draft's context K/V chain around its K/V projection,
 as two CuTe kernels.
 
-``MuseSparkDSparkModel.precompute_and_store_context_kv`` runs the hidden norm,
+`MuseSparkDSparkModel.precompute_and_store_context_kv` runs the hidden norm,
 one input norm per draft layer and a stack, then the batched K/V projection
 (cuBLAS), then the K-norm, RoPE and one cache insert per layer. Here the chain
-before the projection is one kernel (``ContextNorms``) and the chain after it
-is another (``ContextKvStore``); the projection stays the stock ``torch.bmm``.
+before the projection is one kernel (`ContextNorms`) and the chain after it
+is another (`ContextKvStore`); the projection stays the stock `torch.bmm`.
 Both are bitwise equal to the stock chain on contiguous rows:
 
 - the norms: one CTA of 256 threads per (row, layer), the row norm of
-  ``common/row_norm.py`` (the stock single-tile ``fused_rmsnorm_fwd``), the
+  `common/row_norm.py` (the stock single-tile `fused_rmsnorm_fwd`), the
   hidden norm's output rounded to BF16 before the layer norm reads it, as the
   stock chain stores it;
 - the store: one warp per (row, layer), lane j holding the GPT-J pair
@@ -272,16 +272,16 @@ def context_norm_constants(
 
 
 def _rows_view(tensor: torch.Tensor):
-    """``rows_view`` of BF16 or FP32 rows of ``H`` (32-byte aligned in FP32)."""
+    """`rows_view` of BF16 or FP32 rows of `H` (32-byte aligned in FP32)."""
     return rows_view(tensor, H, 32 if tensor.dtype == torch.float32 else 16)
 
 
 class ContextNorms:
-    """``stack([pre_norm_l(hidden_norm(x)) for l])`` as one kernel, bound to
-    its norms: the hidden norm's weight ``[D]`` and the layers' input-norm
-    weights ``[L, D]`` (BF16 or FP32; None for weightless norms), eps, gain
+    """`stack([pre_norm_l(hidden_norm(x)) for l])` as one kernel, bound to
+    its norms: the hidden norm's weight `[D]` and the layers' input-norm
+    weights `[L, D]` (BF16 or FP32; None for weightless norms), eps, gain
     centers and whether each weight scales the input (else the norm's
-    output); ``constants`` their ``context_norm_constants`` where the caller
+    output); `constants` their `context_norm_constants` where the caller
     has them. Compiles at construction (before CUDA graph capture); a call
     is graph-capturable."""
 
@@ -328,9 +328,9 @@ class ContextNorms:
         self._layers = Int32(num_layers)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        """The norms of ``x``, contiguous BF16 ``[T, D]`` with T >= 1 and D
+        """The norms of `x`, contiguous BF16 `[T, D]` with T >= 1 and D
         8192 (the norms' single tile; the caller checks it): BF16
-        ``[L, T, D]``."""
+        `[L, T, D]`."""
         rows = x.shape[0]
         out = torch.empty(
             (self.num_layers, rows, H), dtype=torch.bfloat16, device=x.device
@@ -347,7 +347,7 @@ class ContextNorms:
 
 
 def _sum_squares_64(k0: Float32, k1: Float32) -> Float32:
-    """``x.pow(2).sum(-1)`` of one 64-wide head whose pair (2 j, 2 j + 1) lane
+    """`x.pow(2).sum(-1)` of one 64-wide head whose pair (2 j, 2 j + 1) lane
     j holds, in torch's CUDA mean order: the squares of elements i and i + 32
     added, then the 32 sums folded by halves (a lane butterfly, then even +
     odd). Every lane gets it (traced inline)."""
@@ -559,7 +559,7 @@ class _ContextKvStoreKernel:
 
 @functools.cache
 def compile_context_kv_store(heads: int, rope: bool, enable_pdl: bool):
-    """cute.compile the store kernel of ``heads`` KV heads (before CUDA graph
+    """cute.compile the store kernel of `heads` KV heads (before CUDA graph
     capture); rows, layers, strides, the block size and eps are runtime
     arguments."""
     assert_not_capturing("the DSpark context K/V store")
@@ -575,8 +575,8 @@ def compile_context_kv_store(heads: int, rope: bool, enable_pdl: bool):
 
 
 class ContextKvStore:
-    """The K-norm with ``eps``, GPT-J RoPE (with ``rope``) and cache insert of
-    ``num_heads`` KV heads per layer, as the stock chain after the K/V
+    """The K-norm with `eps`, GPT-J RoPE (with `rope`) and cache insert of
+    `num_heads` KV heads per layer, as the stock chain after the K/V
     projection. Compiles at construction (before CUDA graph capture); a call
     is graph-capturable."""
 
@@ -594,23 +594,23 @@ class ContextKvStore:
         cos_sin_cache: torch.Tensor | None,
         caches: Sequence[torch.Tensor],
     ) -> None:
-        """Insert ``L = len(caches)`` layers' context K/V rows into their
-        caches, the operands as ``ContextKV.store`` checks them.
+        """Insert `L = len(caches)` layers' context K/V rows into their
+        caches, the operands as `ContextKV.store` checks them.
 
-        ``k`` and ``v`` are bf16 ``[L, T, H, 64]`` views of the K/V
+        `k` and `v` are bf16 `[L, T, H, 64]` views of the K/V
         projection's output, unit stride over the last dim, 64 over the one
-        before, even strides and 4-byte aligned. ``slots`` holds each
+        before, even strides and 4-byte aligned. `slots` holds each
         layer's contiguous int64 slot mapping, all of one length; the first
-        ``len(slots[0])`` rows are inserted, as ``reshape_and_cache_flash``
-        does; a negative slot skips its row. ``positions`` is contiguous
-        int64. ``k`` gets the weightless K-norm, then GPT-J RoPE at
-        ``positions`` from ``cos_sin_cache`` (contiguous bf16
-        ``[max_position, 64]``, cos then sin; None without ``rope``).
-        ``caches`` holds each layer's key-cache view ``[num_blocks,
-        block_size, H, 64]`` of the attention backend's bf16 cache
-        ``[num_blocks, H, block_size, 128]`` (K then V in the last dim), of
+        `len(slots[0])` rows are inserted, as `reshape_and_cache_flash`
+        does; a negative slot skips its row. `positions` is contiguous
+        int64. `k` gets the weightless K-norm, then GPT-J RoPE at
+        `positions` from `cos_sin_cache` (contiguous bf16
+        `[max_position, 64]`, cos then sin; None without `rope`).
+        `caches` holds each layer's key-cache view `[num_blocks,
+        block_size, H, 64]` of the attention backend's bf16 cache
+        `[num_blocks, H, block_size, 128]` (K then V in the last dim), of
         one shape and stride, even strides, 4-byte aligned and fewer than
-        2^31 slots. Up to ``MAX_LAYERS_PER_LAUNCH`` layers take one launch.
+        2^31 slots. Up to `MAX_LAYERS_PER_LAUNCH` layers take one launch.
         """
         assert (cos_sin_cache is not None) == self.rope
         rows = slots[0].shape[0]

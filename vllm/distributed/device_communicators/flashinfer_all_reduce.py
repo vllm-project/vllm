@@ -13,7 +13,6 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config_or_none
 from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
@@ -41,6 +40,15 @@ try:
 except ImportError:
     pass
 
+try:
+    from flashinfer.comm.mnnvl import (
+        all_ranks_support_mnnvl,  # type: ignore[import-not-found]
+        is_mnnvl_fabric_supported,
+    )
+except (ImportError, AttributeError):
+    all_ranks_support_mnnvl = None  # type: ignore[assignment]
+    is_mnnvl_fabric_supported = None  # type: ignore[assignment]
+
 # Workspace for standalone allreduce and non-quant ar+rms fusion
 _fi_ar_workspace = None
 # Extra workspace for quant fusion patterns. This may use either the primary
@@ -52,6 +60,30 @@ _fi_ar_quant_workspace = None
 _fi_ar_workspace_failed = False
 _fi_ar_quant_workspace_failed = False
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
+
+
+# TODO: remove this guard once flashinfer gates explicit backend="mnnvl" with
+# a fabric-state probe itself (its auto-path vote only checks the local
+# multicast device attribute, which cannot detect IB-only multi-node).
+def _mnnvl_group_supported(
+    world_size: int, comm_backend: Any, group: ProcessGroup
+) -> bool:
+    """Collectively check cross-node fabric support before allocating a workspace."""
+    if is_mnnvl_fabric_supported is None or all_ranks_support_mnnvl is None:
+        # Older FlashInfer versions retain the attempt-and-check behavior.
+        return True
+    if _node_count(group) == 1:
+        return True
+
+    try:
+        local_supported = is_mnnvl_fabric_supported(
+            torch.accelerator.current_device_index()
+        )
+    except Exception as e:
+        logger.debug_once("MNNVL fabric probe failed: %s", e)
+        # Still join the collective vote below or other ranks deadlock.
+        local_supported = False
+    return all_ranks_support_mnnvl(local_supported, world_size, comm_backend)
 
 
 def _get_tuned_standalone_max_size(
@@ -83,6 +115,16 @@ def _create_workspace(
     comm_backend = TorchDistBackend(group=group)
     rng_state = random.getstate()
     try:
+        if backend == "mnnvl" and not _mnnvl_group_supported(
+            world_size, comm_backend, group
+        ):
+            logger.warning_once(
+                "Skipping FlashInfer MNNVL allreduce workspace creation: the "
+                "group spans multiple nodes without NVLink fabric support "
+                "(check `nvidia-smi -q | grep -i fabric`). Fused allreduce "
+                "will fall back to unfused allreduce + rmsnorm."
+            )
+            return None
         random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
         # Creation may run lazily inside the first sync-checked forward (e.g.
         # with enforce_eager, which skips warmup).
@@ -144,7 +186,7 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
     """Resolve the flashinfer allreduce backend for the current setup.
 
     Returns:
-        A ``(backend, allow_trtllm_fallback)`` tuple. ``backend`` is ``None``
+        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None`
         when automatic selection has no supported backend for the process
         group.
 
@@ -155,22 +197,6 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
         return backend, False
 
     node_count = _node_count(group)
-    config = get_current_vllm_config_or_none()
-    # TODO: drop once FlashInfer ships flashinfer-ai/flashinfer#7782.
-    if config is not None and config.attention_config.hisparse_config is not None:
-        if node_count == 1:
-            logger.info_once(
-                "Using flashinfer allreduce backend trtllm: the mnnvl fused "
-                "all-reduce + RMSNorm can crash with HiSparse (vllm#64327)."
-            )
-            return "trtllm", False
-        logger.warning_once(
-            "FlashInfer allreduce is disabled: the mnnvl fused all-reduce "
-            "+ RMSNorm can crash with HiSparse (vllm#64327), and trtllm does not "
-            "support multi-node process groups."
-        )
-        return None, False
-
     if node_count == 1:
         # MNNVL decodes faster than TRTLLM on single-node NVSwitch systems
         # (about 3-5% throughput at TP4/TP8 on H200 and B200). Fall back to
@@ -201,23 +227,18 @@ def get_fi_ar_workspace(
     hidden_dim: int,
     dtype: torch.dtype,
     group: ProcessGroup,
-    resolved_backend: tuple[str | None, bool] | None = None,
 ):
     """Return the allreduce workspace for non-quant patterns, initializing if needed.
 
     Used by AllReduceFusionPass (non-quant patterns) and FlashInferAllReduce
     for standalone allreduce. Backend is controlled by
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var. ``resolved_backend`` is a
-    ``_resolve_fi_ar_backend`` result taken while the vLLM config was current;
-    lazy creation can run outside it.
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var.
     """
     global _fi_ar_workspace, _fi_ar_workspace_failed
     if _fi_ar_workspace is not None or _fi_ar_workspace_failed:
         return _fi_ar_workspace
 
-    backend, allow_trtllm_fallback = (
-        _resolve_fi_ar_backend(group) if resolved_backend is None else resolved_backend
-    )
+    backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
 
     if backend is None:
         return None
@@ -279,7 +300,7 @@ def get_fi_ar_quant_workspace(
     """Return the allreduce workspace for quant patterns, initializing if needed.
 
     Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env var, matching
-    non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm
+    non-quant fusion. With `auto` this prefers mnnvl and falls back to trtllm
     only on single-node topologies where mnnvl multicast is unavailable.
     """
     global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed
@@ -449,8 +470,7 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-        self.resolved_backend = _resolve_fi_ar_backend(self.group)
-        backend = self.resolved_backend[0]
+        backend, _ = _resolve_fi_ar_backend(self.group)
         if backend is None:
             logger.info(
                 "FlashInfer All Reduce is disabled because no supported backend "
@@ -482,7 +502,6 @@ class FlashInferAllReduce:
             hidden_dim=hidden_dim,
             dtype=dtype,
             group=self.group,
-            resolved_backend=self.resolved_backend,
         )
         if workspace is None:
             self.disabled = True

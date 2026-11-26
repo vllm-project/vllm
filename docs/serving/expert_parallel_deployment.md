@@ -9,8 +9,7 @@ EP is typically coupled with Data Parallelism (DP). While DP can be used indepen
 Before using EP, you need to install the necessary dependencies. We are actively working on making this easier in the future:
 
 1. **Install DeepEP**: Set up host environment following vLLM's guide for EP kernels [here](../../tools/ep_kernels).
-2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
-3. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
+2. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
 
 !!! note "NCCL version (CUDA 13+)"
     The `deepep_v2` backend requires NCCL >= 2.30.4. PyTorch ships an older
@@ -36,10 +35,11 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 
 | Backend | Use Case | Features | Best For |
 | ------- | -------- | -------- | -------- |
-| `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
+| `auto` | Default | Picks `flashinfer_nvlink_one_sided` for EP without elastic EP, on any GB200/GB300/VR200 topology or on a single HGX B200/B300 node launched by vLLM (serving fits on that one node, any parallel layout), for BF16/FP16, ModelOpt NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend; `allgather_reducescatter` otherwise | Most deployments |
+| `allgather_reducescatter` | General purpose | Standard all2all using allgather/reducescatter primitives | Works with any EP+DP configuration |
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
-| `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
+| `flashinfer_nvlink_one_sided` | MNNVL systems, single-node NVSwitch | FlashInfer's one-sided A2A strategy over NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
@@ -136,6 +136,23 @@ EPv2 limitations:
 - Install a MoRI build that ships `mori.ops.dispatch_combine_v2`. On NICs that limit a registered memory region to 2 GiB, the window registration fails once the dispatch arena outgrows that limit (DeepSeek-V4-Pro at EP8 already does at the default 16k batched tokens).
 - Older MoRI builds leave a stale HIP error behind when the fabric-handle probe fails (e.g. on a single MI355X node), and the next PyTorch allocation raises `operation not supported`.
 
+### FlashInfer MegaMoE on SM107
+
+`--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` runs FlashInfer's CuTeDSL MegaMoE on SM107 (compute capability 10.7, NVIDIA Rubin) GPUs for NVFP4 and MXFP4 expert checkpoints. MXFP4 weights are used as stored and run with MXFP8 activations, whatever activation scheme the checkpoint declares. ModelOpt NVFP4 and the MXFP4 experts of DeepSeek-V4.1 are validated; other checkpoints, for example compressed-tensors, have not yet been tested on SM107. It is never selected automatically.
+
+Requirements:
+
+- The `nvshmem4py-cu13` package (`uv pip install nvshmem4py-cu13`).
+- `CUTE_DSL_ARCH=sm_107a` exported before vLLM starts.
+- `NVSHMEM_SYMMETRIC_SIZE`: the backend needs about `(2 * top_k + 2) * hidden_size * max_num_batched_tokens` bytes for each distinct MoE layer shape and weight format, summed. With speculative decoding the draft model's MoE layers count separately. Set it only if the sum exceeds NVSHMEM's default heap size.
+
+Behavior:
+
+- For NVFP4 experts, the checkpoint's activation input scales (the layer maximum over the EP group) set the activation and FC1-output quantization. A non-finite scale, or a layer whose scales are all zero, fails at load. MXFP4 experts have no such scales.
+- For DeepSeek-V4 routing (DeepSeek-V4 and V4.1 checkpoints), vLLM sets `FLASHINFER_SM107_MEGA_CHECK_ROUTES=0` unless it is already set, because that router can return non-finite scores on valid routes and a failed check stops the worker. This disables all of FlashInfer's SM107 route checks in the process (non-finite scores, expert ids out of range, duplicate ids), so a router bug is not caught on the device. Export `FLASHINFER_SM107_MEGA_CHECK_ROUTES=1` to enable them. Other models keep FlashInfer's default.
+- Draft and MTP expert layers use the target's `--moe-backend` unless `--speculative-config` sets `moe_backend` and the speculative method applies it; DSpark does not, so its drafts always use the target's. For example, with DeepSeek-V4.1-Flash-NVFP4 and `--speculative-config '{"method": "dspark", ...}'`, both the target's NVFP4 experts and the draft's MXFP4 experts run on this backend.
+- Not supported on SM107 with this backend: EPLB, and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
+
 ## Multi-Node Deployment
 
 For multi-node deployment, use the DeepEP communication kernel with one of two modes (see [Backend Selection Guide](#backend-selection-guide) above).
@@ -200,6 +217,45 @@ Enable EPLB with the `--enable-eplb` flag.
 
 When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
 
+### Multimodel EPLB with speculative decoding
+
+When speculative decoding uses a draft model that implements `MixtureOfExperts`
+(for example Qwen3-Next MTP, EAGLE, or DeepSeek DSpark), vLLM registers the
+draft and target in the same `EplbState`. Each model keeps its own expert load
+windows, communicators, and rearrangement maps, but shares the same rearrangement
+step counter across EP ranks.
+
+Target and draft models may have different expert topologies. This is required
+for DeepSeek V4.1 DSpark, where draft layers use `dspark_n_routed_experts`
+while the target backbone uses the full routed-expert count. Each model is
+load-balanced independently.
+
+For supported MoE drafts, target EPLB also enables draft EPLB by default. Set
+`draft_enable_eplb` to `false` in the speculative config to disable EPLB for
+the draft while keeping it enabled for the target. In that case,
+`eplb_config.draft_num_redundant_experts` cannot be set.
+
+For every registered model, `(num_routed_experts + num_redundant_experts)` must
+be divisible by the EP world size.
+
+Set `draft_num_redundant_experts` in `--eplb-config` to select the redundant
+expert count for a speculative MoE draft. This setting is ignored unless a
+speculative MoE draft is configured. When unset, vLLM inherits the target's
+count if the target and draft have the same routed-expert counts and that count
+is valid for the draft. Otherwise, vLLM computes the minimum valid count from
+the draft's routed expert counts and the shared EP size. An explicit value is
+used as given and rejected if it is invalid; validation suggests the minimum
+valid count when one value works for all draft layers. This applies to Eagle,
+Eagle3, MTP, DFlash, and supported DSpark drafts. A single redundant-expert
+count must make every draft layer's total expert count divisible by the EP
+size; configuration fails when the draft's layers require different padding
+counts.
+For DSpark drafts, divisibility is checked against the target EP group. If EPLB
+is enabled and `draft_tensor_parallel_size` is `1`, prefill context parallelism
+or data parallelism must also be greater than `1`.
+Draft EPLB for DSpark is not supported with Elastic EP; set
+`speculative_config.draft_enable_eplb=false` to disable EPLB for the draft.
+
 ### EPLB Parameters
 
 Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
@@ -209,7 +265,8 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
+| `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
@@ -232,6 +289,16 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.num_redundant_experts 2 \
             --eplb-config.log_balancedness true
     ```
+
+For speculative decoding with a MoE draft, configure both speculative decoding
+and the draft-specific EPLB count:
+
+```bash
+vllm serve <target-moe-model> \
+  --enable-eplb \
+  --eplb-config '{"num_redundant_experts":2,"draft_num_redundant_experts":2}' \
+  --speculative-config '{"method":"draft_model","model":"<draft-moe-model>","num_speculative_tokens":5}'
+```
 
 ### Expert Distribution Formula
 
@@ -376,7 +443,7 @@ except Exception as e:
 
 - To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation. Add `"kv_connector_extra_config":{"startup_fill":true}` to fill the whole KV cache once at startup instead of in the decode steps that admit new requests (see the connector docstring for its limitations).
 
-- **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
+- **CUDAGraph capture**: Use `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
 
 ## Fault tolerance and scale-down recovery
 
@@ -391,8 +458,8 @@ coordinates recovery across the engines.
 ### Configuring recovery
 
 Both retry and scale-down require `--enable-fault-tolerance`,
-`--enable-expert-parallel`, an FT-capable `--all2all-backend` (`nixl_ep` or
-`deepep_low_latency`), and the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
+`--enable-expert-parallel`, and an FT-capable `--all2all-backend` (`nixl_ep` or
+`deepep_low_latency`).
 Retry can recover from a fault when all workers remain alive.
 
 For scale-down recovery, also enable `--enable-eplb` and configure enough
@@ -400,6 +467,18 @@ redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
 logical experts on the surviving ranks. The original checkpoint must remain
 accessible to survivors so they can reload expert weights.
 The orchestrator selects the recovery mode when it sends the recovery request.
+
+The `FaultToleranceConfig.request_failure_policy` setting controls how faults
+affect unfinished requests. The default, `"fail"`, aborts them immediately.
+To keep them queued for resumption after successful retry or scale-down recovery,
+set `--fault-tolerance-config '{"request_failure_policy": "recompute"}'`.
+The engine recomputes their KV cache from the prompt and already generated
+tokens, then continues generation. Streams on surviving engines stall during
+recovery and continue afterward; requests on a dead engine cannot be resumed
+this way.
+To discard queued requests for a particular retry, include `"abort": true` in
+the retry request's `params`. This parameter must be a JSON boolean and defaults
+to `false`; resumption still requires `request_failure_policy="recompute"`.
 
 ### Coordinating recovery
 

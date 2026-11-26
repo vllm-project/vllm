@@ -1,6 +1,6 @@
 # Muse Spark decode monokernel (MI355X, FlyDSL)
 
-`--monokernel` for `MuseSpark1xForCausalLM` on MI355X: decoder layers 1-60 of
+`--monokernel` for `MuseSparkForCausalLM` on MI355X: decoder layers 1-60 of
 a speculative verify step run as persistent FlyDSL launches, from one layer's
 attention output to the next layer's q, o-gate and KV insert. vLLM's own
 attention op runs between the launches, except where a launch runs the

@@ -372,9 +372,9 @@ def _canvas_layout(
     slices: list[tuple[int, int, int]],
     target_sizes: torch.Tensor,
 ) -> _CanvasLayout:
-    """Measure the canvas for one ``(thumbnail, slices)`` group.
+    """Measure the canvas for one `(thumbnail, slices)` group.
 
-    ``thumbnail`` and each slice are ``(start, end, target_index)`` token spans.
+    `thumbnail` and each slice are `(start, end, target_index)` token spans.
     """
     t_bs, t_be, t_gi = thumbnail
     thumb_h, thumb_w = compute_llm_grid(t_be - t_bs, *_target_hw(target_sizes, t_gi))
@@ -408,12 +408,12 @@ def _assign_canvas_span(
     base: int,
     target_sizes: torch.Tensor,
 ) -> int:
-    """Place one canvas at ``base``, writing its 3-D positions into ``pos3d``.
+    """Place one canvas at `base`, writing its 3-D positions into `pos3d`.
 
     Shared by the video-frame and single-image paths; they differ only in how
     the per-canvas base advances, not in the geometry placed here.
 
-    Mutates ``pos3d`` in place, as the packed canvas computation has always
+    Mutates `pos3d` in place, as the packed canvas computation has always
     done. Returns the distance to the next canvas base, so each caller keeps
     only its own base advancement.
     """
@@ -568,8 +568,8 @@ def _compute_canvas_packed(
         """First position after a group's trailing structural tokens.
 
         Matches the transformers reference, which closes a span over every
-        marker in ``markers`` -- newlines included. The chat template joins
-        content parts with ``\\n``, so an image followed by text always ends with
+        marker in `markers` -- newlines included. The chat template joins
+        content parts with `\\n`, so an image followed by text always ends with
         one; leaving it out moves that newline out of the canvas and pushes
         every later position one step forward.
         """

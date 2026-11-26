@@ -17,6 +17,17 @@ vllm serve MODEL \
   --watermark-config '{"algorithm":"gumbel","key":42}'
 ```
 
+To keep the key off the command line, read it from a file instead, for example
+a mounted Docker or Kubernetes secret:
+
+```bash
+vllm serve MODEL \
+  --watermark-config '{"algorithm":"gumbel","key_file":"/secrets/watermark_key"}'
+```
+
+The file holds the key as a decimal integer; surrounding whitespace is ignored.
+vLLM reads it once at startup. Set either `key` or `key_file`, not both.
+
 Watermarking is disabled when `--watermark-config` is omitted. Gumbel-max (see
 `gumbel`) is the default algorithm within an enabled `WatermarkConfig`.
 
@@ -78,8 +89,7 @@ When `watermark_config` is set, the Prometheus counter
 Each finished request has exactly one status, so the sum over `status` equals
 `vllm:request_success_total` on the same instance. Requests that the client
 aborts are in neither counter. The counter does not exist without
-`watermark_config`. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not
-export this counter yet. With `n > 1`, each sequence counts once. In a
+`watermark_config`. With `n > 1`, each sequence counts once. In a
 disaggregated prefill/decode deployment, both instances count a request: sum
 over decode instances only. For streaming input, the first input chunk sets
 the status.
@@ -311,9 +321,7 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 ## Limitations
 
-- Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
-- Global custom logits processors are unavailable because Model Runner V2 does
-  not support them.
+- Global custom logits processors are not supported.
