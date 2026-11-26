@@ -681,7 +681,7 @@ def _assert_requantized_weights(
     target: str,
     *parameter_prefixes: str,
 ) -> None:
-    from tests.quantization.test_online_mxfp4 import fix_negative_zeros
+    from tests.quantization.reference_mxfp4 import fix_negative_zeros
 
     for prefix in parameter_prefixes:
         expected = getattr(offline_layer, f"{prefix}weight")
