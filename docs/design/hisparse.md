@@ -94,15 +94,16 @@ sees only device pools.
 The source group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
-For MLA with single-node MP tensor parallelism, every TP worker maps the same
+For MLA with MP tensor parallelism, every TP worker on a node maps the same
 pinned host pool and uses the same block and layer offsets. Source KV is replicated
-across TP ranks, so this stores one physical copy instead of one copy per rank.
-TP rank 0 writes the shared host pool; peers wait on its IPC events before
-reading it. Other executor and parallel layouts retain private per-rank pools.
+across TP ranks, so this stores one physical copy per node instead of one copy per
+rank. The lowest TP rank on each node writes that node's pool; its peers wait on
+its IPC events before reading it. Other executor and parallel layouts retain
+private per-rank pools.
 
-The shared layout backs the per-replica logical capacity with one physical pool;
-the private layout allocates one physical pool per rank. Physical pool size
-includes block-stride alignment.
+The shared layout backs the per-replica logical capacity with one physical pool
+per node; the private layout allocates one physical pool per rank. Physical pool
+size includes block-stride alignment.
 
 ## Code boundary
 
