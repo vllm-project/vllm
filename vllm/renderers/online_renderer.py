@@ -816,6 +816,9 @@ class OnlineRenderer:
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
+        renderer.validate_request_chat_template_kwargs(
+            getattr(request, "chat_template_kwargs", None)
+        )
         validate_request_mm_kwargs(
             mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
             media_io_kwargs=getattr(request, "media_io_kwargs", None),

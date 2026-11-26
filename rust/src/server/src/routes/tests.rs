@@ -75,6 +75,7 @@ use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
 
+mod decisions;
 mod responses;
 
 fn request_output(
@@ -463,6 +464,8 @@ struct FakeChatBackend {
     /// A model's own renderer replacing the fake chat format.
     chat_renderer: Option<DynChatRenderer>,
     parsers: ResolvedParsers,
+    /// A tokenizer replacing [`fake_chat_tokenizer`].
+    tokenizer: Option<Arc<TestTokenizer>>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -520,6 +523,7 @@ impl FakeChatBackend {
             skip_tokenizer_init: false,
             chat_renderer: None,
             parsers,
+            tokenizer: None,
         }
     }
 
@@ -564,6 +568,9 @@ impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
         if self.skip_tokenizer_init {
             return Arc::new(UnavailableTokenizer::new(1024));
+        }
+        if let Some(tokenizer) = &self.tokenizer {
+            return tokenizer.clone();
         }
         Arc::new(fake_chat_tokenizer())
     }
@@ -2978,6 +2985,73 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{json}");
+}
+
+/// Render classifies a renderer's errors like the chat route: a refusal of
+/// the request is 400 with its parameter, the model's template failing on
+/// this request is 400, and a renderer failure is 500.
+#[tokio::test]
+async fn render_chat_classifies_renderer_errors_by_fault() {
+    type MakeError = fn() -> vllm_chat::Error;
+    struct FailingRenderer(MakeError);
+
+    impl ChatRenderer for FailingRenderer {
+        fn render(&self, _request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
+            Err((self.0)())
+        }
+    }
+
+    let cases: [(MakeError, StatusCode, serde_json::Value); 4] = [
+        (
+            || vllm_chat::Error::InvalidMessages {
+                message: "unknown tool_call_id `call-unknown`".to_string(),
+            },
+            StatusCode::BAD_REQUEST,
+            json!("messages"),
+        ),
+        (
+            || vllm_chat::Error::InvalidContinueFinalMessage {
+                message: "nothing to continue".to_string(),
+            },
+            StatusCode::BAD_REQUEST,
+            json!("continue_final_message"),
+        ),
+        (
+            || vllm_chat::Error::ChatTemplateRender {
+                message: "unknown filter".to_string(),
+            },
+            StatusCode::BAD_REQUEST,
+            serde_json::Value::Null,
+        ),
+        (
+            || vllm_chat::Error::ChatTemplate("renderer state is inconsistent".to_string()),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::Value::Null,
+        ),
+    ];
+    for (error, status, param) in cases {
+        let backend = Arc::new(FakeChatBackend::with_chat_renderer(Arc::new(
+            FailingRenderer(error),
+        )));
+        let mut app = build_render_router(Arc::new(RenderState {
+            text: TextRequestProcessor::new(backend.clone(), 128),
+            chat: ChatRequestProcessor::new(backend, None, None),
+            ..test_render_state(Some(128))
+        }));
+
+        let (actual_status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(actual_status, status, "{json}");
+        assert_eq!(json["error"]["param"], param, "{json}");
+    }
 }
 
 /// Python renders an empty user turn, so the render route must accept empty
@@ -13277,6 +13351,55 @@ async fn post_json(
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }));
     (status, json)
+}
+
+/// A body whose `messages` is a list is a chat tokenize request even when it
+/// also carries `prompt`: a malformed chat part is reported, not replaced by the
+/// tokens of `prompt`. Without a `messages` list, `prompt` is tokenized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_selects_chat_by_a_messages_list() {
+    let (mut app, _engine_task) = test_app().await;
+    let request = |messages: serde_json::Value| json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "messages": messages});
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        request(json!([{
+            "role": "user",
+            "content": [{"type": "input_audio", "input_audio": {"data": "dGVzdA==", "format": "WAV"}}],
+        }])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    for messages in [serde_json::Value::Null, json!(17)] {
+        let (status, json) = post_json(&mut app, "/tokenize", request(messages)).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["count"], 6, "{json}");
+    }
+}
+
+/// A Responses `input_audio` part without `format` is rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_input_audio_requires_format() {
+    let (mut app, _engine_task) = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/responses",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_audio", "input_audio": {"data": "dGVzdA=="}}],
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
