@@ -5,12 +5,12 @@ from typing import Any, Final
 
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.openai.models.serving import (
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -20,37 +20,46 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizerInfoResponse,
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.params import apply_max_tokenize_tokens, resolve_max_tokenize_tokens
 from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
 
-class OpenAIServingTokenization(OpenAIServing):
+class ServingTokenization(BaseServing):
     def __init__(
         self,
-        engine_client: EngineClient,
-        models: OpenAIServingModels,
-        openai_serving_render: OpenAIServingRender,
+        models: OpenAIServingModels | OpenAIModelRegistry,
+        online_renderer: OnlineRenderer,
         *,
-        request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         trust_request_chat_template: bool = False,
+        request_logger: RequestLogger | None = None,
+        max_tokenize_tokens: int | None = None,
     ) -> None:
         super().__init__(
-            engine_client=engine_client,
             models=models,
+            model_config=online_renderer.model_config,
             request_logger=request_logger,
         )
 
-        self.openai_serving_render = openai_serving_render
+        self.renderer = online_renderer.renderer
+        self.online_renderer = online_renderer
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.trust_request_chat_template = trust_request_chat_template
+        self.max_tokenize_tokens = resolve_max_tokenize_tokens(
+            max_tokenize_tokens,
+            online_renderer.model_config.max_model_len,
+        )
 
     async def create_tokenize(
         self,
@@ -61,17 +70,38 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        try:
+            tok_params = apply_max_tokenize_tokens(
+                request.build_tok_params(self.model_config),
+                self.max_tokenize_tokens,
+            )
+        except VLLMValidationError as e:
+            return self.create_error_response(str(e))
+
         request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
 
-        if isinstance(request, TokenizeChatRequest):
+        if (
+            isinstance(request, TokenizeChatRequest)
+            and self.online_renderer.use_harmony
+        ):
+            # The chat route renders GPT-OSS chats with Harmony, not the template.
+            rendered = await self.online_renderer.render_chat(
+                request.to_chat_completion_request(),
+                skip_mm_cache=True,
+                tok_params=tok_params,
+            )
+            if isinstance(rendered, ErrorResponse):
+                return rendered
+            _, engine_inputs = rendered
+        elif isinstance(request, TokenizeChatRequest):
             tool_dicts = (
                 None
                 if request.tools is None
                 else [tool.model_dump() for tool in request.tools]
             )
-            error_check_ret = self.openai_serving_render.validate_chat_template(
+            error_check_ret = self.online_renderer.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
@@ -79,7 +109,7 @@ class OpenAIServingTokenization(OpenAIServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, engine_inputs = await self.openai_serving_render.preprocess_chat(
+            _, engine_inputs = await self.online_renderer.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -87,13 +117,15 @@ class OpenAIServingTokenization(OpenAIServing):
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
                 skip_mm_cache=True,
+                tok_params=tok_params,
             )
         else:
-            engine_inputs = await self.openai_serving_render.preprocess_completion(
+            engine_inputs = await self.online_renderer.preprocess_completion(
                 request,
                 prompt_input=request.prompt,
                 prompt_embeds=None,
                 skip_mm_cache=True,
+                tok_params=tok_params,
             )
 
         input_ids: list[int] = []
@@ -112,7 +144,10 @@ class OpenAIServingTokenization(OpenAIServing):
         token_strs = None
         if request.return_token_strs:
             tokenizer = self.renderer.get_tokenizer()
-            token_strs = tokenizer.convert_ids_to_tokens(input_ids)
+            token_strs = [
+                t.decode("utf-8", errors="replace") if isinstance(t, bytes) else t
+                for t in tokenizer.convert_ids_to_tokens(input_ids)
+            ]
 
         return TokenizeResponse(
             tokens=input_ids,
@@ -130,6 +165,14 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        try:
+            tok_params = apply_max_tokenize_tokens(
+                request.build_tok_params(self.model_config),
+                self.max_tokenize_tokens,
+            )
+        except VLLMValidationError as e:
+            return self.create_error_response(str(e))
+
         request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
@@ -143,7 +186,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         tok_prompt = await self.renderer.tokenize_prompt_async(
             TokensPrompt(prompt_token_ids=request.tokens),
-            request.build_tok_params(self.model_config),
+            tok_params,
         )
         prompt_text = tok_prompt["prompt"]  # type: ignore[typeddict-item]
 
@@ -158,7 +201,7 @@ class OpenAIServingTokenization(OpenAIServing):
         return TokenizerInfoResponse(**info)
 
 
-@dataclass
+@dataclass(slots=True)
 class TokenizerInfo:
     tokenizer: TokenizerLike
     chat_template: str | None

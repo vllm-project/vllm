@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.model_executor.models.qwen3 import Qwen3Model
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 from vllm.sequence import IntermediateTensors
@@ -15,9 +16,8 @@ from vllm.sequence import IntermediateTensors
 WeightItem = tuple[str, torch.Tensor]
 
 
-class VoyageQwen3BidirectionalEmbedModel(nn.Module):
-    """
-    Qwen3Model + Voyage embedding head + bidirectional attention.
+class VoyageQwen3BidirectionalEmbedModel(nn.Module, SupportsLoRA):
+    """Qwen3Model + Voyage embedding head + bidirectional attention.
 
     Checkpoint conventions (HF):
       - MLP: gate_proj + up_proj (unfused)
@@ -30,6 +30,11 @@ class VoyageQwen3BidirectionalEmbedModel(nn.Module):
       - self_attn.qkv_proj (fused)
       - No "model." prefix
     """
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

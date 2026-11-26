@@ -28,7 +28,6 @@ Using sequence classification models as (sequence) (outcome) reward models, the 
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
-| `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ |
 | `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `Skywork/Skywork-Reward-V2-Qwen3-0.6B`, etc. | ✅︎ | ✅︎ |
 | `LlamaForSequenceClassification`<sup>C</sup> | Llama-based | `Skywork/Skywork-Reward-V2-Llama-3.2-1B`, etc. | ✅︎ | ✅︎ |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
@@ -143,4 +142,4 @@ More examples can be found here: [examples/pooling/reward](../../../examples/poo
 
 ### `LLM.reward`
 
-`llm.reward` api is deprecated and will be removed in v0.23. Please use `LLM.encode` with `pooling_task="classify"` or `pooling_task="token_classify"` instead.
+`llm.reward` API is deprecated and was removed in v0.24. Please use `LLM.encode` with `pooling_task="classify"` or `pooling_task="token_classify"` instead.

@@ -1,0 +1,148 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
+
+import pytest
+
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
+from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
+from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
+from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
+
+
+class _DummyCachePolicy(CachePolicy):
+    """Minimal CachePolicy for CachePolicyFactory registration tests. Loaded
+    by module path, so it must be importable at module scope (mirrors
+    tests/v1/kv_offload/test_factory.py's SingleArgExternalOffloadingSpec)."""
+
+    def __init__(self, cache_capacity: int) -> None:
+        super().__init__(cache_capacity)
+        self.chunks: dict[OffloadKey, ChunkStatus] = {}
+
+    def get(self, key: OffloadKey) -> ChunkStatus | None:
+        return self.chunks.get(key)
+
+    def insert(
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+    ) -> None:
+        self.chunks[key] = chunk
+
+    def remove(self, key: OffloadKey) -> None:
+        del self.chunks[key]
+
+    def on_request_finished(
+        self,
+        key_groups: Sequence[Sequence[OffloadKey]],
+        insertion_only_keys: set[OffloadKey],
+        reused_keys: set[OffloadKey],
+        req_context: ReqContext,
+    ) -> None:
+        pass
+
+    def evict(
+        self, n: int, protected: set[OffloadKey]
+    ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
+        candidates = [
+            (key, chunk)
+            for key, chunk in self.chunks.items()
+            if chunk.ref_cnt == 0 and key not in protected
+        ][:n]
+        if len(candidates) < n:
+            return None
+        for key, _ in candidates:
+            self.remove(key)
+        return candidates
+
+    def clear(self) -> None:
+        self.chunks.clear()
+
+
+def test_external_policy_can_ignore_retention():
+    policy = _DummyCachePolicy(2)
+    ctx = ReqContext(req_id="store")
+    oldest, newest = OffloadKey(b"old"), OffloadKey(b"new")
+    first, second = ChunkStatus(0), ChunkStatus(1)
+    for key, chunk in ((oldest, first), (newest, second)):
+        chunk.ref_cnt = 0
+        policy.insert(key, chunk, ctx)
+
+    first.lease_cnt = 1
+    policy.on_retention_changed(oldest, first.retained)
+
+    evicted = policy.evict(1, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [oldest]
+    assert policy.get(oldest) is None
+    assert policy.get(newest) is not None
+
+
+@pytest.fixture(autouse=True)
+def restore_cache_policy_registry():
+    """Save and restore CachePolicyFactory._registry between tests."""
+    original = dict(CachePolicyFactory._registry)
+    yield
+    CachePolicyFactory._registry = original
+
+
+class TestCachePolicyFactory:
+    """Unit tests for CachePolicyFactory (registration/resolution by name)."""
+
+    def test_pre_registered_policies_can_be_imported(self):
+        """If someone moves a policy module but forgets to update
+        factory.py, CI fails."""
+        for name in CachePolicyFactory._registry:
+            cls = CachePolicyFactory._registry[name]()
+            assert issubclass(cls, CachePolicy)
+
+    def test_lru_and_arc_registered(self):
+        assert CachePolicyFactory.get_cache_policy_cls("lru") is LRUCachePolicy
+        assert CachePolicyFactory.get_cache_policy_cls("arc") is ARCCachePolicy
+
+    def test_register_and_resolve_custom_policy(self):
+        CachePolicyFactory.register_cache_policy(
+            "dummy",
+            "tests.v1.kv_offload.cpu.policies.test_factory",
+            "_DummyCachePolicy",
+        )
+        policy_cls = CachePolicyFactory.get_cache_policy_cls("dummy")
+        assert policy_cls is _DummyCachePolicy
+
+        manager = CPUOffloadingManager(num_chunks=4, cache_policy="dummy")
+        assert isinstance(manager._policy, _DummyCachePolicy)
+
+    def test_unregistered_policy_raises(self):
+        with pytest.raises(ValueError, match="Unknown cache policy"):
+            CachePolicyFactory.get_cache_policy_cls("nonexistent")
+
+    def test_duplicate_registration_raises(self):
+        with pytest.raises(ValueError, match="is already registered"):
+            CachePolicyFactory.register_cache_policy("lru", "some.module", "SomeClass")
+
+    def test_dynamic_load_via_cache_policy_module_path(self):
+        """Out-of-tree policy loaded via cache_policy_module_path, no
+        register_cache_policy() call -- this is how external projects
+        integrate a custom CachePolicy without forking/patching vLLM.
+        Mirrors tests/v1/kv_offload/test_factory.py's
+        test_dynamic_load_via_spec_module_path."""
+        policy_cls = CachePolicyFactory.get_cache_policy_cls(
+            "_DummyCachePolicy", "tests.v1.kv_offload.cpu.policies.test_factory"
+        )
+        assert policy_cls is _DummyCachePolicy
+
+    def test_manager_resolves_policy_via_module_path(self):
+        """End-to-end: CPUOffloadingManager resolves an unregistered policy
+        purely from cache_policy_module_path."""
+        manager = CPUOffloadingManager(
+            num_chunks=4,
+            cache_policy="_DummyCachePolicy",
+            cache_policy_module_path="tests.v1.kv_offload.cpu.policies.test_factory",
+        )
+        assert isinstance(manager._policy, _DummyCachePolicy)
+
+    def test_unregistered_policy_without_module_path_raises(self):
+        """eviction_policy not in registry + no cache_policy_module_path ->
+        ValueError, same shape as the OffloadingSpecFactory error path."""
+        with pytest.raises(ValueError, match="Unknown cache policy"):
+            CachePolicyFactory.get_cache_policy_cls("nonexistent", None)

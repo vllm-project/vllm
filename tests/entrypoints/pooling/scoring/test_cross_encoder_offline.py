@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import weakref
 
 import pytest
@@ -8,10 +9,8 @@ import torch
 
 from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.platforms import current_platform
 
-MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+MODEL_NAME = "vllm-project/Qwen3-Reranker-0.6B-seq-cls"
 PROMPT = "The chef prepared a delicious meal."
 TEXTS_1 = [
     "What is the capital of France?",
@@ -25,30 +24,20 @@ TEXTS_2 = [
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # ROCm: Use FLEX_ATTENTION backend as it's the only attention backend
-    # that supports encoder-only models on ROCm.
-    attention_config = None
-    if current_platform.is_rocm():
-        attention_config = {"backend": "FLEX_ATTENTION"}
-
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-        attention_config=attention_config,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.fixture(scope="module")
@@ -110,6 +99,63 @@ def test_classify(llm):
     outputs = llm.encode(PROMPT, pooling_task="classify", use_tqdm=False)
     assert len(outputs) == 1
     assert len(outputs[0].outputs.data) == 1
+
+
+@pytest.mark.parametrize(
+    "content_format",
+    [
+        pytest.param(None, id="detected-default"),
+        pytest.param("openai", id="structured"),
+        pytest.param("string", id="explicit-string"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_score_content_format_override_matches_classify(llm: LLM, content_format):
+    query, document = TEXTS_1[0], TEXTS_2[0]
+    expected_prompt = json.dumps(
+        [
+            {"role": "query", "content": [{"type": "text", "text": query}]},
+            {"role": "document", "content": [{"type": "text", "text": document}]},
+        ]
+    )
+    chat_template = "{{ messages | tojson }}"
+    if content_format is None:
+        chat_template = (
+            "{% for message in messages %}"
+            "{% for part in message.content %}{{ part.text }}{% endfor %}"
+            "{% endfor %}"
+        )
+        expected_prompt = query + document
+    elif content_format == "string":
+        chat_template = (
+            "{% for message in messages %}"
+            "{% for char in message.content %}{{ char }}{% endfor %}"
+            "{% endfor %}"
+        )
+        expected_prompt = query + document
+    # Compare full-prefill executions; a prefix-cache hit changes the compute path.
+    llm.reset_prefix_cache()
+    format_kwargs = (
+        {}
+        if content_format is None
+        else {"chat_template_content_format": content_format}
+    )
+    (scored,) = llm.score(
+        query,
+        document,
+        chat_template=chat_template,
+        **format_kwargs,
+        tokenization_kwargs={"add_special_tokens": False},
+        use_tqdm=False,
+    )
+    llm.reset_prefix_cache()
+    (classified,) = llm.classify(
+        expected_prompt,
+        tokenization_kwargs={"add_special_tokens": False},
+        use_tqdm=False,
+    )
+    assert scored.prompt_token_ids == classified.prompt_token_ids
+    assert scored.outputs.score == pytest.approx(classified.outputs.probs[0])
 
 
 @pytest.mark.skip_global_cleanup

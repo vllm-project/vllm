@@ -83,3 +83,21 @@ ECConnectorFactory.register_connector(
     "vllm.distributed.ec_transfer.ec_connector.example_connector",
     "ECExampleConnector",
 )
+
+ECConnectorFactory.register_connector(
+    "ECCPUConnector",
+    "vllm.distributed.ec_transfer.ec_connector.cpu.connector",
+    "ECCPUConnector",
+)
+
+ECConnectorFactory.register_connector(
+    "ECTieringConnector",
+    "vllm.distributed.ec_transfer.ec_connector.tiering.connector",
+    "ECTieringConnector",
+)
+
+ECConnectorFactory.register_connector(
+    "ECMooncakeConnector",
+    "vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector",
+    "ECMooncakeConnector",
+)

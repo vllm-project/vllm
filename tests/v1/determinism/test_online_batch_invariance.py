@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HTTP-based batch invariance test: send requests to a running
+"""HTTP-based batch invariance test: send requests to a running
 vLLM server and compare BS=1 vs BS=N results (tokens and per-step logprobs).
 
 Environment variables:
   - VLLM_TEST_MODEL: served model name (e.g., Qwen/Qwen3-1.7B / DeepSeek-R1)
   - VLLM_TP_SIZE: tensor parallelism size (e.g., 4)
+  - VLLM_TEST_SERVER_ARGS: extra server args (e.g., "--data-parallel-size 4")
 
 """
 
@@ -17,7 +17,7 @@ from typing import Any
 
 import openai
 import pytest
-from utils import BACKENDS, TEST_MODEL, _random_prompt, skip_unsupported
+from utils import BACKENDS, TEST_MODEL, _random_prompt, skip_if_not_cuda_alike
 
 from tests.utils import RemoteOpenAIServer
 
@@ -133,7 +133,7 @@ def _compare_bs1_vs_bsn_single_process(
                 )
 
 
-@skip_unsupported
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend: str,
@@ -157,6 +157,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     ]
     if tp_size:
         server_args += ["-tp", tp_size]
+    server_args += os.getenv("VLLM_TEST_SERVER_ARGS", "").split()
 
     with RemoteOpenAIServer(TEST_MODEL, server_args) as server:
         client = server.get_client()

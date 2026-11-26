@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -26,10 +26,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import is_vit_use_data_parallel
 
 
@@ -48,7 +47,7 @@ class VisionRotaryEmbedding(nn.Module):
 
 
 class Siglip2VisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -87,17 +86,16 @@ class Siglip2VisionEmbeddings(nn.Module):
         pixel_values: torch.FloatTensor,
         grid_thws: torch.LongTensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            pixel_values (`torch.FloatTensor`):
-                Pixel values of shape (
-                    num_patches,
-                    num_channels * temporal_patch_size * patch_size * patch_size
-                )
-            grid_thws: (`torch.LongTensor`):
-                grid shape (num_patches, 3)
-        """
+        """Args:
+        pixel_values (`torch.FloatTensor`):
+            Pixel values of shape (
+                num_patches,
+                num_channels * temporal_patch_size * patch_size * patch_size
+            )
+        grid_thws: (`torch.LongTensor`):
+            grid shape (num_patches, 3)
 
+        """
         # Apply patch embeddings to already patchified pixel values
         target_dtype = self.patch_embedding.weight.dtype
         if isinstance(self.patch_embedding, LinearBase):
@@ -174,7 +172,7 @@ def apply_rotary_pos_emb(
 
 
 class Siglip2Attention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -237,8 +235,7 @@ class Siglip2Attention(nn.Module):
         cu_seqlens: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Input shape: Batch x Time x Channel"""
-
+        """Input shape: Batch x Time x Channel."""
         seq_length, embed_dim = hidden_states.shape
 
         qkv_states, _ = self.qkv_proj(hidden_states)
@@ -249,6 +246,7 @@ class Siglip2Attention(nn.Module):
         values = values.view(seq_length, self.num_heads_per_partition, self.head_dim)
 
         if self.use_rope:
+            assert position_embeddings is not None
             cos, sin = position_embeddings
             queries, keys = apply_rotary_pos_emb(
                 queries.unsqueeze(0),
@@ -338,11 +336,11 @@ class Siglip2EncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
     ) -> tuple[torch.FloatTensor]:
-        """
-        Args:
-            hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
-            cu_seqlens: Cumulative sequence lengths tensor.
-            position_embeddings: Position embeddings tensor.
+        """Args:
+        hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
+        cu_seqlens: Cumulative sequence lengths tensor.
+        position_embeddings: Position embeddings tensor.
+
         """
         residual = hidden_states
 
@@ -362,12 +360,12 @@ class Siglip2EncoderLayer(nn.Module):
 
 
 class Siglip2Encoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers`
+    """Transformer encoder consisting of `config.num_hidden_layers`
     self attention layers. Each layer is a [`Siglip2EncoderLayer`].
 
     Args:
-        config: PretrainedConfig
+        config: PreTrainedConfig
+
     """
 
     def __init__(
@@ -486,15 +484,15 @@ class Siglip2Encoder(nn.Module):
         inputs_embeds: torch.Tensor,
         grid_thws: torch.Tensor,
     ) -> torch.Tensor:
-        r"""
-        Args:
-            inputs_embeds: Input tensor of shape
-                (batch_size, sequence_length, hidden_size).
-                Embedded representation of the input tokens.
-            grid_thws: Grid tensor of shape (num_patches, 3)
-                containing grid dimensions.
-                Whether or not to return a [`~utils.ModelOutput`] instead of
-                a plain tuple.
+        r"""Args:
+        inputs_embeds: Input tensor of shape
+            (batch_size, sequence_length, hidden_size).
+            Embedded representation of the input tokens.
+        grid_thws: Grid tensor of shape (num_patches, 3)
+            containing grid dimensions.
+            Whether or not to return a [`~utils.ModelOutput`] instead of
+            a plain tuple.
+
         """
         rotary_pos_emb = self.rot_pos_emb(grid_thws)
         window_index, cu_window_seqlens = self.get_window_index(grid_thws)
@@ -575,10 +573,9 @@ class Siglip2VisionTransformer(nn.Module):
         pixel_values: torch.FloatTensor,
         grid_thws: torch.LongTensor,
     ) -> torch.Tensor:
-        r"""
-        spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
-            Tensor containing the spatial dimensions (height, width)
-            of the input images.
+        r"""spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
+        Tensor containing the spatial dimensions (height, width)
+        of the input images.
         """
         hidden_states = self.embeddings(pixel_values, grid_thws)
 
@@ -588,6 +585,14 @@ class Siglip2VisionTransformer(nn.Module):
 
 
 class Siglip2NavitModel(torch.nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: Siglip2VisionConfig,
@@ -613,28 +618,5 @@ class Siglip2NavitModel(torch.nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

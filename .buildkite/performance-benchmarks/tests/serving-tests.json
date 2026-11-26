@@ -29,11 +29,6 @@
       }
     },
     {
-        "dataset_name": "sharegpt",
-        "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json"
-      }
-    },
-    {
       "test_name": "serving_llama8B_tp1_random_128_128",
       "server_parameters": {
         "tensor_parallel_size": 1
@@ -81,6 +76,7 @@
       "test_name": "serving_llama70B_tp4_random_128_128",
       "server_parameters": {
         "model": "meta-llama/Llama-3.3-70B-Instruct",
+        "tensor_parallel_size": 4,
         "async_scheduling": "",
 	"no_enable_prefix_caching": "",
         "max_num_batched_tokens": 8192

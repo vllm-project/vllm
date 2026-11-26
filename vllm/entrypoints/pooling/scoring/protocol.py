@@ -5,15 +5,16 @@ from typing import Any, TypeAlias
 
 from pydantic import BaseModel, Field, model_validator
 
-from vllm import PoolingParams
+from vllm import PoolingParams, envs
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
 from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
-from .typing import ScoreContentPartParam, ScoreInput
+from .types import ScoreContentPartParam, ScoreInput
 
 
 class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
@@ -43,6 +44,17 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             "chat_template_kwargs={'instruction': ...}."
         ),
     )
+    add_special_tokens: bool | None = Field(
+        default=None,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false. "
+            "If unset (`None`), the per-path default is used: `False` for the "
+            "chat path, and the model/tokenizer default for the completion path."
+        ),
+    )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -51,6 +63,32 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
         ),
     )
     # --8<-- [end:scoring-common-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_input_list_length(cls, data):
+        if not isinstance(data, dict):
+            return data
+        max_prompts = envs.VLLM_MAX_COMPLETION_PROMPTS
+        for field_name in (
+            "documents",
+            "items",
+            "text_2",
+            "data_2",
+            "queries",
+            "data_1",
+            "text_1",
+        ):
+            value = data.get(field_name)
+            if isinstance(value, list) and len(value) > max_prompts:
+                raise VLLMValidationError(
+                    f"{field_name} list length {len(value)} exceeds the "
+                    f"maximum allowed count of {max_prompts}. To increase "
+                    "this limit, set the VLLM_MAX_COMPLETION_PROMPTS "
+                    "environment variable.",
+                    parameter=field_name,
+                )
+        return data
 
     @model_validator(mode="after")
     def _merge_instruction_into_kwargs(self) -> "ScoringRequestMixin":
@@ -66,10 +104,13 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             self.chat_template_kwargs = merged
         return self
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
         return self._build_pooling_tok_params(
             model_config,
-            add_special_tokens=True,
+            default_tok_params,
+            add_special_tokens=self.add_special_tokens,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
         )
@@ -139,7 +180,7 @@ class RerankRequest(ScoringRequestMixin):
     # --8<-- [start:rerank-request-params]
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
-    top_n: int = Field(default_factory=lambda: 0)
+    top_n: int = Field(default=0, ge=0)
     # --8<-- [end:rerank-request-params]
 
 

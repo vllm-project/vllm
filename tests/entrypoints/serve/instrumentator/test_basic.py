@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 from http import HTTPStatus
 from unittest.mock import AsyncMock, Mock
 
@@ -12,7 +13,8 @@ import requests
 from fastapi import Request
 
 from tests.utils import RemoteOpenAIServer
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm import envs
+from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
 from vllm.version import __version__ as VLLM_VERSION
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -20,7 +22,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 @pytest.fixture(scope="module")
 def server_args(request: pytest.FixtureRequest) -> list[str]:
-    """Provide extra arguments to the server via indirect parametrization
+    """Provide extra arguments to the server via indirect parametrization.
 
     Usage:
 
@@ -83,7 +85,10 @@ async def test_show_version(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("version"))
     response.raise_for_status()
 
-    assert response.json() == {"version": VLLM_VERSION}
+    payload = response.json()
+    assert payload["version"] == VLLM_VERSION
+    if envs.VLLM_USE_RUST_FRONTEND:
+        assert payload["rust_frontend_version"] == VLLM_VERSION
 
 
 @pytest.mark.asyncio
@@ -220,3 +225,36 @@ async def test_health_check_engine_dead_error():
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_body"),
+    [
+        (EngineDeadError(), {"status": "not_ready", "reason": "engine_dead"}),
+        (
+            EngineUnhealthyError(
+                "timed out", reason="probe_timeout", engine_ranks=[1], timeout_s=20.0
+            ),
+            {
+                "status": "not_ready",
+                "reason": "probe_timeout",
+                "message": "timed out",
+                "engine_ranks": [1],
+                "timeout_s": 20.0,
+            },
+        ),
+    ],
+)
+async def test_health_generate_response(error, expected_body):
+    from vllm.entrypoints.serve.instrumentator.health import health_generate
+
+    mock_request = Mock(spec=Request)
+    mock_engine_client = AsyncMock()
+    mock_engine_client.check_health_generate.side_effect = error
+    mock_request.app.state.engine_client = mock_engine_client
+
+    response = await health_generate(mock_request, timeout_s=20.0)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == expected_body

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for resource management in hf3fs_client.py: constructor failure cleanup
+"""Tests for resource management in hf3fs_client.py: constructor failure cleanup
 and idempotent close().  Tests use mock to replace real I/O operations
 (hf3fs_fuse.io, SharedMemory, os, CUDA).
 Requires hf3fs_fuse.io to be installed; skipped otherwise.

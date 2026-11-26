@@ -1,10 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::fs;
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 
-use crate::Result;
-
-use std::{fs, path::Path};
+use crate::{Result, parse_checkpoint_json};
 
 /// Minimal `tokenizer.json` projection used to patch `added_tokens` while
 /// preserving the rest of the tokenizer definition verbatim.
@@ -55,9 +59,9 @@ impl AddedTokenConfig {
 /// Read `tokenizer.json`, then merge in extra added tokens from `tokenizer_config.json`.
 pub(super) fn load_tokenizer_json_with_extra_tokens(path: &Path) -> Result<serde_json::Value> {
     let tokenizer_json = fs::read_to_string(path)
-        .map_err(|error| tokenizer_error!("failed to read {}: {}", path.display(), error))?;
+        .map_err(|error| backend!("failed to read {}: {}", path.display(), error))?;
     let mut tokenizer_json: TokenizerJson = serde_json::from_str(&tokenizer_json)
-        .map_err(|error| tokenizer_error!("failed to parse {}: {}", path.display(), error))?;
+        .map_err(|error| backend!("failed to parse {}: {}", path.display(), error))?;
 
     if let Some(parent) = path.parent() {
         let config_path = parent.join("tokenizer_config.json");
@@ -76,15 +80,15 @@ pub(super) fn load_tokenizer_json_with_extra_tokens(path: &Path) -> Result<serde
     }
 
     serde_json::to_value(tokenizer_json)
-        .map_err(|error| tokenizer_error!("failed to serialize tokenizer json: {}", error))
+        .map_err(|error| backend!("failed to serialize tokenizer json: {}", error))
 }
 
 /// Read and parse a sibling `tokenizer_config.json`.
 fn load_tokenizer_config_json(path: &Path) -> Result<TokenizerConfigJson> {
     let text = fs::read_to_string(path)
-        .map_err(|error| tokenizer_error!("failed to read {}: {}", path.display(), error))?;
-    serde_json::from_str(&text)
-        .map_err(|error| tokenizer_error!("failed to parse {}: {}", path.display(), error))
+        .map_err(|error| backend!("failed to read {}: {}", path.display(), error))?;
+    parse_checkpoint_json(&text)
+        .map_err(|error| backend!("failed to parse {}: {}", path.display(), error))
 }
 
 /// Merge added_tokens in `tokenizer.json` and `tokenizer_config.json`.
@@ -154,5 +158,22 @@ mod tests {
         assert_eq!(merged["added_tokens"][1]["content"], "<|image_pad|>");
         assert_eq!(merged["added_tokens"][1]["special"], true);
         assert_eq!(merged["added_tokens"][1]["normalized"], false);
+    }
+
+    #[test]
+    fn extra_added_tokens_load_from_tokenizer_config_with_non_finite_literals() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer_path = dir.path().join("tokenizer.json");
+        fs::write(&tokenizer_path, r#"{"added_tokens":[]}"#).unwrap();
+        fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length":Infinity,"added_tokens_decoder":{"7":{"content":"<extra>","special":true}}}"#,
+        )
+        .unwrap();
+
+        let merged = load_tokenizer_json_with_extra_tokens(&tokenizer_path).unwrap();
+
+        assert_eq!(merged["added_tokens"][0]["id"], 7);
+        assert_eq!(merged["added_tokens"][0]["content"], "<extra>");
     }
 }

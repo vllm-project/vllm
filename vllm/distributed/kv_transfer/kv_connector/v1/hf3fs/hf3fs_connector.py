@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HF3FS KV Connector Implementation for vLLM.
+"""HF3FS KV Connector Implementation for vLLM.
 
 This module implements a KV connector that uses
 the 3FS for storing and retrieving KV cache data.
@@ -31,7 +30,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -59,7 +58,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -93,15 +96,24 @@ DEFAULT_MAX_IO_ENTRIES = 8
 logger = init_logger(__name__)
 
 
+def _ptrs_to_int64(ptrs: list[int]) -> list[int]:
+    """Reinterpret unsigned 64-bit addresses as int64 bit patterns.
+
+    torch has no general uint64 support, so pointers are stored in an int64
+    tensor. Addresses >= 2**63 (e.g. on XPU) are mapped to their two's-
+    complement negative value; the Triton gather/scatter kernels cast int64 ->
+    pointer as a pure bit reinterpretation, so they round-trip unchanged.
+    """
+    return [p - (1 << 64) if p >= (1 << 63) else p for p in ptrs]
+
+
 # ============================================================================
 # Async Operation Management
 # ============================================================================
 
 
 class AsyncOperationManager:
-    """
-    Manages async save/load operations with background threads.
-    """
+    """Manages async save/load operations with background threads."""
 
     def __init__(self, connector: "HF3FSKVConnector"):
         # Store connector reference and extract commonly used attributes
@@ -120,7 +132,7 @@ class AsyncOperationManager:
         self._pending_finished_requests: set[str] = set()
 
         # Initialize resources
-        self._init_cuda_resources()
+        self._init_device_resources()
         self._init_worker_threads()
 
         # Metrics
@@ -128,12 +140,12 @@ class AsyncOperationManager:
 
         logger.info("AsyncOperationManager initialized for rank %d", self._rank)
 
-    def _init_cuda_resources(self) -> None:
-        """Initialize CUDA streams, events and buffer allocators."""
-        # CUDA streams for async operations
-        self._save_stream = torch.cuda.Stream()
-        self._load_stream = torch.cuda.Stream()
-        self._save_event = torch.cuda.Event()
+    def _init_device_resources(self) -> None:
+        """Initialize accelerator streams, events and buffer allocators."""
+        # Accelerator streams for async operations
+        self._save_stream = torch.Stream(device=self._device)
+        self._load_stream = torch.Stream(device=self._device)
+        self._save_event = torch.Event(device=self._device)
 
         # Buffer allocators for data copying
         self._save_buffer_allocator = CopyBufferAllocator(
@@ -171,7 +183,7 @@ class AsyncOperationManager:
     def submit_save_operation(self, request_id: str, block_ids, block_hashes) -> Future:
         """Submit a save operation for async execution."""
         future: Future[Any] = Future()
-        main_stream_event = torch.cuda.Event()
+        main_stream_event = torch.Event(device=self._device)
         main_stream_event.record()
         task = (request_id, block_ids, block_hashes, future, main_stream_event)
         self._save_queue.put(task)
@@ -298,13 +310,13 @@ class AsyncOperationManager:
                 )
 
             # Synchronize streams and gather data
-            with torch.cuda.stream(self._save_stream):
+            with self._save_stream:
                 self._save_stream.wait_event(main_stream_event)  # Wait for main stream
                 self._connector._gather_or_scatter_kv_caches(
                     block_ids, buffers, "gather"
                 )
 
-                save_stream_event = torch.cuda.Event()
+                save_stream_event = torch.Event(device=self._device)
                 save_stream_event.record(self._save_stream)  # Record gather completion
 
             # Step3: Write data in batches
@@ -401,7 +413,7 @@ class AsyncOperationManager:
                 )
 
             # Step3: Scatter data back to KV cache
-            with torch.cuda.stream(self._load_stream):
+            with self._load_stream:
                 self._connector._gather_or_scatter_kv_caches(
                     block_ids, buffers, "scatter"
                 )
@@ -468,6 +480,12 @@ class AsyncOperationManager:
 
 class HF3FSKVConnector(KVConnectorBase_V1):
     """HF3FS KV Connector implementation."""
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
 
     def __init__(
         self,
@@ -541,46 +559,45 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._dtype = first_cache.dtype
         element_size = first_cache.element_size()
 
-        if self._use_mla:
-            assert len(first_cache.shape) == 3, "MLA format should have 3 dimensions"
-            # MLA format: [num_blocks, block_size, head_size]
-            num_blocks, block_size, head_size = first_cache.shape
-            num_heads = 1
-        else:
-            # MHA format: [2, num_blocks, block_size, num_heads, head_size]
-            _, num_blocks, block_size, num_heads, head_size = first_cache.shape
+        # Standardized per-layer [B, H, N, C] view; MLA is just H == 1 with the
+        # latent vector as the content dim.
+        assert len(first_cache.shape) == 4, (
+            f"expected a [B, H, N, C] KV cache view, got {tuple(first_cache.shape)}"
+        )
+        num_blocks, num_heads, block_size, content_dim = first_cache.shape
+        cache_strides = first_cache.stride()
+        assert all(
+            cache.shape == first_cache.shape and cache.stride() == cache_strides
+            for cache in self._kv_caches.values()
+        ), "HF3FS requires uniform KV cache shapes and strides."
 
         self._local_total_tokens = num_blocks * block_size
         self._local_block_size = block_size
+        self._num_heads = num_heads
+        self._content_dim = content_dim
+        self._kv_cache_strides = cache_strides
 
-        if self._use_mla:
-            layer_block_size = block_size * head_size * element_size
-            self._bytes_per_page = layer_block_size * len(self._kv_caches)
-            self._shape_per_page = [
-                len(self._kv_caches),
-                block_size,
-                head_size,
-            ]
-        else:
-            layer_block_size = 2 * block_size * num_heads * head_size * element_size
-            self._bytes_per_page = layer_block_size * len(self._kv_caches)
-            self._shape_per_page = [
-                len(self._kv_caches),
-                2,
-                block_size,
-                num_heads * head_size,
-            ]
+        layer_block_size = num_heads * block_size * content_dim * element_size
+        self._bytes_per_page = layer_block_size * len(self._kv_caches)
+        self._shape_per_page = [
+            len(self._kv_caches),
+            num_heads,
+            block_size,
+            content_dim,
+        ]
 
-        self._kvcache_ptrs = torch.tensor(
-            [cache.data_ptr() for cache in self._kv_caches.values()],
-            dtype=torch.int64,
-            device=self._device,
-        )
+        ptrs = _ptrs_to_int64([cache.data_ptr() for cache in self._kv_caches.values()])
+        self._kvcache_ptrs = torch.tensor(ptrs, dtype=torch.int64, device=self._device)
 
     def _setup_storage_clients(self):
         os.makedirs(self._storage_path, exist_ok=True)
 
-        self._rank = get_tensor_model_parallel_rank()
+        # Pipeline stages hold different layers, so each (PP, TP) rank needs its
+        # own data file and metadata rank.
+        self._rank = (
+            get_pp_group().rank_in_group * get_tensor_model_parallel_world_size()
+            + get_tensor_model_parallel_rank()
+        )
         file_path = os.path.join(
             self._storage_path, f"hf3fs_vllm_data_file_{self._rank}"
         )
@@ -595,6 +612,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     size=self._file_size,
                     bytes_per_page=self._bytes_per_page,
                     entries=DEFAULT_MAX_IO_ENTRIES,
+                    device=self._device,
                 )
                 for _ in range(self._numjobs)
             ]
@@ -670,9 +688,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         return self._async_manager.get_finished_operations(finished_req_ids)
 
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
-        """
-        Get the KV connector stats collected during the last interval.
-        """
+        """Get the KV connector stats collected during the last interval."""
         # Clear stats for next iteration
         if (
             hasattr(self, "_async_manager")
@@ -889,8 +905,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
     ) -> Optional["KVConnectorStats"]:
-        """
-        KVConnectorStats resolution method. This method allows dynamically
+        """KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
         """
@@ -993,7 +1008,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     self._local_total_tokens,
                     buffer_tensor,
                     token_indices,
-                    is_mla=self._use_mla,
+                    self._local_block_size,
+                    self._num_heads,
+                    self._content_dim,
+                    self._kv_cache_strides,
                 )
             else:
                 gather_scatter_helper.scatter_kv_caches(
@@ -1001,7 +1019,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     self._local_total_tokens,
                     buffer_tensor,
                     token_indices,
-                    is_mla=self._use_mla,
+                    self._local_block_size,
+                    self._num_heads,
+                    self._content_dim,
+                    self._kv_cache_strides,
                 )
 
     def _compute_prefix_hash(
@@ -1018,7 +1039,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
 @dataclass
 class HF3FSKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for transfer performance metrics."""
 
     def __post_init__(self):
         if not self.data:
@@ -1078,10 +1099,14 @@ class HF3FSKVConnectorStats(KVConnectorStats):
             "Num save task failed": num_failed_save,
             "Num load task success": num_success_load,
             "Num load task failed": num_failed_load,
-            "Avg save duration (ms)": round(save_duration.mean() * 1e3, 3),
-            "P90 save duration (ms)": round(np.percentile(save_duration, 90) * 1e3, 3),
-            "Avg load duration (ms)": round(load_duration.mean() * 1e3, 3),
-            "P90 load duration (ms)": round(np.percentile(load_duration, 90) * 1e3, 3),
+            "Avg save duration (ms)": round(save_duration.mean().item() * 1e3, 3),
+            "P90 save duration (ms)": round(
+                np.percentile(save_duration, 90).item() * 1e3, 3
+            ),
+            "Avg load duration (ms)": round(load_duration.mean().item() * 1e3, 3),
+            "P90 load duration (ms)": round(
+                np.percentile(load_duration, 90).item() * 1e3, 3
+            ),
         }
 
     def is_empty(self) -> bool:

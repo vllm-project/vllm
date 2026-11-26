@@ -1,79 +1,17 @@
-use std::collections::BTreeMap;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use serde::{Deserialize, Serialize};
+// The parts of `SchedulerStats` that only metrics read are defined next to
+// the metric families they feed.
+pub use vllm_metrics::{
+    BaseCacheStats, CachedTokensBySource, CudagraphStats, DebugPerfStats, KvCacheEvictionEvent,
+    KvConnectorStats, KvFetchReqsByStage, MooncakeRecord, MooncakeStats, MooncakeTransferStats,
+    MultiConnectorStats, NixlStats, OffloadingSample, OffloadingStats, PerfStats, PrefixCacheStats,
+    SimpleCpuOffloadData, SimpleCpuOffloadStats, SpecDecodingStats, UmbpOperationCounts, UmbpStats,
+};
 
-use crate::protocol::OpaqueValue;
-
-/// Stores cache hit statistics.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L18-L32>
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct BaseCacheStats {
-    /// Whether the cache was reset.
-    pub reset: bool,
-    /// The number of requests in this update.
-    pub requests: u64,
-    /// The number of queries in these requests.
-    pub queries: u64,
-    /// The number of hits in these requests.
-    pub hits: u64,
-}
-
-/// Stores prefix cache hit statistics.
-/// - `reset`: Whether `reset_prefix_cache` was invoked.
-/// - `queries`: Refers to the number of tokens that were queried.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L114-L143>
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PrefixCacheStats {
-    /// Embedded base cache counters and reset flag.
-    #[serde(flatten)]
-    pub base: BaseCacheStats,
-    /// The number of previously preempted requests in this update.
-    pub preempted_requests: u64,
-    /// The `queries` number for preempted requests.
-    pub preempted_queries: u64,
-    /// The `hits` number for preempted requests.
-    pub preempted_hits: u64,
-}
-
-/// Single KV cache block eviction sample.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L161-L167>
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct KvCacheEvictionEvent {
-    /// Lifetime from allocation to eviction.
-    pub lifetime_seconds: f64,
-    /// Idle time observed before eviction.
-    pub idle_seconds: f64,
-    /// Time gaps between consecutive accesses before eviction.
-    pub reuse_gaps_seconds: Vec<f64>,
-}
-
-/// Per-step iteration decoding stats from scheduler.
-///
-/// Each scheduler step, statistics on spec decoding performance are aggregated
-/// across requests by the scheduler and returned to the frontend in
-/// `EngineCoreOutputs -> SchedulerStats`.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/spec_decode/metrics.py#L16-L44>
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SpecDecodingStats {
-    /// Configured speculative token count for this scheduler.
-    pub num_spec_tokens: u64,
-    /// Number of drafted speculative decoding attempts.
-    pub num_drafts: u64,
-    /// Number of drafted tokens.
-    pub num_draft_tokens: u64,
-    /// Number of accepted drafted tokens.
-    pub num_accepted_tokens: u64,
-    /// Accepted drafted tokens counted by draft position.
-    pub num_accepted_tokens_per_pos: Vec<u64>,
-}
+use super::OpaqueValue;
 
 /// Breakdown of a scheduled prefill computation.
 ///
@@ -100,56 +38,9 @@ pub struct PrefillStats {
     /// Tokens to be prefilled from external KV transfer.
     #[serde(default)]
     pub num_external_cached_tokens: u32,
-}
-
-/// Stats for debugging the metrics calculation.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/perf.py#L46-L55>
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct DebugPerfStats {
-    /// Time spent calculating these stats.
-    pub calc_duration: f64,
-    /// Number of prefill requests included in the sampled batch.
-    pub num_prefill_requests: u64,
-    /// Number of decode requests included in the sampled batch.
-    pub num_decode_requests: u64,
-    /// Optional execution-context breakdown used for debugging.
-    pub context_breakdown: Option<BTreeMap<String, u64>>,
-    /// Optional per-component FLOPs breakdown.
-    pub num_flops_per_gpu_breakdown: Option<BTreeMap<String, u64>>,
-    /// Optional per-component memory-read breakdown.
-    pub num_read_bytes_per_gpu_breakdown: Option<BTreeMap<String, u64>>,
-    /// Optional per-component memory-write breakdown.
-    pub num_write_bytes_per_gpu_breakdown: Option<BTreeMap<String, u64>>,
-}
-
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/perf.py#L58-L63>
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PerfStats {
-    /// Estimated floating point operations per GPU.
-    pub num_flops_per_gpu: u64,
-    /// Estimated bytes read from memory per GPU.
-    pub num_read_bytes_per_gpu: u64,
-    /// Estimated bytes written to memory per GPU.
-    pub num_write_bytes_per_gpu: u64,
-    /// Optional debug-only perf derivation details.
-    pub debug_stats: Option<DebugPerfStats>,
-}
-
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/compilation/cuda_graph.py#L28-L33>
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct CudagraphStat {
-    /// Number of real tokens in the captured batch before padding.
-    pub num_unpadded_tokens: u64,
-    /// Number of padded tokens in the captured batch.
-    pub num_padded_tokens: u64,
-    /// Number of padding positions added for capture/runtime shape alignment.
-    pub num_paddings: u64,
-    /// Runtime mode string associated with this CUDA graph sample.
-    pub runtime_mode: String,
+    /// Prompt tokens newly admitted into the local prefix cache.
+    #[serde(default)]
+    pub num_cache_creation_tokens: u32,
 }
 
 /// Stats associated with the scheduler.
@@ -160,11 +51,17 @@ pub struct CudagraphStat {
 pub struct SchedulerStats {
     /// Number of requests in model execution batches.
     pub num_running_reqs: u64,
-    /// Length of the "waiting" request queue.
+    /// Number of waiting requests not deferred.
     pub num_waiting_reqs: u64,
-    /// Length of the "skipped waiting" queue.
+    /// Number of waiting requests deferred by transient constraints or a blocked status.
     #[serde(default)]
     pub num_skipped_waiting_reqs: u64,
+    /// Requests preempted since the previous stats, counted at preemption time.
+    #[serde(default)]
+    pub num_preempted_reqs: u64,
+    /// Waiting requests with an async KV load, by load stage.
+    #[serde(default)]
+    pub num_kv_fetch_reqs_by_stage: KvFetchReqsByStage,
     /// Internal DP load-balancing step counter.
     pub step_counter: u64,
     /// Internal DP load-balancing wave number.
@@ -179,14 +76,50 @@ pub struct SchedulerStats {
     pub kv_cache_eviction_events: Vec<KvCacheEvictionEvent>,
     /// Speculative decoding scheduler stats, when enabled.
     pub spec_decoding_stats: Option<SpecDecodingStats>,
-    /// Connector-specific KV transfer stats, kept opaque for now.
-    pub kv_connector_stats: Option<BTreeMap<String, OpaqueValue>>,
-    /// Waiting request counts per LoRA adapter.
-    pub waiting_lora_adapters: BTreeMap<String, u64>,
-    /// Running request counts per LoRA adapter.
-    pub running_lora_adapters: BTreeMap<String, u64>,
+    /// Connector-specific KV transfer stats.
+    pub kv_connector_stats: Option<KvConnectorStats>,
+    /// Connector-specific encoder cache transfer stats, passed through as the
+    /// engine's connector reports them.
+    #[serde(default)]
+    pub ec_connector_stats: Option<OpaqueValue>,
+    /// Scheduler-side details of the engine iteration, when iteration details
+    /// are logged (`SchedulerIterationDetails`), passed through.
+    #[serde(default)]
+    pub iteration_details: Option<OpaqueValue>,
     /// CUDA graph runtime stats when graph metrics are enabled.
-    pub cudagraph_stats: Option<CudagraphStat>,
+    pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KvFetchReqsByStage, SchedulerStats};
+
+    #[test]
+    fn scheduler_stats_kv_fetch_reqs_by_stage_defaults_and_decodes() {
+        let mut payload = serde_json::json!({
+            "num_running_reqs": 1, "num_waiting_reqs": 2,
+            "step_counter": 0, "current_wave": 0, "kv_cache_usage": 0.5,
+            "prefix_cache_stats": {
+                "reset": false, "requests": 0, "queries": 0, "hits": 0,
+                "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0
+            },
+            "kv_cache_eviction_events": []
+        });
+
+        // Engines before vllm-project/vllm#58874 omit the field entirely.
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(
+            stats.num_kv_fetch_reqs_by_stage,
+            KvFetchReqsByStage::default()
+        );
+
+        payload["num_kv_fetch_reqs_by_stage"] =
+            serde_json::json!({"waiting_to_start": 3, "in_progress": 1});
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.num_kv_fetch_reqs_by_stage.counts(), [3, 1, 0]);
+    }
 }

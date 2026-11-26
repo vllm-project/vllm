@@ -1,15 +1,9 @@
 #pragma once
 
-#include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
-#include "cutlass_extensions/epilogue/broadcast_load_epilogue_array_c3x.hpp"
+#include "broadcast_load_epilogue_c3x.hpp"
+#include "broadcast_load_epilogue_array_c3x.hpp"
 
-// This header is shared by both _C (unstable ABI) and _C_stable_libtorch
-// (stable ABI) targets. When compiled under the stable ABI target,
-// TORCH_TARGET_VERSION is defined and Tensor is unavailable, so we
-// use torch::stable::Tensor instead.
-#ifdef TORCH_TARGET_VERSION
-  #include <torch/csrc/stable/tensor.h>
-#endif
+#include <torch/csrc/stable/tensor.h>
 
 /*
    This file defines custom epilogues for fusing channel scales, token scales,
@@ -23,37 +17,9 @@
 
 namespace vllm::c3x {
 
-#ifdef TORCH_TARGET_VERSION
 using TensorType = torch::stable::Tensor;
-#else
-using TensorType = torch::Tensor;
-#endif
 
 using namespace cute;
-
-template <typename T>
-struct identity {
-  CUTLASS_HOST_DEVICE
-  T operator()(T lhs) const { return lhs; }
-};
-
-template <typename ElementAcc, typename ElementD, typename TileShape>
-struct TrivialEpilogue {
- private:
-  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
-  using Compute = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::epilogue::thread::Identity, ElementD, ElementAcc,
-      cutlass::FloatRoundStyle::round_to_nearest>;
-
- public:
-  using EVTCompute = cutlass::epilogue::fusion::Sm90EVT<Compute, Accum>;
-  using ArgumentType = typename EVTCompute::Arguments;
-
-  template <typename... Args>
-  static ArgumentType prepare_args(Args... args) {
-    return {};
-  }
-};
 
 /*
  * This class provides the common load descriptors for the

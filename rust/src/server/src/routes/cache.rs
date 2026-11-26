@@ -1,34 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
+use axum::Json;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::utility_call_error;
+use crate::utils::{deserialize_query_bool, utility_call_error};
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ResetPrefixCacheParams {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_query_bool")]
     reset_running_requests: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_query_bool")]
     reset_external: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ResetPrefixCacheResponse {
+    success: bool,
 }
 
 /// Reset the local prefix cache and optionally the connector-managed external
 /// cache.
 pub async fn reset_prefix_cache(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<ResetPrefixCacheParams>,
-) -> Result<StatusCode, ApiError> {
-    state
+    params: Result<Query<ResetPrefixCacheParams>, QueryRejection>,
+) -> Result<Json<ResetPrefixCacheResponse>, ApiError> {
+    let Query(params) = params?;
+    let success = state
         .engine_core_client()
         .reset_prefix_cache(params.reset_running_requests, params.reset_external)
         .await
         .map_err(|error| utility_call_error("reset_prefix_cache", error))?;
 
-    Ok(StatusCode::OK)
+    Ok(Json(ResetPrefixCacheResponse { success }))
 }
 
 /// Reset the multi-modal cache.

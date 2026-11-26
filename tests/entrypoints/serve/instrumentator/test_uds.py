@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from tempfile import TemporaryDirectory
+
+import httpx
+import pytest
+
+from tests.utils import RemoteOpenAIServer
+from vllm import envs
+from vllm.version import __version__ as VLLM_VERSION
+
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+
+
+@pytest.fixture(scope="module")
+def server():
+    with TemporaryDirectory() as tmpdir:
+        args = [
+            # use half precision for speed and memory savings in CI environment
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            "8192",
+            "--enforce-eager",
+            "--max-num-seqs",
+            "128",
+            "--uds",
+            f"{tmpdir}/vllm.sock",
+        ]
+
+        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+            yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_show_version(server: RemoteOpenAIServer):
+    transport = httpx.HTTPTransport(uds=server.uds)
+    client = httpx.Client(transport=transport)
+    response = client.get(server.url_for("version"))
+    response.raise_for_status()
+
+    payload = response.json()
+    assert payload["version"] == VLLM_VERSION
+    if envs.VLLM_USE_RUST_FRONTEND:
+        assert payload["rust_frontend_version"] == VLLM_VERSION

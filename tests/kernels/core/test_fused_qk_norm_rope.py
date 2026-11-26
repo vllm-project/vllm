@@ -35,10 +35,12 @@ def _apply_qk_norm_rope(
 
     q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_dim, head_dim)
     q_by_head = q_norm.forward_native(q_by_head)
+    assert isinstance(q_by_head, torch.Tensor)
     q = q_by_head.view(q.shape)
 
     k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_dim, head_dim)
     k_by_head = k_norm.forward_native(k_by_head)
+    assert isinstance(k_by_head, torch.Tensor)
     k = k_by_head.view(k.shape)
 
     q, k = rope.forward_native(positions, q, k)
@@ -54,7 +56,8 @@ def _apply_qk_norm_rope(
 @pytest.mark.parametrize("is_neox", IS_NEOX)
 @pytest.mark.parametrize("eps", EPS_VALUES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.25])
+@pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.375, 0.25])
+@pytest.mark.parametrize("token_heads_per_warp", [1, 4])
 @torch.inference_mode()
 def test_fused_qk_norm_rope_matches_reference(
     default_vllm_config,
@@ -64,6 +67,7 @@ def test_fused_qk_norm_rope_matches_reference(
     eps: float,
     seed: int,
     rotary_ratio: float,
+    token_heads_per_warp: int,
 ):
     torch.set_default_device(device)
     set_random_seed(seed)
@@ -131,6 +135,7 @@ def test_fused_qk_norm_rope_matches_reference(
         rope.cos_sin_cache,
         is_neox,
         positions.view(-1),
+        token_heads_per_warp,
     )
 
     if dtype == torch.float16:
@@ -144,3 +149,44 @@ def test_fused_qk_norm_rope_matches_reference(
         atol=ATOL,
         rtol=RTOL,
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="fused_qk_norm_rope custom op requires cuda and rocm platform",
+)
+@pytest.mark.parametrize("token_heads_per_warp", [1, 8])
+@torch.inference_mode()
+def test_fused_qk_norm_rope_large_num_tokens(token_heads_per_warp: int):
+    # 48 heads x 64 dims per row: token 699,051 starts past INT_MAX elements.
+    num_heads, head_dim, num_tokens = 16, 64, 700_000
+    if torch.accelerator.get_memory_info()[0] < 12 * 1024**3:
+        pytest.skip("needs 12 GiB of free GPU memory")
+    torch.set_default_device("cuda:0")
+    set_random_seed(13)
+    qkv = torch.randn(num_tokens, 3 * num_heads * head_dim, dtype=torch.bfloat16)
+    weight = torch.rand(head_dim, dtype=torch.bfloat16) + 0.5
+    cos_sin_cache = torch.randn(4096, head_dim)
+    positions = torch.arange(num_tokens) % 4096
+
+    def run(x, pos):
+        torch.ops._C.fused_qk_norm_rope(
+            x,
+            num_heads,
+            num_heads,
+            num_heads,
+            head_dim,
+            1e-6,
+            weight,
+            weight,
+            cos_sin_cache,
+            True,
+            pos,
+            token_heads_per_warp,
+        )
+
+    rows = torch.tensor([0, 699_049, 699_050, 699_051, num_tokens - 1])
+    expected = qkv[rows]
+    run(expected, positions[rows])
+    run(qkv, positions)
+    torch.testing.assert_close(qkv[rows], expected, atol=0, rtol=0)

@@ -1,13 +1,13 @@
-use std::pin::Pin;
-use std::sync::{Arc, Weak};
-use std::task::{Context, Poll};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use axum::body::{Body, Bytes, HttpBody};
+use std::sync::{Arc, Weak};
+
 use axum::extract::{MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use http_body::{Frame, SizeHint};
 
+use super::body_guard::hold_until_body_dropped;
 use crate::state::AppState;
 
 /// Endpoints that will be tracked for server load.
@@ -34,6 +34,7 @@ const TRACKED_HANDLERS: &[&str] = &[
     "/v1/rerank",
     "/v2/rerank",
     "/inference/v1/generate",
+    "/generative_scoring",
 ];
 
 /// Track frontend-local in-flight inference requests for the `/load` endpoint.
@@ -55,19 +56,13 @@ pub async fn track_server_load(
     let guard = ServerLoadGuard {
         state: Arc::downgrade(&state),
     };
-    let response = next.run(req).await;
-
-    let (parts, body) = response.into_parts();
-    Response::from_parts(
-        parts,
-        Body::new(LoadTrackedBody {
-            inner: body,
-            _guard: guard,
-        }),
-    )
+    hold_until_body_dropped(next.run(req).await, guard)
 }
 
 /// A guard that decrements the server load when dropped.
+///
+/// It is held by the response body, so the load is decremented when the body
+/// is fully consumed and dropped.
 struct ServerLoadGuard {
     state: Weak<AppState>,
 }
@@ -77,34 +72,5 @@ impl Drop for ServerLoadGuard {
         if let Some(state) = self.state.upgrade() {
             state.decrement_server_load();
         }
-    }
-}
-
-/// A wrapper around response bodies that tracks server load by holding a
-/// `ServerLoadGuard`, which will decrement the load when the body is fully
-/// consumed and dropped.
-struct LoadTrackedBody {
-    inner: Body,
-    _guard: ServerLoadGuard,
-}
-
-// Simply delegate all `HttpBody` methods to the inner body.
-impl HttpBody for LoadTrackedBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.inner).poll_frame(cx)
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
     }
 }

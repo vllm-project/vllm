@@ -126,6 +126,18 @@ void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
       });
 }
 
+void gelu_tanh(torch::Tensor& out, torch::Tensor& input) {
+  int num_tokens = input.numel() / input.size(-1);
+  int d = input.size(-1);
+
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_tanh_impl", [&] {
+    CPU_KERNEL_GUARD_IN(gelu_tanh_impl)
+    activation_kernel<scalar_t, gelu_tanh_act, false>(
+        num_tokens, d, input.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
+    CPU_KERNEL_GUARD_OUT(gelu_tanh_impl)
+  });
+}
+
 void gelu_new(torch::Tensor& out, torch::Tensor& input) {
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1);

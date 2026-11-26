@@ -1,0 +1,23 @@
+model_name: "deepseek-ai/DeepSeek-V4-Flash"
+accuracy_threshold: 0.92
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1800
+startup_rpc_checks:
+  - check_eplb_replica_slots
+server_args: >-
+  --tokenizer-mode deepseek_v4
+  --max-model-len 8192
+  --tensor-parallel-size 4
+  --enable-expert-parallel
+  --enable-eplb
+  --eplb-config '{"num_redundant_experts":8}'
+  --worker-extension-cls tests.evals.gsm8k.eplb_checks.EplbCheckExtension
+  --block-size 256
+  --gpu-memory-utilization 0.5
+  --kv-cache-dtype fp8
+  --attention_config.indexer_kv_dtype=mxfp4
+  --max-num-batched-tokens 16384
+  --max-num-seqs 128
+env:
+  VLLM_SERVER_DEV_MODE: "1"

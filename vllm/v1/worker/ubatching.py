@@ -14,13 +14,12 @@ logger = init_logger(__name__)
 _THREAD_ID_TO_CONTEXT: dict = {}
 # Here we hardcode the number of microbatches to 2 for default.
 _NUM_UBATCHES: int = 2
+_SCHEDULE: str | None = None
 _CURRENT_CONTEXTS: list["UBatchContext | None"] = []
 
 
 class UBatchContext:
-    """
-    Context manager for micro-batching synchronization using threading events.
-    """
+    """Context manager for micro-batching synchronization using threading events."""
 
     def __init__(
         self,
@@ -33,7 +32,8 @@ class UBatchContext:
         cpu_signal_event: threading.Event,
         gpu_comm_done_event: torch.Event,
         gpu_compute_done_event: torch.Event,
-        schedule: str = "default",
+        schedule: str | None = "default",
+        token_offset: int = 0,
     ):
         self.id = id
         self.comm_stream = comm_stream
@@ -46,6 +46,7 @@ class UBatchContext:
         self.gpu_comm_done_event = gpu_comm_done_event
         self.gpu_compute_done_event = gpu_compute_done_event
         self.schedule = schedule
+        self.token_offset = token_offset
         self.recv_hook = None
 
     def __enter__(self):
@@ -110,7 +111,10 @@ class UBatchContext:
     def switch_to_compute(self):
         self.update_stream(self.compute_stream)
 
-    def switch_to_comm_sync(self):
+    def switch_to_comm_sync(self, schedule: str | None = None):
+        """With `schedule`, a no-op unless that schedule is running."""
+        if schedule is not None and schedule != self.schedule:
+            return
         self._signal_compute_done()
         self.update_stream(self.comm_stream)
         self._wait_compute_done()
@@ -138,7 +142,10 @@ class UBatchContext:
         self.update_stream(self.comm_stream)
         self._wait_compute_done()
 
-    def yield_and_switch_from_comm_to_compute(self):
+    def yield_and_switch_from_comm_to_compute(self, schedule: str | None = None):
+        """With `schedule`, a no-op unless that schedule is running."""
+        if schedule is not None and schedule != self.schedule:
+            return
         assert current_stream() == self.comm_stream
         self._signal_comm_done()
         self._cpu_yield()
@@ -147,14 +154,26 @@ class UBatchContext:
         self._wait_comm_done()
 
 
-def dbo_enabled() -> bool:
-    return len(_THREAD_ID_TO_CONTEXT) > 0
+def dbo_enabled(schedule: str | None = None) -> bool:
+    """With `schedule`, whether that schedule is running."""
+    return len(_THREAD_ID_TO_CONTEXT) > 0 and schedule in (None, _SCHEDULE)
 
 
 def dbo_current_ubatch_id() -> int:
     if len(_THREAD_ID_TO_CONTEXT) == 0:
         return 0
     return _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+
+
+def dbo_current_ubatch_token_offset() -> int:
+    """Row offset of the calling ubatch inside the parent batch.
+
+    Returns 0 when no DBO context is active on this thread.
+    """
+    if len(_THREAD_ID_TO_CONTEXT) == 0:
+        return 0
+    ctx = _CURRENT_CONTEXTS[_THREAD_ID_TO_CONTEXT[threading.get_ident()]]
+    return ctx.token_offset
 
 
 def _register_ubatch_function(func):
@@ -205,12 +224,14 @@ def make_ubatch_contexts(
     comm_stream: torch.cuda.Stream,
     forward_contexts: list[ForwardContext],
     ready_barrier: threading.Barrier,
-    schedule: str = "default",
+    schedule: str | None = "default",
+    token_offsets: list[int] | None = None,
 ) -> list[UBatchContext]:
-    global _NUM_UBATCHES, _CURRENT_CONTEXTS
+    global _NUM_UBATCHES, _CURRENT_CONTEXTS, _SCHEDULE
     assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
 
     _NUM_UBATCHES = num_micro_batches
+    _SCHEDULE = schedule
     # Ensure the global context list is large enough
     if len(_CURRENT_CONTEXTS) < num_micro_batches:
         _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))
@@ -235,7 +256,16 @@ def make_ubatch_contexts(
             gpu_comm_done_event=gpu_comm_done_events[i],
             gpu_compute_done_event=gpu_compute_done_events[i],
             schedule=schedule,
+            token_offset=token_offsets[i] if token_offsets else 0,
         )
         ctxs.append(ctx)
 
     return ctxs
+
+
+def dbo_comm_stream_priority() -> int:
+    """High on ROCm: at the default priority comm and compute can share one
+    hardware queue and serialize."""
+    from vllm.platforms import current_platform
+
+    return -1 if current_platform.is_rocm() else 0

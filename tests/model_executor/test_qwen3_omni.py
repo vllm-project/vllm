@@ -1,18 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import Mock
+from contextlib import nullcontext
+from functools import partial
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
-from transformers import PretrainedConfig
+import torch
+import torch.nn as nn
+from transformers import PreTrainedConfig
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+    Qwen3OmniMoeAudioEncoderConfig,
+)
 
+from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.multimodal.processing import InputProcessingContext
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 # Helper function to print input IDs with coalesced audio/video tokens.
 def print_input_ids(input_ids):
-    """
-    Print input IDs, compressing consecutive special tokens.
+    """Print input IDs, compressing consecutive special tokens.
     - 151675: <|audio_pad|>
     - 151656: <|video_pad|>
     """
@@ -48,7 +58,7 @@ def print_input_ids(input_ids):
 @pytest.fixture
 def mock_qwen3_omni_config():
     """Create a mock Qwen3OmniMoeThinker config."""
-    config = Mock(spec=PretrainedConfig)
+    config = Mock(spec=PreTrainedConfig)
     # Token IDs from https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct/blob/main/tokenizer_config.json
     config.audio_token_id = 151675  # <|audio_pad|>
     config.video_token_id = 151656  # <|video_pad|>
@@ -130,9 +140,9 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     mock_processor,
     mock_tokenizer,
     mock_image_processor,
+    monkeypatch,
 ):
     """Test the get_updates_use_audio_in_video method directly."""
-
     from vllm.model_executor.models.qwen3_omni_moe_thinker import (
         Qwen3OmniMoeThinkerMultiModalProcessor,
         Qwen3OmniMoeThinkerProcessingInfo,
@@ -140,14 +150,24 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
     # Create a mock context
     mock_ctx = Mock(spec=InputProcessingContext)
+    mock_ctx.tokenizer = mock_tokenizer
+    # `model_config` is an instance attribute, so it is not covered by the
+    # spec; the data parser reads it for `allow_missing_mm_embeddings`.
+    mock_ctx.model_config = SimpleNamespace(
+        multimodal_config=SimpleNamespace(allow_missing_mm_embeddings=False)
+    )
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
-    info._get_expected_hidden_size = lambda: 100
-    info.get_hf_config = Mock(return_value=mock_qwen3_omni_config)
-    info.get_hf_processor = Mock(return_value=mock_processor)
-    info.get_tokenizer = Mock(return_value=mock_tokenizer)
-    info.get_image_processor = Mock(return_value=mock_image_processor)
+    monkeypatch.setattr(info, "_get_expected_hidden_size", lambda: 100)
+    monkeypatch.setattr(
+        info, "get_hf_config", Mock(return_value=mock_qwen3_omni_config)
+    )
+    monkeypatch.setattr(info, "get_hf_processor", Mock(return_value=mock_processor))
+    monkeypatch.setattr(info, "get_tokenizer", Mock(return_value=mock_tokenizer))
+    monkeypatch.setattr(
+        info, "get_image_processor", Mock(return_value=mock_image_processor)
+    )
 
     # Create a mock dummy_inputs builder
     mock_dummy_inputs = Mock()
@@ -216,6 +236,225 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     assert len(updates) == expected_total, (
         f"Expected {expected_total} total tokens, got {len(updates)}"
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_exposes_eagle3_to_its_text_backbone():
+    from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+
+    class DummyBackbone(nn.Module, EagleModelMixin):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Identity(), nn.Identity()])
+
+    class DummyLanguageModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = DummyBackbone()
+
+        def embed_input_ids(self, input_ids):
+            return input_ids
+
+    model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
+        Qwen3OmniMoeThinkerForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
+    )
+    nn.Module.__init__(model)
+    model.language_model = DummyLanguageModel()
+
+    # supports_eagle3() would narrow to a class: nn.Module is Any to mypy
+    assert isinstance(model, SupportsEagle3)
+    model.set_aux_hidden_state_layers((1, 2))
+    assert model.language_model.model.aux_hidden_state_layers == (1, 2)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import Qwen3MoeLLMModel
+
+    class DummyLayer(nn.Module):
+        def forward(self, positions, hidden_states, residual):
+            return hidden_states + 1, torch.full_like(hidden_states, 10)
+
+    class DummyNorm(nn.Module):
+        def forward(self, hidden_states, residual):
+            return hidden_states + residual, None
+
+    model = Qwen3MoeLLMModel.__new__(Qwen3MoeLLMModel)
+    nn.Module.__init__(model)
+    model.start_layer = 0
+    model.end_layer = 1
+    model.layers = nn.ModuleList([DummyLayer()])
+    model.norm = DummyNorm()
+    model.aux_hidden_state_layers = (1,)
+
+    pp_group = Mock(is_first_rank=True, is_last_rank=True)
+    inputs_embeds = torch.tensor([[1.0]])
+    deepstack_inputs = {"deepstack_input_embeds_0": torch.tensor([[3.0]])}
+    with patch(
+        "vllm.model_executor.models.qwen3_omni_moe_thinker.get_pp_group",
+        return_value=pp_group,
+    ):
+        result = model.forward(
+            input_ids=None,
+            positions=torch.tensor([0]),
+            inputs_embeds=inputs_embeds,
+            deepstack_input_embeds=deepstack_inputs,
+        )
+
+    # aux_hidden_state_layers is set, so forward() returns a tuple.
+    assert isinstance(result, tuple)
+    output, aux_hidden_states = result
+
+    torch.testing.assert_close(output, torch.tensor([[15.0]]))
+    assert len(aux_hidden_states) == 1
+    torch.testing.assert_close(aux_hidden_states[0], torch.tensor([[15.0]]))
+
+
+def _dspark_vocab_stub(input_vocab_size: int, draft_vocab_size: int):
+    """A Qwen3 DSpark model with only what `load_weights` reads."""
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+
+    model = Qwen3DSparkForCausalLM.__new__(
+        Qwen3DSparkForCausalLM  # type: ignore[type-abstract]  # protocol attrs unset
+    )
+    nn.Module.__init__(model)
+    object.__setattr__(
+        model,
+        "config",
+        SimpleNamespace(
+            vocab_size=input_vocab_size,
+            draft_vocab_size=draft_vocab_size,
+        ),
+    )
+    object.__setattr__(model, "target_vocab_size", 100)
+    object.__setattr__(model, "model", Mock(confidence_head=None))
+    return model
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("draft_vocab_size", [100, 101])
+def test_qwen3_dspark_accepts_draft_vocab_at_least_target(draft_vocab_size):
+    """A draft vocab >= the target's maps identically, so needs no lm_head/d2t.
+
+    Guards the padded case (draft > target): the draft's unembedding is padded
+    to its physical size, which is not a reduced vocabulary.
+    """
+    model = _dspark_vocab_stub(100, draft_vocab_size)
+
+    model.load_weights([])
+
+
+@pytest.mark.skip_global_cleanup
+def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
+    from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
+
+    target_embedding = nn.Embedding(100, 8)
+    draft_embedding = nn.Embedding(99, 8)
+    target_model = SimpleNamespace(model=SimpleNamespace(embed_tokens=target_embedding))
+    draft_model = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=draft_embedding),
+        has_own_embed_tokens=False,
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="qwen3"),
+        get_vocab_size=Mock(return_value=99),
+    )
+    speculative_config = SimpleNamespace(
+        draft_model_config=draft_model_config,
+        draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        moe_backend=None,
+        attention_backend=None,
+        kv_cache_dtype=None,
+        draft_load_config=None,
+        draft_lm_head_quantization=None,
+        draft_enable_eplb=True,
+        resolved_draft_num_redundant_experts=None,
+    )
+    speculative_config.apply_draft_eplb_overrides = partial(
+        SpeculativeConfig.apply_draft_eplb_overrides, speculative_config
+    )
+    speculative_config.apply_draft_overrides = partial(
+        SpeculativeConfig.apply_draft_overrides, speculative_config
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        parallel_config=ParallelConfig(),
+        attention_config=SimpleNamespace(backend=None),
+        cache_config=SimpleNamespace(),
+        load_config=SimpleNamespace(load_format="auto"),
+        model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
+    )
+
+    def fake_replace(config, **changes):
+        values = vars(config).copy()
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    with (
+        patch.object(dspark_utils, "replace", side_effect=fake_replace),
+        patch(
+            "vllm.compilation.backends.set_model_tag",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm.model_executor.model_loader.get_model",
+            return_value=draft_model,
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.dflash_has_any_non_causal",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.models.utils.get_draft_quant_config",
+            return_value=None,
+        ),
+    ):
+        loaded_model = dspark_utils.load_dspark_model(target_model, vllm_config)
+
+    assert loaded_model.model.embed_tokens is target_embedding
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires a GPU")
+def test_qwen3_omni_audio_encoder_has_no_gpu_sync(
+    monkeypatch, default_vllm_config, dist_init
+):
+    """The audio tower takes host lengths, so a prefill must not read the GPU."""
+    import vllm.utils.gpu_sync_debug as gpu_sync_debug
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeAudioEncoder,
+        _get_feat_extract_output_lengths,
+    )
+
+    config = Qwen3OmniMoeAudioEncoderConfig(
+        d_model=64,
+        encoder_layers=1,
+        encoder_attention_heads=4,
+        encoder_ffn_dim=128,
+        downsample_hidden_size=32,
+        output_dim=48,
+        n_window_infer=200,
+    )
+    with torch.device("cuda"), set_default_torch_dtype(torch.bfloat16):
+        encoder = Qwen3OmniMoeAudioEncoder(config)
+    # Multiple chunks and attention windows, with ragged tails.
+    feature_lens = torch.tensor([950, 130], device="cpu")
+    aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
+    features = torch.randn(
+        config.num_mel_bins, int(feature_lens.sum()), device="cuda"
+    ).to(torch.bfloat16)
+
+    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", False)
+    gpu_sync_debug.enable_gpu_sync_check()
+    with torch.no_grad():
+        output = gpu_sync_debug.with_gpu_sync_check(encoder)(
+            features, feature_lens, aftercnn_lens
+        )
+
+    assert output.shape == (int(aftercnn_lens.sum()), config.output_dim)
 
 
 if __name__ == "__main__":

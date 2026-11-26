@@ -8,13 +8,16 @@ We currently support the following OpenAI APIs:
 
 - [Completions API](./openai_compatible_server.md#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
-    - *Note: `suffix` parameter is not supported.*
-- [Responses API](./openai_compatible_server.md#responses-api) (`/v1/responses`)
-    - Only applicable to [text generation models](../../models/generative_models.md).
+    - *Note: `suffix` parameter is only supported by models with fill-in-the-middle rendering, such as DeepSeek V4.*
 - [Chat Completions API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions`)
-    - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](./openai_compatible_server.md#chat-template).
+    - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
     - *Note: `user` parameter is ignored.*
     - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
+- [Chat Completions batch API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions/batch`)
+- [Responses API](./openai_compatible_server.md#responses-api) (`/v1/responses`, `/v1/responses/{response_id}`, `/v1/responses/{response_id}/cancel`)
+    - Only applicable to [text generation models](../../models/generative_models.md).
+- [Decisions API](../../models/structured_decisions_models.md#openai-decisions-api) (`/v1/decisions`)
+    - Supports text-only predicate, choice, and score questions on supported generation models.
 - [Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Transcriptions API](./speech_to_text.md#transcriptions-api) (`/v1/audio/transcriptions`)
@@ -24,20 +27,19 @@ We currently support the following OpenAI APIs:
 
 ## Anthropic APIs
 
-- Anthropic messages API (`/v1/messages`)
+- Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
+    - `max_tokens=0` (Anthropic's prompt-cache pre-warming request) is rejected
+      with a 400. vLLM samples at least one token per request, so warm the cache
+      with `max_tokens=1` instead.
 
 ## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
     - Works with any [embedding model](../../models/pooling_models/embed.md#supported-models), including multimodal models.
-- [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+- [Cohere Rerank API](../../models/pooling_models/scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
-
-## SageMaker APIs
-
-- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
 
 ## Pooling APIs
 
@@ -51,8 +53,8 @@ For further details on pooling models, please refer to [this page](../../models/
     - [OpenAI-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Scoring Usages](../../models/pooling_models/scoring.md)
-    - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`)
-    - [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
+    - [Cohere Rerank API](../../models/pooling_models/scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [Pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
@@ -68,17 +70,6 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - [Realtime API](./speech_to_text.md#realtime-api) (`/v1/realtime`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#realtime-transcription).
 
-## Disaggregated APIs
-
-### Renderer APIs
-
-For further details on renderer APIs, please refer to [this page](renderer.md).
-
-- [Completions Render API](renderer.md) (`/v1/completions/render`)
-    - Render completion requests
-- [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
-    - Render chat completions
-
 ## Custom APIs
 
 - [Classification API](../../models/pooling_models/classify.md#classification-api) (`/classify`)
@@ -87,18 +78,133 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [Pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
-- [Generative Scoring API](generative_scoring.md#generative-scoring-api) (`/generative_scoring`)
+- [Generative Scoring API](generative_scoring.md) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
+- [Structured Decisions API](../../models/structured_decisions_models.md#typesafe-system-one-endpoint) (`/v1/systemone`)
+    - Applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
+    - Answers typed questions about a state with a probability for every allowed answer.
 
-## Utility APIs
+## Instrumentator APIs
+
+### Basic APIs
+
+- `/version` - Version information
+- `/load` - Server load metrics
+- `/v1/models` - List available models
+- `/health` - Health check
+- `/health_generate` - Generation readiness check, see [below](#generation-readiness-check)
+
+### Generation readiness check
+
+`/health` checks that the API server and engine processes are alive. `/health_generate` also checks that every engine rank can run the model right now. It returns 200 when the server can serve generation, and 503 with a JSON body otherwise:
+
+```json
+{"status": "not_ready", "reason": "probe_timeout", "message": "...", "engine_ranks": [1], "timeout_s": 20.0}
+```
+
+| Reason | Meaning |
+| :---- | :---- |
+| `engine_dead` | An engine process has died. |
+| `sleeping` | An engine rank is sleeping or paused, e.g. during a weight sync. |
+| `probe_timeout` | An engine rank did not answer in time. Its busy loop is blocked, e.g. in a hung collective, or a single step is taking longer than the timeout. |
+| `probe_failed` | The GPU probe on an idle engine rank raised an error. |
+
+A busy engine rank is reported ready without extra GPU work. An idle rank runs one dummy forward pass on every worker. For MoE models with data parallelism, idle ranks only check that the engine answers, because a dummy batch outside a DP wave could deadlock.
+
+The `timeout_s` query parameter sets how long to wait for each engine rank before reporting `probe_timeout` (default 20 s), e.g. `/health_generate?timeout_s=10`.
+
+Use `/health_generate` for readiness checks and keep `/health` for liveness checks, so that a sleeping or temporarily slow server is taken out of rotation instead of restarted. `/health_generate` is not authenticated with `--api-key`, like `/health`.
+
+While elastic EP is scaling, the server answers every request, including `/health_generate`, with a 503 and an `{"error": ...}` body instead. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not serve `/health_generate` yet.
+
+### Metrics APIs
+
+For further details on metrics, please refer to [this page](../../design/metrics.md).
+
+- `/metrics` - Prometheus-compatible metrics HTTP endpoint
+
+### Offline API Documentation
+
+The FastAPI `/docs` endpoint requires an internet connection by default. To enable offline access in air-gapped environments, use the `--enable-offline-docs` flag:
+
+```bash
+vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
+```
+
+### LoRA dynamic loading
+
+LoRA dynamic loading & unloading is enabled in the API server. This should ONLY be used for local development!
+
+- `/v1/load_lora_adapter` - LoRA dynamic loading
+- `/v1/unload_lora_adapter` - LoRA dynamic unloading
+
+### Profiling APIs
+
+For further details on profiling vLLM, please refer to [this page](../../contributing/profiling.md).
+
+- `/start_profile` - Start PyTorch profiler (accepts an optional JSON body with `profiler_kwargs` to pass keyword arguments to the underlying profiler)
+- `/stop_profile` - Stop PyTorch profiler
+
+### SageMaker APIs
+
+- `/ping` - SageMaker health check
+- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
+
+## Scale-Out APIs
+
+Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below; `VLLM_SERVER_DEV_MODE=1` also turns it on unless `--disable-scale-out` is passed. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
+
+### Tokens IN <> Tokens OUT APIs
+
+- [Generate API](token_in_token_out.md) (`/inference/v1/generate`)
+    - Generate completions from token IDs, optionally with detokenized text (`output_mode`)
+- `/inference/v1/abort_requests` - Abort in-flight requests (registered wherever `/inference/v1/generate` is)
+- `/abort_requests` - Unauthenticated alias of `/inference/v1/abort_requests` (`--tokens-only` only)
+
+### Renderer APIs
+
+Renderer APIs preprocess completion, chat, and Responses requests without running
+inference. They handle tokenization, model-specific prompt formatting, and
+multimodal preprocessing, returning prompt token IDs, sampling parameters, and
+any processed multimodal inputs for generation.
+
+See the [renderer guide](renderer.md) for setup instructions and examples.
+
+- [Completions Render API](renderer.md) (`/v1/completions/render`)
+    - Render completion requests
+- [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
+    - Render chat completions
+- [Responses Render API](renderer.md) (`/v1/responses/render`)
+    - Render self-contained Responses requests
+
+### Derenderer APIs
+
+For further details on derenderer APIs, please refer to [this page](derenderer.md).
+
+- [Chat Completions Derender API](derenderer.md) (`/v1/chat/completions/derender`)
+    - Derender chat completion requests
+- [Completions Derender API](derenderer.md) (`/v1/completions/derender`)
+    - Derender completion requests
+
+## Tokenize APIs
 
 - `/tokenize` - Tokenize text
 - `/detokenize` - Detokenize tokens
-- `/health` - Health check
-- `/ping` - SageMaker health check
-- `/version` - Version information
-- `/load` - Server load metrics
+- `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
+
+## Elastic Expert Parallelism (EEP)
+
+- `/scale_elastic_ep` - Trigger scaling operations
+- `/is_scaling_elastic_ep` - Check if scaling is in progress
+
+## Process Checkpoint APIs
+
+For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
+
+- `/checkpoint/prepare` - Start preparing, draining with `?mode=wait` (default), `abort` or `keep`; 200 once started or already preparing, 400 if the engine cannot prepare now
+- `/checkpoint/status` - Return the state: 200 once prepared, 503 until then, 500 after a failure
+- `/checkpoint/restore` - Bring back released state and serve; 200 if already restoring or serving, 400 while preparing or after a failure
 
 ## Server in development mode
 
@@ -114,13 +220,18 @@ When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
 
 ### Weight Transfer APIs (RL Training)
 
-For further details on Weight Transfer, please refer to [this page](../../training/weight_transfer/README.md).
+For further details on Weight Transfer, please refer to [this page](../../training/weight_updates/README.md).
 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
+- `/abort_requests` - Abort in-flight requests (all in-flight, or the given `request_ids`) without pausing the scheduler
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
+- `/start_weight_update` - Prepares the inference engine for a weight update.
 - `/update_weights` - Update model weights (can alter model behavior)
+- `/finish_weight_update` - Finalizes the weight update
+- `/update_weight_version` - Set the weight version without updating model weights
+- `/weight_info` - Get the latest committed weight version
 - `/get_world_size` - Get distributed world size
 
 ### Collective RPC
@@ -156,6 +267,10 @@ and all chat requests will error.
 vllm serve <model> --chat-template ./path-to-chat-template.jinja
 ```
 
+With `--tokenizer-mode cohere`, configure custom templates with
+`--chat-template`. This mode rejects template source in HTTP requests,
+even when `--trust-request-chat-template` is enabled.
+
 vLLM community provides a set of chat templates for popular models. You can find them under the [examples](../../../examples) directory.
 
 With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
@@ -188,14 +303,6 @@ the detected format, which can be one of:
 
 If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
 to override which format to use.
-
-## Offline API Documentation
-
-The FastAPI `/docs` endpoint requires an internet connection by default. To enable offline access in air-gapped environments, use the `--enable-offline-docs` flag:
-
-```bash
-vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
-```
 
 ## Ray Serve LLM
 

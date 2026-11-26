@@ -102,7 +102,9 @@ class TileGemm82 {
     kv_cache_t* __restrict__ curr_b = b_tile;
 
     for (int32_t k = 0; k < dynamic_k_size; ++k) {
-      auto [fp32_b_0_reg, fp32_b_1_reg] = load_b_pair_vec(curr_b);
+      auto fp32_b_regs = load_b_pair_vec(curr_b);
+      auto fp32_b_0_reg = fp32_b_regs.first;
+      auto fp32_b_1_reg = fp32_b_regs.second;
 
       float* __restrict__ curr_m_a = curr_a;
       vec_op::unroll_loop<int32_t, M>([&](int32_t i) {

@@ -1,9 +1,5 @@
 #pragma once
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
-
 // clang-format off
 // The cutlass include order matters (annoyingly)
 
@@ -228,25 +224,6 @@ struct PrepackedLayoutBTemplate {
 
     // (BlocksN, BlocksK, L) -> (storage_idx)
     return make_layout(blocks_shape, compact_col_major(blocks_shape, stride));
-  }
-
-  // ((athrid, val), (BlocksN, BlocksK, L)) -> (N, K, L)
-  template <class Shape_NKL>
-  CUTE_HOST_DEVICE static auto TVbNbK_to_NKL(Shape_NKL shape_mkl) {
-    auto tile = make_tile(make_layout(size<0>(PPBlockShape_NK{})),
-                          make_layout(size<1>(PPBlockShape_NK{})));
-
-    // ((BlockN, BlockK), (BlocksN, BlocksK, L)) -> (N, K, L)
-    auto tiled_A = zipped_divide(make_layout(shape_mkl), tile);
-    return tiled_A.compose(ppblock_TV_to_NK(), _);
-  }
-
-  // (N, K, L) -> ((athrid, val), (BlocksN, BlocksK), L)
-  template <class Shape_NKL>
-  CUTE_HOST_DEVICE static auto NKL_to_TVbNbK(Shape_NKL shape_mkl) {
-    auto TVbNbK_to_NKL_layout = TVbNbK_to_NKL(shape_mkl);
-    return blocked_product(ppblock_NK_to_TV(),
-                           make_layout(shape<1>(TVbNbK_to_NKL_layout)));
   }
 };
 

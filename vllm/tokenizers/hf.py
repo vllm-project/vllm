@@ -6,14 +6,30 @@ import queue
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, BatchEncoding, PythonBackend, TokenizersBackend
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
 
-HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
+HfTokenizer: TypeAlias = PythonBackend | TokenizersBackend
 _T = TypeVar("_T", bound=TokenizerLike)
+logger = init_logger(__name__)
+
+
+def encode_with_special_tokens_mask(
+    tokenizer: TokenizerLike, text: str, **kwargs
+) -> BatchEncoding:
+    """Encode text with a best-effort mask of tokenizer-added special tokens."""
+    kwargs["return_special_tokens_mask"] = True
+    try:
+        return tokenizer(text, **kwargs)
+    except (TypeError, NotImplementedError):
+        kwargs.pop("return_special_tokens_mask")
+        encoding = copy.copy(tokenizer(text, **kwargs))
+        encoding.pop("special_tokens_mask", None)
+        return encoding
 
 
 class ThreadSafeHFTokenizerMixin:
@@ -23,25 +39,24 @@ class ThreadSafeHFTokenizerMixin:
 
 
 def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
-    """
-    If `tokenizer` is a `PreTrainedTokenizerFast`, modify the tokenizer
+    """If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
     in-place to make the public interface thread-safe by routing calls
     through a deep-copied tokenizer pool.
 
     Note that:
-    - Only ``TokenizerLike``'s public interface is thread-safe.
-      This doesn't include ``_tokenizer`` property nor any mutation
-      methods like ``add_special_tokens`` or ``add_tokens``.
+    - Only `TokenizerLike`'s public interface is thread-safe.
+      This doesn't include `_tokenizer` property nor any mutation
+      methods like `add_special_tokens` or `add_tokens`.
     - Adjacent method calls could happen on different deep copies.
     """
-    if not isinstance(tokenizer, PreTrainedTokenizerFast) or isinstance(
+    if not isinstance(tokenizer, TokenizersBackend) or isinstance(
         tokenizer, ThreadSafeHFTokenizerMixin
     ):
         return tokenizer
 
     og_tokenizer = copy.copy(tokenizer)
 
-    tokenizer_pool: queue.Queue[PreTrainedTokenizerFast] = queue.Queue()
+    tokenizer_pool: queue.Queue[TokenizersBackend] = queue.Queue()
     for _ in range(copies):
         tokenizer_pool.put(copy.deepcopy(og_tokenizer))
 
@@ -99,11 +114,13 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     TokenizerPool.__name__ = f"TokenizerPool{og_tokenizer.__class__.__name__}"
 
     tokenizer.__class__ = TokenizerPool
+    # Return the tokenizer: TokenizerPool.__reduce__ reconstructs through this
+    # function, so falling off the end would unpickle to None (issue #45433).
+    return tokenizer
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    By default, transformers will recompute multiple tokenizer properties
+    """By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
@@ -113,6 +130,9 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
+    # The underlying tokenizer class could be a specific backend,
+    # which does not always implement is_fast in Transformers
+    tokenizer_is_fast = getattr(tokenizer, "is_fast", True)
 
     max_token_id = max(tokenizer_vocab.values())
     max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
@@ -120,10 +140,11 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     # Some tokenizers (e.g., QwenTokenizer) have special tokens that
     # are added and included in the implementation of the vocab_size
     # property, but not in get_vocab(); if there is an implementation
-    # of vocab size, we should take the greater value.
+    # of vocab size, we should take the greater value. vocab_size is a
+    # count, so the largest id it implies is vocab_size - 1.
     if hasattr(tokenizer, "vocab_size"):
         with contextlib.suppress(NotImplementedError):
-            max_token_id = max(max_token_id, tokenizer.vocab_size)
+            max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
         @property
@@ -141,6 +162,10 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         @property
         def max_chars_per_token(self) -> int:
             return max_chars_per_token
+
+        @property
+        def is_fast(self) -> bool:
+            return tokenizer_is_fast
 
         def get_vocab(self) -> dict[str, int]:
             return tokenizer_vocab

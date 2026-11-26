@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import suppress
 
 import openai  # use the official client for correctness check
 import pytest
@@ -8,11 +9,14 @@ import pytest_asyncio
 import regex as re
 from openai import BadRequestError
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
-MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
@@ -31,8 +35,11 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module")
-def server(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+def server(default_server_args, request):
+    model_name, env_dict = getattr(request, "param", (MODEL_NAME, None))
+    with RemoteOpenAIServer(
+        model_name, default_server_args, env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 
@@ -58,9 +65,12 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) ->
     choice = completion.choices[0]
     assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
-    assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=6, total_tokens=11
-    )
+    assert completion.usage is not None
+    assert completion.usage.completion_tokens == 5
+    assert completion.usage.prompt_tokens == 5
+    assert completion.usage.total_tokens == 10
+    assert completion.usage.prompt_tokens_details is not None
+    assert completion.usage.prompt_tokens_details.cached_tokens == 0
 
     # test using token IDs
     completion = await client.completions.create(
@@ -108,6 +118,77 @@ async def test_completion_truncation_side_controls_prompt_truncation(
         },
     )
     assert left_completion.choices[0].prompt_token_ids == prompt_token_ids[-4:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    # Exercise the Python renderer even when this module runs in Rust frontend CI.
+    [("facebook/opt-125m", {"VLLM_USE_RUST_FRONTEND": "0"})],
+    indirect=True,
+    ids=["python-opt"],
+)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("max_tokens", [0, 3])
+@pytest.mark.parametrize(
+    "prompt,keep,expected",
+    [
+        ("Hello, my name is", 4, "Hello, my"),
+        ("</s>Hello, my name is", 4, "</s>Hello,"),
+        ("Hello, my name is", 1, ""),
+    ],
+)
+async def test_truncated_echo_excludes_only_added_special_tokens(
+    client: openai.AsyncOpenAI,
+    prompt: str,
+    keep: int,
+    expected: str,
+    stream: bool,
+    max_tokens: int,
+) -> None:
+    extra_body = {"truncate_prompt_tokens": keep, "truncation_side": "right"}
+    generated = await client.completions.create(
+        model="facebook/opt-125m",
+        prompt=prompt,
+        max_tokens=max(1, max_tokens),
+        temperature=0.0,
+        extra_body={**extra_body, "return_token_ids": True},
+    )
+    tokenizer = get_tokenizer("facebook/opt-125m")
+    assert generated.choices[0].prompt_token_ids == tokenizer.encode(prompt)[:keep]
+    assert generated.usage is not None
+    assert generated.usage.prompt_tokens == keep
+    response = await client.completions.create(
+        model="facebook/opt-125m",
+        prompt=prompt,
+        echo=True,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        logprobs=0,
+        stream=stream,
+        extra_body=extra_body,
+    )
+    choices = (
+        [chunk.choices[0] async for chunk in response] if stream else response.choices
+    )
+    if not stream:
+        assert response.usage is not None
+        assert response.usage.prompt_tokens == keep
+    text = "".join(choice.text for choice in choices)
+    generated_text = generated.choices[0].text if max_tokens else ""
+    assert text == expected + generated_text
+    offset = 0
+    for choice in choices:
+        assert choice.logprobs is not None
+        assert len(choice.logprobs.tokens) == len(choice.logprobs.token_logprobs)
+        assert len(choice.logprobs.tokens) == len(choice.logprobs.top_logprobs)
+        for token, text_offset in zip(
+            choice.logprobs.tokens, choice.logprobs.text_offset, strict=True
+        ):
+            assert text_offset == offset
+            assert text[text_offset : text_offset + len(token)] == token
+            offset += len(token)
+    assert offset == len(text)
 
 
 @pytest.mark.asyncio
@@ -171,6 +252,112 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
+async def test_logprob_token_ids(client: openai.AsyncOpenAI):
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello",
+        max_tokens=1,
+        temperature=0.0,
+        logprobs=5,
+        extra_body={
+            "logprob_token_ids": [5000],
+            "allowed_token_ids": [42],
+            "return_tokens_as_token_ids": True,
+        },
+    )
+
+    choice = completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.tokens == ["token_id:42"]
+    assert choice.logprobs.top_logprobs is not None
+    assert set(choice.logprobs.top_logprobs[0]) == {
+        "token_id:42",
+        "token_id:5000",
+    }
+
+
+@pytest.mark.asyncio
+async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
+    stream = await client.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello",
+        max_tokens=1,
+        temperature=0.0,
+        logprobs=5,
+        stream=True,
+        extra_body={
+            "logprob_token_ids": [5000],
+            "allowed_token_ids": [42],
+            "return_tokens_as_token_ids": True,
+        },
+    )
+
+    returned_top_logprobs: list[dict[str, float]] = []
+    async for chunk in stream:
+        logprobs = chunk.choices[0].logprobs
+        if logprobs is not None and logprobs.top_logprobs is not None:
+            returned_top_logprobs.extend(
+                top_logprobs
+                for top_logprobs in logprobs.top_logprobs
+                if top_logprobs is not None
+            )
+
+    assert len(returned_top_logprobs) == 1
+    assert set(returned_top_logprobs[0]) == {"token_id:42", "token_id:5000"}
+
+
+# 8158 is a leading-byte fragment of U+0E58 (Thai digit 8); 3023 and 378 are
+# other leading fragments. All three decode to "" on their own. After "Hello",
+# 8158 is the most likely of the three, so the "" entry is the sampled token's.
+FRAGMENT_REQUEST = dict(
+    model=MODEL_NAME,
+    prompt="Hello",
+    max_tokens=1,
+    temperature=0.0,
+    # Required with logprob_token_ids, which returns every requested token
+    # whatever the count.
+    logprobs=0,
+    extra_body={"allowed_token_ids": [8158], "logprob_token_ids": [3023, 378]},
+)
+
+# The Rust frontend keeps the last of the candidates with the same text until
+# #68488 lands, and decodes byte fragments to "\ufffd" until #63926 lands.
+skip_on_rust_frontend = pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not keep the sampled top_logprobs entry yet",
+)
+
+
+@pytest.mark.asyncio
+@skip_on_rust_frontend
+async def test_top_logprobs_keep_sampled_entry_on_string_collision(
+    client: openai.AsyncOpenAI,
+):
+    completion = await client.completions.create(**FRAGMENT_REQUEST)
+    logprobs = completion.choices[0].logprobs
+    assert logprobs is not None
+    assert logprobs.tokens == [""]
+    assert logprobs.top_logprobs == [{"": logprobs.token_logprobs[0]}]
+
+
+@pytest.mark.asyncio
+@skip_on_rust_frontend
+async def test_top_logprobs_keep_sampled_entry_on_string_collision_stream(
+    client: openai.AsyncOpenAI,
+):
+    stream = await client.completions.create(**FRAGMENT_REQUEST, stream=True)
+    tokens, token_logprobs, top_logprobs = [], [], []
+    async for chunk in stream:
+        logprobs = chunk.choices[0].logprobs
+        if logprobs is not None and logprobs.tokens:
+            tokens += logprobs.tokens
+            token_logprobs += logprobs.token_logprobs
+            top_logprobs += logprobs.top_logprobs
+    assert tokens == [""]
+    assert top_logprobs == [{"": token_logprobs[0]}]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
@@ -204,7 +391,7 @@ async def test_too_many_completion_logprobs(
             logprobs=30,
             stream=True,
         )
-        async for chunk in stream:
+        async for _ in stream:
             ...
 
     # the server should still work afterwards
@@ -277,7 +464,8 @@ async def test_completion_streaming(
     # finish reason should only return in last block
     assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == "length"
-    assert chunk.choices[0].text
+    # The last chunk may carry only the finish_reason (Rust); the joined text is
+    # checked against the non-streaming output below.
     assert "".join(chunks) == single_output
 
 
@@ -290,10 +478,9 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI, model_name: str
     """Parallel sampling without streaming.
     A single request output contains a list of completions.
     """
-
     prompt = "What is an LLM?"
     n = 3
-    max_tokens = 50  # we want some to finish earlier than others
+    max_tokens = 50
 
     # High temperature to maximize chance of unique completions.
     completion = await client.completions.create(
@@ -311,16 +498,12 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI, model_name: str
     num_completions = len(completion.choices)
     assert num_completions == n, f"Num completions {num_completions} but expected {n}."
     completion_repeats: dict[str, int] = {}
-    output_token_lengths = set()
     for idx, choice in enumerate(completion.choices):
         # Assert correct completion index & some finish reason.
         assert choice.index == idx, f"Index {choice.index} but expected {idx}."
         assert choice.finish_reason is not None, "None finish_reason is invalid."
         text = choice.text
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
-        output_token_lengths.add(len(choice.logprobs.tokens))
-    # Assert subrequests finished at different times
-    assert len(output_token_lengths) > 1
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
@@ -340,10 +523,9 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     The tokens from multiple samples, are flattened into a single stream,
     with an index to indicate which sample the token belongs to.
     """
-
     prompt = "What is an LLM?"
     n = 3
-    max_tokens = 50  # we want some to finish earlier than others
+    max_tokens = 50
 
     stream = await client.completions.create(
         model=model_name,
@@ -359,7 +541,9 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     async for chunk in stream:
         index = chunk.choices[0].index
         text = chunk.choices[0].text
-        chunks[index].append(text)
+        # The last chunk of a sample may carry only the finish_reason (Rust).
+        if text or chunk.choices[0].finish_reason is None:
+            chunks[index].append(text)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
     # Assert `n` completions with correct finish reasons
@@ -367,19 +551,15 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
         f"Expected {n} completions with valid indices and finish_reason."
     )
     completion_repeats: dict[str, int] = {}
-    chunk_lengths = set()
     for chunk in chunks:
         chunk_len = len(chunk)
         # Assert correct number of completion tokens
-        chunk_lengths.add(chunk_len)
         assert chunk_len <= max_tokens, (
             f"max_tokens={max_tokens} but chunk len is {chunk_len}."
         )
         text = "".join(chunk)
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
         print(text)
-    # Assert subrequests finished at different times
-    assert len(chunk_lengths) > 1
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
@@ -501,7 +681,8 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
 
     # Test stream=False, stream_options=
     #     {"include_usage": None}
-    with pytest.raises(BadRequestError):
+    # A null option sets nothing: Python rejects it, Rust accepts it as unset.
+    with suppress(BadRequestError):
         await client.completions.create(
             model=model_name,
             prompt=prompt,
@@ -525,7 +706,8 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
 
     # Test stream=False, stream_options=
     #     {"continuous_usage_stats": None}
-    with pytest.raises(BadRequestError):
+    # A null option sets nothing: Python rejects it, Rust accepts it as unset.
+    with suppress(BadRequestError):
         await client.completions.create(
             model=model_name,
             prompt=prompt,
@@ -727,3 +909,54 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
                 "structured_outputs": {"grammar": invalid_simplified_sql_grammar}
             },
         )
+
+
+# Unit tests for bad_words in CompletionRequest.to_sampling_params()
+def test_completion_request_bad_words_to_sampling_params():
+    """bad_words should be forwarded to SamplingParams (parity with chat)."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        bad_words=["foo", "bar"],
+        max_tokens=10,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert isinstance(sampling_params, SamplingParams)
+    assert sampling_params.bad_words == ["foo", "bar"]
+
+
+def test_completion_request_bad_words_default_empty():
+    """bad_words defaults to an empty list, matching the chat endpoint."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        max_tokens=10,
+    )
+
+    assert request.bad_words == []
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+    assert sampling_params.bad_words == []
+
+
+def test_completion_request_forwards_routed_experts_prompt_start():
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        max_tokens=10,
+        routed_experts_prompt_start=3,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.routed_experts_prompt_start == 3

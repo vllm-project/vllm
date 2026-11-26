@@ -5,13 +5,21 @@ from collections.abc import Callable
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
-from torch.nn import Parameter
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
@@ -34,9 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
-)
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -63,8 +69,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.weight_block_size = self.weight_quant.block_structure
 
         if self.weight_block_size is not None:
-            self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-            self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
             assert not self.is_static_input_scheme
             self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
             self.weight_quant_key = create_fp8_quant_key(
@@ -78,6 +82,14 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 self.is_static_input_scheme
             ]
             self.weight_quant_key = weight_quant_key_mapping[self.strategy]
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        kernel = getattr(self, "fp8_linear", None)
+        return isinstance(kernel, CutlassFP8ScaledMMLinearKernel) or (
+            self.weight_block_size == [128, 128]
+            and isinstance(kernel, CutlassFp8BlockScaledMMKernel)
+        )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -143,7 +155,20 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             module_name=self.__class__.__name__,
         )
 
+        expose_input_quant_key(layer, self.fp8_linear)
+
     def process_weights_after_loading(self, layer) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Compressed-tensors FP8 backend cannot use pre-processed weights"
+                )
+            if self.weight_block_size is None:
+                layer.processed_weight_dims = (0, 1)
+            if not self.is_static_input_scheme:
+                layer.input_scale = None
+            return
+
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
                 layer.weight,
@@ -151,12 +176,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 layer.logical_widths,
                 getattr(layer, "input_scale", None),
             )
-            weight = weight.t()
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight, weight_scale, input_scale = process_fp8_weight_channel_strategy(
                 layer.weight, layer.weight_scale, getattr(layer, "input_scale", None)
             )
-            weight = weight.t()
 
         elif self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False
@@ -174,14 +197,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             )
 
         # required by torch.compile to be torch.nn.Parameter
-        layer.weight = Parameter(weight.data, requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
+        replace_parameter(layer, "weight", weight.data)
+        # The helpers return (K, N); the param keeps its checkpoint dims.
+        layer.processed_weight_dims = (0, 1)
+        replace_parameter(layer, "weight_scale", weight_scale.data)
         if input_scale is not None:
-            layer.input_scale = Parameter(input_scale.data, requires_grad=False)
+            replace_parameter(layer, "input_scale", input_scale.data)
 
         # INPUT SCALE
         if self.is_static_input_scheme and hasattr(layer, "input_scale"):
-            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+            replace_parameter(layer, "input_scale", layer.input_scale.max())
         else:
             layer.input_scale = None
 
@@ -191,7 +216,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)
