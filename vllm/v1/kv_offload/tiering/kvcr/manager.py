@@ -71,7 +71,6 @@ from vllm.v1.kv_offload.base import (
     OffloadingMetricMetadata,
     OffloadKey,
     ReqContext,
-    RequestOffloadingContext,
     get_offload_block_hash,
 )
 from vllm.v1.kv_offload.config import OffloadAccessMode
@@ -80,6 +79,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     ParentManager,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TransferJob,
 )
 
@@ -631,13 +631,13 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         return events
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         if (hint := req_context.kv_hints) is not None:
             self._kvcr.submit_hint(
                 request_id=req_context.req_id,
                 hints=hint,
             )
-        return RequestOffloadingContext()
+        return SecondaryTierRequestContext()
 
     def _align_sequence(
         self,
