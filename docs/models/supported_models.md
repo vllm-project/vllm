@@ -668,6 +668,13 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR-2 | T + I<sup>+</sup> | `baidu/Unlimited-OCR-2` | | |
 
+!!! note "Inkling 2 on NVIDIA Rubin"
+
+    Inkling 2 automatically selects Rubin-specific expert GEMM kernels on
+    SM107 for NVFP4 and MXFP8. Use a FlashInfer build containing the SM107
+    TRT-LLM-gen cubins; this path was validated with FlashInfer 0.7.4.
+    No additional vLLM flag is required.
+
 !!! note "HY4 and HY4 Flash"
 
     HY4 and HY4 Flash run on NVIDIA CUDA and on AMD ROCm gfx950 GPUs (MI350X,
