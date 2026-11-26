@@ -1523,20 +1523,17 @@ impl ServeArgs {
         });
 
         let mut server = self.runtime.server_config(listener_mode, grpc_listener_mode);
-        let max_model_len = if let (Some(_), Some(value)) = (
-            &self.remote_generation_url,
-            self.managed_engine.max_model_len.as_deref(),
-        ) {
-            Some(
-                parse_human_readable_int(value)
+        let max_model_len = match self.managed_engine.max_model_len.as_deref() {
+            Some(value) if self.remote_generation_url.is_some() => {
+                let Some(limit) = parse_human_readable_int(value)
                     .and_then(|n| u32::try_from(n).ok())
                     .and_then(NonZeroU32::new)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("remote --max-model-len must be a positive token count")
-                    })?,
-            )
-        } else {
-            None
+                else {
+                    anyhow::bail!("remote --max-model-len must be a positive token count");
+                };
+                Some(limit)
+            }
+            _ => None,
         };
 
         server.max_model_len = max_model_len;
