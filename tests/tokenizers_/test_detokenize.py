@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Generator
 from typing import Any, cast
 
+import pybase64 as base64
 import pytest
+from tokenizers import AddedToken, Tokenizer, decoders, models
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
+from transformers.convert_slow_tokenizer import bytes_to_unicode
 
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.detokenizer_utils import (
@@ -14,6 +18,7 @@ from vllm.tokenizers.detokenizer_utils import (
     decode_token_ids_with_offsets,
     detokenize_incrementally,
 )
+from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.transformers_utils.repo_utils import with_retry
@@ -54,9 +59,6 @@ TOKENIZERS = [
 
 
 def _byte_tokenizer(byte_fallback=False):
-    from tokenizers import Tokenizer, decoders, models
-    from transformers.convert_slow_tokenizer import bytes_to_unicode
-
     pieces = (
         [f"<0x{b:02X}>" for b in range(256)]
         if byte_fallback
@@ -92,8 +94,6 @@ def test_decode_offsets_for_split_unicode(byte_fallback, raw, expected, starts):
 
 
 def test_decode_offsets_preserve_added_tokens_and_special_slots():
-    from tokenizers import AddedToken
-
     tokenizer = _byte_tokenizer()
     tokenizer.add_tokens([AddedToken("🦄")])
     tokenizer.add_special_tokens({"bos_token": "<s>", "eos_token": "</s>"})
@@ -107,8 +107,6 @@ def test_decode_offsets_preserve_added_tokens_and_special_slots():
 
 
 def test_decode_offsets_leave_unknown_decoder_unsupported():
-    from tokenizers import Tokenizer, decoders, models
-
     backend = Tokenizer(models.WordPiece(vocab={"[UNK]": 0, "x": 1}))
     backend.decoder = decoders.WordPiece()
     tokenizer = TokenizersBackend(tokenizer_object=backend)
@@ -136,12 +134,6 @@ def test_decode_offsets_respect_invalid_byte_runs(byte_fallback):
     ],
 )
 def test_decode_offsets_kimi_audio(tmp_path, raw, text, starts, skip_special_tokens):
-    import json
-
-    import pybase64 as base64
-
-    from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
-
     prefix, suffix = "<|im_kimia_user_msg_start|>", "<|im_kimia_assistant_msg_start|>"
     (tmp_path / "tiktoken.model").write_text(
         "".join(f"{base64.b64encode(bytes([i])).decode()} {i}\n" for i in range(256))
@@ -425,8 +417,6 @@ class _MockBackend:
     """Fake backend_tokenizer that exposes pre_tokenizer config."""
 
     def __init__(self, pre_tokenizer_type, replacement=None):
-        import json
-
         pre: dict = {"type": pre_tokenizer_type}
         if replacement is not None:
             pre["replacement"] = replacement

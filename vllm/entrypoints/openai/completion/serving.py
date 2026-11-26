@@ -150,12 +150,15 @@ def _get_prompt_text_offsets(
         ):
             return [*decoded[1], len(text)]
     # Some policies echo literal vocabulary pieces rather than decoded bytes.
-    pieces = [tokenizer.decode([token_id]) for token_id in token_ids]
-    if "".join(pieces) == text:
-        offsets = [0]
-        for piece in pieces:
-            offsets.append(offsets[-1] + len(piece))
-        return offsets
+    offsets = [0]
+    for token_id in token_ids:
+        piece = tokenizer.decode([token_id])
+        if not text.startswith(piece, offsets[-1]):
+            break
+        offsets.append(offsets[-1] + len(piece))
+    else:
+        if offsets[-1] == len(text):
+            return offsets
     if source_offsets is not None:
         # HF source offsets use (0, 0) for tokens added by the postprocessor.
         source_mask = [int(start == end == 0) for start, end in source_offsets]

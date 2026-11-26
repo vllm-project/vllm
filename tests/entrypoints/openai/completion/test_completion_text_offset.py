@@ -4,9 +4,20 @@
 import asyncio
 import json
 import threading
+from cProfile import Profile
 
 import pytest
+from tokenizers import (
+    Tokenizer,
+    decoders,
+    models,
+    normalizers,
+    pre_tokenizers,
+    processors,
+)
+from transformers import OPTConfig, TokenizersBackend
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import (
@@ -17,6 +28,7 @@ from vllm.entrypoints.openai.completion.serving import (
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.renderers.hf import HfRenderer
 
 TOKENS = [(1, "abc"), (2, " de"), (3, "!")]
 # Text deltas as the detokenizer streams them with stop=["\n\n"]: one char is
@@ -51,22 +63,24 @@ def test_normalized_echo_offsets_preserve_special_token_boundaries(
         prompt_input["prompt_token_offsets"] = tokenizer(
             text, add_special_tokens=add_special_tokens, return_offsets_mapping=True
         )["offset_mapping"]
-    assert _get_prompt_text_offsets(
-        tokenizer, ids, text, prompt_input=prompt_input, source_text=text
-    ) == [*expected, len(text)]
+    with Profile() as profile:
+        offsets = _get_prompt_text_offsets(
+            tokenizer, ids, text, prompt_input=prompt_input, source_text=text
+        )
+    assert offsets == [*expected, len(text)]
+    if reuse_source_offsets:
+        # Stop at the first mismatching prefix, then reuse source offsets.
+        decode_calls = sum(
+            entry.callcount
+            for entry in profile.getstats()
+            if entry.code == tokenizer.decode.__func__.__code__
+        )
+        assert decode_calls == (
+            2 if text.startswith("</s>") and not add_special_tokens else 1
+        )
 
 
 def _normalized_tokenizer(special_count=1):
-    from tokenizers import (
-        Tokenizer,
-        decoders,
-        models,
-        normalizers,
-        pre_tokenizers,
-        processors,
-    )
-    from transformers import TokenizersBackend
-
     backend = Tokenizer(
         models.WordLevel(
             {"[UNK]": 0, "<s>": 1, "</s>": 2, "é": 3, "x": 4}, unk_token="[UNK]"
@@ -100,6 +114,7 @@ def test_echo_offsets_ignore_stale_source_offsets(stale_cache):
         prompt_input["prompt_token_offsets"] = [(0, 1), (2, 3)]
     elif stale_cache == "ids":
         prompt_input["prompt_token_ids"] = list(reversed(ids))
+        prompt_input["prompt_token_offsets"] = [(0, 1), (1, 2)]
     elif stale_cache == "length":
         prompt_input["prompt_token_offsets"] = [(1, 2)]
     else:
@@ -132,11 +147,6 @@ def test_echo_offsets_reuse_source_offsets_after_masking(echo_mask):
 
 @pytest.mark.asyncio
 async def test_echo_offsets_use_renderer_tokenizer_executor(tmp_path):
-    from transformers import OPTConfig
-
-    from vllm.config import ModelConfig, VllmConfig
-    from vllm.renderers.hf import HfRenderer
-
     OPTConfig(vocab_size=5).save_pretrained(tmp_path)
     config = VllmConfig(
         model_config=ModelConfig(
