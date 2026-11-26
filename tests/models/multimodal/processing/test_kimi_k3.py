@@ -348,6 +348,36 @@ def test_fused_image_processor_matches_hf(image_processors, width: int, height: 
     ) == hf.media_tokens_calculator({"type": "image", "image": image})
 
 
+def _transparent_image(mode: str, width: int, height: int) -> Image.Image:
+    rng = np.random.default_rng(1)
+    alpha = Image.fromarray(rng.integers(0, 256, (height, width), dtype=np.uint8))
+    image = _noise_image(width, height)
+    if mode == "P":
+        image = image.convert("P")
+        image.info["transparency"] = 0
+        return image
+    image = image.convert(mode)
+    image.putalpha(alpha)
+    return image
+
+
+@pytest.mark.parametrize(
+    ("mode", "width", "height"),
+    [("RGBA", 310, 470), ("RGBA", 7300, 30), ("LA", 310, 470), ("P", 310, 470)],
+)
+def test_fused_image_processor_composites_transparency_like_hf(
+    image_processors, mode: str, width: int, height: int
+):
+    """K3 blends transparent pixels over its chessboard, also after a resize."""
+    fused, hf = image_processors
+    image = _transparent_image(mode, width, height)
+    expected = hf.preprocess([{"type": "image", "image": image}], return_tensors="pt")
+    actual = fused.preprocess([{"type": "image", "image": image}], return_tensors="pt")
+
+    torch.testing.assert_close(actual["grid_thws"], expected["grid_thws"])
+    torch.testing.assert_close(actual["pixel_values"], expected["pixel_values"])
+
+
 @pytest.mark.usefixtures("default_vllm_config")
 def test_mm_device_do_normalize():
     device = current_platform.device_type

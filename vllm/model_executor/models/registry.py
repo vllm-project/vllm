@@ -88,7 +88,6 @@ _TEXT_GENERATION_MODELS = {
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2MoeForCausalLM": ("cohere2_moe", "Cohere2MoeForCausalLM"),
-    "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
@@ -981,6 +980,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "JambaForSequenceClassification": "0.34.0",
     "MambaForCausalLM": "0.34.0",
     "TeleFLMForCausalLM": "0.34.0",
+    "DbrxForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
