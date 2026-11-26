@@ -983,15 +983,15 @@ def test_rocm_attention_takes_the_gfx942_indexer_with_the_flag(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm attention")
-@pytest.mark.parametrize("cdna_version", [3, 4])
+@pytest.mark.parametrize("cdna_version", [3, 4, 5])
 def test_rocm_attention_wo_a_with_online_quant(
     default_vllm_config, dist_init, monkeypatch, cdna_version
 ):
     """With online quantization (`--quantization-config`) of the MXFP8
     checkpoint, CDNA3 builds wo_a on the checkpoint's method, since its
     einsum path reads the MXFP8 weight itself; the other layers keep the
-    online quantization. CDNA4's wo_a BMM reads the MXFP8 block scales too,
-    so a requantized wo_a is refused."""
+    online quantization. The other CDNA versions read the MXFP8 block scales
+    too, so a requantized wo_a is refused."""
     import vllm.platforms.rocm as rocm_platform
     from vllm.config.model import ModelConfig
     from vllm.config.quantization import _ONLINE_SHORTHANDS
@@ -1036,8 +1036,22 @@ def test_rocm_attention_wo_a_with_online_quant(
     if cdna_version == 3:
         assert type(wo_a.quant_method) is _mxfp8_linear_method_cls()
     else:
-        with pytest.raises(ValueError, match="not supported on CDNA4"):
-            rocm._refuse_requantized_wo_a_on_cdna4(wo_a)
+        with pytest.raises(ValueError, match="only supported on CDNA3"):
+            rocm._refuse_requantized_wo_a(wo_a)
+
+
+def test_cdna4_monokernel_refuses_requantized_linears():
+    """With wo_a in the online config's `ignore`, the other linears the CDNA4
+    kernels read as MXFP8 are still requantized, so --monokernel refuses."""
+    requant = SimpleNamespace(
+        quant_method=SimpleNamespace(requantization_source=object()),
+        prefix="model.layers.0.ffn.shared_experts.gate_up_proj",
+    )
+    plain = SimpleNamespace(quant_method=SimpleNamespace(), prefix="down_proj")
+    shared = SimpleNamespace(gate_up_proj=requant, down_proj=plain)
+    layer = SimpleNamespace(ffn=SimpleNamespace(shared_experts=shared))
+    with pytest.raises(ValueError, match="gate_up_proj on CDNA4"):
+        md._keep_row_major_at_load(layer, ffn_only=True)
 
 
 @pytest.mark.parametrize("monokernel", [True, False])

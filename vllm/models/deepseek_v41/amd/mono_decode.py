@@ -305,6 +305,10 @@ def _keep_row_major_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> 
     assert sh is not None
     attn = [] if ffn_only else [getattr(layer.attn, n) for n in ATTN_LINEARS_942]
     for linear in [sh.gate_up_proj, sh.down_proj, *attn]:
+        if getattr(linear.quant_method, "requantization_source", None):
+            raise ValueError(
+                f"--monokernel needs the checkpoint's MXFP8 {linear.prefix} on CDNA4."
+            )
         linear.keep_row_major_weight = True
 
 
