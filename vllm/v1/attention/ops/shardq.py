@@ -54,6 +54,8 @@ class ShardQMetadata:
     # Every rank's tokens, grouped by rank, and where each group starts.
     token_ids: torch.Tensor
     rank_offsets: torch.Tensor
+    # CPU view for backends that plan using host sequence-length bounds.
+    local_token_ids_cpu: np.ndarray | None = None
     # forward_mqa metadata of this rank's tokens, which run with all heads.
     attn_metadata: "SparseMLACommonMetadata" = field(init=False)
     # Under DCP, the gathered context this rank's tokens attend instead of the
