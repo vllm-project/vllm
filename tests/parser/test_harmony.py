@@ -1341,3 +1341,50 @@ class TestAdjustRequest:
             xgrammar_backend,
             gpt_oss_stop_token_ids,
         )
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    @pytest.mark.parametrize(
+        ("request_kwargs", "message"),
+        [
+            (
+                {"response_format_type": "json_schema"},
+                assistant('{"answer": "Tokyo"}', "final", "json"),
+            ),
+            (
+                {"tool_choice": "required"},
+                tool_call(f"functions.{TOOL_2_NAME}", '{"city": "Tokyo"}'),
+            ),
+        ],
+        ids=["response_format_json_schema", "tool_required"],
+    )
+    def test_constrained_message_end_requires_special_token(
+        self,
+        harmony_parser,
+        xgrammar_backend,
+        gpt_oss_stop_token_ids,
+        request_kind,
+        request_kwargs,
+        message,
+    ):
+        """A constrained message ends with the <|end|> special token, not with
+        "<|end|>" spelled with ordinary tokens, which the Harmony parser keeps
+        as message text after the JSON (#68264)."""
+        request = self._build_request(request_kind, **request_kwargs)
+        adjusted_request = harmony_parser.adjust_request(request)
+        grammar = xgrammar_backend.compile_grammar(
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            adjusted_request.structured_outputs.structural_tag,
+            stop_token_ids=gpt_oss_stop_token_ids,
+        )
+
+        enc = get_encoding()
+        end_token = enc.encode("<|end|>", allowed_special="all")
+        end_as_text = [27, 91, 419, 91, 29]  # "<", "|", "end", "|", ">"
+        assert enc.decode_utf8(end_as_text) == "<|end|>"
+        tokens = get_model_output_tokens([assistant("reasoning", "analysis"), message])
+        # Drop the message's closing <|end|> / <|call|> / <|return|>.
+        body = tokens[:-1]
+        assert grammar.validate_tokens(body) == body
+
+        assert grammar.validate_tokens(body + end_token) == body + end_token
+        assert grammar.validate_tokens(body + end_as_text) == body
