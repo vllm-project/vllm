@@ -12,7 +12,7 @@ import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Final
 
@@ -153,6 +153,7 @@ class TransferRegion:
     shared_group_ids: tuple[int, ...] = ()
     # Byte offset of this view from the start of its block row.
     row_offset: int = 0
+    page_spec: str = ""
 
 
 def _block_ids_for_region(
@@ -421,6 +422,7 @@ def _align_transfer_regions(
     remote_regions: list[TransferRegion],
     *,
     allow_partial_layers: bool = False,
+    allow_group_mapping: bool = False,
 ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
     """Align KV transfer regions by registered layer-name occurrence.
 
@@ -473,7 +475,15 @@ def _align_transfer_regions(
                     f"{remote_region.layer_index}."
                 ),
             )
-        if local_region.group_index != remote_region.group_index:
+        if allow_group_mapping:
+            if (
+                not local_region.page_spec
+                or local_region.page_spec != remote_region.page_spec
+                or local_region.kv_block_len != remote_region.kv_block_len
+                or min(local_region.group_index, remote_region.group_index) < 0
+            ):
+                return [], [], f"Mooncake incompatible logical page: {key[0]}."
+        elif local_region.group_index != remote_region.group_index:
             return (
                 [],
                 [],
@@ -485,7 +495,8 @@ def _align_transfer_regions(
                 ),
             )
         if (
-            local_region.shared_group_ids
+            not allow_group_mapping
+            and local_region.shared_group_ids
             and remote_region.shared_group_ids
             and local_region.shared_group_ids != remote_region.shared_group_ids
         ):
@@ -633,6 +644,7 @@ def _pp_mismatch_hides_packed_layers(
     remote_row_offsets: list[int],
     remote_kv_block_lens: list[int],
     remote_block_lens: list[int],
+    remote_has_logical_regions: bool = False,
 ) -> bool:
     """A row that dropped per-layer names cannot be aligned across PP sizes.
 
@@ -641,8 +653,11 @@ def _pp_mismatch_hides_packed_layers(
     """
     if local_pp_size == remote_pp_size:
         return False
-    return local_has_opaque_row or _has_opaque_packed_row(
-        remote_row_offsets, remote_kv_block_lens, remote_block_lens
+    return local_has_opaque_row or (
+        not remote_has_logical_regions
+        and _has_opaque_packed_row(
+            remote_row_offsets, remote_kv_block_lens, remote_block_lens
+        )
     )
 
 
@@ -674,6 +689,7 @@ class MooncakeXferMetadata(
     # Byte offset of each registered view from its block row. -1 means the
     # peer did not send the field, so the run must not be promoted.
     registered_row_offsets: list[int] = msgspec.field(default_factory=list)
+    logical_regions: list[TransferRegion] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
@@ -1478,6 +1494,7 @@ class MooncakeConnectorWorker:
         self.region_shared_groups: list[tuple[int, ...]] = []
         # Parallel to registered regions. -1 is not a packed row view.
         self.region_row_offsets: list[int] = []
+        self.logical_regions: list[TransferRegion] = []
         self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
         self._kv_data_lens: list[int] = []
@@ -1823,6 +1840,7 @@ class MooncakeConnectorWorker:
             remote_row_offsets=meta.registered_row_offsets,
             remote_kv_block_lens=meta.kv_block_lens,
             remote_block_lens=meta.block_lens,
+            remote_has_logical_regions=bool(meta.logical_regions),
         ):
             msg = (
                 "Mooncake non-page-contiguous packed regions keep only the "
@@ -2097,8 +2115,26 @@ class MooncakeConnectorWorker:
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
+        mapped_groups = (
+            bool(local_regions)
+            and all(r.page_spec for r in local_regions)
+            and self.pp_size != agent_meta.remote_pp_size
+        )
+        group_pairs = (
+            list(
+                dict.fromkeys(
+                    (local.group_index, remote.group_index)
+                    for local, remote in zip(local_regions, remote_regions)
+                )
+            )
+            if mapped_groups
+            else []
+        )
+        pair_indices = {pair: i for i, pair in enumerate(group_pairs)}
 
         for d_req_id, send_meta in ready_reqs:
+            if not local_regions:
+                continue
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
 
             if not remote_block_ids_per_group or all(
@@ -2106,7 +2142,9 @@ class MooncakeConnectorWorker:
             ):
                 continue
 
-            if len(send_meta.local_block_ids) != len(remote_block_ids_per_group):
+            if not mapped_groups and len(send_meta.local_block_ids) != len(
+                remote_block_ids_per_group
+            ):
                 logger.error(
                     "req %s: KV group count mismatch: local=%d, remote=%d",
                     d_req_id,
@@ -2126,9 +2164,23 @@ class MooncakeConnectorWorker:
             remote_block_ids_by_group: list[list[int]] = []
             has_block_error = False
             group_specs = self.kv_cache_config.transfer_groups
-            for group_index, (local_group, remote_group) in enumerate(
-                zip(send_meta.local_block_ids, remote_block_ids_per_group)
-            ):
+            pairs = (
+                group_pairs
+                if mapped_groups
+                else [(i, i) for i in range(len(send_meta.local_block_ids))]
+            )
+            for group_index, remote_group_index in pairs:
+                if (
+                    group_index < 0
+                    or group_index >= len(send_meta.local_block_ids)
+                    or remote_group_index < 0
+                    or remote_group_index >= len(remote_block_ids_per_group)
+                ):
+                    has_block_error = True
+                    err_msg = "Mooncake logical page references a missing KV group."
+                    break
+                local_group = send_meta.local_block_ids[group_index]
+                remote_group = remote_block_ids_per_group[remote_group_index]
                 is_mamba_group = issubclass(
                     group_specs[group_index].manager_cls, MambaManager
                 )
@@ -2163,6 +2215,18 @@ class MooncakeConnectorWorker:
                 elif n_local > n_remote:
                     # Partial prefix cache hit: just read uncomputed blocks.
                     local_group = local_group[-n_remote:] if n_remote > 0 else []
+                if mapped_groups:
+                    valid_pairs = [
+                        (p, d)
+                        for p, d in zip(local_group, remote_group)
+                        if d != NULL_BLOCK_ID
+                    ]
+                    if any(p == NULL_BLOCK_ID for p, _ in valid_pairs):
+                        has_block_error = True
+                        err_msg = "Mooncake required source page is a null block."
+                        break
+                    local_group = [p for p, _ in valid_pairs]
+                    remote_group = [d for _, d in valid_pairs]
                 local_block_ids_by_group.append(local_group)
                 remote_block_ids_by_group.append(remote_group)
 
@@ -2196,16 +2260,21 @@ class MooncakeConnectorWorker:
             # Regions of the same KV group share block ids; group them once.
             block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
             for local_region, remote_region in zip(local_regions, remote_regions):
-                assert local_region.group_index == remote_region.group_index, (
-                    "Aligned Mooncake transfer regions must belong to the same "
-                    "KV group."
+                assert (
+                    mapped_groups
+                    or local_region.group_index == remote_region.group_index
+                ), "Aligned Mooncake transfer regions must belong to the same KV group."
+                group_index = (
+                    pair_indices[(local_region.group_index, remote_region.group_index)]
+                    if mapped_groups
+                    else local_region.group_index
                 )
-                group_key = (local_region.group_index, local_region.shared_group_ids)
+                group_key = (group_index, local_region.shared_group_ids)
                 if group_key not in block_runs:
                     local_ids = np.asarray(
                         _block_ids_for_region(
                             local_block_ids_by_group,
-                            local_region.group_index,
+                            group_index,
                             local_region.shared_group_ids,
                         ),
                         dtype=np.int64,
@@ -2213,8 +2282,8 @@ class MooncakeConnectorWorker:
                     remote_ids = np.asarray(
                         _block_ids_for_region(
                             remote_block_ids_by_group,
-                            remote_region.group_index,
-                            local_region.shared_group_ids,
+                            group_index if mapped_groups else remote_region.group_index,
+                            remote_region.shared_group_ids,
                         ),
                         dtype=np.int64,
                     )
@@ -2465,9 +2534,7 @@ class MooncakeConnectorWorker:
                     view_addr = storage_addr
                     kv_block_len = block_stride
                     self.opaque_packed_storages.add(storage_addr)
-                # Same PP on both sides still aligns by the first layer name.
-                # A remote PP mismatch is rejected at send time, once the
-                # peer's PP size is known.
+                # Legacy peers align collapsed views by the first layer name.
                 dedupe_key = (view_addr, block_stride, kv_block_len)
                 region_idx = packed_view_to_region.get(dedupe_key)
                 if region_idx is not None:
@@ -2545,6 +2612,7 @@ class MooncakeConnectorWorker:
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
         self._kv_data_lens = kv_data_lens
+        self.logical_regions = self._get_logical_transfer_regions(kv_caches)
 
         if not kv_data_ptrs:
             raise RuntimeError("No KV cache tensors were registered with Mooncake.")
@@ -3152,6 +3220,56 @@ class MooncakeConnectorWorker:
                 self.record_send_reqs(metadata), self.sender_loop
             )
 
+    def _get_logical_transfer_regions(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> list[TransferRegion]:
+        """Keep independently paged views for unsplit MLA PP handoffs."""
+        parallel = self.vllm_config.parallel_config
+        if (
+            not self.use_mla
+            or self._physical_blocks_per_logical_kv_block != 1
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or self.opaque_packed_storages
+        ):
+            return []
+        regions: list[TransferRegion] = []
+        for name, cache in kv_caches.items():
+            if name not in self._layer_specs:
+                continue
+            spec = self._layer_specs[name]
+            group_id = self.kv_cache_config.transfer_group_index_by_layer[name]
+            group = self.kv_cache_config.transfer_groups[group_id]
+            if (
+                not isinstance(spec, AttentionSpec)
+                or not (
+                    isinstance(spec, MLAAttentionSpec)
+                    or issubclass(group.manager_cls, CircularBufferManager)
+                )
+                or cache.ndim < 2
+                or not cache[0].is_contiguous()
+                or not 0 < cache[0].nbytes <= cache.stride(0) * cache.element_size()
+            ):
+                return []
+            regions.append(
+                TransferRegion(
+                    layer_name=name,
+                    layer_index=extract_layer_index(name),
+                    base_addr=cache.data_ptr(),
+                    block_len=cache.stride(0) * cache.element_size(),
+                    kv_block_len=cache[0].nbytes,
+                    group_index=group_id,
+                    page_spec=repr(
+                        (
+                            replace(spec, page_size_padded=None),
+                            group.manager_config,
+                            self.cache_config.cache_dtype,
+                        )
+                    ),
+                )
+            )
+        return regions
+
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache
 
@@ -3180,6 +3298,7 @@ class MooncakeConnectorWorker:
             tuple(meta.registered_group_indices),
             tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
             tuple(meta.registered_row_offsets),
+            tuple(meta.logical_regions),
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
@@ -3242,12 +3361,24 @@ class MooncakeConnectorWorker:
             remote_shared,
             remote_row_offsets,
         )
+        map_groups = (
+            self.pp_size != meta.remote_pp_size
+            and bool(self.logical_regions)
+            and bool(meta.logical_regions)
+        )
+        if map_groups:
+            local_regions = self.logical_regions
+            remote_regions = meta.logical_regions
         pre_align_local = local_regions
         pre_align_remote = remote_regions
         local_regions, remote_regions, align_err = _align_transfer_regions(
             local_regions,
             remote_regions,
-            allow_partial_layers=meta.remote_pp_size != self.pp_size,
+            allow_partial_layers=(
+                meta.remote_pp_size != self.pp_size
+                and (not map_groups or meta.remote_pp_size > 1)
+            ),
+            allow_group_mapping=map_groups,
         )
         if align_err is not None:
             return finish([], [], align_err)
@@ -3263,7 +3394,7 @@ class MooncakeConnectorWorker:
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if tp_ratio == 1 or self._producer_cache_is_replicated():
+        if not map_groups and (tp_ratio == 1 or self._producer_cache_is_replicated()):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
@@ -3357,6 +3488,7 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
+            logical_regions=self.logical_regions,
             requires_draft_context_kv=self.projects_draft_context_kv,
         )
 

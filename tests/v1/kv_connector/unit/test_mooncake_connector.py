@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import ctypes
 import errno
 import os
 import signal
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2708,6 +2710,7 @@ def test_register_kv_caches_collapses_shared_mla_storage(
         _make_packed_mla_kv_cache_config(num_blocks, num_groups=num_groups)
     ) as (worker, reg):
         backing = torch.zeros((num_blocks, packed_row), dtype=torch.uint8)
+        worker.use_mla = True
         worker.register_kv_caches(
             {
                 "model.layers.0.mla_attn": backing,
@@ -2726,6 +2729,233 @@ def test_register_kv_caches_collapses_shared_mla_storage(
     assert worker.registered_group_indices == [expected_group_index]
     if expected_group_index == _SHARED_REGION_GROUP_ID:
         assert worker.region_shared_groups == [(0, 1)]
+
+    assert [r.layer_name for r in worker.logical_regions] == [
+        "model.layers.0.mla_attn",
+        "model.layers.1.indexer",
+    ]
+    assert [r.group_index for r in worker.logical_regions] == [0, num_groups - 1]
+    assert all(r.page_spec for r in worker.logical_regions)
+    wire = _xfer_meta([], {}, logical_regions=worker.logical_regions)
+    assert (
+        msgspec.msgpack.decode(
+            msgspec.msgpack.encode(wire), type=MooncakeXferMetadata
+        ).logical_regions
+        == worker.logical_regions
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consumer_groups", [(0, 1), (3, 1)])
+@pytest.mark.parametrize("remote_tp_rank", [0, 7])
+async def test_mapped_swa_views_copy_each_groups_own_pages(
+    consumer_groups, remote_tp_rank
+):
+    """PP stages keep aliases whose consumer groups and row strides differ."""
+    page = 16
+    source = np.full((8, 2 * page), 0xA5, dtype=np.uint8)
+    destination = np.full((8, 4 * page), 0xEE, dtype=np.uint8)
+    expected = destination.copy()
+    local_blocks = [[2, 3, 4], [5, 6, 7]]
+    remote_blocks: list[list[int]] = [[], [], [], []]
+    remote_blocks[consumer_groups[0]] = [0, 2, 3]
+    remote_blocks[consumer_groups[1]] = [6, 7]
+    for group, blocks in enumerate(local_blocks):
+        for block in blocks:
+            source[block, :page] = 10 * group + block
+    expected[2, :page] = 3
+    expected[3, :page] = 4
+    expected[6, page : 2 * page] = 16
+    expected[7, page : 2 * page] = 17
+    regions = [
+        TransferRegion(
+            layer_name=f"model.layers.{12 + i}.attn.swa_cache",
+            layer_index=12 + i,
+            base_addr=source.ctypes.data,
+            block_len=source.strides[0],
+            kv_block_len=page,
+            group_index=i,
+            page_spec="same-swa-page",
+        )
+        for i in range(2)
+    ]
+    remote = [
+        replace(
+            region,
+            base_addr=destination.ctypes.data + i * page,
+            block_len=destination.strides[0],
+            group_index=consumer_groups[i],
+        )
+        for i, region in enumerate(regions)
+    ]
+    aligned_p, aligned_d, err = _align_transfer_regions(
+        regions, remote, allow_group_mapping=True
+    )
+    assert err is None
+    writes = np.zeros_like(destination)
+    with mooncake_register_worker(
+        _make_packed_mla_kv_cache_config(8, num_groups=2)
+    ) as (worker, _):
+        worker.use_mla = True
+        worker.tp_size = 4
+        worker.tp_rank = remote_tp_rank // 2
+        worker.pp_size = 2
+        worker.transfer_topo.is_mla = True
+        for local, peer in zip(aligned_p, aligned_d):
+            send = SendBlockMeta(
+                p_req_id="p",
+                transfer_id="xfer",
+                local_block_ids=local_blocks,
+                ready=asyncio.Event(),
+            )
+            meta = _xfer_meta(
+                [peer],
+                {"d": ("xfer", remote_blocks)},
+                remote_tp_size=8,
+                remote_tp_rank=remote_tp_rank,
+            )
+            src, dst, lengths, errors, error = await worker._build_transfer_params(
+                [("d", send)], meta, [local], [peer]
+            )
+            assert errors == [] and error is None
+            for source_ptr, dest_ptr, length in zip(src, dst, lengths):
+                ctypes.memmove(int(dest_ptr), int(source_ptr), int(length))
+                offset = int(dest_ptr) - destination.ctypes.data
+                writes.reshape(-1)[offset : offset + int(length)] += 1
+    np.testing.assert_array_equal(destination, expected)
+    np.testing.assert_array_equal(writes, (expected != 0xEE).astype(np.uint8))
+
+
+@pytest.mark.asyncio
+async def test_mapped_pages_reject_missing_source_and_incompatible_semantics():
+    local = replace(_region(0x1000), page_spec="swa", group_index=0)
+    remote = replace(local, base_addr=0x2000, group_index=1)
+    with mooncake_register_worker(
+        _make_packed_mla_kv_cache_config(8, num_groups=2)
+    ) as (worker, _):
+        worker.use_mla = True
+        worker.pp_size = 2
+        bad = SendBlockMeta(
+            p_req_id="p",
+            transfer_id="xfer",
+            local_block_ids=[[0, 2], []],
+            ready=asyncio.Event(),
+        )
+        good = replace(bad, local_block_ids=[[1, 2], []])
+        meta = _xfer_meta(
+            [remote], {"bad": ("xfer", [[], [3, 4]]), "good": ("xfer", [[], [3, 4]])}
+        )
+        src, dst, lengths, errors, error = await worker._build_transfer_params(
+            [("bad", bad), ("good", good)], meta, [local], [remote]
+        )
+        assert errors == ["bad"] and "source page is a null block" in error
+        assert sum(lengths) == 2 * local.kv_block_len
+        assert len(src) == len(dst) == 1
+        meta.req_blocks["good"] = ("xfer", [[3, 4]])
+        src, _, _, errors, error = await worker._build_transfer_params(
+            [("good", good)], meta, [local], [remote]
+        )
+        assert len(src) == 0 and errors == ["good"] and "missing KV group" in error
+    for incompatible in (
+        replace(remote, page_spec="full-attention"),
+        replace(remote, page_spec=""),
+        replace(remote, kv_block_len=128),
+    ):
+        assert (
+            _align_transfer_regions([local], [incompatible], allow_group_mapping=True)[
+                2
+            ]
+            is not None
+        )
+
+
+@pytest.mark.parametrize("remote_pp", [1, 2])
+def test_logical_regions_only_override_heterogeneous_pp(remote_pp):
+    """Same-PP and old-peer layouts retain the legacy registered view."""
+    with mooncake_register_worker(_make_packed_mla_kv_cache_config(8)) as (worker, _):
+        worker.use_mla = True
+        worker.pp_size = 2
+        caches = {
+            name: torch.zeros((8, 16, 64), dtype=torch.uint8)
+            for name in worker._layer_specs
+        }
+        worker.register_kv_caches(caches)
+        assert worker.logical_regions
+        meta = _xfer_meta(
+            worker.logical_regions,
+            {},
+            remote_pp_size=remote_pp,
+            logical_regions=list(worker.logical_regions),
+        )
+        before = worker._prepare_transfer_regions(meta)
+        assert before[2] is None
+        if remote_pp == 1:
+            meta.logical_regions = meta.logical_regions[:1]
+            assert (
+                "no matching consumer occurrence"
+                in worker._prepare_transfer_regions(meta)[2]
+            )
+            meta.logical_regions = list(worker.logical_regions)
+            for i, region in enumerate(meta.logical_regions):
+                meta.logical_regions[i] = replace(region, page_spec="incompatible")
+            assert worker._prepare_transfer_regions(meta)[2] is not None
+        else:
+            meta.logical_regions = [
+                replace(r, page_spec="incompatible") for r in meta.logical_regions
+            ]
+            assert worker._prepare_transfer_regions(meta) == before
+        meta.logical_regions = []
+        assert worker._prepare_transfer_regions(meta)[2] is None
+
+
+def test_logical_regions_resolve_packed_shared_group_mismatch():
+    """A PP shard keeps both aliases when D has four differently numbered groups."""
+    with mooncake_register_worker(
+        _make_packed_mla_kv_cache_config(8, num_groups=2)
+    ) as (worker, _):
+        worker.use_mla = True
+        worker.pp_size = 2
+        backing = torch.zeros((8, 256), dtype=torch.uint8)
+        worker.register_kv_caches(dict.fromkeys(worker._layer_specs, backing))
+        legacy = _region(
+            0x9000,
+            layer_name=worker.registered_layer_names[0],
+            group_index=-1,
+            shared_group_ids=(0, 1, 2, 3),
+            row_offset=0,
+        )
+        logical = [
+            replace(r, base_addr=0x9000, group_index=g)
+            for r, g in zip(worker.logical_regions, (3, 1))
+        ]
+        meta = _xfer_meta([legacy], {}, remote_pp_size=1, logical_regions=logical)
+        local, remote, error = worker._prepare_transfer_regions(meta)
+        assert error is None and len(local) == len(remote) == 2
+        assert [r.group_index for r in local] == [0, 1]
+        assert [r.group_index for r in remote] == [3, 1]
+        # An old peer still exercises the strict legacy shared-group check.
+        meta.logical_regions = []
+        assert "shared-group set mismatch" in worker._prepare_transfer_regions(meta)[2]
+
+
+@pytest.mark.parametrize("constraint", ["pcp", "dcp", "split", "opaque"])
+def test_logical_regions_require_complete_unsplit_pages(constraint):
+    with mooncake_register_worker(_make_packed_mla_kv_cache_config(8)) as (worker, _):
+        worker.use_mla = True
+        caches = {
+            name: torch.zeros((8, 256), dtype=torch.uint8)
+            for name in worker._layer_specs
+        }
+        assert worker._get_logical_transfer_regions(caches)
+        if constraint == "pcp":
+            worker.vllm_config.parallel_config.prefill_context_parallel_size = 2
+        elif constraint == "dcp":
+            worker.vllm_config.parallel_config.decode_context_parallel_size = 2
+        elif constraint == "split":
+            worker._physical_blocks_per_logical_kv_block = 2
+        else:
+            worker.opaque_packed_storages.add(1)
+        assert worker._get_logical_transfer_regions(caches) == []
 
 
 def test_block_ids_for_region_flattens_shared_groups():
@@ -3054,6 +3284,14 @@ def test_pp_mismatch_rejects_opaque_row_in_both_directions():
     # Hetero PP with page-contiguous views is not this rejection.
     assert not _pp_mismatch_hides_packed_layers(
         2, 1, local_has_opaque_row=False, **page_view
+    )
+    # A named contiguous view can fill its row without hiding layer identities.
+    assert not _pp_mismatch_hides_packed_layers(
+        2,
+        1,
+        local_has_opaque_row=False,
+        remote_has_logical_regions=True,
+        **opaque_row,
     )
 
 
