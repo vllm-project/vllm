@@ -1625,8 +1625,11 @@ presets:
       "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
       "--kv-transfer-config": { MooncakeConnector: { kv_connector_extra_config: { mooncake_protocol: rdma, num_workers: 10 } } }
     # MooncakeConnector sets LBHNC itself; the pd_cluster block's BLHNC is for NIXL.
+    # Each role has its own node; an engine is TP4 on four of the node's eight GPUs.
     roles:
       prefill:
+        nodes: 1
+        tp: 4
         args:
           - "--enable-dbo"
           - "--dbo-prefill-token-threshold"
@@ -1639,6 +1642,8 @@ presets:
         json_args:
           "--attention-config": { indexer_decode_cp: true }
       decode:
+        nodes: 1
+        tp: 4
         env: { VLLM_KV_CACHE_LAYOUT: "LBHNC", MC_MAX_MR_SIZE: "268435456" }
         # Replaces the NIXL config the pd_cluster block writes for MI355X decode.
         args:

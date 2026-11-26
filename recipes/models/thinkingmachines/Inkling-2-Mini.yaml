@@ -58,6 +58,9 @@ opt_in_features:
 variants:
   default:
     precision: nvfp4
+    # Hopper runs the NVFP4/MXFP8 experts as W4A16/W8A16 (Humming GEMMs).
+    precision_hardware:
+      brand: NVIDIA
     vram_minimum_gb: 24
     description: "Routed experts in NVFP4 (layers 0-19) and MXFP8 (layers 20-23) with activations quantized to the same format; attention, routers, attention-residual queries, loop controllers and the LM head in BF16/FP32. ~20 GB on disk including the 0.6 GB DSpark draft."
 
