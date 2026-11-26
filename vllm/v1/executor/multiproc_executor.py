@@ -243,6 +243,11 @@ class MultiprocExecutor(Executor):
                         inherited_fds=inherited_fds,
                     )
 
+            # Resolve automatic binding (numa_bind=None) before choosing how to
+            # start workers: otherwise it turns on inside each worker's start,
+            # after the check, and the threads race on the multiprocessing
+            # executable (#67851).
+            numa_utils.resolve_numa_bind(self.parallel_config)
             if self._can_start_workers_concurrently(inherited_fds):
                 # Start workers in parallel to overlap their slow spawn imports.
                 self._start_workers_concurrently(start_worker, unready_workers)
@@ -356,10 +361,8 @@ class MultiprocExecutor(Executor):
             inherited_fds is None
             and self.local_world_size > 1
             and not current_platform.is_cpu()
-            # Resolve automatic binding (numa_bind=None) first: it turns on
-            # inside each worker's start otherwise, after this check, and the
-            # threads race on the multiprocessing executable (#67851).
-            and not numa_utils.resolve_numa_bind(self.parallel_config)
+            # Already resolved by _init_executor (never None here).
+            and not self.parallel_config.numa_bind
         )
 
     def _start_workers_concurrently(

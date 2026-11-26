@@ -21,7 +21,7 @@ import psutil
 from vllm import envs
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
 
 logger = logging.getLogger(__name__)
 _NUMACTL_ARGS_ENV = "_VLLM_INTERNAL_NUMACTL_ARGS"
@@ -555,7 +555,9 @@ def _resolve_numactl_args(numactl_args: str) -> str:
 
 
 def resolve_numa_bind(
-    parallel_config, local_rank: int = 0, dp_local_rank: int | None = None
+    parallel_config: "ParallelConfig",
+    local_rank: int = 0,
+    dp_local_rank: int | None = None,
 ) -> bool:
     """Resolve automatic NUMA binding (`numa_bind=None`) and return the result.
 
