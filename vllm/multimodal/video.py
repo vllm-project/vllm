@@ -41,6 +41,17 @@ def _frame_nbytes(frames: DecodedFrames) -> int:
     return frames[0].nbytes
 
 
+def _warn_if_num_frames_adjusted(loader: str, requested: int, used: int) -> None:
+    if used != requested:
+        logger.warning_once(
+            "%s sampled %d frames instead of the requested num_frames=%d, "
+            "to fit the clip length, max_frames and the model's frame grouping.",
+            loader,
+            used,
+            requested,
+        )
+
+
 class VideoLoaderRegistry(ExtensionManager):
     def __init__(self) -> None:
         super().__init__()
@@ -413,6 +424,7 @@ class Qwen3VLVideoBackend(VideoBackend):
         # An explicit num_frames takes priority over fps, as in HF.
         if target.num_frames > 0:
             num_frames = min(target.num_frames, max_frames, total_frames_num)
+            _warn_if_num_frames_adjusted(cls.__name__, target.num_frames, num_frames)
         else:
             num_frames = int(total_frames_num / original_fps * fps)
             num_frames = min(max(num_frames, min_frames), max_frames, total_frames_num)
@@ -669,6 +681,7 @@ class Qwen2VLVideoBackend(VideoBackend):
         if target.num_frames > 0:
             n = round(target.num_frames / temporal_patch_size) * temporal_patch_size
             n = min(max(n, temporal_patch_size), max_frames)
+            _warn_if_num_frames_adjusted(cls.__name__, target.num_frames, n)
         else:
             # vLLM reports original_fps == 0 for clips with unknown/variable fps
             # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
