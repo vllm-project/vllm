@@ -215,7 +215,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.hidden_size,
             1,
             bias=False,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.shared_expert_gate",
         )
 
