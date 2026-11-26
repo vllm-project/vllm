@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import fnmatch
 import json
 import os
 import posixpath
@@ -227,9 +228,24 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_or_path: str,
         revision: str | None,
         is_unused_weight: Callable[[str], bool] | None = None,
+        allow_patterns_overrides: list[str] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
+        if allow_patterns_overrides is not None:
+            hf_weights_files = [
+                path
+                for path in hf_weights_files
+                if any(
+                    fnmatch.fnmatch(posixpath.basename(path), pattern)
+                    for pattern in allow_patterns_overrides
+                )
+            ]
+            if not hf_weights_files:
+                raise RuntimeError(
+                    f"No safetensors file in `{model_or_path}` matches the "
+                    f"model's allow_patterns_overrides {allow_patterns_overrides}"
+                )
         selected_files = hf_weights_files
         # Other pipeline stages do not load a model built as a single stage, so
         # collectives that include their ranks would hang.
@@ -277,6 +293,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             model_weights,
             model_config.revision,
             getattr(model, "is_unused_checkpoint_weight", None),
+            getattr(model, "allow_patterns_overrides", None),
         )
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:

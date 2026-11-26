@@ -273,7 +273,7 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
 )
 def test_runai_get_all_weights_resolves_source(model_config, expected_source):
     fake_self = types.SimpleNamespace(
-        _get_weights_iterator=lambda path, revision, is_unused_weight=None: iter(
+        _get_weights_iterator=lambda path, revision, *selection: iter(
             [(f"{path}@{revision}", None)]
         )
     )
@@ -327,6 +327,38 @@ def test_runai_selects_shards_before_streaming(tmp_path, monkeypatch, selection)
     }
     for name, tensor in {**contents[1], **contents[2]}.items():
         torch.testing.assert_close(loaded[name], tensor)
+
+
+@pytest.mark.parametrize(
+    "patterns,expected",
+    [(["model*.safetensors"], "target"), (["mtp.safetensors"], "draft")],
+    ids=["target", "draft"],
+)
+def test_runai_reads_only_the_files_the_model_names(tmp_path, patterns, expected):
+    contents = {
+        "target": {"layers.0.weight": torch.tensor([1.0])},
+        "draft": {"layers.1.post_attention_layernorm.weight": torch.tensor([2.0])},
+    }
+    names = {"target": "model-00001-of-00001.safetensors", "draft": "mtp.safetensors"}
+    for kind, name in names.items():
+        save_file(contents[kind], str(tmp_path / name))
+    model = torch.nn.Module()
+    model.allow_patterns_overrides = patterns
+    config = types.SimpleNamespace(model=str(tmp_path), model_weights="", revision=None)
+
+    loaded = dict(_runai_loader({}).get_all_weights(config, model))
+
+    assert set(loaded) == set(contents[expected])
+
+
+def test_runai_refuses_allow_patterns_that_match_no_file(tmp_path):
+    save_file({"w": torch.tensor([1.0])}, str(tmp_path / "model.safetensors"))
+    model = torch.nn.Module()
+    model.allow_patterns_overrides = ["mtp.safetensors"]
+    config = types.SimpleNamespace(model=str(tmp_path), model_weights="", revision=None)
+
+    with pytest.raises(RuntimeError, match="allow_patterns_overrides"):
+        list(_runai_loader({}).get_all_weights(config, model))
 
 
 def _check_distributed_selection(rank, rendezvous, scenario):
