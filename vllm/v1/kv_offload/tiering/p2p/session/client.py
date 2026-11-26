@@ -165,8 +165,10 @@ class ClientRole:
         # Per-request progress deadlines. Only newly resolved probes extend
         # them; additional keys and repeated scheduler polls do not.
         self._lookup_deadlines: dict[str, float] = {}
-        # First load whose AbortAck never arrived. Sticky: the peer has
-        # stopped confirming that its WRITEs ended, so the session faults it.
+        # An abort still owes an ack if TransferDone arrived first.
+        # Retain its original abort time after releasing the load.
+        self._pending_abort_acks: dict[tuple[str, int], float] = {}
+        # First abort whose acknowledgement timed out. Sticky until close.
         self._expired_abort_ack: tuple[str, int] | None = None
 
     # ------------------------------------------------------------------
@@ -246,8 +248,8 @@ class ClientRole:
 
     @property
     def has_active_loads(self) -> bool:
-        """True if any kv_request_id has a fetch in flight."""
-        return bool(self._active_loads)
+        """True while a fetch or its abort acknowledgement is outstanding."""
+        return bool(self._active_loads or self._pending_abort_acks)
 
     def get_expired_lookup(self) -> tuple[str, float] | None:
         """Return an expired request and seconds without progress, if any."""
@@ -405,6 +407,8 @@ class ClientRole:
         load = st.loads.pop(round_seq, None) if st is not None else None
         if st is not None and load is not None and load.release is not None:
             # Already reported failed; the peer's WRITEs are over.
+            assert load.aborted_at is not None
+            self._pending_abort_acks[(kv_request_id, round_seq)] = load.aborted_at
             load.release.set()
             self._on_load_terminal(kv_request_id, st)
         elif st is not None and load is not None:
@@ -434,12 +438,18 @@ class ClientRole:
 
     def on_abort_ack(self, kv_request_id: str, round_seq: int) -> None:
         """Handle an AbortAckMsg from the peer."""
+        # The peer replies to the older abort before processing a later fetch.
+        if self._pending_abort_acks.pop((kv_request_id, round_seq), None) is not None:
+            return
+
         st = self._requests.get(kv_request_id)
-        load = st.loads.pop(round_seq, None) if st is not None else None
+        load = st.loads.get(round_seq) if st is not None else None
         if st is not None and load is not None:
             # Every abort reported the load failed when it was sent; the
             # ack only releases its blocks.
-            assert load.release is not None
+            if load.release is None:
+                raise ValueError("AbortAck does not match an aborting load")
+            del st.loads[round_seq]
             load.release.set()
             self._on_load_terminal(kv_request_id, st)
         else:
@@ -653,6 +663,12 @@ class ClientRole:
             del st.loads[round_seq]
             self._on_load_terminal(req_id, st)
 
+        if self._expired_abort_ack is None:
+            for key, aborted_at in self._pending_abort_acks.items():
+                if now - aborted_at >= _ABORT_ACK_TIMEOUT_S:
+                    self._expired_abort_ack = key
+                    break
+
         results = self._completed_loads
         self._completed_loads = []
         return results
@@ -685,4 +701,5 @@ class ClientRole:
         self._active_loads.clear()
         self._completed_loads.clear()
         self._lookup_deadlines.clear()
+        self._pending_abort_acks.clear()
         return ClientCloseResult(failed_jobs=failed_jobs, failed_req_ids=failed_req_ids)
