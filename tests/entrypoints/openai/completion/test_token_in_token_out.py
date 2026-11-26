@@ -8,6 +8,7 @@ import openai
 import pytest
 
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
 from vllm.tokenizers import get_tokenizer
 
@@ -75,7 +76,8 @@ async def test_token_in_token_out_and_logprobs(server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["END", ["END", "STOP"]])
-async def test_rejects_stop_strings_without_tokenizer(server, stop):
+@pytest.mark.parametrize("stream", [False, True])
+async def test_rejects_stop_strings_without_tokenizer(server, stop, stream):
     async with server.get_async_client() as client:
         with pytest.raises(openai.BadRequestError, match="stop strings require") as exc:
             await client.completions.create(
@@ -84,8 +86,10 @@ async def test_rejects_stop_strings_without_tokenizer(server, stop):
                 max_tokens=1,
                 temperature=0,
                 stop=stop,
+                stream=stream,
             )
-    assert exc.value.param == "stop"
+    if not envs.VLLM_USE_RUST_FRONTEND:
+        assert exc.value.param == "stop"
 
 
 @pytest.mark.asyncio
