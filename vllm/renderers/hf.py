@@ -61,7 +61,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
-from .base import BaseRenderer
+from .base import HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS, BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
 
 if TYPE_CHECKING:
@@ -1155,6 +1155,8 @@ class BaseHfRenderer(BaseRenderer[_T]):
 
 
 class HfRenderer(BaseHfRenderer[HfTokenizer]):
+    _server_owned_chat_template_kwargs = HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+
     def __init__(
         self,
         config: VllmConfig,

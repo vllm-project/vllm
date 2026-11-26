@@ -10,7 +10,7 @@ use super::HarmonyChatRenderer;
 use super::encoding::harmony_encoding;
 use crate::ChatRenderer;
 use crate::EffortValue;
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
@@ -198,10 +198,9 @@ fn rejects_unknown_tool_response_id() {
 
     let error = test_renderer(false).render(&request).unwrap_err();
 
-    expect![
-        "chat template error: invalid Harmony tool message: unknown tool_call_id `call-unknown`"
-    ]
-    .assert_eq(&error.to_report_string());
+    expect!["invalid Harmony tool message: unknown tool_call_id `call-unknown`"]
+        .assert_eq(&error.to_report_string());
+    assert_eq!(error.kind(), ErrorKind::invalid_param("messages"));
 }
 
 #[test]
