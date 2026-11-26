@@ -14,14 +14,27 @@ type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 pub enum Error {
     #[error("chat request must contain at least one message")]
     EmptyMessages,
-    #[error("cannot continue the final message when the last message is not from the assistant")]
-    ContinueFinalAssistantWithoutFinalAssistant,
     #[error("{renderer} renderer does not support continue_final_message")]
     UnsupportedContinueFinalMessage { renderer: &'static str },
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
+    /// The model's own template, or this renderer, failed; request-caused
+    /// refusals use the typed variants below.
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    /// The request's own `chat_template` failed to compile or render.
+    #[error("{message}")]
+    InvalidRequestChatTemplate { message: String },
+    /// `continue_final_message` without a final assistant message to
+    /// continue, or the template dropped the final message.
+    #[error("{message}")]
+    InvalidContinueFinalMessage { message: String },
+    /// The messages break a rule of the model's prompt format, such as a tool
+    /// result without a matching tool call.
+    #[error("{message}")]
+    InvalidMessages { message: String },
+    #[error("{message}")]
+    InvalidChatTemplateKwargs { message: String },
     #[error("{message}")]
     ChatTemplateThrown { message: String },
     #[error("{0}")]
@@ -162,9 +175,10 @@ impl Error {
             Self::MediaAfterPreprocessed { source, .. } => source.kind(),
             Self::EmptyMessages
             | Self::UnsupportedChatRole { .. }
-            | Self::ToolReferenceNotFound { .. } => ErrorKind::invalid_param("messages"),
-            Self::ContinueFinalAssistantWithoutFinalAssistant
-            | Self::UnsupportedContinueFinalMessage { .. } => {
+            | Self::ToolReferenceNotFound { .. }
+            | Self::InvalidMessages { .. } => ErrorKind::invalid_param("messages"),
+            Self::UnsupportedContinueFinalMessage { .. }
+            | Self::InvalidContinueFinalMessage { .. } => {
                 ErrorKind::invalid_param("continue_final_message")
             }
             Self::InvalidReasoningEffort(_) => ErrorKind::invalid_param("reasoning_effort"),
@@ -174,8 +188,11 @@ impl Error {
             Self::ToolChoiceRequiresTools | Self::ToolChoiceFunctionNotFound { .. } => {
                 ErrorKind::invalid_param("tool_choice")
             }
-            Self::UntrustedRequestChatTemplate | Self::UnsupportedRequestChatTemplate => {
-                ErrorKind::invalid_param("chat_template")
+            Self::UntrustedRequestChatTemplate
+            | Self::UnsupportedRequestChatTemplate
+            | Self::InvalidRequestChatTemplate { .. } => ErrorKind::invalid_param("chat_template"),
+            Self::InvalidChatTemplateKwargs { .. } => {
+                ErrorKind::invalid_param("chat_template_kwargs")
             }
             Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningControl { .. }

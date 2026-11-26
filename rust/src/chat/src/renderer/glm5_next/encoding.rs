@@ -11,7 +11,9 @@ use serde_json::{Value, json};
 use thiserror_ext::AsReport as _;
 
 use super::writer::Glm5PromptWriter;
-use crate::error::{Error, Result, bail_chat_template_thrown, chat_template_thrown};
+use crate::error::{
+    Result, bail_chat_template_thrown, bail_invalid_continue_final_message, chat_template_thrown,
+};
 use crate::renderer::{MediaPartSource, tool_call_arguments_or_empty};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode};
 use crate::{AssistantContentBlock, AssistantMessageExt};
@@ -376,12 +378,12 @@ fn render_inner(
                     out.ordinary(content.trim_matches(trim));
                     let original = original.trim_matches(trim);
                     if !out.text().contains(original) {
-                        return Err(Error::ChatTemplate(format!(
+                        bail_invalid_continue_final_message!(
                             "continue_final_message is set but the final message does not appear \
                              in the prompt after applying the chat template! This can happen if \
                              the chat template deletes portions of the final message. Final \
                              message to continue: {original}"
-                        )));
+                        );
                     }
                     break;
                 }
