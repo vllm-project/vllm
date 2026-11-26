@@ -46,6 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
     MultiModalFieldConfig,
     MultiModalKwargsItem,
     NestedTensors,
@@ -73,6 +74,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processors.pixtral import (
     MistralCommonImageProcessor,
     MistralCommonPixtralProcessor,
+    validate_pixtral_image,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -286,6 +288,21 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
 
 
 class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
+    def validate_preprocessed_item(
+        self, modality: str, item: MultiModalKwargsItem
+    ) -> None:
+        if modality != "image":
+            return
+        image = item.get("images")
+        if image is None or not isinstance(image.field, MultiModalBatchedField):
+            raise ValueError("Pixtral image features require a batched images tensor")
+        config = self.info.get_hf_config().vision_config
+        validate_pixtral_image(
+            image.data,
+            image_size=config.image_size,
+            patch_size=config.patch_size,
+        )
+
     def get_dummy_inputs(
         self,
         seq_len: int,
@@ -472,6 +489,9 @@ class PixtralEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_item_specs(
         self, mm_kwargs: dict[str, Any]
     ) -> list[EncoderItemSpec]:
+        tower = self.encoder_cudagraph_vision_tower
+        if isinstance(tower, VisionTransformer):
+            tower.validate_images(mm_kwargs[self.encoder_cudagraph_pixel_key])
         m = self.encoder_cudagraph_spatial_merge_size
         grid_sizes = _patch_grid_sizes(
             mm_kwargs[self.encoder_cudagraph_pixel_key],
@@ -545,6 +565,8 @@ class PixtralEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         tower = self.encoder_cudagraph_vision_tower
+        if isinstance(tower, VisionTransformer):
+            tower.validate_images(mm_kwargs[self.encoder_cudagraph_pixel_key])
         m = self.encoder_cudagraph_spatial_merge_size
         images = [
             image.to(device=tower.device)
@@ -1298,6 +1320,12 @@ class VisionTransformer(nn.Module):
             args.num_attention_heads, head_dim
         )
 
+    def validate_images(self, images: list[torch.Tensor]) -> None:
+        for image in images:
+            validate_pixtral_image(
+                image, image_size=self.args.image_size, patch_size=self.args.patch_size
+            )
+
     @property
     def patch_size(self) -> int:
         return self.args.patch_size
@@ -1409,6 +1437,7 @@ class VisionTransformer(nn.Module):
                 (N_toks_i, D)
 
         """
+        self.validate_images(images)
         patch_size = self.args.patch_size
         patches, grid_sizes = pack_image_patches(images, (patch_size, patch_size))
         embed_sizes = [h * w for h, w in grid_sizes]

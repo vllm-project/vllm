@@ -1152,6 +1152,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return self.apply(processor_inputs, TimingContext(enabled=False))
 
+    def validate_preprocessed_item(
+        self, modality: str, item: MultiModalKwargsItem
+    ) -> None:
+        """Raise `ValueError` for an invalid inline preprocessed item."""
+
     @abstractmethod
     def _get_mm_fields_config(
         self,

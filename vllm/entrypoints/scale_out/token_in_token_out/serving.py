@@ -53,6 +53,7 @@ from vllm.exceptions import (
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
+from vllm.multimodal.cache import ShmObjectStoreSenderCache
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -204,21 +205,31 @@ class ServingTokens(GenerateBaseServing):
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
 
-    def _validate_mm_cache_handles(
+    def _validate_mm_features(
         self,
         mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
         mm_hashes: dict[str, list[str]],
     ) -> ErrorResponse | None:
-        cache = self.online_renderer.renderer.mm_processor_cache
-        if cache is None:
+        renderer = self.online_renderer.renderer
+        cache = renderer.mm_processor_cache
+        processor = renderer.mm_processor
+        if cache is None and processor is None:
             return None
-        try:
-            for modality, items in mm_kwargs.items():
-                for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
-                    if item is not None:
+        uses_shm_cache = isinstance(cache, ShmObjectStoreSenderCache)
+        for modality, items in mm_kwargs.items():
+            for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
+                if item is None:
+                    continue
+                if cache is not None:
+                    try:
                         cache.validate_input_item(item, mm_hash)
-        except ValueError as error:
-            return self.create_error_response(error)
+                    except ValueError as error:
+                        return self.create_error_response(error)
+                if processor is not None and not (uses_shm_cache and "address" in item):
+                    try:
+                        processor.validate_preprocessed_item(modality, item)
+                    except ValueError as error:
+                        return self.create_error_response(error, param="features")
         return None
 
     async def serve_tokens(
@@ -378,7 +389,7 @@ class ServingTokens(GenerateBaseServing):
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
             mm_kwargs = mm_kwargs_from_features(features)
-            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
+            if error := self._validate_mm_features(mm_kwargs, features.mm_hashes):
                 return error
 
             token_ids = request.token_ids

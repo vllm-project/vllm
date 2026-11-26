@@ -10,6 +10,26 @@ from transformers.image_utils import ImageInput
 from vllm.tokenizers.mistral import MistralTokenizer
 
 
+def validate_pixtral_image(
+    image: torch.Tensor, *, image_size: int, patch_size: int
+) -> None:
+    """Reject image geometry that cannot index the native Pixtral RoPE table."""
+    if not isinstance(image, torch.Tensor) or image.ndim != 3 or image.shape[0] != 3:
+        raise ValueError("Pixtral images must be tensors of shape (3, H, W)")
+    height, width = image.shape[-2:]
+    max_side = image_size // patch_size * patch_size
+    if (
+        min(height, width) <= 0
+        or height % patch_size
+        or width % patch_size
+        or max(height, width) > max_side
+    ):
+        raise ValueError(
+            f"Pixtral image dimensions must be positive multiples of {patch_size} "
+            f"and no greater than {max_side}; got {height}x{width}"
+        )
+
+
 class MistralCommonImageProcessor(ImageProcessingMixin):
     """Provide a HF-compatible interface for
     `mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.

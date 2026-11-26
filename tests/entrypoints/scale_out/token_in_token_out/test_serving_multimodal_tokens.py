@@ -9,18 +9,118 @@ processor in the pytest parent process to keep os.fork() in other
 tests (e.g. entrypoints/rl/weight_transfer/test_offline.py) deadlock-free.
 """
 
+from copy import deepcopy
+from uuid import uuid4
+
 import httpx
 import pytest
 import pytest_asyncio
+import torch
 from PIL import Image
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+    decode_mm_kwargs_item,
+    encode_mm_kwargs_item,
+)
 from vllm.multimodal.utils import encode_image_url
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 GEN_ENDPOINT = "/inference/v1/generate"
 RENDER_ENDPOINT = "/v1/chat/completions/render"
 DETOKENIZE_ENDPOINT = "/detokenize"
+
+
+def test_pixtral_oversized_features_return_bad_request_and_server_recovers():
+    """Consistent placeholder counts must not admit images beyond RoPE bounds."""
+    model = "mistralai/Pixtral-12B-2409"
+    args = [
+        "--tokenizer-mode",
+        "mistral",
+        "--config-format",
+        "mistral",
+        "--load-format",
+        "mistral",
+        "--dtype",
+        "half",
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "1",
+        "--enforce-eager",
+        "--enable-scale-out",
+    ]
+    with (
+        RemoteOpenAIServer(model, args) as server,
+        httpx.Client(
+            base_url=server.url_root,
+            transport=httpx.HTTPTransport(uds=server.uds) if server.uds else None,
+            headers={"Authorization": f"Bearer {server.DUMMY_API_KEY}"},
+            timeout=600,
+        ) as client,
+    ):
+        rendered = client.post(
+            RENDER_ENDPOINT,
+            json={
+                "model": model,
+                "mm_payload": "tensors",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe this image."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": encode_image_url(
+                                        Image.new("RGB", (64, 64)), format="PNG"
+                                    )
+                                },
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+        rendered.raise_for_status()
+        valid = rendered.json()
+        valid["sampling_params"] = {"max_tokens": 1, "temperature": 0}
+        for height, width in [(1024, 1024), (1040, 1040), (1040, 16), (16, 1040)]:
+            payload = deepcopy(valid)
+            features = payload["features"]
+            item = decode_mm_kwargs_item(features["kwargs_data"]["image"][0])
+            item["images"].data = torch.zeros(
+                (3, height, width), dtype=item["images"].data.dtype
+            )
+            features["kwargs_data"]["image"] = [encode_mm_kwargs_item(item)]
+            placeholder = features["mm_placeholders"]["image"][0]
+            offset, old_length = placeholder["offset"], placeholder["length"]
+            mask = placeholder.get("is_embed")
+            image_token = payload["token_ids"][
+                offset + (mask.index(True) if mask else 0)
+            ]
+            length = height // 16 * (width // 16)
+            payload["token_ids"] = (
+                payload["token_ids"][:offset]
+                + [image_token] * length
+                + payload["token_ids"][offset + old_length :]
+            )
+            placeholder.update(length=length, is_embed=None)
+            for stream in (False, True):
+                features["mm_hashes"]["image"] = [uuid4().hex]
+                response = client.post(GEN_ENDPOINT, json={**payload, "stream": stream})
+                if height == width == 1024:
+                    response.raise_for_status()
+                    if stream:
+                        assert "data: [DONE]" in response.text
+                    else:
+                        assert response.json()["choices"][0]["token_ids"]
+                else:
+                    assert response.status_code == 400, response.text
+                    assert "Pixtral image dimensions" in response.text
+                recovery = client.post(GEN_ENDPOINT, json=valid)
+                recovery.raise_for_status()
+                assert recovery.json()["choices"][0]["token_ids"]
 
 
 @pytest.fixture(scope="module")
