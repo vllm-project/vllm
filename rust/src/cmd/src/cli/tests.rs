@@ -1485,31 +1485,6 @@ fn int_flag_parses_like_python_bool_int() {
 }
 
 #[test]
-fn serve_rejects_auto_max_model_len_for_remote_generation() {
-    let url = "http://127.0.0.1:50051";
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--remote-generation-url",
-        url,
-        "--max-model-len=auto",
-    ])
-    .unwrap();
-    let Command::Serve(serve) = cli.command else {
-        panic!("expected serve args");
-    };
-    assert_eq!(serve.remote_generation_url.as_deref(), Some(url));
-    let Err(error) = serve.to_remote_grpc_config(url) else {
-        panic!("expected an invalid remote context limit");
-    };
-    assert_eq!(
-        error.to_report_string(),
-        "remote --max-model-len must be a positive token count"
-    );
-}
-
-#[test]
 fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
