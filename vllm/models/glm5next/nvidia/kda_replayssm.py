@@ -12,12 +12,13 @@ import functools
 import math
 import os
 from pathlib import Path
-from types import SimpleNamespace
+from typing import NamedTuple
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.mamba import MambaBackendEnum
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.gdn_attn import (
@@ -170,18 +171,30 @@ def kda_replayssm_step(
     )  # fmt: skip
 
 
-def step_cursors(layer, metadata: GDNAttentionMetadata) -> SimpleNamespace:
-    """The step's verify rows and cursors, built once per step and cached on
-    the metadata. The cursors are the ReplaySSM tracker's, committed after
-    acceptance by the runner."""
-    cached = getattr(metadata, "_kda_replayssm_cursors", None)
-    if cached is not None:
+class StepCursors(NamedTuple):
+    query_start_loc: torch.Tensor
+    slot: torch.Tensor
+    ring_slot: torch.Tensor
+    num_accepted: torch.Tensor
+    ring_start: torch.Tensor
+    num_committed: torch.Tensor
+
+
+def step_cursors(layer, metadata: GDNAttentionMetadata) -> StepCursors:
+    """The step's verify rows and cursors, built once per step and metadata
+    and held in the forward context. The cursors are the ReplaySSM tracker's,
+    committed after acceptance by the runner."""
+    held = get_forward_context().additional_kwargs.setdefault(
+        "kda_replayssm_cursors", {}
+    )
+    if (cached := held.get(id(metadata))) is not None:
         return cached
     assert metadata.num_spec_decodes and not metadata.num_decodes
+    assert metadata.spec_query_start_loc is not None
     assert metadata.spec_state_indices_tensor is not None
     assert metadata.num_accepted_tokens is not None
     slot = metadata.spec_state_indices_tensor[:, 0].contiguous()
-    cursors = SimpleNamespace(
+    cursors = StepCursors(
         query_start_loc=metadata.spec_query_start_loc,
         slot=slot,
         # The rings fill the request's speculative block.
@@ -190,5 +203,5 @@ def step_cursors(layer, metadata: GDNAttentionMetadata) -> SimpleNamespace:
         ring_start=layer._replayssm_ring_start.index_select(0, slot),
         num_committed=layer._replayssm_prev_num_accepted.index_select(0, slot),
     )
-    metadata._kda_replayssm_cursors = cursors  # type: ignore[attr-defined]
+    held[id(metadata)] = cursors
     return cursors
