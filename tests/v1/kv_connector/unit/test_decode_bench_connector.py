@@ -62,6 +62,8 @@ class DecodeBenchTestRunner:
         block_size: int,
         num_gpu_blocks: int,
         kv_connector_extra_config: dict | None = None,
+        *,
+        enable_prefix_caching: bool = True,
     ):
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
@@ -76,6 +78,7 @@ class DecodeBenchTestRunner:
             kv_connector_extra_config=kv_connector_extra_config,
         )
 
+        vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
         self.vllm_config = vllm_config
         self.scheduler: Scheduler = create_scheduler(
             vllm_config, num_blocks=num_gpu_blocks
@@ -204,6 +207,61 @@ def test_decode_bench_connector_basic():
             block_data = kv_cache[block_id]
             # Should be filled with constant value 0.015
             assert torch.allclose(block_data, torch.tensor(0.015))
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "cached_tokens", "startup_fill"),
+    [(48, 32, False), (48, 32, True), (16, 0, False), (8, 0, False)],
+)
+def test_decode_bench_connector_schedules_uncached_prompt_suffix(
+    prompt_tokens, cached_tokens, startup_fill
+):
+    block_size = 16
+    runner = DecodeBenchTestRunner(
+        block_size=block_size,
+        num_gpu_blocks=8,
+        kv_connector_extra_config={
+            "uncached_prompt_tokens": 16,
+            "startup_fill": startup_fill,
+        },
+        enable_prefix_caching=False,
+    )
+    req = runner.new_request(list(range(prompt_tokens)))
+    output, metadata = runner.run_single_step()
+
+    (scheduled_req,) = output.scheduled_new_reqs
+    assert scheduled_req.num_computed_tokens == cached_tokens
+    assert output.num_scheduled_tokens == {
+        req.request_id: prompt_tokens - cached_tokens
+    }
+    expected_fills = {}
+    if cached_tokens and not startup_fill:
+        prefix_blocks = scheduled_req.block_ids[0][: cached_tokens // block_size]
+        expected_fills[req.request_id] = ((prefix_blocks,), cached_tokens)
+    assert metadata.reqs_to_fill == expected_fills
+
+
+@pytest.mark.parametrize(
+    ("uncached_prompt_tokens", "enable_prefix_caching", "error"),
+    [
+        (0, False, "positive integer"),
+        (True, False, "positive integer"),
+        (0.95, False, "positive integer"),
+        (16, True, "--no-enable-prefix-caching"),
+    ],
+)
+def test_decode_bench_connector_rejects_invalid_prefill_config(
+    uncached_prompt_tokens, enable_prefix_caching, error
+):
+    with pytest.raises(ValueError, match=error):
+        DecodeBenchTestRunner(
+            block_size=16,
+            num_gpu_blocks=8,
+            kv_connector_extra_config={
+                "uncached_prompt_tokens": uncached_prompt_tokens
+            },
+            enable_prefix_caching=enable_prefix_caching,
+        )
 
 
 def test_decode_bench_connector_prefix_hit_fills_only_suffix_blocks():
