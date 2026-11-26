@@ -17,11 +17,14 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     StorageRecord,
     storage_bytes,
 )
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.memfd_storage import (
+    materialize_pinned_cpu_storages,
+)
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     SharedFileDescriptor,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
-    TensorEntry,
+    export_tensor,
 )
 from vllm.platforms import current_platform
 from vllm.utils.vmm_driver import (
@@ -185,7 +188,7 @@ class VmmIPCBackend(IPCBackendBase):
         return packs
 
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
-        records = super().materialize(storages)
+        records = materialize_pinned_cpu_storages(storages)
         groups: dict[int, list[int]] = {}
         for index, record in enumerate(records):
             storage = record.storage
@@ -231,7 +234,7 @@ class VmmIPCBackend(IPCBackendBase):
 
     def export_storage(self, record: StorageRecord) -> StorageEntry:
         if not record.storage.is_cuda or not record.storage.nbytes():
-            return TensorEntry.from_storage(record.storage)
+            return export_tensor(record)
 
         owner = cast(VmmAllocation, record.owner)
         assert owner.fd is not None

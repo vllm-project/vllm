@@ -75,11 +75,17 @@ def _server(role: str, cpu_bytes: int = DEFAULT_EC_CPU_BYTES) -> RemoteOpenAISer
 
 
 @pytest.fixture(scope="module")
-def encoder():
+def encoder(request):
     pytest.importorskip("nixl")
     if not current_platform.is_cuda() or current_platform.device_count() < 2:
         pytest.skip("Requires two CUDA GPUs")
-    with _server("ec_producer") as server:
+    with _server("ec_producer") as probe:
+        if getattr(request, "param", None) != "eviction":
+            yield probe
+            return
+        cpu_bytes = 2 * asyncio.run(_entry_size(probe))
+
+    with _server("ec_producer", cpu_bytes) as server:
         yield server
 
 
@@ -87,15 +93,7 @@ def encoder():
 def consumer(request, encoder):
     cpu_bytes = DEFAULT_EC_CPU_BYTES
     if getattr(request, "param", None) == "eviction":
-
-        async def entry_size() -> int:
-            timeout = aiohttp.ClientTimeout(total=120)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                _, probe, mm_hash = await _encode(session, encoder)
-            return probe["ec_transfer_params"][mm_hash]["size_bytes"]
-
-        # Leave room for two entries of the size announced by this producer.
-        cpu_bytes = 2 * asyncio.run(entry_size())
+        cpu_bytes = 2 * asyncio.run(_entry_size(encoder))
 
     with _server("ec_consumer", cpu_bytes) as server:
         yield server
@@ -152,6 +150,13 @@ async def _encode(session, encoder):
     for request in (body, rewritten):
         request["ec_transfer_params"] = {mm_hash: copy.deepcopy(handle)}
     return body, rewritten, mm_hash
+
+
+async def _entry_size(encoder) -> int:
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        _, probe, mm_hash = await _encode(session, encoder)
+    return probe["ec_transfer_params"][mm_hash]["size_bytes"]
 
 
 @pytest.mark.asyncio
@@ -260,3 +265,27 @@ async def test_runner_hit_survives_cpu_eviction_and_missing_producer(encoder, co
             assert reads == [], "A runner cache hit contacted the producer"
             assert status == 200, result
             assert result["choices"][0]["message"]["content"], result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoder", ["eviction"], indirect=True)
+async def test_producer_republishes_runner_hit_after_cpu_eviction(encoder, consumer):
+    """A fresh consumer can fetch a repeated image after producer CPU eviction."""
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        original, rewritten, mm_hash = await _encode(session, encoder)
+
+        # Two fresh identities displace the first entry in the producer CPU tier.
+        for _ in range(2):
+            await _encode(session, encoder)
+
+        original.pop("ec_transfer_params")
+        status, result = await _post(session, encoder, original)
+        assert status == 200, result
+        handle = result["ec_transfer_params"][mm_hash]
+        assert handle["metadata"] and handle.get("peer_host"), result
+        rewritten["ec_transfer_params"] = {mm_hash: handle}
+
+        status, result = await _post(session, consumer, rewritten)
+        assert status == 200, result
+        assert result["choices"][0]["message"]["content"], result

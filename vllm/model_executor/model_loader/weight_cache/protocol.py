@@ -364,6 +364,9 @@ class WeightCacheKey:
     mm_disabled_modalities: tuple[str, ...] = ()
     """With the two flags above, decides which components (e.g. the vision
     tower) are built; skipped ones are absent from the daemon's export."""
+    engram_cpu_offload: bool = False
+    engram_embedding_across_dp: bool = False
+    indexer_kv_dtype: str = "auto"
 
     @classmethod
     def from_model_config(
@@ -381,6 +384,9 @@ class WeightCacheKey:
         enable_expert_parallel: bool = False,
         expert_placement_strategy: str = "linear",
         kernel_config: KernelConfig | None = None,
+        engram_cpu_offload: bool = False,
+        engram_embedding_across_dp: bool = False,
+        indexer_kv_dtype: str = "auto",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -436,6 +442,9 @@ class WeightCacheKey:
             mm_disabled_modalities=tuple(
                 sorted(m for m, opts in mm_limits.items() if opts.count == 0)
             ),
+            engram_cpu_offload=engram_cpu_offload,
+            engram_embedding_across_dp=engram_embedding_across_dp,
+            indexer_kv_dtype=indexer_kv_dtype,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
