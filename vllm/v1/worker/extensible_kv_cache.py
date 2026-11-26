@@ -398,17 +398,19 @@ class ExtensibleKVCache:
         fraction = 1.0 if num_bytes is None else min(num_bytes / total, 1.0)
         # torch.accelerator has no per-process memory fraction.
         torch.cuda.set_per_process_memory_fraction(fraction, self.buffer.device)
-        if not current_platform.is_rocm() or EXPANDABLE_SEGMENTS in (
-            alloc_conf_from_env()
-        ):
+        if current_platform.is_rocm():
+            self._set_expandable_segments(num_bytes is not None)
+
+    @staticmethod
+    def _set_expandable_segments(enabled: bool) -> None:
+        if EXPANDABLE_SEGMENTS in alloc_conf_from_env():
             return
-        capped = num_bytes is not None
-        if expandable_segments_enabled() is (not capped):
-            if not capped:
+        if expandable_segments_enabled() is (not enabled):
+            if not enabled:
                 # Torch does not reuse cached expandable blocks once it is off.
                 torch.accelerator.empty_cache()
             set_alloc_conf(
-                with_conf_flag(current_alloc_conf(), EXPANDABLE_SEGMENTS, capped)
+                with_conf_flag(current_alloc_conf(), EXPANDABLE_SEGMENTS, enabled)
             )
 
     def free(self) -> None:
