@@ -8,12 +8,29 @@ import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import in_single_pp_stage
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.lm_head import (
     quantized_lm_head_copy,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
 )
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.utils import PPMissingLayer
+
+_UNQUANTIZED_METHODS = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+_COMPARABLE_DTYPES = (
+    torch.float16,
+    torch.bfloat16,
+    torch.float32,
+    torch.float64,
+)
+
+
+def _is_unquantized(module: nn.Module) -> bool:
+    quant_method = getattr(module, "quant_method", None)
+    return quant_method is None or isinstance(quant_method, _UNQUANTIZED_METHODS)
 
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
@@ -26,12 +43,21 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
         return True
     if draft is None or target is None:
         return False
-    # A quantized layer registers packed weights (`weight_packed`, `qweight`,
-    # ...) instead of `weight`, so the two copies cannot be compared. Keep the
-    # draft's own copy rather than assuming it matches the target.
+    # Quantized layers may replace `weight` with packed tensors or pair a
+    # quantized `weight` with separate scales/zero points, so only compare
+    # plain unquantized floating-point weights.
+    if not (_is_unquantized(draft) and _is_unquantized(target)):
+        return False
     w = getattr(draft, "weight", None)
     target_w = getattr(target, "weight", None)
     if not isinstance(w, torch.Tensor) or not isinstance(target_w, torch.Tensor):
+        return False
+    if (
+        w.shape != target_w.shape
+        or w.dtype != target_w.dtype
+        or w.dtype not in _COMPARABLE_DTYPES
+        or w.device != target_w.device
+    ):
         return False
     # torch.equal on GPU allocates a bool mask the size of the input.
     # Use the faster GPU path when there is plenty of headroom;
