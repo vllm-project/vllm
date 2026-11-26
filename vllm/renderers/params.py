@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
+import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -32,6 +33,8 @@ ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "
 _PARALLEL_TO_PROMPT_TOKENS = (
     "prompt_token_offsets",
     "prompt_is_token_ids",
+    "prompt_echo_mask",
+    "prompt_special_tokens_mask",
 )
 
 
@@ -89,7 +92,7 @@ def recursively_merge_kwargs(
     return merged
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ChatParams:
     """Configuration to control how to parse chat messages."""
 
@@ -110,6 +113,9 @@ class ChatParams:
 
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
+
+    parallel_tool_calls: bool = True
+    """Request-level `parallel_tool_calls` for renderers that need API metadata."""
 
     response_format: Any | None = None
     """Request-level response format for renderers that need API metadata."""
@@ -143,6 +149,7 @@ class ChatParams:
                 self.mm_processor_kwargs,
             ),
             tool_choice=self.tool_choice,
+            parallel_tool_calls=self.parallel_tool_calls,
             response_format=self.response_format,
         )
 
@@ -154,14 +161,14 @@ class ChatParams:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TokenizeParams:
     """Configuration to control how prompts are tokenized."""
 
     max_total_tokens: int | None
     """
     Maximum allowed number of input + output tokens.
-    
+
     Usually, this refers to the model's context length.
     """
 
@@ -611,3 +618,42 @@ class TokenizeParams:
                 prompt_dict[key] = parallel[truncation]
 
         return prompt
+
+
+def resolve_max_tokenize_tokens(
+    max_tokenize_tokens: int | None,
+    max_model_len: int,
+) -> int | None:
+    if max_tokenize_tokens is not None:
+        return None if max_tokenize_tokens <= 0 else max_tokenize_tokens
+    env_limit = envs.VLLM_MAX_TOKENIZE_TOKENS
+    if env_limit is not None:
+        return None if env_limit <= 0 else env_limit
+    return max(max_model_len * 2, 131072)
+
+
+def apply_max_tokenize_tokens(
+    tok_params: TokenizeParams,
+    max_tokenize_tokens: int | None,
+) -> TokenizeParams:
+    """Validate and apply the server's max_tokenize_tokens limit to TokenizeParams."""
+    if max_tokenize_tokens is None:
+        return tok_params
+
+    if (
+        tok_params.max_total_tokens is not None
+        and tok_params.max_total_tokens > max_tokenize_tokens
+    ):
+        raise VLLMValidationError(
+            f"Requested token limit ({tok_params.max_total_tokens}) "
+            f"cannot be greater than max_tokenize_tokens={max_tokenize_tokens}.",
+            parameter=tok_params.max_total_tokens_param,
+            value=tok_params.max_total_tokens,
+        )
+
+    new_limit = (
+        max_tokenize_tokens
+        if tok_params.max_total_tokens is None
+        else min(tok_params.max_total_tokens, max_tokenize_tokens)
+    )
+    return replace(tok_params, max_total_tokens=new_limit)

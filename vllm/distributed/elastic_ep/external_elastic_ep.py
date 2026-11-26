@@ -47,7 +47,7 @@ class ExternalElasticEPScalePhase(enum.StrEnum):
     COMPLETED = "completed"
 
 
-@dataclass
+@dataclass(slots=True)
 class ExternalElasticEPScaleUpHandshakeMetadata:
     engine_metadata: EngineHandshakeMetadata
     num_redundant_experts: int
@@ -189,7 +189,7 @@ class ExternalElasticEPScaleUpHandshakeServer:
             self.started_event.set()
 
 
-@dataclass
+@dataclass(slots=True)
 class _PreparedExternalElasticEPScale:
     control_store: Any
     reconfig_store: Any

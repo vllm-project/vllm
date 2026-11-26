@@ -138,7 +138,7 @@ class ServeSubcommand(CLISubcommand):
         # Elastic EP currently only supports running with at most one API server.
         if getattr(args, "enable_elastic_ep", False) and args.api_server_count > 1:
             logger.warning(
-                "Elastic EP only supports running with with at most one API server. "
+                "Elastic EP only supports running with at most one API server. "
                 "Capping api_server_count from %d to 1.",
                 args.api_server_count,
             )
@@ -247,6 +247,12 @@ def run_headless(args: argparse.Namespace):
     # hybrid or external DP LB) also handshakes with them for their I/O.
     client_handshake_address = args.headless_client_handshake_address
 
+    # Tracing reads the collected stats without enabling stat logging.
+    collect_stats = (
+        not engine_args.disable_log_stats
+        or vllm_config.observability_config.otlp_traces_endpoint is not None
+    )
+
     # Create the engines.
     engine_manager = CoreEngineProcManager(
         local_engine_count=local_engine_count,
@@ -256,7 +262,7 @@ def run_headless(args: argparse.Namespace):
         local_client=client_handshake_address is not None,
         handshake_address=handshake_address,
         executor_class=Executor.get_class(vllm_config),
-        log_stats=not engine_args.disable_log_stats,
+        collect_stats=collect_stats,
         client_handshake_address=client_handshake_address,
     )
 
@@ -313,6 +319,10 @@ def run_multi_api_server(args: argparse.Namespace):
     propagate_flash_late_interaction(args, engine_args)
     engine_args._api_process_count = num_api_servers
     engine_args._api_process_rank = -1
+    if rust_frontend_path:
+        # vllm-rs has no multimodal processor cache yet, so the engine's
+        # receiver cache would never be hit.
+        engine_args.mm_processor_cache_gb = 0
 
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
@@ -323,7 +333,11 @@ def run_multi_api_server(args: argparse.Namespace):
         )
 
     executor_class = Executor.get_class(vllm_config)
-    log_stats = not engine_args.disable_log_stats
+    # Tracing reads the collected stats without enabling stat logging.
+    collect_stats = (
+        not engine_args.disable_log_stats
+        or vllm_config.observability_config.otlp_traces_endpoint is not None
+    )
 
     parallel_config = vllm_config.parallel_config
     dp_rank = parallel_config.data_parallel_rank
@@ -339,7 +353,7 @@ def run_multi_api_server(args: argparse.Namespace):
     addresses = zmq_listeners.addresses
 
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, addresses
+        vllm_config, executor_class, collect_stats, addresses
     ) as engine_launch:
         local_engine_manager = engine_launch.engine_manager
         coordinator = engine_launch.coordinator
@@ -367,6 +381,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 engine_count=expected_engine_count,
                 data_parallel_size=parallel_config.data_parallel_size,
                 stats_update_address=stats_update_address,
+                model_config=vllm_config.model_config,
             )
         else:
             # Start API server(s).

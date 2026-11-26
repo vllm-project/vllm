@@ -12,7 +12,7 @@ from vllm.config import SpeculativeConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class SpeculatorTestConfig:
     model_path: str
     method: str
@@ -159,10 +159,8 @@ def test_speculators_correctness(monkeypatch, config):
 
     spec_llm = LLM(
         model=config.model_path,
-        trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=128,
-        gpu_memory_utilization=0.85,
         enforce_eager=False,
         disable_log_stats=False,
     )

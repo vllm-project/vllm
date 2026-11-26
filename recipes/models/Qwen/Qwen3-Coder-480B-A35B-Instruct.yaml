@@ -183,7 +183,7 @@ guide: |
 
   ## Troubleshooting
 
-  - **Context-length OOM**: A single H20 node cannot serve the native 262144 context. Reduce `--max-model-len` or raise `--gpu-memory-utilization`.
+  - **Context-length OOM**: A single H20 node cannot serve the native 262144 context. Reduce `--max-model-len`.
   - **TP=8 failure on FP8**: Expect `ValueError: The output_size of gate's and up's weight = 320 is not divisible by weight quantization block_n = 128.` on FP8 with TP=8. Switch to `--data-parallel-size 8` instead.
   - **DeepGEMM**: set `VLLM_USE_DEEP_GEMM=1` for faster FP8 matmul. Follow the [setup instructions](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/deepgemm/README.md#setup) to install it.
   - **Tool calling**: add `--tool-call-parser qwen3_coder` as shown above.

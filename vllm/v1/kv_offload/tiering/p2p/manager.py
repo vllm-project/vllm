@@ -24,13 +24,14 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     OffloadPolicy,
     ReqContext,
-    RequestOffloadingContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
@@ -98,20 +99,25 @@ def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
     Set on decoder requests to name the remote prefiller they pull from;
     carries kv_request_id, remote_host, remote_port.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_prefiller")
+    val = kv_params.get("remote_prefiller")
+    return val if isinstance(val, dict) else None
 
 
 def _remote_decoder_params(kv_params: dict | None) -> dict | None:
-    """Return the `remote_decoder` sub-dict, or None if absent.
+    """Return the `remote_decoder` sub-dict, or None if absent or null.
 
     Set on prefiller requests to name the remote decoder they serve;
-    carries kv_request_id.
+    carries kv_request_id. A present but non-dict value is treated as an
+    empty dict so submit_store fails closed instead of storing locally.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_decoder")
+    val = kv_params.get("remote_decoder")
+    if val is None:
+        return None
+    return val if isinstance(val, dict) else {}
 
 
 def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
@@ -120,9 +126,10 @@ def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
     Set on symmetric-P2P consumer requests to name the remote source they
     pull from; carries kv_request_id, remote_host, remote_port.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_kv_source")
+    val = kv_params.get("remote_kv_source")
+    return val if isinstance(val, dict) else None
 
 
 def _peer_id_from_params(role_params: dict) -> str | None:
@@ -134,6 +141,11 @@ def _peer_id_from_params(role_params: dict) -> str | None:
     return None
 
 
+def _request_id_from_params(role_params: dict) -> str | None:
+    request_id = role_params.get("kv_request_id")
+    return request_id if isinstance(request_id, str) and request_id else None
+
+
 @dataclass(slots=True)
 class P2PSourceInfo:
     """Consumer side: this request fetches from a remote (prefiller or peer)."""
@@ -141,6 +153,8 @@ class P2PSourceInfo:
     kv_request_id: str
     peer_id: str
     do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_source
+    # Mutable per-request state; retained across decoder preemptions.
+    pd_fetch_submitted: bool = False
 
 
 @dataclass(slots=True)
@@ -166,8 +180,8 @@ def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
     if not role:
         return None
     peer_id = _peer_id_from_params(role)
-    kv_request_id = role.get("kv_request_id")
-    if peer_id is None or not kv_request_id:
+    kv_request_id = _request_id_from_params(role)
+    if peer_id is None or kv_request_id is None:
         return None
     return P2PSourceInfo(
         kv_request_id=kv_request_id,
@@ -182,7 +196,7 @@ def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
     role = _remote_decoder_params(kv_params)
     if role is None:
         return None
-    return P2PDestInfo(kv_request_id=role.get("kv_request_id") or None)
+    return P2PDestInfo(kv_request_id=_request_id_from_params(role))
 
 
 def _annotate_req_context(req_context: ReqContext) -> None:
@@ -200,7 +214,7 @@ def _annotate_req_context(req_context: ReqContext) -> None:
         req_context.set_state(dest)
 
 
-@dataclass
+@dataclass(slots=True)
 class _UnboundStoreBatch:
     """A submit_store batch parked at the manager before any peer has fetched.
 
@@ -249,6 +263,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         backends: list[str] | None = None,
         num_threads: int = 4,
         unbound_store_timeout_s: float = _UNBOUND_STORE_TIMEOUT_S,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
         **kwargs: Any,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -291,6 +306,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 `_reap_unbound_stores` drops them. Raise it for
                 deployments whose prefills outlast the default; the blocks
                 keep primary-tier slots pinned for the whole window.
+            access_mode: Direction(s) in which this tier may transfer data.
+                `read` fetches blocks from peers but never stages local
+                blocks for them; `write` stages blocks for peers but never
+                fetches. The tiering manager skips the directions the mode
+                disables.
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
@@ -316,6 +336,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             offloading_spec,
             primary_kv_view,
             tier_type,
+            access_mode=access_mode,
         )
         try:
             timeout_s = float(unbound_store_timeout_s)
@@ -432,7 +453,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # key) entry and returns RETRY; flush_pending_lookups()
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
-        # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
         # Until the peer acks the handshake, prefill locally rather than wait
         # up to VLLM_P2P_HANDSHAKE_TIMEOUT_S on a peer that may be gone.
         if source.do_probe:
@@ -446,12 +466,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 return LookupResult.MISS
             return LookupResult.RETRY
 
-        # PD consumer (we are the decoder): all kv blocks should be on the
-        # prefiller side. Return HIT immediately.
+        # PD stores bind to round 0. A later fetch after preemption or partial
+        # promotion cannot be supplied and would wait out the PD load timeout.
+        if source.pd_fetch_submitted:
+            return LookupResult.MISS
         return LookupResult.HIT
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         """Parse kv_transfer_params once and open the outbound session.
 
         Parses the P2P routing state onto `req_context` (cached for the
@@ -466,6 +488,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Producer-leg requests (`remote_decoder` present) ask for
         REQUEST_LEVEL: the peer needs every block of the request, not just
         the ones this request computed.
+
+        Requests without a `remote_decoder` opt out of cascades of newly
+        stored primary chunks, since there is no destination to receive them.
         """
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
@@ -475,8 +500,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._failed_req_ids.add(source.kv_request_id)
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
-            return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
-        return RequestOffloadingContext()
+            return SecondaryTierRequestContext(policy=OffloadPolicy.REQUEST_LEVEL)
+        return SecondaryTierRequestContext(receives_stores=dest is not None)
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
@@ -663,6 +688,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.ready,
         )
         session.request_blocks(job_id, kv_request_id, keys, block_ids)
+        if not source.do_probe:
+            source.pd_fetch_submitted = True
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:

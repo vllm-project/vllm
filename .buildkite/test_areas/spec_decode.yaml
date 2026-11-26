@@ -13,6 +13,10 @@ steps:
     - "!vllm/distributed/kv_transfer/"
     - vllm/inputs/
     - vllm/model_executor/
+    - vllm/models/hy_v4/dfly_config.py
+    - vllm/models/hy_v4/nvidia/dfly.py
+    - vllm/models/hy_v4/nvidia/dfly_speculator.py
+    - vllm/models/hy_v4/common/
     - vllm/models/qwen4_exp/
     - vllm/platforms/
     - vllm/sampling_params.py
@@ -26,13 +30,18 @@ steps:
     - pytest -v -s -m 'not slow_test' v1/spec_decode
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Spec Decode"
+      label: ":amd: (MI300 DPX) V1 Spec Decode"
       dind: false
       automatic_shard: true
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/models/hy_v4/amd/aiter_mla_sparse.py
+      - vllm/models/hy_v4/amd/attention.py
+      - vllm/models/hy_v4/amd/dfly.py
+      - vllm/models/hy_v4/amd/dfly_speculator.py
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen
@@ -267,6 +276,8 @@ steps:
       - vllm/model_executor/layers/
       - vllm/transformers_utils/configs/speculators/
       - vllm/model_executor/models/qwen3_5_mtp.py
+      - vllm/models/qwen3_5/
+      - vllm/model_executor/models/qwen3_next.py
       - vllm/model_executor/models/qwen3_next_mtp.py
       - vllm/config/speculative.py
       - tests/v1/e2e/spec_decode/
@@ -313,10 +324,12 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix"
   key: spec-decode-ngram-suffix
   automatic_shard: true
-  timeout_in_minutes: 20
+  timeout_in_minutes: 35
   device: h200_35gb
   source_file_dependencies:
+    - vllm/sampling_params.py
     - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/sample/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
   commands:
@@ -331,7 +344,9 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/sampling_params.py
       - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/sample/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/model_executor/model_loader/
       - vllm/v1/sample/
@@ -445,8 +460,11 @@ steps:
   num_devices: 2
   source_file_dependencies:
     - vllm/v1/worker/gpu/spec_decode/eagle/
+    - vllm/distributed/parallel_state.py
+    - vllm/v1/worker/gpu/model_runner.py
     - vllm/model_executor/models/deepseek_mtp.py
     - vllm/model_executor/models/deepseek_v2.py
+    - vllm/model_executor/models/qwen3_next_mtp.py
     - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
@@ -489,8 +507,8 @@ steps:
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
-    # DFlash2 NVFP4 (27B) does not fit a 35GB MIG slice; runs on B200 below.
-    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+    # DFlash2 NVFP4 and DSpine BF16 (27B) do not fit a 35GB MIG slice; run on B200.
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2 and not dspine"
     - pytest -v -s v1/e2e/spec_decode/test_distribution_shift.py
   mirror:
     amd:
@@ -500,7 +518,7 @@ steps:
       device: mi355_dpx
       timeout_in_minutes: 120
       commands:
-      - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+      - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2 and not dspine"
       - pytest -v -s v1/e2e/spec_decode/test_distribution_shift.py
       depends_on:
       - image-build-amd
@@ -511,7 +529,6 @@ steps:
       - vllm/v1/sample/
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/
-      - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/laguna.py
@@ -530,12 +547,16 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
     - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/model_executor/models/qwen3_dspine.py
+    - vllm/model_executor/models/registry.py
+    - vllm/config/speculative.py
+    - vllm/transformers_utils/configs/
     - vllm/models/qwen3_5/
     - vllm/model_executor/models/qwen3_5.py
     - vllm/model_executor/models/qwen3_5_mtp.py
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2 or dspine"
   mirror:
     amd:
       automatic_shard: true
@@ -558,6 +579,10 @@ steps:
       - vllm/v1/attention/
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/qwen3_dflash2.py
+      - vllm/model_executor/models/qwen3_dspine.py
+      - vllm/model_executor/models/registry.py
+      - vllm/config/speculative.py
+      - vllm/transformers_utils/configs/
       - vllm/models/qwen3_5/
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py
@@ -630,7 +655,6 @@ steps:
       - vllm/v1/sample/
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/
-      - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/qwen3_dspark.py

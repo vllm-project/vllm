@@ -8,12 +8,14 @@ the Triton, FlashInfer, or CPU backend based on the configured
 the backend defaults to 'cpu'.
 """
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cache
 
 import torch
 
+from vllm.config.cache import CacheConfig
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -85,9 +87,10 @@ def plan_replayssm_decode(
     advances the slot's counter, so the runner supplies no ring metadata.
     Prefill resets the counters in the same layer.
 
-    With `align_block_size` > 0 (mamba `align` prefix caching), the ring
-    restarts at each block's first step and flushes on the step completing a
-    block; `seq_lens` must then hold each row's sequence length.
+    With `align_block_size` > 0 (prefix caching, see
+    `get_replayssm_align_block_size`), the ring restarts at the first step of
+    every `align_block_size` tokens and flushes on the step completing them;
+    `seq_lens` must then hold each row's sequence length.
     """
     if state_batch_indices.dim() > 1:
         state_batch_indices = state_batch_indices[:, 0]
@@ -112,6 +115,20 @@ def plan_replayssm_decode(
         pad_slot_id,
         BLOCK=block,
     )
+
+
+def get_replayssm_align_block_size(cache_config: CacheConfig, block_size: int) -> int:
+    """`plan_replayssm_decode` alignment for a Mamba group with prefix caching.
+
+    A prefix-cache hit may resume a request at any prefix match unit inside a
+    Mamba block, as a one-token decode in a copied block whose ring counter
+    belongs to another request. Restarting the ring on every unit makes that
+    step start from the exact cached state; with a unit that is a multiple of
+    the ring length this adds no flushes.
+    """
+    if cache_config.prefix_match_unit is None:
+        return block_size
+    return math.gcd(block_size, cache_config.prefix_match_unit)
 
 
 class MambaSSUBackend(ABC):
@@ -465,10 +482,10 @@ def initialize_mamba_ssu_backend(
 ) -> None:
     """Initialize the Mamba SSU backend and optional FlashInfer ReplaySSM."""
     if not any(
-        isinstance(g.kv_cache_spec, MambaSpec)
-        and g.kv_cache_spec.mamba_type
-        in (MambaAttentionBackendEnum.MAMBA1, MambaAttentionBackendEnum.MAMBA2)
+        isinstance(spec, MambaSpec)
+        and spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
         for g in kv_cache_config.kv_cache_groups
+        for spec in g.kv_cache_specs.values()
     ):
         return
 

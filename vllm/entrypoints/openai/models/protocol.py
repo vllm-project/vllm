@@ -5,13 +5,13 @@
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(slots=True)
 class BaseModelPath:
     name: str
     model_path: str
 
 
-@dataclass
+@dataclass(slots=True)
 class LoRAModulePath:
     name: str
     path: str

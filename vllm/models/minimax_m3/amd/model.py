@@ -108,6 +108,8 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.amd.glue import M3Glue
+from vllm.models.minimax_m3.amd.glue.carry import Mxfp8Carry
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAImpl,
     MiniMaxM3MSAIndexer,
@@ -118,7 +120,6 @@ from vllm.models.minimax_m3.amd.indexer_nvfp4 import (
     MiniMaxM3IndexerRocmNvfp4Impl,
     init_rocm_nvfp4_indexer_decode_cp,
 )
-from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
@@ -137,6 +138,7 @@ from vllm.models.minimax_m3.amd.sparse_attention_msa import (
     MiniMaxM3SparseAiterPAPrefillMetadata,
 )
 from vllm.models.minimax_m3.amd.specialized_decode.runtime import (
+    DecodeConfig,
     specialized_decode_config,
 )
 from vllm.models.minimax_m3.common.encoder_cudagraph import (
@@ -164,14 +166,16 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
 
 if TYPE_CHECKING:
+    from .mono.dispatch import MonoDecode
     from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
@@ -961,7 +965,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
         # AITER sparse PA wants K and V as two separate head groups
         # (H folded into the content dim).
@@ -969,7 +973,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         kv_bytes = (
             self.num_kv_heads * self.head_dim * self.kv_cache_torch_dtype.itemsize
         )
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -979,6 +983,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             num_head_slots=2 if sparse_pa else None,
             state_content_bytes=kv_bytes if sparse_pa else None,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _ensure_aiter_sparse_pa_kv_cache(self) -> None:
         if self.kv_cache.numel() == 0:
@@ -1619,6 +1624,9 @@ def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
 
 
 class MiniMaxM3DecoderLayer(nn.Module):
+    # set on the backbone's MoE layers when a glue path is on (glue/runtime.py)
+    _m3_glue: M3Glue | None = None
+
     def __init__(
         self,
         config: PreTrainedConfig,
@@ -1718,7 +1726,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         attn_input: torch.Tensor | QuantizedActivation
-        if residual is None:
+        if isinstance(hidden_states, Mxfp8Carry):
+            # the previous MoE layer already normed and quantized this layer's
+            # attention input (codes of every row); the residual it returned
+            # goes with it
+            attn_input = QuantizedActivation(
+                hidden_states.x_q,
+                hidden_states.x_s,
+                torch.bfloat16,
+                hidden_states.x_q.shape,
+                kMxfp8Dynamic,
+            )
+            residual = hidden_states.res_local
+        elif residual is None:
             residual = hidden_states
             attn_input = self.input_layernorm(hidden_states)
         elif self.fuse_input_norm_mxfp8:
@@ -1737,6 +1757,13 @@ class MiniMaxM3DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=attn_input,
         )
+
+        # the glue: the whole MoE half from the o_proj partial, when this
+        # forward's plan selected it (glue/runtime.py)
+        if self._m3_glue is not None:
+            glued = self._m3_glue.moe_half(self, hidden_states, residual)
+            if glued is not None:
+                return glued
 
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         if self.fuse_post_norm_mxfp8:
@@ -1776,7 +1803,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode_config: DecodeConfig | None = None
         self.specialized_decode: SpecializedDecode | None = None
 
         self.vocab_size = config.vocab_size
@@ -1914,13 +1941,74 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        # VLLM_ROCM_MINIMAX_M3_MONO=1: supported decode steps run one FlyDSL
-        # launch per layer (mono kernels)
-        self._mono = None
-        if mono_envs.MONO_ENABLE:
-            from vllm.models.minimax_m3.amd.mono.dispatch import MonoDecode
+        self._mono: MonoDecode | None = None
+        if vllm_config.kernel_config.monokernel:
+            self._init_monokernel(vllm_config)
 
-            self._mono = MonoDecode(self, vllm_config)
+        # MiniMax-M3.1 TP4 glue paths (glue/): None where they do not apply
+        self.m3_glue = M3Glue.create(self, vllm_config)
+
+    def _init_monokernel(self, vllm_config: VllmConfig) -> None:
+        """Run the selected MiniMax-M3 monokernels (`mono/selection.py`) that fit:
+        the decode kernels here, the DSpark drafter kernels in `common/dspark.py`.
+        A deployment that fits none of them is refused."""
+        from vllm.models.minimax_m3.amd.mono.selection import (
+            DECODE,
+            DRAFTER,
+            enabled_monokernels,
+        )
+
+        kernels = enabled_monokernels(vllm_config)
+        reasons: list[str] = []
+        if DECODE in kernels:
+            why = self._init_mono_decode(vllm_config)
+            if why is None:
+                return
+            reasons.append(why)
+        if DRAFTER in kernels:
+            from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
+                config_refusal as drafter_refusal,
+            )
+
+            drafter_why = drafter_refusal(vllm_config)
+            if drafter_why is None:
+                logger.info(
+                    "MiniMax-M3 --monokernel: DSpark drafter kernels only (%s)",
+                    "; ".join(reasons) or "decode kernels not selected",
+                )
+                return
+            reasons.append(
+                f"MiniMax-M3 DSpark drafter kernels unsupported: {drafter_why}"
+            )
+        raise ValueError("--monokernel: " + "; ".join(reasons))
+
+    def _init_mono_decode(self, vllm_config: VllmConfig) -> str | None:
+        """Set up the whole-layer mono decode if the deployment fits it, else the
+        FFN-only specialized decode. Returns why neither fits, or None."""
+        why: str | None
+        try:
+            from vllm.models.minimax_m3.amd.mono.dispatch import (
+                MonoDecode,
+                config_refusal,
+            )
+        except ImportError as err:
+            why = f"needs FlyDSL and AITER ({err})"
+        else:
+            why = config_refusal(vllm_config, self)
+            if why is None:
+                logger.info("MiniMax-M3 --monokernel: whole-layer mono decode")
+                self._mono = MonoDecode(self, vllm_config)
+                return None
+        try:
+            self.specialized_decode_config = specialized_decode_config(vllm_config)
+        except ValueError as err:
+            return f"MiniMax-M3 whole-layer mono decode unsupported: {why}; {err}"
+        logger.info(
+            "MiniMax-M3 --monokernel: FFN-only specialized decode (whole-layer "
+            "mono decode unsupported: %s)",
+            why,
+        )
+        return None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1962,27 +2050,38 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, self.start_layer, hidden_states, residual
             )
         layers = self.layers[self.start_layer : self.end_layer]
-        if decode is None:
-            for idx, layer in enumerate(layers, start=self.start_layer):
-                hidden_states, residual = layer(positions, hidden_states, residual)
-                self._maybe_add_hidden_state(
-                    aux_hidden_states, idx + 1, hidden_states, residual
-                )
-        else:
-            step = decode.plan(positions, intermediate_tensors)
-            failure: Exception | None = None
-            try:
+        # one glue plan for the whole forward (the MoE layers read it)
+        glue = self.m3_glue
+        plan = (
+            glue.begin_forward(positions, intermediate_tensors)
+            if glue is not None
+            else None
+        )
+        try:
+            if decode is None:
                 for idx, layer in enumerate(layers, start=self.start_layer):
-                    kernel = step.layer(layer.layer_id) if step else None
-                    hidden_states, residual = (kernel or layer)(
-                        positions, hidden_states, residual
-                    )
+                    hidden_states, residual = layer(positions, hidden_states, residual)
                     self._maybe_add_hidden_state(
                         aux_hidden_states, idx + 1, hidden_states, residual
                     )
-            except Exception as err:
-                failure = err
-            decode.after_step(step, failure)
+            else:
+                step = decode.plan(positions, intermediate_tensors)
+                failure: Exception | None = None
+                try:
+                    for idx, layer in enumerate(layers, start=self.start_layer):
+                        kernel = step.layer(layer.layer_id) if step else None
+                        hidden_states, residual = (kernel or layer)(
+                            positions, hidden_states, residual
+                        )
+                        self._maybe_add_hidden_state(
+                            aux_hidden_states, idx + 1, hidden_states, residual
+                        )
+                except Exception as err:
+                    failure = err
+                decode.after_step(step, failure)
+        finally:
+            if glue is not None:
+                glue.end_forward(plan)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -2097,7 +2196,10 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.model.m3_glue is not None:
+            self.model.m3_glue.after_load_weights()
+        return loaded
 
 
 # TODO(refactor): this VL wrapper is platform-agnostic and byte-identical to the

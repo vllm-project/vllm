@@ -506,16 +506,10 @@ class OpenPanguEmbeddedAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        rope_parameters = config.rope_parameters or {}
-        if rope_parameters is not None and rope_parameters.get(
-            "mrope_interleaved", False
-        ):
-            rope_parameters["rope_type"] = "openpangu"
-
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
         )
 
@@ -828,7 +822,7 @@ class OpenPanguDecoderLayer(nn.Module):
                     f"is_causal={config.is_causal} is not support "
                     "for attention with sink"
                 )
-            rope_parameters = getattr(config, "rope_scaling", None)
+            rope_parameters = getattr(config, "rope_parameters", None)
             if rope_parameters is None:
                 rope_parameters = {
                     "rope_type": "default",

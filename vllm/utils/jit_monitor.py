@@ -25,7 +25,7 @@ import contextlib
 import functools
 import importlib
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, cast
 
@@ -596,7 +596,7 @@ def _setup_tilelang_jit_hook() -> None:
 
 
 @contextlib.contextmanager
-def numba_workqueue_threading_layer() -> Iterator[None]:
+def numba_workqueue_threading_layer() -> Generator[None]:
     """Force numba's fork-safe `workqueue` threading layer for this block.
 
     GNU OpenMP (numba's default `omp` threading layer) aborts the process

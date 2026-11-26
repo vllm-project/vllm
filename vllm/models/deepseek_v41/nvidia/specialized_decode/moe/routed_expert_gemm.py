@@ -132,7 +132,7 @@ def route_words(ctas: int) -> int:
     return 4 + 3 * cta_words(ctas) + TILE * ctas
 
 
-@dataclass
+@dataclass(slots=True)
 class FrontConfig:
     """The router's DSv4 top-k parameters the fused front applies."""
 
@@ -142,7 +142,7 @@ class FrontConfig:
     scale: float  # routed scaling factor of the normalized weights
 
 
-@dataclass
+@dataclass(slots=True)
 class Routing:
     """What GEMM1 and GEMM2 read, from `route` or `front`."""
 

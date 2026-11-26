@@ -76,7 +76,7 @@ PRESETS = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Case:
     seqlens: tuple[int, ...]
     hv: int

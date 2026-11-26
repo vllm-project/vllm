@@ -65,7 +65,7 @@ requires_mega_attn = pytest.mark.skipif(
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class Case:
     heads: int
     q: torch.Tensor  # [s_q, heads, 512] bf16, head-major

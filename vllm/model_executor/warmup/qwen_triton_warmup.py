@@ -32,7 +32,7 @@ _QWEN_MODEL_TYPES = frozenset(
 _FLA_POST_CONV_WARMUP_LENGTHS = (1, 2, 16)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _QwenGDNWarmupConfig:
     h: int
     hv: int
@@ -163,9 +163,12 @@ def _warm_gated_rms_norm_kernel(
         warmup_layer_norm_fwd,
     )
 
+    # _rms_norm_gated_cuda: a row per token; RMSNormGated: a row per head.
+    fused = config.fused_spec_decode
     warmup_layer_norm_fwd(
         max_num_tokens=max_num_tokens,
-        rows_per_token=config.hv,
+        rows_per_token=1 if fused else config.hv,
+        groups_per_row=config.hv if fused else 1,
         group_size=config.v,
         x_dtype=x_dtype,
         weight_dtype=config.norm_weight_dtype,

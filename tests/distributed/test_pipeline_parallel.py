@@ -42,7 +42,7 @@ class PPTestOptions(NamedTuple):
     load_format: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]
@@ -131,7 +131,6 @@ TEXT_GENERATION_MODELS = {
     "ibm/PowerLM-3b": PPTestSettings.fast(),
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
-    "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
@@ -140,7 +139,6 @@ TEXT_GENERATION_MODELS = {
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
-    "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
@@ -207,8 +205,6 @@ TEST_MODELS = [
     "OpenGVLab/InternVL3-1B",
     "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
-    # [LANGUAGE GENERATION - HYBRID ARCH]
-    "ai21labs/Jamba-tiny-dev",
 ]
 
 
@@ -504,6 +500,9 @@ def test_pp_granite4_vision_deepstack(num_gpus_available):
     ("model_id", "model_kwargs"),
     [
         pytest.param("tiiuae/Falcon-H1-Tiny-90M-Instruct", {}, id="falcon_h1"),
+        pytest.param("Qwen/Qwen3.5-0.8B", {}, id="qwen3_5"),
+        pytest.param("google/gemma-3-1b-it", {}, id="gemma3"),
+        pytest.param("ibm-granite/granite-4.0-h-350m", {}, id="granite4_h"),
         # Startup check only: dummy weights give near-uniform logits.
         pytest.param(
             "baidu/ERNIE-4.5-21B-A3B-PT",
@@ -534,7 +533,6 @@ def test_pp_tied_word_embeddings(
     for pp_size in (1, 2):
         with vllm_runner(
             model_id,
-            trust_remote_code=False,
             max_model_len=512,
             enable_chunked_prefill=True,
             enforce_eager=True,

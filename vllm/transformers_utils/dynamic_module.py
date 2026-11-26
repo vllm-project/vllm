@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from typing import TYPE_CHECKING
 
+import transformers
 from transformers.dynamic_module_utils import (
     get_class_from_dynamic_module,
     resolve_trust_remote_code,
@@ -9,6 +11,11 @@ from transformers.dynamic_module_utils import (
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedModel
+
+    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -67,3 +74,23 @@ def try_get_class_from_dynamic_module(
             )
 
         return None
+
+
+def get_transformers_model_class(
+    architecture: str, model_config: "ModelConfig"
+) -> type["PreTrainedModel"] | None:
+    """The Transformers class for `architecture`, from Transformers itself or from
+    the model's remote code. As with `AutoModel`, trusted remote code takes precedence.
+    """
+    if model_config.trust_remote_code:
+        auto_map = getattr(model_config.hf_config, "auto_map", None) or {}
+        for name, ref in auto_map.items():
+            if name.startswith("AutoModel") and ref.endswith(f".{architecture}"):
+                return try_get_class_from_dynamic_module(
+                    ref,
+                    model_config.model,
+                    trust_remote_code=model_config.trust_remote_code,
+                    revision=model_config.revision,
+                    code_revision=model_config.code_revision,
+                )
+    return getattr(transformers, architecture, None)

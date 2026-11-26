@@ -49,6 +49,13 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
+    TritonKDACheckpointSpec,
+    get_triton_kda_checkpoint_buffer,
+    kda_prefill_checkpoint_alignment,
+    reserve_triton_kda_checkpoint_buffer,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
@@ -160,20 +167,10 @@ def _get_kda_state_shape_for_config(
 
 def _build_rope_parameters(config: PreTrainedConfig) -> dict | None:
     rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
-    if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
-        rope_parameters["rope_theta"] = config.rope_theta
     # BailingMoeV3 stores the MLA rotary width explicitly in qk_rope_head_dim.
     # Some checkpoints also carry partial_rotary_factor=0.5, but applying it
     # here would shrink the rotary cache to half of the qk_rope_head_dim.
     rope_parameters.pop("partial_rotary_factor", None)
-
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if isinstance(rope_scaling, dict):
-        rope_scaling = copy.deepcopy(rope_scaling)
-        if "type" in rope_scaling and "rope_type" not in rope_scaling:
-            rope_scaling["rope_type"] = rope_scaling.pop("type")
-        rope_scaling.pop("partial_rotary_factor", None)
-        rope_parameters.update(rope_scaling)
 
     return rope_parameters or None
 
@@ -793,7 +790,20 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             prefix=f"{prefix}.o_proj",
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+            state_len=self.conv_size - 1
+        )
+        self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
+        if vllm_config.cache_config.enable_prefix_caching:
+            self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
+                vllm_config,
+                self.local_num_heads,
+                self.head_dim,
+                self.get_state_dtype()[1],
+            )
+
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -803,6 +813,9 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             and splitting_op not in compilation_config.splitting_ops
         ):
             compilation_config.splitting_ops.append(splitting_op)
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return kda_prefill_checkpoint_alignment("triton")
 
     def forward(
         self,
@@ -1117,6 +1130,10 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             assert has_initial_state is not None
             initial_state = recurrent_state_active[state_indices].contiguous()
             initial_state.masked_fill_(~has_initial_state[:, None, None, None], 0)
+            checkpoint = attn_metadata.checkpoint
+            checkpoint_state, checkpoint_offsets = get_triton_kda_checkpoint_buffer(
+                checkpoint, self._triton_checkpoint_spec, initial_state.shape[0]
+            )
             out, last_state = chunk_kda(
                 q=q,
                 k=k,
@@ -1129,7 +1146,30 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
                 safe_gate=self.safe_gate,
                 lower_bound=self.lower_bound,
                 cu_seqlens=query_start_loc,
+                checkpoint_state=checkpoint_state,
+                checkpoint_offsets=checkpoint_offsets,
             )
+            if checkpoint is not None:
+                # Q, K and V keep separate inputs and conv states, so export
+                # each window on its own; the Q call also stores the state.
+                self._checkpoint_exporter.export(
+                    checkpoint,
+                    raw_qkv=q_proj_states_non_spec,
+                    conv_state=conv_state_q,
+                    cu_seqlens=query_start_loc,
+                    recurrent_checkpoint=checkpoint_state,
+                    recurrent_state=recurrent_state_active,
+                )
+                for raw, state in (
+                    (k_proj_states_non_spec, conv_state_k),
+                    (v_proj_states_non_spec, conv_state_v),
+                ):
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=raw,
+                        conv_state=state,
+                        cu_seqlens=query_start_loc,
+                    )
             recurrent_state_active[state_indices] = last_state
         elif attn_metadata.num_decodes > 0:
             assert q is not None and k is not None and v is not None

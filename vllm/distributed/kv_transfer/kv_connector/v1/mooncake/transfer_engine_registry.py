@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SharedMooncakeTransferEngine:
     """TransferEngine published by the `MooncakeConnector` worker."""
 

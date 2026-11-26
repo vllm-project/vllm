@@ -38,7 +38,7 @@ WHOLE, FFN = "whole", "ffn"
 K3_SHAPES = (7168, 896, 96, 128, 4)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     # rows per request: 1 for regular decode, or num_speculative_tokens + 1
     q: int

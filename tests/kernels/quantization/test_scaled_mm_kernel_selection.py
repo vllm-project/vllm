@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
+from vllm.utils.deep_gemm import is_deep_gemm_fp8_linear_requested
 
 pytestmark = pytest.mark.cpu_test
 
@@ -81,9 +82,13 @@ def test_linear_backend_override_is_quantization_specific():
         assert _get_linear_backend(quantization="fp8_w8a8") == "cutlass"
 
 
+@pytest.mark.parametrize("strict", [False, True])
 @patch.object(HummingFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
 @patch("vllm.model_executor.kernels.linear.current_platform")
-def test_fp8_linear_backend_override(platform_mock, _):
+def test_fp8_linear_backend_override(platform_mock, _, monkeypatch, strict):
+    """Humming FP8 linear is weight-only, so it runs W8A8 layers as W8A16
+    unless VLLM_STRICT_QUANT_SCHEME forbids that."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
     platform_mock._enum = PlatformEnum.CUDA
     config = VllmConfig(
         kernel_config=KernelConfig(
@@ -92,8 +97,8 @@ def test_fp8_linear_backend_override(platform_mock, _):
         )
     )
 
-    with set_current_vllm_config(config):
-        kernel = init_fp8_linear_kernel(
+    def init_kernel():
+        return init_fp8_linear_kernel(
             activation_quant_key=kFp8StaticTensorSym,
             weight_quant_key=kFp8StaticTensorSym,
             input_dtype=torch.bfloat16,
@@ -101,7 +106,12 @@ def test_fp8_linear_backend_override(platform_mock, _):
             weight_shape=(128, 128),
         )
 
-    assert type(kernel) is HummingFP8ScaledMMLinearKernel
+    with set_current_vllm_config(config):
+        if strict:
+            with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+                init_kernel()
+        else:
+            assert type(init_kernel()) is HummingFP8ScaledMMLinearKernel
 
 
 def test_is_supported_is_abstract():
@@ -422,3 +432,27 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+@pytest.mark.parametrize(
+    "kernel_config,requested",
+    [
+        (KernelConfig(), False),
+        (KernelConfig(linear_backend="cutlass"), False),
+        (KernelConfig(linear_backend="deep_gemm"), True),
+        (
+            KernelConfig(linear_backend_per_quant={"fp8_block_w8a8": "deep_gemm"}),
+            True,
+        ),
+        (KernelConfig(linear_backend_per_quant={"fp8_w8a8": "deep_gemm"}), False),
+        (
+            KernelConfig(
+                linear_backend="deep_gemm",
+                linear_backend_per_quant={"fp8_block_w8a8": "cutlass"},
+            ),
+            False,
+        ),
+    ],
+)
+def test_deep_gemm_fp8_linear_requested(kernel_config, requested):
+    assert is_deep_gemm_fp8_linear_requested(kernel_config) is requested
