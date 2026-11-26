@@ -278,18 +278,13 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         super().__init__(client=client, source=source, is_sender=is_sender)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
-        self._initialize_device()
-
-    def _initialize_device(self) -> None:
-        """Select the trainer's device and physical-device key.
-
-        Plugins may override this to initialize their native device context.
-        """
         self.device_index = torch.accelerator.current_device_index()
         self.device = torch.device(current_platform.device_type, self.device_index)
-        self.gpu_uuid = str(
-            current_platform.get_device_properties(self.device_index).uuid
-        )
+        self.gpu_uuid = self._get_device_key()
+
+    def _get_device_key(self) -> str:
+        """Return the physical-device key used by the colocated worker."""
+        return str(current_platform.get_device_properties(self.device_index).uuid)
 
     def _export_ipc_tensor(self, tensor: torch.Tensor) -> tuple:
         """Export native reconstruction arguments after device registration."""

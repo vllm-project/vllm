@@ -1934,7 +1934,10 @@ def test_ipc_device_plugin_reuses_the_full_transfer_lifecycle(monkeypatch, packe
     from dataclasses import dataclass
 
     from vllm.config import DeviceConfig, VllmConfig
+    from vllm.distributed.weight_transfer import ipc_engine
+    from vllm.platforms.cpu import CpuPlatform
 
+    monkeypatch.setattr(ipc_engine, "current_platform", CpuPlatform())
     reductions = torch.multiprocessing.reductions
     native_reduce = reductions.reduce_tensor
     exports: list[tuple] = []
@@ -1950,6 +1953,7 @@ def test_ipc_device_plugin_reuses_the_full_transfer_lifecycle(monkeypatch, packe
         return rebuild, ("cpu-handle", len(exports) - 1)
 
     monkeypatch.setattr(reductions, "reduce_tensor", registered_reduce)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     monkeypatch.setattr(torch.accelerator, "synchronize", torch.cpu.synchronize)
     monkeypatch.setattr(
         torch.cpu.Stream,
@@ -1990,10 +1994,8 @@ def test_ipc_device_plugin_reuses_the_full_transfer_lifecycle(monkeypatch, packe
         worker_init_info_cls = InitInfo
         update_info_cls = UpdateInfo
 
-        def _initialize_device(self):
-            self.device = torch.device("cpu")
-            self.device_index = 0
-            self.gpu_uuid = "cpu-plugin"
+        def _get_device_key(self):
+            return "cpu-plugin"
 
         @classmethod
         def _post_send_sync(cls):

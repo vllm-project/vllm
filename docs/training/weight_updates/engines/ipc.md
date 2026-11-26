@@ -170,12 +170,14 @@ built-in `ipc` backend continues to use CUDA IPC.
 | ----- | --------------- | -------------- |
 | `IPCWeightTransferEngine` | `_get_device_key()` | Match this worker to the trainer's physical-device handle key |
 | `IPCWeightTransferEngine` | `_rebuild_ipc_tensor(args)` | Reconstruct a native IPC tensor and remap the sender's device index to the worker's assigned device |
-| `IPCTrainerWeightTransferEngine` | `_initialize_device()` | Set `device`, `device_index`, and the opaque handle key in `gpu_uuid` |
+| `IPCTrainerWeightTransferEngine` | `_get_device_key()` | Match the trainer to its colocated worker; device/index initialization stays in the base class |
 | `IPCTrainerWeightTransferEngine` | `_export_ipc_tensor(tensor)` | Return native reconstruction arguments |
 | `IPCTrainerWeightTransferEngine` | `_synchronize_device()` | Complete writes at the existing multi-rank handle-gather boundary |
 | `IPCTrainerWeightTransferEngine` | `_post_send_sync()` | Complete backend-specific post-send cleanup, retaining the trainer barrier |
 
 The worker uses the same reconstruction hook for packed and unpacked imports.
+The trainer initializes its device through the active platform. Plugins that
+use the default request schemas inherit them without additional subclasses.
 The trainer passes its device and exporter to `packed_ipc_producer`; the packed
 helper uses that device's native stream module. Exporters resolve the PyTorch
 tensor reducer at call time, so device plugins may register it after importing
