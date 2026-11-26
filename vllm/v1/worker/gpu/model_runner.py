@@ -1955,11 +1955,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         cudagraph_stats = None
         if not dummy_run:
+            assert batch_req_state is not None
+            # A varlen decode graph can verify extra scheduled drafts within
+            # the padded shape already agreed across DP ranks.
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "dspark"
+                and self.adaptive_verification is not None
+                and scheduler_output.scheduled_spec_decode_tokens
+                and dp_sync_state is not None
+                and batch_desc.cg_mode == CUDAGraphMode.FULL
+                and batch_desc.uniform_token_count is None
+                and batch_desc.max_query_len is not None
+                and batch_desc.num_reqs is not None
+                and batch_desc.num_reqs >= dp_sync_state.num_reqs
+                and batch_desc.num_ubatches == 1
+                and self.pcp_manager is None
+                and not batch_req_state.has_prefill
+                and num_toks < batch_desc.num_tokens
+            ):
+                num_toks = self.adaptive_verification.refill_draft_budget(
+                    batch_desc.num_tokens
+                )
+                batch_req_state = batch_req_state._replace(num_tokens=num_toks)
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             if self.observability_config.cudagraph_metrics:
                 cudagraph_stats = make_cudagraph_stats(batch_desc, num_toks)
-            assert batch_req_state is not None
             input_batch = self.prepare_inputs(
                 scheduler_output, batch_req_state, batch_desc, num_active_loras
             )
