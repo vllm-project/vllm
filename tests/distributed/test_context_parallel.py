@@ -46,7 +46,7 @@ MIN_ACCURACY = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
     # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
     "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
-    "Qwen/Qwen3.5-0.8B": 0.32,
+    "Qwen/Qwen3.5-0.8B": 0.33,
 }
 
 
@@ -138,9 +138,6 @@ elif current_platform.is_xpu():
     CP_TEXT_GENERATION_MODELS = {
         "deepseek-ai/DeepSeek-V2-Lite-Chat": [
             CPTestSettings.detailed(dcp_multipliers=[1]),
-        ],
-        "Qwen/Qwen3.5-0.8B": [
-            CPTestSettings.detailed(dcp_multipliers=[0.5]),
         ],
     }
 
