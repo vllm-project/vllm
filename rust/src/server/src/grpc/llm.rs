@@ -56,7 +56,7 @@ impl InflightRequest {
 type InflightRequests = Arc<Mutex<HashMap<Uuid, Arc<InflightRequest>>>>;
 
 /// Token-only client for a vllm.Inference endpoint.
-pub struct GrpcLlm {
+pub(crate) struct GrpcLlm {
     readiness: watch::Receiver<bool>,
     _readiness_task: AbortOnDropHandle<()>,
     channel: Channel,
@@ -68,7 +68,7 @@ pub struct GrpcLlm {
 
 impl GrpcLlm {
     /// Connect lazily to a worker using model information supplied by the caller.
-    pub fn new(url: &str, model: String, info: LlmInfo) -> anyhow::Result<Self> {
+    pub(crate) fn new(url: &str, model: String, info: LlmInfo) -> anyhow::Result<Self> {
         let channel = Endpoint::from_shared(url.to_owned())?.connect_lazy();
         Ok(Self::from_channel(channel, model, info))
     }

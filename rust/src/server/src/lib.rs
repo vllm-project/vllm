@@ -40,7 +40,6 @@ pub use config::{
     OutputLogging, ServerConfig, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
-pub use grpc::llm::GrpcLlm;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -67,6 +66,7 @@ pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
+use crate::grpc::llm::GrpcLlm;
 use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
