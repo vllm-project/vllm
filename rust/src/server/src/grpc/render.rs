@@ -8,6 +8,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::Json;
+use axum::http::HeaderMap;
 use itertools::Itertools as _;
 use llm_multimodal::ImageDetail;
 use thiserror_ext::AsReport as _;
@@ -118,9 +119,10 @@ async fn render(
     let Json(body) = Json::<ChatCompletionRequest>::from_bytes(&request.body)
         .map_err(|rejection| api_error_to_status(rejection.into()))?;
 
-    let LoweredChatRender { chat_request, .. } = lower_chat_render_request(state, body, None)
-        .await
-        .map_err(api_error_to_status)?;
+    let LoweredChatRender { chat_request, .. } =
+        lower_chat_render_request(state, body, &HeaderMap::new())
+            .await
+            .map_err(api_error_to_status)?;
 
     let RenderedChat {
         prompt_token_ids,

@@ -30,9 +30,7 @@ use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
 };
-use crate::utils::{
-    ResolvedRequestContext, resolve_base_request_id, resolve_request_context, unix_timestamp,
-};
+use crate::utils::{resolve_request_context, unix_timestamp};
 
 pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
     Router::new()
@@ -175,19 +173,13 @@ pub(crate) struct LoweredChatRender {
 pub(crate) async fn lower_chat_render_request<S: RenderContext>(
     state: &S,
     body: ChatCompletionRequest,
-    headers: Option<&HeaderMap>,
+    headers: &HeaderMap,
 ) -> Result<LoweredChatRender, ApiError> {
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model(requested_model).await;
     let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
 
-    let request_context = match headers {
-        Some(headers) => resolve_request_context(headers, body.request_id.as_deref())?,
-        None => ResolvedRequestContext {
-            request_id: resolve_base_request_id(None, body.request_id.as_deref()),
-            ..Default::default()
-        },
-    };
+    let request_context = resolve_request_context(headers, body.request_id.as_deref())?;
 
     let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
     validate_max_output_tokens(
@@ -221,7 +213,7 @@ pub(crate) async fn render_chat<S: RenderContext>(
     let LoweredChatRender {
         chat_request,
         model,
-    } = lower_chat_render_request(state.as_ref(), body, Some(&headers)).await?;
+    } = lower_chat_render_request(state.as_ref(), body, &headers).await?;
     let text_request = state
         .chat_processor()
         // The parallel samples of `n` are the generate request's to fan out;
