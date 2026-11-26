@@ -305,11 +305,6 @@ Generation requests also enforce `VLLM_MAX_STOP_STRINGS` (4),
 `VLLM_MAX_STOP_TOKEN_IDS` (128), and `VLLM_MAX_NUM_BAD_WORDS` (128).
 `VLLM_MAX_BAD_WORDS_TOTAL_TOKENS` (1024) bounds the combined length of the
 tokenized bad-word sequences.
-The Python frontend also limits each `bad_words` entry to
-`VLLM_MAX_BAD_WORD_LENGTH` characters (1000) before tokenization.
-`VLLM_MAX_LOGIT_BIAS_SIZE` and `VLLM_MAX_ALLOWED_TOKEN_IDS` can set per-request
-entry limits below the model vocabulary size. Both default to `0`, which
-uses the vocabulary size.
 
 ### Recommendations
 

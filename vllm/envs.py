@@ -117,9 +117,6 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENIZE_TOKENS: int | None = None
     VLLM_MAX_NUM_BAD_WORDS: int = 128
     VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
-    VLLM_MAX_LOGIT_BIAS_SIZE: int = 0
-    VLLM_MAX_ALLOWED_TOKEN_IDS: int = 0
-    VLLM_MAX_BAD_WORD_LENGTH: int = 1000
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -1226,17 +1223,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # allowed per request. Bounds the per-request GPU buffer width.
     "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS": lambda: int(
         os.environ.get("VLLM_MAX_BAD_WORDS_TOTAL_TOKENS", "1024")
-    ),
-    # A value of 0 uses the model vocabulary size as the limit.
-    "VLLM_MAX_LOGIT_BIAS_SIZE": lambda: int(
-        os.environ.get("VLLM_MAX_LOGIT_BIAS_SIZE", "0")
-    ),
-    "VLLM_MAX_ALLOWED_TOKEN_IDS": lambda: int(
-        os.environ.get("VLLM_MAX_ALLOWED_TOKEN_IDS", "0")
-    ),
-    # Maximum character length of a single bad_words entry.
-    "VLLM_MAX_BAD_WORD_LENGTH": lambda: int(
-        os.environ.get("VLLM_MAX_BAD_WORD_LENGTH", "1000")
     ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded

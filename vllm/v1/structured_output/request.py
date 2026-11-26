@@ -3,7 +3,6 @@
 import dataclasses
 import functools
 import json
-import time
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, cast
 
@@ -32,7 +31,7 @@ class StructuredOutputRequest:
     # Implicit reasoning-end tokens the grammar rejects as the first content
     # token; masked while the request reasons. Computed on first use.
     masked_reasoning_end_ids: tuple[int, ...] | None = None
-    compilation_start_time: float | None = None
+    compilation_submit_time: float | None = None
 
     @staticmethod
     def from_sampling_params(
@@ -55,18 +54,15 @@ class StructuredOutputRequest:
                 self._grammar = e
         return True
 
-    def start_compilation(self) -> None:
-        self.compilation_start_time = time.monotonic()
-
-    def cancel_grammar_if_expired(self, timeout: int) -> bool:
+    def cancel_grammar_if_expired(self, timeout: int, now: float) -> bool:
         """Stop waiting for an overdue compilation and cancel queued work."""
         future = self._grammar
-        started = self.compilation_start_time
+        submitted = self.compilation_submit_time
         if (
             timeout <= 0
-            or started is None
+            or submitted is None
             or not isinstance(future, Future)
-            or time.monotonic() - started < timeout
+            or now - submitted < timeout
             or future.done()
         ):
             return False

@@ -60,11 +60,14 @@ request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
 
-The engine waits up to 10 seconds for asynchronous grammar compilation, including
-time in the compilation queue. Set
-`--structured-outputs-config.compilation_timeout` to change the limit or use
-`0` to disable it. A timeout fails the request and cancels the compilation if
-it is still queued.
+On each scheduling step, the engine checks whether pending asynchronous grammar
+compilations have exceeded the 10-second request deadline. The deadline starts
+at submission and includes time in the compilation queue. Set
+`--structured-outputs-config.compilation_timeout` to change the deadline or
+use `0` to disable it. Expiry fails the request and cancels queued compilation.
+Compilations that are already running continue to occupy their workers until
+they finish. Synchronous compilation, used with `external_launcher`, is
+outside this deadline.
 
 Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 

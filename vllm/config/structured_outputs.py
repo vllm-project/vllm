@@ -44,9 +44,9 @@ class StructuredOutputsConfig:
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
     compilation_timeout: int = Field(default=10, ge=0)
-    """Maximum wall-clock seconds a request can wait for engine-side
-    asynchronous grammar compilation, including time queued for compilation.
-    Set to 0 to disable the timeout."""
+    """Request deadline in seconds for asynchronous engine-side grammar
+    compilation, including queue time. Checked on scheduling steps.
+    Running compilations continue after expiry. Set to 0 to disable."""
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.

@@ -774,30 +774,11 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
-        max_logit_bias = envs.VLLM_MAX_LOGIT_BIAS_SIZE
-        if (
-            max_logit_bias > 0
-            and self.logit_bias is not None
-            and len(self.logit_bias) > max_logit_bias
-        ):
-            raise VLLMValidationError(
-                f"logit_bias has {len(self.logit_bias)} entries, "
-                f"which exceeds the maximum of {max_logit_bias}.",
-                parameter="logit_bias",
-                value=len(self.logit_bias),
-            )
         assert isinstance(self.bad_words, list)
         if any(not bad_word for bad_word in self.bad_words):
             raise VLLMValidationError(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
-            )
-        max_bad_word_len = envs.VLLM_MAX_BAD_WORD_LENGTH
-        if any(len(bad_word) > max_bad_word_len for bad_word in self.bad_words):
-            raise VLLMValidationError(
-                f"bad_words contains an entry that exceeds the maximum of "
-                f"{max_bad_word_len} characters.",
-                parameter="bad_words",
             )
 
     def _verify_extra_args(self) -> None:
@@ -1147,13 +1128,6 @@ class SamplingParams(
             return
 
         vocab_size = model_config.get_vocab_size()
-        if len(self.logit_bias) > vocab_size:
-            raise VLLMValidationError(
-                f"logit_bias has {len(self.logit_bias)} entries, "
-                f"which exceeds the vocabulary size of {vocab_size}.",
-                parameter="logit_bias",
-                value=len(self.logit_bias),
-            )
         invalid_token_ids = [
             token_id
             for token_id in self.logit_bias
@@ -1242,15 +1216,6 @@ class SamplingParams(
         # like _validate_stop_token_ids and _validate_logit_bias, which
         # index the same tensor.
         vocab_size = model_config.get_vocab_size()
-        max_size = envs.VLLM_MAX_ALLOWED_TOKEN_IDS
-        effective_max = min(max_size, vocab_size) if max_size > 0 else vocab_size
-        if len(allowed_token_ids) > effective_max:
-            raise VLLMValidationError(
-                f"allowed_token_ids has {len(allowed_token_ids)} entries, "
-                f"which exceeds the maximum of {effective_max}.",
-                parameter="allowed_token_ids",
-                value=len(allowed_token_ids),
-            )
         invalid_token_ids = [
             token_id
             for token_id in allowed_token_ids

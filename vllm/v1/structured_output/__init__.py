@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
+import time
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import chain
@@ -184,7 +185,7 @@ class StructuredOutputManager:
 
         grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar
         if self._use_async_grammar_compilation:
-            request.structured_output_request.start_compilation()
+            request.structured_output_request.compilation_submit_time = time.monotonic()
             grammar = self.executor.submit(self._create_grammar, request, backend)
         else:
             try:
