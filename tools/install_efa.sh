@@ -3,8 +3,11 @@
 # release image and check that NIXL and NCCL resolve to it. Run by the
 # vllm-openai-base stage of docker/Dockerfile when INSTALL_KV_CONNECTORS=true.
 #
-# Env: EFA_INSTALLER_VERSION, EFA_INSTALLER_SHA256
+# Usage: install_efa.sh <installer_version> <installer_sha256>
 set -eux
+
+EFA_INSTALLER_VERSION=$1
+EFA_INSTALLER_SHA256=$2
 
 EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 curl -fsSL --retry 3 --retry-all-errors \

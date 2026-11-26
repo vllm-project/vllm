@@ -699,6 +699,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing dev requirements plus torch nightly..." \
         && python3 tools/use_existing_torch.py --prefix \
+        && test -s torch_lib_versions.txt \
         && cat torch_lib_versions.txt >> requirements/test/cuda.in \
         && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
@@ -990,7 +991,7 @@ COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" dist/*.whl
+    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" dist/*.whl
 
 # Expose the Rust frontend bundled in the wheel on the container's PATH.
 RUN ln -s "$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/vllm/vllm-rs" /usr/local/bin/vllm-rs \
@@ -1010,7 +1011,7 @@ COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-w
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh 0 ep_kernels/dist/*.whl
+    /tmp/uv_install_cuda.sh 0 "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" ep_kernels/dist/*.whl
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -1065,6 +1066,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
             echo "Installing dev requirements plus torch nightly..." \
             && python3 tools/use_existing_torch.py --prefix \
+            && test -s torch_lib_versions.txt \
             && cat torch_lib_versions.txt >> requirements/test/cuda.in \
             && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
@@ -1154,7 +1156,7 @@ COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" dist/*.whl
+    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" dist/*.whl
 
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
@@ -1163,7 +1165,7 @@ COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-w
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh 0 ep_kernels/dist/*.whl
+    /tmp/uv_install_cuda.sh 0 "${CUDA_VERSION}" "${PYTORCH_CUDA_INDEX_BASE_URL}" ep_kernels/dist/*.whl
 
 # See the matching comment in the vllm-base stage.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
@@ -1231,7 +1233,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install the AWS EFA userspace with the KV connectors: NIXL's LIBFABRIC plugin
 # and Mooncake's EFA transport load libfabric at runtime.
 RUN --mount=type=bind,source=tools/install_efa.sh,target=/tmp/install_efa.sh,ro \
-    if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then /tmp/install_efa.sh; fi
+    if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then /tmp/install_efa.sh "${EFA_INSTALLER_VERSION}" "${EFA_INSTALLER_SHA256}"; fi
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
 # without that module loaded (e.g. GB200) must pass WITH_NVIDIA_PEERMEM=0 at run
 # time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
