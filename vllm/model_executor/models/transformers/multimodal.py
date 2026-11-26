@@ -22,7 +22,6 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
-from weakref import WeakKeyDictionary
 
 import numpy as np
 import torch
@@ -68,7 +67,7 @@ from .base import Base
 from .utils import infer_dynamic_arg_dims
 
 if TYPE_CHECKING:
-    from transformers import BatchFeature, PreTrainedModel, ProcessorMixin
+    from transformers import BatchFeature, PreTrainedModel
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import MultiModalDummyOptions
@@ -89,8 +88,6 @@ _MAX_FRAMES_PER_VIDEO = 16
 _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
 _MIN_DUMMY_SIDE = 224
-# Keyed by the HF processor, which vLLM caches per model and tokenizer
-_PROMPT_PREFIX_IDS: "WeakKeyDictionary[ProcessorMixin, list[int]]" = WeakKeyDictionary()
 
 
 def _get_embed_token_id(
@@ -183,25 +180,21 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def _fuses_audio_into_video(self) -> bool:
         return bool(get_load_audio_from_video(self.ctx.get_merged_mm_kwargs({})))
 
-    def _get_prompt_prefix_ids(self) -> list[int]:
+    @cached_property
+    def _prompt_prefix_ids(self) -> list[int]:
         """Tokens the HF processor puts before a prompt on top of what its tokenizer
         adds, such as the BOS that Emu3 prepends itself.
 
         Processors that reject a prompt without multi-modal data (e.g. PaliGemma) or
         add anything other than a prefix get none."""
-        hf_processor = self.get_hf_processor()
-        if (prefix := _PROMPT_PREFIX_IDS.get(hf_processor)) is not None:
-            return prefix
         try:
-            outputs = self.ctx.call_hf_processor(hf_processor, dict(text=""))
+            outputs = self.ctx.call_hf_processor(self.get_hf_processor(), dict(text=""))
             ids = outputs["input_ids"][0].tolist()
         except (ValueError, KeyError, IndexError, AttributeError):
-            ids = []
+            return []
         tail = cached_encode(self.get_tokenizer(), "")
         split = len(ids) - len(tail)
-        prefix = ids[:split] if split > 0 and ids[split:] == tail else []
-        _PROMPT_PREFIX_IDS[hf_processor] = prefix
-        return prefix
+        return ids[:split] if split > 0 and ids[split:] == tail else []
 
     def _get_placeholder_ids(self, modality: str) -> list[int]:
         token = getattr(self.get_hf_processor(), f"{modality}_token")
@@ -540,13 +533,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
     and with it the multi-modal processor cache.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Bound per instance so that processors without a prefix pay nothing per prompt
-        if prefix := self.info._get_prompt_prefix_ids():
-            self._prompt_prefix_ids = prefix
-            self._postprocess_prompt = self._prepend_prompt_prefix  # type: ignore[method-assign]
-
     def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
@@ -764,8 +750,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             "cannot be attributed to a video."
         )
 
-    def _prepend_prompt_prefix(self, prompt: list[int]) -> list[int]:
-        prefix = self._prompt_prefix_ids
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
+        prefix = self.info._prompt_prefix_ids
         if prompt[: len(prefix)] == prefix:
             return prompt
         return prefix + prompt
