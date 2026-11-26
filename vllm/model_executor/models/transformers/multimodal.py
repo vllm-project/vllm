@@ -752,7 +752,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         prefix = self.info._prompt_prefix_ids
-        if prompt[: len(prefix)] == prefix:
+        if not prefix or prompt[: len(prefix)] == prefix:
             return prompt
         return prefix + prompt
 
