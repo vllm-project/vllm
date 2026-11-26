@@ -116,7 +116,7 @@ def _layout(worker):
     )
 
 
-def _check_local_execution(worker, *, sequence_parallel=True, min_tokens=64):
+def _check_local_execution(worker, *, sequence_parallel=True, min_tokens=1024):
     from vllm.forward_context import get_forward_context
     from vllm.model_executor.layers.attention.sparse_mla_attention import (
         SparseMLACommonMetadata,
@@ -158,16 +158,43 @@ def _observed_rows(worker):
 
 
 @pytest.mark.parametrize(
-    ("quantization", "use_lora", "spec_method", "enforce_eager"),
+    (
+        "quantization",
+        "use_lora",
+        "spec_method",
+        "cudagraph_mode",
+        "use_shardq",
+        "kv_cache_dtype",
+        "residual_sp_min_tokens",
+    ),
     [
-        (None, False, None, True),
-        ("fp8", False, None, True),
-        (None, True, None, True),
-        (None, False, "ngram", True),
-        (None, False, "mtp", True),
-        (None, False, "mtp", False),
+        (None, False, None, None, True, "fp8_ds_mla", 1024),
+        ("fp8", False, None, None, True, "fp8_ds_mla", 1024),
+        (None, True, None, None, True, "fp8_ds_mla", 1024),
+        (None, False, "ngram", None, True, "fp8_ds_mla", 1024),
+        (None, False, "mtp", None, True, "fp8_ds_mla", 1024),
+        (None, False, "mtp", "FULL_AND_PIECEWISE", True, "fp8_ds_mla", 1024),
+        (None, False, None, None, False, "auto", 1024),
+        ("fp8", False, None, None, False, "fp8_ds_mla", 1024),
+        (None, False, "mtp", "FULL_AND_PIECEWISE", False, "fp8_ds_mla", 1024),
+        (None, False, "mtp", "FULL", False, "fp8_ds_mla", 1024),
+        (None, False, None, None, True, "fp8_ds_mla", 512),
+        (None, False, None, None, True, "fp8_ds_mla", 0),
     ],
-    ids=["bf16", "fp8", "lora", "ngram", "mtp", "mtp-cudagraph"],
+    ids=[
+        "bf16",
+        "fp8",
+        "lora",
+        "ngram",
+        "mtp",
+        "mtp-cudagraph",
+        "bf16-no-shardq",
+        "fp8-no-shardq",
+        "mtp-cudagraph-no-shardq",
+        "mtp-cudagraph-full-fallback",
+        "bf16-custom-sp-threshold",
+        "bf16-no-sp",
+    ],
 )
 def test_shardq_keeps_tp_weights_and_projects_local_rows(
     vllm_runner,
@@ -178,11 +205,16 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
     quantization,
     use_lora,
     spec_method,
-    enforce_eager,
+    cudagraph_mode,
+    use_shardq,
+    kv_cache_dtype,
+    residual_sp_min_tokens,
 ):
-    """Preserve TP generation with LoRA enabled or accepted speculative tokens."""
+    """Preserve TP generation across the SP threshold, with or without ShardQ."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_RESIDUAL_SP_MIN_TOKENS", str(residual_sp_min_tokens))
     caplog_vllm.set_level(logging.INFO, logger="vllm.v1.metrics.loggers")
+    enforce_eager = cudagraph_mode is None
     speculative_config = None
     if spec_method:
         speculative_config = {"method": spec_method, "num_speculative_tokens": 3}
@@ -190,17 +222,19 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
             speculative_config["index_share_for_mtp_iteration"] = True
         else:
             speculative_config.update(prompt_lookup_min=1, prompt_lookup_max=3)
-    min_tokens = 4 if spec_method else 64
+    shardq_min_tokens = 4 if spec_method else 64
     max_tokens = 16 if spec_method else 4
     prompts = [
-        {"prompt_token_ids": [2 + i % 997 for i in range(n)]} for n in (769, 17, 3)
+        {"prompt_token_ids": [2 + i % 997 for i in range(n)]} for n in (1537, 17, 3)
     ]
     sampling = SamplingParams(
         temperature=0, max_tokens=max_tokens, ignore_eos=True, logprobs=16
     )
     outputs: list[list[CompletionOutput]] = []
     layouts = []
-    for use_shardq in (False, True):
+    sequence_parallel = not use_lora and residual_sp_min_tokens > 0
+    threshold = residual_sp_min_tokens or 1024
+    for max_num_batched_tokens in (threshold - 1, threshold + 1):
         with vllm_runner(
             shardq_mtp_checkpoint if spec_method == "mtp" else shardq_checkpoint,
             tensor_parallel_size=2,
@@ -217,23 +251,29 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
             disable_log_stats=False,
             cudagraph_metrics=not enforce_eager,
             compilation_config={
-                "cudagraph_mode": "FULL_AND_PIECEWISE",
-                "prefill_cudagraph_capture_token_sizes": [64, 128, 255],
+                "cudagraph_mode": cudagraph_mode,
+                "prefill_cudagraph_capture_token_sizes": [
+                    64,
+                    128,
+                    max_num_batched_tokens,
+                ],
                 "decode_cudagraph_capture_request_sizes": [1, 2, 4],
             }
             if not enforce_eager
             else None,
-            max_model_len=1024,
-            max_num_batched_tokens=255,
+            max_model_len=2048,
+            max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=4,
             enable_chunked_prefill=True,
             enable_prefix_caching=True,
             block_size=64,
-            kv_cache_dtype="fp8_ds_mla",
+            kv_cache_dtype=kv_cache_dtype,
             attention_config={
                 "backend": "FLASHMLA_SPARSE",
                 "sparse_mla_shard_q": use_shardq,
-                "sparse_mla_shard_q_min_tokens": min_tokens,
+                "sparse_mla_shard_q_min_tokens": shardq_min_tokens
+                if use_shardq
+                else 2048,
             },
             gpu_memory_utilization=0.1,
         ) as runner:
@@ -241,15 +281,27 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
             layouts.append(runner.llm.collective_rpc(_layout))
             assert all(layout[:6] == (2, 8, 2, 2, False, 2) for layout in layouts[-1])
             enabled = runner.llm.collective_rpc(
-                lambda worker: worker.model_runner.model.model.shardq_sequence_parallel
+                lambda worker: (
+                    worker.model_runner.model.model.use_residual_sequence_parallel,
+                    worker.model_runner.model.model.layers[0].self_attn.use_shardq,
+                )
             )
-            assert enabled == [use_shardq and not use_lora] * 2
-            if use_shardq and enforce_eager:
+            assert enabled == [(sequence_parallel, use_shardq)] * 2
+            if cudagraph_mode == "FULL":
+                assert (
+                    runner.llm.collective_rpc(
+                        lambda worker: (
+                            worker.model_runner.compilation_config.cudagraph_mode.name
+                        )
+                    )
+                    == ["FULL_DECODE_ONLY"] * 2
+                )
+            if enforce_eager:
                 runner.llm.collective_rpc(
                     partial(
                         _check_local_execution,
-                        sequence_parallel=not use_lora,
-                        min_tokens=min_tokens,
+                        sequence_parallel=sequence_parallel,
+                        min_tokens=residual_sp_min_tokens,
                     )
                 )
             runs: list[CompletionOutput] = []
@@ -265,27 +317,28 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
                 assert metrics["vllm:spec_decode_num_accepted_tokens"].value > 0
             if not enforce_eager:
                 runner.llm.llm_engine.do_log_stats()
-                for mode in ("FULL", "PIECEWISE"):
+                prefill_mode = "NONE" if cudagraph_mode == "FULL" else "PIECEWISE"
+                for mode in ("FULL", prefill_mode):
                     assert re.search(rf"\|\s+{mode}\s+\|", caplog_vllm.text)
-            if use_shardq and enforce_eager:
+            if enforce_eager:
                 for rows in runner.llm.collective_rpc(_observed_rows):
                     if spec_method:
                         # Four rows are one target token plus three draft tokens.
-                        assert ("A", 4, 2) in rows
+                        assert ("A", 4, 4) in rows
                     else:
                         assert ("A", 1, 1) in rows
-                    if use_lora:
-                        assert any(p == "A" and full >= 64 for p, full, _ in rows)
-                    else:
+                    if max_num_batched_tokens >= threshold and sequence_parallel:
                         assert any(
                             p == "A" and full > local > 1 for p, full, local in rows
                         )
+                    else:
+                        assert all(full == local for _, full, local in rows)
             outputs.append(runs)
     assert layouts[0] == layouts[1]
     assert all(len(run.token_ids) == max_tokens for runs in outputs for run in runs)
     check_logprobs_close(
         outputs_0_lst=[(list(r.token_ids), "", r.logprobs) for r in outputs[0]],
         outputs_1_lst=[(list(r.token_ids), "", r.logprobs) for r in outputs[1]],
-        name_0="TP",
-        name_1="TP with extended ShardQ",
+        name_0="Below SP threshold",
+        name_1="Above SP threshold",
     )
