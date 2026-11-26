@@ -287,6 +287,12 @@ vllm run-batch \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
+When uploading results to an HTTP(S) URL, use `--keep-output-on-upload-error`
+to keep the completed JSONL file if all upload attempts fail. The error log
+includes the file path so you can upload it again without rerunning inference.
+The file is staged in `--output-tmp-dir` or the system temporary directory.
+Successful uploads and interrupted batch processing clean up the staged file.
+
 For batch embeddings, create an `embeddings.jsonl` file with one request per line:
 
 ```json

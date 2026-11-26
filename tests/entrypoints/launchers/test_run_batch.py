@@ -1699,8 +1699,9 @@ async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_tmp_dir", [False, True])
+@pytest.mark.parametrize("keep_on_upload_error", [False, True])
 async def test_batch_output_writer_uploads_url_output_once(
-    tmp_path, monkeypatch, use_tmp_dir
+    tmp_path, monkeypatch, use_tmp_dir, keep_on_upload_error
 ):
     """A URL destination is staged and uploaded after the batch."""
     uploaded = {}
@@ -1715,23 +1716,63 @@ async def test_batch_output_writer_uploads_url_output_once(
             uploaded["content"] = data_or_file
 
     monkeypatch.setattr(run_batch_module, "upload_data", fake_upload_data)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
     tmp_dir = str(tmp_path) if use_tmp_dir else None
+    staged_on_disk = use_tmp_dir or keep_on_upload_error
     async with batch_output_writer(
-        "https://example.com/output.jsonl", tmp_dir
+        "https://example.com/output.jsonl",
+        tmp_dir,
+        keep_on_upload_error=keep_on_upload_error,
     ) as output_file:
         print("first", file=output_file)
         print("second", file=output_file)
         assert not uploaded, "upload must wait until the batch finishes"
-        assert bool(list(tmp_path.iterdir())) == use_tmp_dir
+        assert bool(list(tmp_path.iterdir())) == staged_on_disk
 
     # The in-memory path uploads stripped bytes, as it always has.
     assert uploaded == {
         "url": "https://example.com/output.jsonl",
-        "from_file": use_tmp_dir,
-        "content": "first\nsecond\n" if use_tmp_dir else b"first\nsecond",
+        "from_file": staged_on_disk,
+        "content": "first\nsecond\n" if staged_on_disk else b"first\nsecond",
     }
     assert not list(tmp_path.iterdir()), "staged copy must be removed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep_on_upload_error", [False, True])
+async def test_batch_output_writer_upload_failure(
+    batch_http_server, tmp_path, caplog_vllm, keep_on_upload_error
+):
+    # The local HTTP fixture rejects PUT; exercise all retries without waiting.
+    url = _batch_http_url(batch_http_server, "/output.jsonl")
+    contents = '{"custom_id":"one"}\n{"custom_id":"two"}\n'
+    with (
+        patch.object(asyncio, "sleep", new_callable=AsyncMock),
+        pytest.raises(Exception, match="Failed to upload data \\(attempt 5\\)"),
+    ):
+        async with batch_output_writer(
+            url, str(tmp_path), keep_on_upload_error=keep_on_upload_error
+        ) as output_file:
+            output_file.write(contents)
+
+    if keep_on_upload_error:
+        [retained] = tmp_path.iterdir()
+        assert retained.read_bytes() == contents.encode()
+        assert str(retained) in caplog_vllm.text
+    else:
+        assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_batch_output_writer_discards_incomplete_output(tmp_path):
+    with pytest.raises(RuntimeError, match="inference failed"):
+        async with batch_output_writer(
+            "https://example.com/out.jsonl", str(tmp_path), keep_on_upload_error=True
+        ) as output_file:
+            output_file.write("partial")
+            raise RuntimeError("inference failed")
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.asyncio
