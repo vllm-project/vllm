@@ -1004,7 +1004,6 @@ class BaseRenderer(ABC, Generic[_T]):
 
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
-            mm_inputs["skip_mm_cache"] = skip_mm_cache
 
         self.update_mm_cache_stats()
 
