@@ -27,8 +27,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kNvfp4Dynamic,
 )
@@ -136,7 +140,7 @@ def fused_allreduce_gemma_rms_norm_quant(
             dtype=torch.int32,
             device=hidden_states.device,
         ).view(current_platform.fp8_dtype())
-    elif key == kFp8DynamicTokenSym:
+    elif key in (kFp8DynamicTokenSym, kFp8Dynamic128Sym):
         # Quantized after the AR+norm below.
         pattern = patterns.kARResidualRMSNorm
         quant_out = scale_out = None
@@ -169,6 +173,11 @@ def fused_allreduce_gemma_rms_norm_quant(
     if key == kFp8DynamicTokenSym:
         quant_out, scale_out = ops.scaled_fp8_quant(
             norm_out, use_per_token_if_dynamic=True
+        )
+    elif key == kFp8Dynamic128Sym:
+        # Column-major scales, the layout the CUTLASS block-FP8 kernel reads.
+        quant_out, scale_out = per_token_group_quant_fp8(
+            norm_out, group_size=128, column_major_scales=True, use_ue8m0=False
         )
     qa = QuantizedActivation(
         data=quant_out,

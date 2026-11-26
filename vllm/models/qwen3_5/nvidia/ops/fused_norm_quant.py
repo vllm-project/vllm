@@ -3,10 +3,11 @@
 """Gemma (1 + w) add-RMSNorm fused with the consumer linear's input quant.
 
 Replaces `gemma_fused_add_rmsnorm` followed by a standalone static FP8 or
-dynamic per-token FP8 (`scaled_fp8_quant`) or NVFP4 (`scaled_fp4_quant`)
-kernel. The quantized values are computed from the bf16-rounded normed
-activation with the same scale arithmetic as those kernels, so codes match
-the unfused chain.
+dynamic per-token FP8 (`scaled_fp8_quant`), dynamic per-token-group-128 FP8
+(`per_token_group_quant_fp8`, block-FP8 checkpoints) or NVFP4
+(`scaled_fp4_quant`) kernel. The quantized values are computed from the
+bf16-rounded normed activation with the same scale arithmetic as those
+kernels, so codes match the unfused chain.
 
 `gemma_add_rms_norm` is the same kernel without the quant epilogue, used
 as the pre-SM80 fallback where flashinfer's norm module cannot JIT-build.
@@ -16,6 +17,7 @@ import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
@@ -28,11 +30,15 @@ FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = tl.constexpr(448.0)
 # min_scaling_factor in csrc/quantization/utils.cuh: 1 / (448 * 512).
 FP8_MIN_SCALE = tl.constexpr(1.0 / (448.0 * 512.0))
+# per_token_group_quant_fp8's default eps (floor of the group absmax).
+FP8_GROUP_EPS = tl.constexpr(1e-10)
+FP8_GROUP_SIZE = 128
 
 # Consumer input quant key -> the kernel's QUANT epilogue.
 _QUANT = {
     kFp8StaticTensorSym: "fp8",
     kFp8DynamicTokenSym: "fp8_token",
+    kFp8Dynamic128Sym: "fp8_group128",
     kNvfp4Dynamic: "nvfp4",
 }
 
@@ -82,9 +88,11 @@ def _gemma_add_rms_norm_quant_kernel(
     sf_ptr,
     y_ptr,
     eps,
+    num_rows,
     H: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
-    QUANT: tl.constexpr,  # "none" (plain norm) | "fp8" | "fp8_token" | "nvfp4"
+    # "none" (plain norm) | "fp8" | "fp8_token" | "fp8_group128" | "nvfp4"
+    QUANT: tl.constexpr,
     WRITE_Y: tl.constexpr,
     launch_pdl: tl.constexpr,
     TRIGGER_EARLY: tl.constexpr,
@@ -164,6 +172,21 @@ def _gemma_add_rms_norm_quant_kernel(
         q = tl.clamp(tl.math.div_rn(y32, token_scale), -FP8_MAX, FP8_MAX)
         tl.store(q_ptr + row * H + cols, q, mask=mask)
         tl.store(sf_ptr + row, token_scale)
+    elif QUANT == "fp8_group128":
+        # per_token_group_quant_fp8 numerics (group 128): scale =
+        # max(amax, eps) / 448, then x * (1 / scale), both IEEE. A group is
+        # 8 consecutive 16-wide blocks of the [G, 8, 2] row view. Scales are
+        # written column-major, (num_rows, H // 128) with strides (1, num_rows).
+        NG: tl.constexpr = G // 8
+        y32 = tl.reshape(y.to(tl.float32), (NG, 128))
+        amax = tl.maximum(tl.max(tl.abs(y32), axis=1), FP8_GROUP_EPS)
+        group_scale = tl.math.div_rn(amax, FP8_MAX)
+        inv = tl.math.div_rn(1.0, group_scale)
+        q = tl.clamp(y32 * inv[:, None], -FP8_MAX, FP8_MAX)
+        gcols = tl.reshape(cols, (NG, 128))
+        tl.store(q_ptr + row * H + gcols, q, mask=gcols < H)
+        grp = tl.arange(0, NG)
+        tl.store(sf_ptr + grp * num_rows + row, group_scale, mask=grp < H // 128)
 
     if launch_pdl and not TRIGGER_EARLY:
         tl.extra.cuda.gdc_launch_dependents()
@@ -188,15 +211,17 @@ def gemma_add_rms_norm_quant(
         scale: FP8: the static per-tensor input scale, or None for dynamic
             per-token FP8. NVFP4: the global scale (`input_global_scale_inv`).
         key: the consumer's input quant key: static per-tensor FP8,
-            dynamic per-token FP8, or NVFP4 with swizzled 128x4 block scales.
+            dynamic per-token FP8, dynamic per-token-group-128 FP8 (needs
+            hidden % 128 == 0), or NVFP4 with swizzled 128x4 block scales.
         write_y: also return the bf16 normed activation.
 
     Returns:
         `(q, block_scale, y)`: quantized data (fp8, or packed fp4 uint8),
         NVFP4 block scales (fp8, `(round_up(M, 128), round_up(H // 16, 4))`;
         rows >= M are left unwritten), `scale` for static FP8 or the
-        `(M, 1)` fp32 token scales for dynamic FP8, and the normed
-        activation (or None).
+        `(M, 1)` fp32 token scales for dynamic FP8, the `(M, H // 128)` fp32
+        group scales (column-major, strides `(1, M)`) for group-128 FP8, and
+        the normed activation (or None).
 
     """
     assert x.dim() == 2 and x.is_contiguous()
@@ -204,13 +229,20 @@ def gemma_add_rms_norm_quant(
     assert residual is None or (residual.shape == x.shape and residual.is_contiguous())
     assert weight.shape == (x.shape[1],) and weight.is_contiguous()
     quant = _QUANT[key]
-    assert (scale is None) == (quant == "fp8_token")
+    assert (scale is None) == (quant in ("fp8_token", "fp8_group128"))
     if scale is not None:
         assert scale.numel() == 1 and scale.dtype == torch.float32
     M, H = x.shape
     if quant == "fp8_token":
         q = torch.empty((M, H), dtype=FP8_DTYPE, device=x.device)
         block_scale = torch.empty((M, 1), dtype=torch.float32, device=x.device)
+    elif quant == "fp8_group128":
+        assert H % FP8_GROUP_SIZE == 0
+        q = torch.empty((M, H), dtype=FP8_DTYPE, device=x.device)
+        # Column-major, the layout the CUTLASS block-FP8 kernel reads.
+        block_scale = torch.empty(
+            (H // FP8_GROUP_SIZE, M), dtype=torch.float32, device=x.device
+        ).t()
     elif quant == "nvfp4":
         # Whole 4-column scale tiles: padded scale columns are not written.
         assert H % 64 == 0
@@ -231,7 +263,7 @@ def gemma_add_rms_norm_quant(
     # warps at every swept M except NVFP4 M=129 (4%). Per-token FP8 (swept
     # on SM120) needs 8 warps above that for its row amax, not 4.
     max_m_16_warps = 128 if quant == "nvfp4" else 384
-    large_m_warps = 8 if quant == "fp8_token" else 4
+    large_m_warps = 8 if quant in ("fp8_token", "fp8_group128") else 4
     _gemma_add_rms_norm_quant_kernel[(M,)](
         x,
         residual if residual is not None else x,
@@ -241,6 +273,7 @@ def gemma_add_rms_norm_quant(
         block_scale,
         y if y is not None else x,
         eps,
+        M,
         H=H,
         HAS_RESIDUAL=residual is not None,
         QUANT=quant,
@@ -285,6 +318,7 @@ def gemma_add_rms_norm(
         x,
         y,
         eps,
+        M,
         H=H,
         HAS_RESIDUAL=residual is not None,
         QUANT="none",
