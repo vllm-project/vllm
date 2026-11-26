@@ -556,9 +556,10 @@ class HYV4MLAAttention(nn.Module):
         1. If the backend the selector would pick already advertises
            `supports_sink`, keep it — this also honours an explicit
            `--attention-backend` choice.
-        2. Otherwise fall back to the sink-capable `FLASHMLA_SPARSE` subclass
-           in `.flashmla_sparse`, whose kernels accept `attn_sink`, provided
-           it validates against the current runtime configuration.
+        2. On SM120, use the sink-capable HY4 FlashInfer sparse backend.
+           Otherwise fall back to the sink-capable `FLASHMLA_SPARSE` subclass
+           in `.flashmla_sparse`, provided it validates against the current
+           runtime configuration.
         3. Otherwise give up on the bias rather than failing the load.
 
         Args:
@@ -595,10 +596,6 @@ class HYV4MLAAttention(nn.Module):
         if selected_cls.supports_sink():
             return selected_cls
 
-        from .flashmla_sparse import HYV4FlashMLASparseBackend
-
-        # Mirror how the selector derives the configuration-dependent inputs so
-        # this check accepts exactly what the backend would accept at runtime.
         capability = current_platform.get_device_capability()
         if capability is None:
             logger.warning_once(
@@ -607,6 +604,18 @@ class HYV4MLAAttention(nn.Module):
                 "sink bias is disabled."
             )
             return None
+
+        if capability.major == 12:
+            from vllm.models.hy_v4_flash.nvidia.flashinfer_sparse import (
+                HYV4FlashInferSparseBackend,
+            )
+
+            return HYV4FlashInferSparseBackend
+
+        from .flashmla_sparse import HYV4FlashMLASparseBackend
+
+        # Mirror how the selector derives the configuration-dependent inputs so
+        # this check accepts exactly what the backend would accept at runtime.
         cache_config = get_current_vllm_config().cache_config
         block_size = (
             cache_config.block_size
