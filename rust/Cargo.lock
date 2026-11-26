@@ -1304,9 +1304,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84024abb104481ef6b9c55df497f941f92f49515c428afd78b990efc906f1aa6"
+checksum = "d915324fcf00aa9cade45192ffb7eb49f44a66eb9e7059914d87a2a34b58d88d"
 dependencies = [
  "aho-corasick",
  "daachorse",
@@ -5680,7 +5680,6 @@ dependencies = [
  "half",
  "image",
  "itertools 0.14.0",
- "json5",
  "llm-multimodal",
  "minijinja",
  "minijinja-contrib",
@@ -5727,10 +5726,12 @@ dependencies = [
  "itertools 0.14.0",
  "mimalloc",
  "native-tls",
+ "rlimit",
  "serde",
  "serde_json",
  "serde_path_to_error",
  "serde_with",
+ "tempfile",
  "thiserror-ext",
  "tokio",
  "tokio-util",
@@ -5835,8 +5836,11 @@ dependencies = [
  "expect-test",
  "itertools 0.14.0",
  "prometheus-client",
+ "rmp-serde",
+ "rmpv",
  "serde",
  "serde_json",
+ "serde_with",
 ]
 
 [[package]]
@@ -5902,6 +5906,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-openai",
+ "async-trait",
  "asynk-strim-attr",
  "auto_enums",
  "axum",
@@ -5948,7 +5953,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "validator",
  "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
@@ -5986,7 +5990,6 @@ dependencies = [
  "futures",
  "hf-hub",
  "itertools 0.14.0",
- "json5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6012,6 +6015,7 @@ dependencies = [
  "criterion",
  "fastokens",
  "hf-hub",
+ "json5",
  "reqwest 0.12.28",
  "riptoken",
  "rustc-hash 1.1.0",
