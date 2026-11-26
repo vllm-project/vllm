@@ -125,6 +125,18 @@ The RDMA mover has one I/O thread, so a slow source can delay other reads.
 Quarantine is a safety mechanism, not an admission guarantee: already submitted
 reads can exceed its threshold before feedback disables new reads.
 
+## Cache capacity
+
+Peer L1 can only return rows that some rank still caches, so each rank's free
+prefix-cache capacity bounds the hit rate. On hybrid models whose
+sliding-window and compressor-state groups share the block pool with
+full-attention rows, such as DeepSeek V4, a scheduled chunk holds state rows
+for every token it covers, so large per-rank chunks compete with cached
+prefixes. Lowering `--max-num-batched-tokens` reduces that pressure and the
+profiled activation peak, which also enlarges the KV pool. Raising
+`--gpu-memory-utilization` adds capacity too; keep headroom for allocations
+outside the memory profiler.
+
 ## Metrics
 
 Metrics use the `vllm:peer_l1_` prefix and vLLM's per-engine labels:
