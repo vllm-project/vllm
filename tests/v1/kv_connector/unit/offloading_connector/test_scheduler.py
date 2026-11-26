@@ -2576,6 +2576,25 @@ def test_cascade_from_the_last_store_keeps_engine_stepping():
         scheduler.shutdown()
 
 
+def test_cache_reset_that_drains_the_cascades_goes_idle():
+    """A reset that drains the cascades in flight leaves no pending work, so
+    the engine takes no further step for them."""
+    scheduler, manager = _make_tiering_engine_scheduler([{"type": "example"}])
+    try:
+        stored = _store_in_flight(scheduler)
+        output = scheduler.schedule()
+        _report_jobs(scheduler, output, stored)
+        assert manager.has_pending_work()
+        assert scheduler.has_requests()
+
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+
+        assert not manager.has_pending_work()
+        assert not scheduler.has_requests()
+    finally:
+        scheduler.shutdown()
+
+
 def test_cache_reset_twice_before_a_step_still_flushes():
     """A second reset before the engine steps must not assert: RL loops call
     reset_prefix_cache(reset_connector=True) every iteration, and EngineCore
@@ -3106,6 +3125,32 @@ def test_step_without_transfers_asks_the_manager_once(request_runner):
     assert [type(event) for event in events] == [BlockRemoved]
     runner.manager.complete_transfers.return_value = StepResult()
     assert list(scheduler.take_events()) == []
+    assert runner.manager.complete_transfers.call_count == 2
+
+
+def test_step_after_an_event_drain_asks_the_manager_again(request_runner):
+    """A take_events() between steps, as an idle event drain makes, does not
+    leave the next step's get_stats() with a result from before its schedule().
+    """
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    scheduler = runner.connector_scheduler
+    runner.manager.complete_transfers.side_effect = None
+    runner.manager.complete_transfers.return_value = StepResult()
+    assert list(scheduler.take_events()) == []
+
+    stats = OffloadingConnectorStats()
+    stats.increase_counter(_ConnectorMetricName.ALLOCATION_FAILURE)
+    runner.manager.complete_transfers.return_value = StepResult(stats=stats)
+    runner.scheduler.schedule()
+    reported = scheduler.get_stats()
+    assert list(scheduler.take_events()) == []
+
+    assert reported is not None
+    assert reported.reduce().get(_ConnectorMetricName.ALLOCATION_FAILURE) == 1
     assert runner.manager.complete_transfers.call_count == 2
 
 

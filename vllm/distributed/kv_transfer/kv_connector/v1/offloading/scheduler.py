@@ -187,8 +187,9 @@ class _ManagerResults:
     pending: bool = True
     events: list[OffloadingEvent] = field(default_factory=list)
     stats: OffloadingConnectorStats | None = None
-    # Whether take_events() / get_stats() has drained every StepResult so far.
-    # A reader that has asks the manager for a new one first.
+    # Whether take_events() / get_stats() has drained every StepResult so far,
+    # or the step that followed has ended, so what is left predates it. A
+    # reader that sees True asks the manager for a new one first.
     events_drained: bool = True
     stats_drained: bool = True
 
@@ -1489,6 +1490,10 @@ class OffloadingConnectorScheduler:
         self._manager_results.pending = self.manager.on_schedule_end(
             schedule_end_context
         )
+        # A result reported before this schedule() predates it, so the step's
+        # first reader asks again unless update_connector_output() reports.
+        self._manager_results.events_drained = True
+        self._manager_results.stats_drained = True
         return meta
 
     def has_pending_push_work(self) -> bool:
@@ -1816,6 +1821,10 @@ class OffloadingConnectorScheduler:
         # The load flush IDs collected above must be delivered to workers.
         if self._chunks_being_loaded is not None:
             self._chunks_being_loaded.clear()
+
+        # The reset can end the manager's pending work, e.g. by draining the
+        # cascades in flight, so refresh the flag has_pending_push_work() reads.
+        self._manager_results.add(self.manager.complete_transfers(()))
 
     def shutdown(self) -> None:
         self.manager.shutdown()
