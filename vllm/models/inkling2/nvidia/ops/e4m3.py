@@ -93,5 +93,6 @@ def from_e4m3(x):
 @triton.jit
 def cast_store(x, dtype: tl.constexpr):
     """`x` cast to pointer element type `dtype`, where uint8 stands for e4m3
-    below SM90."""
-    return _e4m3_bits(x.to(tl.float32)) if dtype == tl.uint8 else x.to(dtype)
+    below SM90 (`e4m3_arg`). On SM90+ uint8 stays an integer type."""
+    if_uint8 = _e4m3_bits(x.to(tl.float32)) if dtype == tl.uint8 else x.to(dtype)
+    return x.to(dtype) if _NATIVE_E4M3 else if_uint8
