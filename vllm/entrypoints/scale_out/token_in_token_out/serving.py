@@ -332,7 +332,81 @@ class ServingTokens(GenerateBaseServing):
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
 
-        engine_input = await self.build_engine_input(request)
+        engine_input: EngineInput
+        features = request.features
+        if request.content_parts:
+            # Items in features are already expanded; render every token
+            # after the last of them, so new placeholders must lie there.
+            feature_ranges = features.mm_placeholders.values() if features else ()
+            start = max(
+                (p.offset + p.length for rs in feature_ranges for p in rs), default=0
+            )
+            tracker = AsyncMultiModalItemTracker(self.model_config)
+            mm_parser = tracker.create_parser()
+            for part in request.content_parts:
+                ptype = part.get("type", "")
+                url = part.get("url")
+                uuid = part.get("uuid")
+                if ptype == "image_url":
+                    mm_parser.parse_image(url, uuid)
+                elif ptype == "audio_url":
+                    mm_parser.parse_audio(url, uuid)
+                elif ptype == "video_url":
+                    mm_parser.parse_video(url, uuid)
+            mm_data, mm_uuids = await tracker.resolve_items()
+            prompt = TokensPrompt(prompt_token_ids=request.token_ids[start:])
+            if request.cache_salt is not None:
+                prompt["cache_salt"] = request.cache_salt
+            if mm_data:
+                prompt["multi_modal_data"] = mm_data
+            if mm_uuids:
+                prompt["multi_modal_uuids"] = mm_uuids
+            try:
+                (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
+                    [prompt]
+                )
+            except PromptUpdateMismatchError as e:
+                if not features:
+                    raise
+                raise VLLMValidationError(
+                    f"{e}; content_parts placeholders must come after the last "
+                    f"features range, which ends at offset {start}"
+                ) from e
+        if features:
+            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
+
+            # Deserialize full tensor data and optional metadata-only data.
+            # Metadata-only items are valid when ec_transfer_params is set.
+            mm_kwargs = mm_kwargs_from_features(features)
+            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
+                return error
+
+            token_ids = request.token_ids
+            mm_hashes = {m: list(h) for m, h in features.mm_hashes.items()}
+            if request.content_parts:
+                rendered = cast(MultiModalInput, engine_input)
+                token_ids = token_ids[:start] + rendered["prompt_token_ids"]
+                for m, ps in rendered.get("mm_placeholders", {}).items():
+                    mm_placeholders.setdefault(m, []).extend(
+                        replace(p, offset=p.offset + start) for p in ps
+                    )
+                    mm_kwargs.setdefault(m, []).extend(rendered["mm_kwargs"][m])
+                    mm_hashes.setdefault(m, []).extend(rendered["mm_hashes"][m])
+
+            engine_input = mm_input(
+                prompt_token_ids=token_ids,
+                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+                mm_hashes=mm_hashes,
+                mm_placeholders=mm_placeholders,
+                cache_salt=request.cache_salt,
+            )
+        elif not request.content_parts:
+            (engine_input,) = await self.online_renderer.preprocess_completion(
+                request,
+                prompt_input=request.token_ids,
+                prompt_embeds=None,
+                skip_mm_cache=True,
+            )
 
         # Offsets are relative to the decoder prompt, so they are not
         # meaningful for encoder-decoder models.
@@ -455,95 +529,6 @@ class ServingTokens(GenerateBaseServing):
             request_metadata,
             derender_request=derender_request,
         )
-
-    async def build_engine_input(self, request):
-
-        engine_input: EngineInput
-        features = request.features
-        if request.content_parts:
-            # Items in features are already expanded; render every token
-            # after the last of them, so new placeholders must lie there.
-            feature_ranges = features.mm_placeholders.values() if features else ()
-            start = max(
-                (p.offset + p.length for rs in feature_ranges for p in rs), default=0
-            )
-            tracker = AsyncMultiModalItemTracker(self.model_config)
-            mm_parser = tracker.create_parser()
-            for part in request.content_parts:
-                ptype = part.get("type", "")
-                url = part.get("url")
-                uuid = part.get("uuid")
-                if ptype == "image_url":
-                    mm_parser.parse_image(url, uuid)
-                elif ptype == "audio_url":
-                    mm_parser.parse_audio(url, uuid)
-                elif ptype == "video_url":
-                    mm_parser.parse_video(url, uuid)
-            mm_data, mm_uuids = await tracker.resolve_items()
-            prompt = TokensPrompt(prompt_token_ids=request.token_ids[start:])
-            if request.cache_salt is not None:
-                prompt["cache_salt"] = request.cache_salt
-            if mm_data:
-                prompt["multi_modal_data"] = mm_data
-            if mm_uuids:
-                prompt["multi_modal_uuids"] = mm_uuids
-            try:
-                (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
-                    [prompt]
-                )
-            except PromptUpdateMismatchError as e:
-                if not features:
-                    raise
-                raise VLLMValidationError(
-                    f"{e}; content_parts placeholders must come after the last "
-                    f"features range, which ends at offset {start}"
-                ) from e
-        if features:
-            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
-
-            # Deserialize full tensor data and optional metadata-only data.
-            # Metadata-only items are valid when ec_transfer_params is set.
-            mm_kwargs = mm_kwargs_from_features(features)
-
-            # If the features are supplied then the cache should be skipped.
-            for items in mm_kwargs.values():
-                for item in items:
-                    if item is None:
-                        continue
-                    for elem in item.values():
-                        if elem.data is not None:
-                            elem.skip_mm_cache = True
-
-            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
-                return error
-
-            token_ids = request.token_ids
-            mm_hashes = {m: list(h) for m, h in features.mm_hashes.items()}
-            if request.content_parts:
-                rendered = cast(MultiModalInput, engine_input)
-                token_ids = token_ids[:start] + rendered["prompt_token_ids"]
-                for m, ps in rendered.get("mm_placeholders", {}).items():
-                    mm_placeholders.setdefault(m, []).extend(
-                        replace(p, offset=p.offset + start) for p in ps
-                    )
-                    mm_kwargs.setdefault(m, []).extend(rendered["mm_kwargs"][m])
-                    mm_hashes.setdefault(m, []).extend(rendered["mm_hashes"][m])
-
-            engine_input = mm_input(
-                prompt_token_ids=token_ids,
-                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-                mm_hashes=mm_hashes,
-                mm_placeholders=mm_placeholders,
-                cache_salt=request.cache_salt,
-            )
-        elif not request.content_parts:
-            (engine_input,) = await self.online_renderer.preprocess_completion(
-                request,
-                prompt_input=request.token_ids,
-                prompt_embeds=None,
-                skip_mm_cache=True,
-            )
-        return engine_input
 
     async def serve_tokens_full_generator(
         self,
