@@ -26,10 +26,9 @@ For further details on generative models, please refer to [this page](../models/
 ## Streaming Inputs with AsyncLLM
 
 [`AsyncLLM.generate`][vllm.v1.engine.async_llm.AsyncLLM.generate] accepts an async
-generator of [`StreamingInput`][vllm.engine.protocol.StreamingInput] objects for
-sessions that receive additional input while generating output. Each input can
-provide its own `SamplingParams`. If an input omits `sampling_params`, it uses
-the parameters passed to `generate`.
+generator of [`StreamingInput`][vllm.engine.protocol.StreamingInput] objects.
+Each input can provide its own `SamplingParams`; otherwise, the parameters passed
+to `generate` apply.
 
 `SamplingParams.skip_special_tokens` defaults to `True`. A change to this setting
 takes effect when that input becomes active, including when inputs are queued.
