@@ -21,8 +21,11 @@ class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
         # Dict overrides are filtered when loading the draft checkpoint.
         overrides = target.hf_overrides
         if callable(overrides):
-            # The generic loader has already called it on the converted draft.
+            # A callable can distinguish the target from the converted draft.
+            source = spec.draft_model_config
             overrides = vars(draft)
+            if target.model == source.model and target.revision == source.revision:
+                overrides = vars(target.hf_config)
         draft.set_quantization(
             overrides.get(
                 "dspark_weight_quantization", draft.draft_weight_quantization

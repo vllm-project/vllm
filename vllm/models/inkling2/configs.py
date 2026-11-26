@@ -270,15 +270,11 @@ class Inkling2DSparkConfig(PreTrainedConfig):
         kwargs.setdefault("architectures", ["Inkling2DSparkModel"])
         super().__init__(tie_word_embeddings=False, **kwargs)
 
-    def set_quantization(
-        self, mode: Literal["int8"] | None, quantize_layers: bool
-    ) -> None:
+    def set_quantization(self, mode: Literal["int8"] | None, layers: bool) -> None:
         if mode not in (None, "int8"):
-            raise ValueError(
-                "Inkling2 draft_weight_quantization must be null or 'int8'"
-            )
+            raise ValueError("draft_weight_quantization must be null or 'int8'")
         self.draft_weight_quantization = mode
-        self.draft_quantize_layers = quantize_layers
+        self.draft_quantize_layers = layers
 
     def validate_target(self, target: Inkling2MMConfig) -> None:
         text = target.text_config
@@ -299,9 +295,7 @@ class Inkling2DSparkConfig(PreTrainedConfig):
                 "followed by num_layer_visits (the final-norm output)"
             )
         if self.hidden_size != text.hidden_size:
-            raise ValueError(
-                "Inkling2 DSpark requires matching draft and target widths"
-            )
+            raise ValueError("Inkling2 DSpark requires matching hidden sizes")
 
     @classmethod
     def from_target(cls, config: Inkling2MMConfig) -> Inkling2DSparkConfig:

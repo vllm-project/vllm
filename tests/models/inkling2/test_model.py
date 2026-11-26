@@ -112,14 +112,20 @@ class ZeroHeadDummyLoader(DummyModelLoader):
 
 def _int8_draft_is_active(worker, quantize_layers: bool) -> bool:
     draft = worker.model_runner.speculator.model
+    projections = {
+        "self_attn.qkv_proj",
+        "self_attn.kv_proj_ctx",
+        "self_attn.o_proj",
+        "mlp.gate_up_proj",
+        "mlp.down_proj",
+    }
     return (
         draft.lm_head_q8 is not None
         and draft.lm_head_q8[0].dtype == torch.int8
         and draft.model.markov_head.fold_q8 is not None
-        and draft.config.draft_quantize_layers == quantize_layers
         and all(
-            (getattr(layer.self_attn.qkv_proj, "q8", None) is not None)
-            == quantize_layers
+            {name for name, mod in layer.named_modules() if getattr(mod, "q8", None)}
+            == (projections if quantize_layers else set())
             for layer in draft.model.layers
         )
     )

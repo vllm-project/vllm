@@ -22,6 +22,7 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
+    LinearBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
@@ -354,7 +355,6 @@ class Inkling2MarkovHead(nn.Module):
         self.fold_weight: torch.Tensor | None = None
         self.fold_bias: torch.Tensor | None = None
         self.rnn_bias: torch.Tensor | None = None
-        # Separate draft-only values and per-row scales.
         self.fold_q8: tuple[torch.Tensor, torch.Tensor] | None = None
 
     @torch.no_grad()
@@ -519,21 +519,13 @@ class Inkling2DSparkModel(nn.Module):
         head = self.model.markov_head
         assert head.rnn_bias is not None
         head.fold(self.lm_head.weight)
-        mode = self.config.draft_weight_quantization
-        if mode is not None:
+        if self.config.draft_weight_quantization is not None:
             self.lm_head_q8 = quantize_rows(self.lm_head.weight, self.lm_head_q8)
             assert head.fold_weight is not None
             head.fold_q8 = quantize_rows(head.fold_weight, head.fold_q8)
             if self.config.draft_quantize_layers:
-                for layer in self.model.layers:
-                    attn, mlp = layer.self_attn, layer.mlp
-                    for mod in (
-                        attn.qkv_proj,
-                        attn.o_proj,
-                        attn.kv_proj_ctx,
-                        mlp.gate_up_proj,
-                        mlp.down_proj,
-                    ):
+                for mod in self.model.layers.modules():
+                    if isinstance(mod, LinearBase):
                         mod.q8 = quantize_rows(mod.weight, getattr(mod, "q8", None))
         head.rnn_bias.copy_(head.rnn_proj.bias)
         self.model.fuse_alpha.copy_(
@@ -575,8 +567,7 @@ class Inkling2DSparkModel(nn.Module):
         return self.model(input_ids, positions)
 
     def compute_base_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """TP-local bf16 base logits (bf16 GEMM, as the reference; or the
-        8-bit head copy with dspark_weight_quantization)."""
+        """Return TP-local BF16 draft vocabulary logits."""
         assert self.lm_head is not None
         if self.lm_head_q8 is not None and 0 < hidden_states.shape[0] <= Q8_MAX_M:
             return gemv_q8(hidden_states, *self.lm_head_q8)
