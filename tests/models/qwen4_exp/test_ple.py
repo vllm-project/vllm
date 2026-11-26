@@ -1627,6 +1627,7 @@ def test_cpu_offload_without_uva_uses_host_memory_table(
     assert type(module.ngram_embedding) is Qwen4ExpPLEHostMemoryEmbedding
     assert module.ngram_embedding.weight.device.type == "cpu"
     assert not module.ngram_embedding.supports_prefetch
+    assert module.ngram_embedding.quant_method.supports_pre_processed_weights is False
 
 
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
