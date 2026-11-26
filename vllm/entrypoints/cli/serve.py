@@ -247,6 +247,12 @@ def run_headless(args: argparse.Namespace):
     # hybrid or external DP LB) also handshakes with them for their I/O.
     client_handshake_address = args.headless_client_handshake_address
 
+    # Tracing reads the collected stats without enabling stat logging.
+    collect_stats = (
+        not engine_args.disable_log_stats
+        or vllm_config.observability_config.otlp_traces_endpoint is not None
+    )
+
     # Create the engines.
     engine_manager = CoreEngineProcManager(
         local_engine_count=local_engine_count,
@@ -256,7 +262,7 @@ def run_headless(args: argparse.Namespace):
         local_client=client_handshake_address is not None,
         handshake_address=handshake_address,
         executor_class=Executor.get_class(vllm_config),
-        log_stats=not engine_args.disable_log_stats,
+        collect_stats=collect_stats,
         client_handshake_address=client_handshake_address,
     )
 
@@ -327,7 +333,11 @@ def run_multi_api_server(args: argparse.Namespace):
         )
 
     executor_class = Executor.get_class(vllm_config)
-    log_stats = not engine_args.disable_log_stats
+    # Tracing reads the collected stats without enabling stat logging.
+    collect_stats = (
+        not engine_args.disable_log_stats
+        or vllm_config.observability_config.otlp_traces_endpoint is not None
+    )
 
     parallel_config = vllm_config.parallel_config
     dp_rank = parallel_config.data_parallel_rank
@@ -343,7 +353,7 @@ def run_multi_api_server(args: argparse.Namespace):
     addresses = zmq_listeners.addresses
 
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, addresses
+        vllm_config, executor_class, collect_stats, addresses
     ) as engine_launch:
         local_engine_manager = engine_launch.engine_manager
         coordinator = engine_launch.coordinator

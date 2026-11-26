@@ -16,6 +16,7 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
@@ -477,6 +478,123 @@ class AsmKvScaleTables:
         return table
 
 
+class AiterFlashAttentionExtendKernel(
+    VllmJitKernel["AiterFlashAttentionExtendKernel.CompileKey"]
+):
+    """Warm the AITER varlen kernels that only an extend step reaches.
+
+    An extend is a prefill over cached tokens: a chunked-prefill continuation
+    or a prefix-cache hit. `AiterFlashAttentionImpl.extend_forward` attends the
+    new tokens causally and each gathered context chunk non-causally, both
+    returning the LSE so `merge_attn_states` can combine them. A new prompt
+    makes one causal call without the LSE, so it never selects these variants.
+    AITER builds a module per variant on first use, which otherwise stalls the
+    first request that needs one.
+
+    Sliding-window layers are skipped: their extend step runs the same
+    windowed, LSE-free call as a new prompt.
+    """
+
+    # AITER treats `max_seqlen_q == 1` as decode and drops `causal`, so the
+    # warmup query must be longer than one token to select the causal variant.
+    NUM_REQS = 2
+    QUERY_LEN = 16
+    CONTEXT_LEN = 64
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        head_dim: int
+        qhead_per_kvhead: int
+        causal: bool
+        has_alibi: bool
+        has_sinks: bool
+
+    def get_warmup_keys(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        head_dim: int,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        sliding_window: tuple[int, int],
+        has_alibi: bool,
+        has_sinks: bool,
+    ) -> list[CompileKey]:
+        if sliding_window[0] != -1:
+            return []
+
+        def key(causal: bool, has_sinks: bool):
+            return self.CompileKey(
+                dtype=dtype,
+                head_dim=head_dim,
+                qhead_per_kvhead=num_qo_heads // num_kv_heads,
+                causal=causal,
+                has_alibi=has_alibi,
+                has_sinks=has_sinks,
+            )
+
+        # `extend_forward` passes the sinks to the causal call only, so each
+        # context chunk's LSE does not count them twice on merge.
+        return [key(True, has_sinks), key(False, False)]
+
+    def compile(self, compile_key: CompileKey) -> None:
+        device = torch.device(current_platform.device_type)
+        heads = compile_key.qhead_per_kvhead
+        # The causal call attends the new tokens alone; the non-causal call
+        # attends a gathered context chunk longer than the query.
+        key_len = self.QUERY_LEN if compile_key.causal else self.CONTEXT_LEN
+
+        def lens(length: int) -> torch.Tensor:
+            return torch.arange(
+                0,
+                (self.NUM_REQS + 1) * length,
+                length,
+                dtype=torch.int32,
+                device=device,
+            )
+
+        def tokens(length: int, num_heads: int) -> torch.Tensor:
+            return torch.zeros(
+                (self.NUM_REQS * length, num_heads, compile_key.head_dim),
+                dtype=compile_key.dtype,
+                device=device,
+            )
+
+        rocm_aiter_ops.flash_attn_varlen_func(
+            q=tokens(self.QUERY_LEN, heads),
+            k=tokens(key_len, 1),
+            v=tokens(key_len, 1),
+            cu_seqlens_q=lens(self.QUERY_LEN),
+            cu_seqlens_k=lens(key_len),
+            max_seqlen_q=self.QUERY_LEN,
+            max_seqlen_k=key_len,
+            # Must match the serving calls: AITER names the module after a zero
+            # min_seqlen_q, so a nonzero value here builds a module serving never uses.
+            min_seqlen_q=0,
+            dropout_p=0.0,
+            softmax_scale=compile_key.head_dim**-0.5,
+            causal=compile_key.causal,
+            window_size=(-1, -1),
+            alibi_slopes=(
+                torch.ones(heads, dtype=torch.float32, device=device)
+                if compile_key.has_alibi
+                else None
+            ),
+            return_lse=True,
+            sink_ptr=(
+                torch.zeros(heads, dtype=torch.float32, device=device)
+                if compile_key.has_sinks
+                else None
+            ),
+        )
+        torch.accelerator.synchronize()
+        self._compiled_cache[compile_key] = True
+
+
+_AITER_FA_EXTEND_KERNEL = AiterFlashAttentionExtendKernel()
+
+
 class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
@@ -525,6 +643,16 @@ class AiterFlashAttentionMetadataBuilder(
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
+            if vllm_config.kernel_config.enable_jit_warmup:
+                _AITER_FA_EXTEND_KERNEL.register_warmup(
+                    dtype=self.model_config.dtype,
+                    head_dim=layer.impl.head_size,
+                    num_qo_heads=layer.impl.num_heads,
+                    num_kv_heads=layer.impl.num_kv_heads,
+                    sliding_window=layer.impl.sliding_window,
+                    has_alibi=layer.impl.alibi_slopes is not None,
+                    has_sinks=layer.impl.sinks is not None,
+                )
             if layer.impl._fast_verify and layer.impl.sliding_window[0] == -1:
                 self._verify_kv_heads = layer.impl.num_kv_heads
             if layer.impl.sliding_window[0] != -1 and not layer.impl._fast_verify:
