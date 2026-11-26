@@ -39,12 +39,11 @@ launches share a workspace or something else wrote it, and the kernel executes
 (fail-loud); `VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE=1` turns the path off.
 
 The workspace (counters, then partials) is one zero-initialised FP32 buffer per
-workspace-manager slot (ubatch, lane), reserved for every ubatch in the
-memory-profiling run. Each launch returns its counters to 0, so CUDA graphs
-that captured the buffer replay in any order; launches on one slot run in
-stream order. Without a workspace (no manager, or a slot first used under
-capture) a call runs the split and merge roles as two launches on scratch,
-with no counters and no wait.
+workspace-manager slot, reserved in the memory-profiling run. Each launch
+returns its counters to 0, so CUDA graphs that captured the buffer replay in
+any order; launches on one slot run in stream order. Without a workspace (no
+manager, or a slot first used under capture) a call runs the split and merge
+roles as two launches on scratch. The path is off under micro-batching (DBO).
 
 Tested with Triton 3.8.0 (the version vLLM's torch pin brings). The loop's
 dots are mma.sync because the heads pad to M = 16; `prepare()` rejects a
@@ -469,15 +468,10 @@ def _workspace() -> torch.Tensor | None:
 
 
 def reserve_workspace() -> torch.Tensor | None:
-    """Allocate the zero-initialised workspace in every ubatch slot of the
-    current lane (call it from the memory-profiling run) and return the current
-    slot's; None without a workspace manager, under capture or once locked."""
-    try:
-        return current_workspace_manager().reserve_persistent_resource_all_ubatches(
-            _WORKSPACE_KEY, _new_workspace
-        )
-    except (AssertionError, _NoWorkspace):
-        return None
+    """The zero-initialised workspace of the current workspace slot, allocated
+    on first use (call it from the memory-profiling run); None without a
+    workspace manager, under capture or once locked."""
+    return _workspace()
 
 
 def splitk_decode_supported(num_heads: int) -> bool:

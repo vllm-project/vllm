@@ -118,16 +118,15 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         self._decode_page_rows = 64
         # On SM90, the rows of short BF16 calls go to the split-K decode kernel
         # (`sparse_mla_decode.py`), which splits each row's top-k across CTAs.
+        vllm_config = get_current_vllm_config()
         self._splitk_decode = (
             splitk.splitk_decode_supported(num_heads)
+            and not vllm_config.parallel_config.use_ubatching
             and self.dcp_world_size == 1
             and not self.need_to_return_lse_for_decode
             and kv_cache_dtype not in QUANTIZED_DS_MLA_CACHE_FORMATS
         )
-        if (
-            self._splitk_decode
-            and get_current_vllm_config().kernel_config.enable_jit_warmup
-        ):
+        if self._splitk_decode and vllm_config.kernel_config.enable_jit_warmup:
             splitk.sparse_mla_decode.register_warmup(heads=num_heads)
 
     @staticmethod
