@@ -15,9 +15,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
-from vllm.utils.system_utils import get_mp_context
 
 from tests.utils import core_dumped_bytes
+from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu import host_register as host_register_module
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
