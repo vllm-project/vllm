@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.grant_table import GrantTable
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -107,6 +108,17 @@ class KVCacheCoordinator(ABC):
         )
         self.scheduler_block_size = scheduler_block_size
 
+        # Percy: the GrantTable is the only record of block ownership; its
+        # block sizes match the single-type managers' (DCP-scaled) sizes.
+        self.grant_table = GrantTable(
+            num_blocks=kv_cache_config.num_blocks,
+            group_block_sizes=[
+                g.block_size * (dcp_world_size if g.dcp_sharded else 1)
+                for g in kv_cache_config.kv_cache_groups
+            ]
+            or [hash_block_size],
+            enable_caching=enable_caching,
+        )
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
@@ -114,6 +126,7 @@ class KVCacheCoordinator(ABC):
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            grant_table=self.grant_table,
         )
 
         self.single_type_managers = tuple(
@@ -358,16 +371,18 @@ class KVCacheCoordinator(ABC):
         )
         return all([pool.reset_prefix_cache() for pool in pools])
 
-    def free(self, request: Request) -> None:
+    def free(self, request: Request, step_seq: int | None = None) -> None:
         """Free the blocks for the request.
 
         Args:
             request: The request.
+            step_seq: The last step that may use the blocks through this
+                request; None uses the latest scheduled step.
 
         """
         for manager in self.single_type_managers:
             manager.cache_blocks_on_free(request)
-            manager.free(request.request_id)
+            manager.free(request.request_id, step_seq=step_seq)
 
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping from all single-type managers and

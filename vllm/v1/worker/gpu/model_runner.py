@@ -155,6 +155,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
+from vllm.v1.worker.gpu.percy_rows import RowPlan, RowVerifier
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -787,7 +788,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+            num_kv_blocks=self.kv_cache_config.num_blocks,
+            # Async spec-decode slack plus drafter lookahead (an overestimate
+            # in sync mode, which has no slack).
+            max_window_extra_tokens=(
+                self.vllm_config.num_speculative_tokens
+                + self.vllm_config.num_lookahead_tokens
+            ),
         )
+        # Percy W1: this worker's checked copy of the scheduler's rows.
+        self.row_verifier = RowVerifier(
+            len(kv_cache_groups),
+            self.kv_cache_config.num_blocks,
+            # Percy W5: recurrent-state groups address blocks by id.
+            state_groups=[
+                gid
+                for gid, g in enumerate(kv_cache_groups)
+                if any(isinstance(s, MambaSpec) for s in g.distinct_specs)
+            ],
+        )
+        # Requests refused by a row check in the step being executed.
+        self.row_check_failures: set[str] = set()
         if self.pcp_manager is not None:
             self.pcp_manager.set_block_tables(self.block_tables)
         self.ubatch_runner = maybe_build_ubatch_runner(
@@ -1269,6 +1290,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # so the model_state can still look up the slot index.
         self.model_state.remove_request(req_id)
         self.draft_tokens_handler.discard(req_id)
+        self.row_verifier.drop((req_id,))
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
@@ -1284,6 +1306,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return True
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
+        # Percy W1: verify msg_seq, update the CPU gen mirror and drop
+        # finished/preempted rows before any row of this step changes.
+        self.row_check_failures = self.row_verifier.begin_step(scheduler_output).refused
         finished_req_ids = scheduler_output.finished_req_ids
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
@@ -1354,8 +1379,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_connector.record_mrope_position_delta(
                     req_id, mrope_position_delta
                 )
-            self.block_tables.append_block_ids(
-                req_index, new_req_data.block_ids, overwrite=True
+            self._apply_row_plan(
+                req_index,
+                self.row_verifier.add_new(
+                    req_id,
+                    new_req_data.block_ids,
+                    new_req_data.block_gens,
+                    new_req_data.expected_row_len,
+                    new_req_data.row_digest,
+                ),
             )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
@@ -1377,15 +1409,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
-        for req_id, num_computed_tokens, req_new_block_ids in zip(
-            reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
+        # Percy W1: absent (hand-built) fields leave a request unchecked.
+        checked = len(reqs.expected_row_len) == len(reqs.req_ids)
+        for i, (req_id, num_computed_tokens, req_new_block_ids) in enumerate(
+            zip(reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids)
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
-            if req_new_block_ids is not None:
-                self.block_tables.append_block_ids(
-                    req_index, req_new_block_ids, overwrite=False
-                )
+            # Revokes first, then appends, then the length/digest check.
+            plan = self.row_verifier.apply_cached(
+                req_id,
+                req_new_block_ids,
+                reqs.new_block_gens[i] if checked else None,
+                reqs.revoked[i] if checked else None,
+                reqs.expected_row_len[i] if checked else (),
+                reqs.row_digest[i] if checked else (),
+            )
+            self._apply_row_plan(req_index, plan)
 
         # Update CPU num_computed_prefill_tokens.
         np.minimum(
@@ -1396,18 +1436,56 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
-        if scheduler_output.new_block_ids_to_zero:
+        # Percy W5: only the zeros and copies whose gens passed the check.
+        verdict = self.row_verifier.verdict
+        if verdict.zero_block_ids:
             assert self.kv_block_zeroer is not None
-            self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
+            self.kv_block_zeroer.zero_block_ids(verdict.zero_block_ids)
 
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
-        if scheduler_output.kv_cache_block_copies:
+        if verdict.block_copies:
             copy_kv_cache_blocks_inplace(
                 [*self.kv_caches, *self.replayssm_block_copy_tensors],
                 self.kv_cache_config.num_blocks,
-                scheduler_output.kv_cache_block_copies,
+                verdict.block_copies,
             )
+
+    def _stage_gen_check(self, scheduler_output: SchedulerOutput) -> None:
+        """Percy W2: apply the step's gen updates to the device gen table and
+        load each scheduled request's write windows (refused rows PAD every
+        write; requests without windows stay unchecked)."""
+        gen_check = self.block_tables.gen_check
+        if gen_check is None:
+            return
+        gen_check.apply_gen_updates(scheduler_output.gen_updates)
+        gen_check.begin_windows()
+        refused = self.row_check_failures
+        req_id_to_index = self.req_states.req_id_to_index
+        for new_req in scheduler_output.scheduled_new_reqs:
+            req_index = req_id_to_index.get(new_req.req_id)
+            if req_index is not None:
+                gen_check.set_windows(
+                    req_index, new_req.write_window, new_req.req_id in refused
+                )
+        cached = scheduler_output.scheduled_cached_reqs
+        windows = (
+            cached.write_windows
+            if len(cached.write_windows) == len(cached.req_ids)
+            else [()] * len(cached.req_ids)
+        )
+        for req_id, req_windows in zip(cached.req_ids, windows):
+            req_index = req_id_to_index.get(req_id)
+            if req_index is not None:
+                gen_check.set_windows(req_index, req_windows, req_id in refused)
+        gen_check.commit_windows()
+
+    def _apply_row_plan(self, req_index: int, plan: RowPlan) -> None:
+        """Stage a request's verified row changes: one write per group (a
+        refused row is pointed at the null block in full)."""
+        for group, write in enumerate(plan.writes):
+            if write is not None:
+                self.block_tables.write_row(req_index, group, *write)
 
     def gather_batch_req_state(
         self, scheduler_output: SchedulerOutput, dummy_run: bool
@@ -1885,6 +1963,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # add_requests initializes RoPE positions from CPU metadata first.
                 for req_id, updates in scheduler_output.encoder_input_updates.items():
                     self.encoder_cache.update_encoder_inputs(req_id, updates)
+            # Percy W2: gen bumps reach the device table, and this step's
+            # write windows its buffers, before any slot mapping is built.
+            self._stage_gen_check(scheduler_output)
             self.block_tables.apply_staged_writes()
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
@@ -2259,6 +2340,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_spec_tokens_to_schedule=(
                 0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
             ),
+            row_check_failures=self.row_check_failures,
         )
 
         if not self.is_last_pp_rank:
@@ -2293,6 +2375,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        row_check_failures = self.execute_model_state.row_check_failures
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2365,6 +2448,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
+            row_check_failures=set(row_check_failures),
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
@@ -2509,6 +2593,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
+        row_check_failures = self.execute_model_state.row_check_failures
         self.execute_model_state = None
 
         # Post-step KV connector related operations.
@@ -2529,6 +2614,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids=input_batch.req_ids,
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
+            row_check_failures=set(row_check_failures),
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
@@ -2645,6 +2731,8 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    # Percy W1: requests whose rows this worker refused this step.
+    row_check_failures: frozenset[str] | set[str] = frozenset()
 
 
 class BatchReqState(NamedTuple):

@@ -188,9 +188,14 @@ class Request:
         # so the worker's broadcast slot ring stays consistent.
         self.next_decode_eligible_step = 0
 
-        # Seq of the most recent step this request was scheduled in; fences
-        # deferred block freeing (see Scheduler._free_request_blocks).
+        # Seq of the most recent step this request was scheduled in: its blocks'
+        # release is stamped with it, and they drain once that step is
+        # processed (Percy step ledger, see Scheduler._free_request_blocks).
         self.last_sched_seq = 0
+        # Tokens rejected drafts rolled back from num_computed_tokens, in total:
+        # a step scheduled before a rollback started that many tokens earlier on
+        # the worker than its scheduled num_computed_tokens (Percy M2 acks).
+        self.num_rolled_back_tokens = 0
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0

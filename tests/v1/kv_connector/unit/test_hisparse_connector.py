@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from tests.v1.core.utils import percy_ack_planned_steps  # noqa: F401
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
@@ -482,6 +483,7 @@ def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
     assert calls == expected
 
 
+@pytest.mark.usefixtures("percy_ack_planned_steps")
 def test_scheduled_prefix_hit_publishes_adopted_copies():
     """Copies adopted after scheduling reach the worker as a residency update,
     leaving the block-table row the scheduler output carries untouched."""

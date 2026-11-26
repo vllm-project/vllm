@@ -6,6 +6,7 @@ from collections.abc import Callable
 import pytest
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from tests.v1.core.utils import grant_confirmed_blocks
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -89,7 +90,7 @@ def cache_full_block_and_partial_tail(
         hash_block_size=hash_block_size,
         enable_kv_cache_events=enable_kv_cache_events,
     )
-    blocks = pool.get_new_blocks(2)
+    blocks = grant_confirmed_blocks(pool, 2, block_size, kv_cache_group_id)
 
     pool.cache_full_blocks(
         request=req,
@@ -149,7 +150,7 @@ def test_cache_partial_block_kv_cache_events():
         session_id="agent-session-partial",
     )
 
-    block = pool.get_new_blocks(1)[0]
+    block = grant_confirmed_blocks(pool, 1, block_size, kv_cache_group_id)[0]
     partial_entry_hash = pool.cache_partial_block(
         request=req,
         block=block,
@@ -185,6 +186,7 @@ def test_cache_partial_block_kv_cache_events():
     assert pool.take_events() == []
 
     pool.free_blocks([block])
+    pool.make_room(1)  # Percy: eviction is its own call, before the grant
     pool.get_new_blocks(1)
     events = pool.take_events()
     assert len(events) == 1
@@ -230,7 +232,7 @@ def test_cache_partial_block_event_keeps_every_mm_feature():
 
     assert pool.cache_partial_block(
         request=req,
-        block=pool.get_new_blocks(1)[0],
+        block=grant_confirmed_blocks(pool, 1, block_size, 0)[0],
         num_tokens=num_tokens,
         kv_cache_group_id=0,
         block_size=block_size,
@@ -253,7 +255,7 @@ def test_partial_block_replacement_emits_remove_then_store_events():
         hash_block_size=hash_block_size,
         enable_kv_cache_events=True,
     )
-    blocks = pool.get_new_blocks(2)
+    blocks = grant_confirmed_blocks(pool, 2, block_size, kv_cache_group_id)
 
     pool.cache_full_blocks(
         request=req,
@@ -317,7 +319,7 @@ def test_later_request_hits_cached_partial_tail():
         enable_caching=True,
         hash_block_size=hash_block_size,
     )
-    blocks = pool.get_new_blocks(2)
+    blocks = grant_confirmed_blocks(pool, 2, block_size, kv_cache_group_id)
 
     pool.cache_full_blocks(
         request=req,
@@ -358,7 +360,7 @@ def test_cache_partial_block_uses_fine_grained_boundary_hash():
         enable_caching=True,
         hash_block_size=hash_block_size,
     )
-    blocks = pool.get_new_blocks(2)
+    blocks = grant_confirmed_blocks(pool, 2, block_size, kv_cache_group_id)
 
     pool.cache_full_blocks(
         request=req,
@@ -394,7 +396,7 @@ def test_cache_partial_block_requires_hash_boundary():
         enable_caching=True,
         hash_block_size=hash_block_size,
     )
-    block = pool.get_new_blocks(1)[0]
+    block = grant_confirmed_blocks(pool, 1, block_size, 0)[0]
 
     with pytest.raises(AssertionError):
         pool.cache_partial_block(
@@ -416,7 +418,7 @@ def test_cache_partial_block_duplicate_checks_all_blocks_for_hash():
         enable_caching=True,
         hash_block_size=hash_block_size,
     )
-    blocks = pool.get_new_blocks(2)
+    blocks = grant_confirmed_blocks(pool, 2, block_size, kv_cache_group_id)
 
     first_entry_hash = pool.cache_partial_block(
         request=req,
@@ -496,7 +498,7 @@ def test_partial_block_promotes_to_direct_full_block_hash(dcp_world_size: int):
         enable_caching=True,
         hash_block_size=hash_block_size,
     )
-    blocks = pool.get_new_blocks(2)
+    blocks = grant_confirmed_blocks(pool, 2, block_size, kv_cache_group_id)
 
     pool.cache_full_blocks(
         request=req,

@@ -237,6 +237,10 @@ class KVConnectorOutput:
     # It captures a static setup info and should almost always remain constant
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
+    # Percy (M2, phase 2): per-block transfer acks, block ids whose peer read
+    # or write lease completed this step. Unused until connector leases (A3).
+    finished_read_block_ids: set[int] = field(default_factory=set)
+    finished_write_block_ids: set[int] = field(default_factory=set)
 
     def is_empty(self):
         return (
@@ -248,6 +252,8 @@ class KVConnectorOutput:
             and not self.failed_recving
             and not self.kv_connector_worker_meta
             and not self.mrope_position_deltas
+            and not self.finished_read_block_ids
+            and not self.finished_write_block_ids
         )
 
 
@@ -325,6 +331,10 @@ class ModelRunnerOutput:
 
     # Iterations whose GPU timing has completed; see IterationTimer.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
+
+    # Percy (M2): ids of requests a worker check (W1) refused this step. Their
+    # output is discarded and the scheduler resyncs them.
+    row_check_failures: set[str] = field(default_factory=set)
 
     @staticmethod
     def with_kv_conn_output_only(

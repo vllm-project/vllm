@@ -10,7 +10,11 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from tests.v1.core.utils import uniform_spec
+from tests.v1.core.utils import (
+    confirm_slots,
+    take_confirmed_blocks,
+    uniform_spec,
+)
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.kv_connector.unit.utils import create_scheduler, set_mtp_config
 from vllm import SamplingParams
@@ -225,7 +229,7 @@ def test_lookahead_store_retries_block_when_hash_becomes_available(finish):
     fix = make_scheduler(vllm_config=_make_lookahead_config(1))
     sched, pool = fix.scheduler, fix.gpu_block_pool
     req = make_request(extra_tokens=0, num_lookahead=1)
-    blocks = pool.get_new_blocks(2)
+    blocks = take_confirmed_blocks(pool, 2)
     pool.cache_full_blocks(req, blocks, 0, 1, BLOCK_SIZE, 0)
     req.num_computed_tokens = 32
     kv_blocks = KVCacheBlocks((blocks,))
@@ -627,9 +631,11 @@ def _allocate_gpu_blocks(
     register them in the prefix cache via cache_full_blocks so that
     re-allocation properly evicts stale hashes.
     """
-    blocks = gpu_block_pool.get_new_blocks(num_blocks)
+    blocks = take_confirmed_blocks(gpu_block_pool, num_blocks, group=group_id)
     num_full = min(num_blocks, len(request.block_hashes))
     if num_full > 0:
+        # Percy: KVCacheManager confirms slots before publishing them.
+        confirm_slots(gpu_block_pool, blocks, BLOCK_SIZE)
         gpu_block_pool.cache_full_blocks(
             request=request,
             blocks=blocks,
@@ -707,7 +713,7 @@ def test_eager_store_and_load_roundtrip() -> None:
     assert hit_tokens == num_blocks * BLOCK_SIZE
     assert is_async is True
 
-    gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
+    gpu_blocks2 = take_confirmed_blocks(fix.gpu_block_pool, num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
 
@@ -870,7 +876,7 @@ def test_finished_eager_stores_are_batched() -> None:
     assert hit_tokens == 2 * BLOCK_SIZE
     assert is_async is True
 
-    cached_gpu_blocks = fix.gpu_block_pool.get_new_blocks(2)
+    cached_gpu_blocks = take_confirmed_blocks(fix.gpu_block_pool, 2)
     sched.update_state_after_alloc(
         cached_request,
         KVCacheBlocks(blocks=(cached_gpu_blocks,)),
@@ -1052,7 +1058,7 @@ def _flush_old_blocks_to_lru_head(
     head, consuming the unhashed blocks and leaving the old hashed blocks at
     the front of the queue.
     """
-    fillers = gpu_pool.get_new_blocks(num_filler_blocks)
+    fillers = take_confirmed_blocks(gpu_pool, num_filler_blocks)
     return fillers
 
 
@@ -1125,7 +1131,7 @@ def test_lazy_store_and_load_roundtrip(num_lookahead) -> None:
     assert is_async is True
 
     # Allocate fresh GPU blocks for the load.
-    gpu_blocks_load = gpu_pool.get_new_blocks(num_blocks)
+    gpu_blocks_load = take_confirmed_blocks(gpu_pool, num_blocks)
     kv_blocks_load = KVCacheBlocks(blocks=(gpu_blocks_load,))
     sched.update_state_after_alloc(
         req_old2, kv_blocks_load, num_external_tokens=hit_tokens
@@ -1352,7 +1358,7 @@ def test_lazy_store_returns_blocks_to_eviction_end() -> None:
     assert len(meta.store_gpu_blocks) == target
     simulate_store_completion(sched, meta.store_event)
 
-    evicted = gpu_pool.get_new_blocks(target)
+    evicted = take_confirmed_blocks(gpu_pool, target)
     assert [b.block_id for b in evicted] == list(meta.store_gpu_blocks)
     gpu_pool.free_blocks(fillers + evicted)
 
@@ -1639,7 +1645,7 @@ def test_preemption_no_cpu_block_leak() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
     assert hit_tokens is not None and hit_tokens > 0
 
-    gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
+    gpu_blocks2 = take_confirmed_blocks(fix.gpu_block_pool, num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
 
@@ -1734,7 +1740,7 @@ def test_inflight_finish_deferred_cleanup() -> None:
     hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
     assert hit_tokens is not None and hit_tokens > 0
 
-    gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
+    gpu_blocks2 = take_confirmed_blocks(fix.gpu_block_pool, num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
 
@@ -1818,7 +1824,7 @@ def test_multi_group_null_blocks_skipped() -> None:
     assert is_async is True
 
     # Allocate new GPU blocks for the load
-    gpu_blocks2 = gpu_pool.get_new_blocks(2)
+    gpu_blocks2 = take_confirmed_blocks(gpu_pool, 2)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
 
@@ -1851,7 +1857,7 @@ def test_scratch_group_excluded_from_store_and_load() -> None:
 
     req = make_request(num_blocks=num_blocks)
     fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
-    scratch_block = gpu_pool.get_new_blocks(1)
+    scratch_block = take_confirmed_blocks(gpu_pool, 1)
     kv_blocks = KVCacheBlocks(blocks=(fa_blocks, scratch_block))
     req.num_computed_tokens = num_blocks * BLOCK_SIZE
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
@@ -1875,8 +1881,8 @@ def test_scratch_group_excluded_from_store_and_load() -> None:
     assert hit_tokens == num_blocks * BLOCK_SIZE
     assert is_async is True
 
-    fa_blocks2 = gpu_pool.get_new_blocks(num_blocks)
-    scratch_block2 = gpu_pool.get_new_blocks(1)
+    fa_blocks2 = take_confirmed_blocks(gpu_pool, num_blocks)
+    scratch_block2 = take_confirmed_blocks(gpu_pool, 1)
     kv_blocks2 = KVCacheBlocks(blocks=(fa_blocks2, scratch_block2))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
     sched_out2 = make_scheduler_output(
@@ -1989,7 +1995,7 @@ def test_eager_store_streaming_session_stores_new_chunks() -> None:
     sched = fix.scheduler
     req = make_request(num_blocks=4)
 
-    gpu_blocks = fix.gpu_block_pool.get_new_blocks(2)
+    gpu_blocks = take_confirmed_blocks(fix.gpu_block_pool, 2)
     fix.gpu_block_pool.cache_full_blocks(req, gpu_blocks, 0, 2, BLOCK_SIZE, 0)
     req.num_computed_tokens = 2 * BLOCK_SIZE
     first_turn = KVCacheBlocks(blocks=(gpu_blocks,))
@@ -2004,7 +2010,7 @@ def test_eager_store_streaming_session_stores_new_chunks() -> None:
     simulate_store_completion(sched, first_meta.store_event)
 
     # The paused session keeps its blocks and grows by a new chunk.
-    gpu_blocks = gpu_blocks + fix.gpu_block_pool.get_new_blocks(2)
+    gpu_blocks = gpu_blocks + take_confirmed_blocks(fix.gpu_block_pool, 2)
     fix.gpu_block_pool.cache_full_blocks(req, gpu_blocks, 2, 4, BLOCK_SIZE, 0)
     req.num_computed_tokens = 4 * BLOCK_SIZE
     second_turn = KVCacheBlocks(blocks=(gpu_blocks,))
@@ -2093,7 +2099,7 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
     # comp: GPU prefix cache hit — blocks with hashes
     gpu_comp = _allocate_gpu_blocks(gpu_pool, req2, 2, group_id=0)
     # ext_comp + new: freshly allocated, no hashes
-    gpu_ext_and_new = gpu_pool.get_new_blocks(num_ext_blocks + num_new_blocks)
+    gpu_ext_and_new = take_confirmed_blocks(gpu_pool, num_ext_blocks + num_new_blocks)
     all_gpu_blocks = gpu_comp + gpu_ext_and_new
     kv_blocks2 = KVCacheBlocks(blocks=(all_gpu_blocks,))
 
@@ -2240,7 +2246,7 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
     # Before fix: AssertionError: Expected 32 hit tokens, got 0
     # After fix: Phase A pinned the hits → Step 3 evicted req_c instead,
     # Phase B consumes the cached (cpu_hit_blocks, hit_length) tuple.
-    gpu_blocks_b = fix.gpu_block_pool.get_new_blocks(2)
+    gpu_blocks_b = take_confirmed_blocks(fix.gpu_block_pool, 2)
     kv_blocks_b = KVCacheBlocks(blocks=(gpu_blocks_b,))
     sched.update_state_after_alloc(req_b, kv_blocks_b, num_external_tokens=hit_tokens)
 
@@ -2419,7 +2425,7 @@ def test_reset_pending_loads() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
     assert hit_tokens is not None and hit_tokens > 0
 
-    gpu_blocks2 = gpu_pool.get_new_blocks(num_blocks)
+    gpu_blocks2 = take_confirmed_blocks(gpu_pool, num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
 
@@ -2542,7 +2548,7 @@ def _allocate_cp_gpu_blocks(
     group_id: int = 0,
 ) -> list:
     """Allocate GPU blocks and cache them using the CP-scaled block size."""
-    blocks = gpu_block_pool.get_new_blocks(num_blocks)
+    blocks = take_confirmed_blocks(gpu_block_pool, num_blocks)
     num_full = min(num_blocks, len(request.block_hashes))
     if num_full > 0:
         gpu_block_pool.cache_full_blocks(
@@ -2640,7 +2646,7 @@ def test_cp_eager_store_and_load_roundtrip(
     assert is_async is True
 
     # Allocate fresh GPU blocks for the load.
-    gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
+    gpu_blocks2 = take_confirmed_blocks(fix.gpu_block_pool, num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
 
@@ -2717,7 +2723,7 @@ def test_cp_effective_block_size_store_and_load(
     hit, _ = sched.get_num_new_matched_tokens(req3, num_computed_tokens=0)
     assert hit == 2 * vbs
 
-    kv3 = KVCacheBlocks(blocks=(gpu_pool.get_new_blocks(expected_blocks),))
+    kv3 = KVCacheBlocks(blocks=(take_confirmed_blocks(gpu_pool, expected_blocks),))
     sched.update_state_after_alloc(req3, kv3, num_external_tokens=vbs)
     m3 = sched.build_connector_meta(
         make_scheduler_output(
@@ -2882,6 +2888,9 @@ def _make_two_group_scheduler(
         enable_caching=True,
         hash_block_size=hash_block_size,
     )
+    # Percy: the engine's pool knows each group's (resolved) block size.
+    for group_id, group_size in enumerate(sched.group_block_sizes):
+        gpu_block_pool.grant_table.set_group_block_size(group_id, group_size)
     sched.bind_gpu_block_pool(gpu_block_pool)
     return SchedulerFixture(
         scheduler=sched,
@@ -3001,7 +3010,7 @@ def test_dcp_mixed_cache_loads_fine_grained_external_hit() -> None:
         virtual_block_size=2 * BLOCK_SIZE,
         group_id=0,
     )
-    mamba_blocks = gpu_pool.get_new_blocks(3)
+    mamba_blocks = take_confirmed_blocks(gpu_pool, 3)
     gpu_pool.cache_full_blocks(
         request=producer,
         blocks=mamba_blocks,
@@ -3079,8 +3088,8 @@ def test_dcp_mixed_cache_loads_fine_grained_external_hit() -> None:
     local_mamba = mamba_blocks[:1]
     load_blocks = KVCacheBlocks(
         blocks=(
-            local_attention + gpu_pool.get_new_blocks(3),
-            local_mamba + gpu_pool.get_new_blocks(2),
+            local_attention + take_confirmed_blocks(gpu_pool, 3),
+            local_mamba + take_confirmed_blocks(gpu_pool, 2),
         )
     )
     sched.update_state_after_alloc(
@@ -3124,7 +3133,7 @@ def test_finished_eager_store_caches_fa_partial_tail_for_hybrid_hit() -> None:
     assert total_cached_tokens % sched.fa_block_size != 0
 
     producer = _make_cp_request(num_blocks=5, virtual_block_size=hash_block_size)
-    attention_blocks = gpu_pool.get_new_blocks(1)
+    attention_blocks = take_confirmed_blocks(gpu_pool, 1)
     gpu_pool.cache_partial_block(
         request=producer,
         block=attention_blocks[0],
@@ -3132,7 +3141,7 @@ def test_finished_eager_store_caches_fa_partial_tail_for_hybrid_hit() -> None:
         kv_cache_group_id=0,
         block_size=scheduler_block_size,
     )
-    mamba_blocks = gpu_pool.get_new_blocks(5)
+    mamba_blocks = take_confirmed_blocks(gpu_pool, 5)
     gpu_pool.cache_full_blocks(
         request=producer,
         blocks=mamba_blocks,
@@ -3203,7 +3212,7 @@ def test_finished_eager_store_does_not_duplicate_completed_partial_tail() -> Non
     assert prompt_tokens % sched.fa_block_size != 0
 
     producer = _make_cp_request(num_blocks=5, virtual_block_size=hash_block_size)
-    attention_blocks = gpu_pool.get_new_blocks(1)
+    attention_blocks = take_confirmed_blocks(gpu_pool, 1)
     gpu_pool.cache_partial_block(
         request=producer,
         block=attention_blocks[0],
@@ -3211,7 +3220,7 @@ def test_finished_eager_store_does_not_duplicate_completed_partial_tail() -> Non
         kv_cache_group_id=0,
         block_size=scheduler_block_size,
     )
-    mamba_blocks = gpu_pool.get_new_blocks(5)
+    mamba_blocks = take_confirmed_blocks(gpu_pool, 5)
     gpu_pool.cache_full_blocks(
         request=producer,
         blocks=mamba_blocks,
@@ -3246,7 +3255,7 @@ def test_gpu_prefix_hit_refreshes_cpu_mamba_boundary() -> None:
     other = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
 
     def cache_on_cpu(request: Request, group_id: int) -> list[KVCacheBlock]:
-        blocks = cpu_pool.get_new_blocks(2)
+        blocks = take_confirmed_blocks(cpu_pool, 2)
         cpu_pool.cache_full_blocks(
             request=request,
             blocks=blocks,
@@ -3324,7 +3333,7 @@ def test_eager_store_does_not_scan_mamba_blocks_positionally() -> None:
     attn_blocks = _allocate_cp_gpu_blocks(
         gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
     )
-    gpu_blocks = gpu_pool.get_new_blocks(2)
+    gpu_blocks = take_confirmed_blocks(gpu_pool, 2)
     gpu_blocks[1].set_block_hash(make_block_hash_with_group_id(req.block_hashes[1], 1))
     kv_blocks = KVCacheBlocks(blocks=(attn_blocks, gpu_blocks))
     req.num_computed_tokens = 0
@@ -3397,7 +3406,7 @@ def test_boundary_handoff_dropped_for_departing_request(gone_via: str) -> None:
     attn_blocks = _allocate_cp_gpu_blocks(
         gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
     )
-    mamba_blocks = gpu_pool.get_new_blocks(2)
+    mamba_blocks = take_confirmed_blocks(gpu_pool, 2)
     mamba_blocks[1].set_block_hash(
         make_block_hash_with_group_id(req.block_hashes[1], 1)
     )
@@ -3453,7 +3462,7 @@ def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
     attn_blocks = _allocate_cp_gpu_blocks(
         gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
     )
-    mamba_blocks = gpu_pool.get_new_blocks(2)
+    mamba_blocks = take_confirmed_blocks(gpu_pool, 2)
     mamba_blocks[1].set_block_hash(
         make_block_hash_with_group_id(req.block_hashes[1], 1)
     )
@@ -3593,7 +3602,7 @@ def test_qsa_ring_group_is_never_stored_or_loaded() -> None:
     num_blocks = 2
     req = make_request(num_blocks=num_blocks)
     fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
-    ring_block = gpu_pool.get_new_blocks(1)[0]
+    ring_block = take_confirmed_blocks(gpu_pool, 1)[0]
     kv_blocks = KVCacheBlocks(blocks=(fa_blocks, [ring_block]))
     req.num_computed_tokens = num_blocks * BLOCK_SIZE
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
@@ -3620,8 +3629,8 @@ def test_qsa_ring_group_is_never_stored_or_loaded() -> None:
     assert hit_tokens == num_blocks * BLOCK_SIZE
     assert is_async is True
 
-    fa_blocks2 = gpu_pool.get_new_blocks(num_blocks)
-    ring_block2 = gpu_pool.get_new_blocks(1)[0]
+    fa_blocks2 = take_confirmed_blocks(gpu_pool, num_blocks)
+    ring_block2 = take_confirmed_blocks(gpu_pool, 1)[0]
     kv_blocks2 = KVCacheBlocks(blocks=(fa_blocks2, [ring_block2]))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
 

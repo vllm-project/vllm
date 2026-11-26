@@ -6,7 +6,12 @@ import random
 import pytest
 import torch
 
-from tests.v1.core.utils import new_kv_cache_group
+from tests.v1.core.utils import (
+    grant_confirmed_blocks,
+    granted_block_table,
+    new_kv_cache_group,
+    percy_ack_planned_steps,  # noqa: F401
+)
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -32,7 +37,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-pytestmark = pytest.mark.cpu_test
+# Percy M2: these tests drive KV cache managers directly, with no processed
+# steps; ack each planned step at once (pre-Percy publish timing).
+pytestmark = [pytest.mark.cpu_test, pytest.mark.usefixtures("percy_ack_planned_steps")]
 
 
 def test_external_computed_blocks_do_not_corrupt_free_pool():
@@ -93,7 +100,7 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
     block = block_pool.get_new_blocks(1)[0]
     blocks = [block]
 
-    manager._relocate_speculative_block(blocks, 0)
+    manager._relocate_speculative_block("req", blocks, 0)
 
     assert blocks == [block_pool.null_block, block]
     assert block.ref_cnt == 1
@@ -101,7 +108,7 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
     pinned_block = block_pool.get_new_blocks(1)[0]
     block_pool.touch((pinned_block,))
     with pytest.raises(AssertionError, match="exclusively owned and unhashed"):
-        manager._relocate_speculative_block([pinned_block], 0)
+        manager._relocate_speculative_block("req", [pinned_block], 0)
 
 
 def test_mamba_retirement_crosses_null_gaps():
@@ -960,10 +967,7 @@ def test_chunked_local_attention_remove_skipped_blocks():
     null_block_id = block_pool.null_block.block_id
 
     def id_to_block_table(ids) -> list[KVCacheBlock]:
-        return [
-            KVCacheBlock(id_) if id_ != null_block_id else block_pool.null_block
-            for id_ in ids
-        ]
+        return granted_block_table(block_pool, ids)
 
     def assert_block_id(block_table: list[KVCacheBlock], ids: list[int]):
         for block, id_ in zip(block_table, ids):
@@ -1018,10 +1022,7 @@ def test_sliding_window_remove_skipped_blocks():
     null_block_id = block_pool.null_block.block_id
 
     def id_to_block_table(ids) -> list[KVCacheBlock]:
-        return [
-            KVCacheBlock(id_) if id_ != null_block_id else block_pool.null_block
-            for id_ in ids
-        ]
+        return granted_block_table(block_pool, ids)
 
     def assert_block_id(block_table: list[KVCacheBlock], ids: list[int]):
         for block, id_ in zip(block_table, ids):
@@ -1097,10 +1098,7 @@ def test_rswa_remove_skipped_blocks_gap_range():
 
     null_block_id = block_pool.null_block.block_id
     original_block_ids = list(range(1000, 1010))
-    block_table = [
-        KVCacheBlock(id_) if id_ != null_block_id else block_pool.null_block
-        for id_ in original_block_ids
-    ]
+    block_table = granted_block_table(block_pool, original_block_ids)
     manager.req_to_blocks["test"] = block_table
 
     prefix_len = 16
@@ -1170,7 +1168,17 @@ def test_evictable_cached_blocks_not_double_allocated():
     manager = get_sliding_window_manager(sliding_window_spec, block_pool)
 
     request_id = "req"
-    evictable_block = block_pool.blocks[1]  # ref_cnt == 0, eviction candidate
+    # A published, released block: ref_cnt == 0, an eviction candidate. Percy
+    # refuses prefix hits on free blocks that were never published.
+    [evictable_block] = grant_confirmed_blocks(block_pool, 1, block_size)
+    assert block_pool.grant_table.publish([evictable_block.block_id])
+    block_pool._insert_block_hash(
+        make_block_hash_with_group_id(BlockHash(b"evictable"), 0),
+        evictable_block,
+        num_tokens=block_size,
+    )
+    block_pool.free_blocks([evictable_block])
+    assert evictable_block.ref_cnt == 0
 
     num_blocks_to_allocate = manager.get_num_blocks_to_allocate(
         request_id=request_id,

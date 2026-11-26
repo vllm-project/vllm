@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import MockKVConfig
@@ -503,3 +504,90 @@ def get_kv_cache_configs(
         available_memory,
         kv_cache_planning.get_global_kv_cache_groups(vllm_config, layer_configs),
     )
+
+
+def grant_confirmed_blocks(pool, num_blocks: int, block_size: int, group: int = 0):
+    """Grant `num_blocks` blocks of `group` with every slot confirmed, as a
+    processed step's acks leave them. Percy only publishes confirmed slots
+    (I3, I8), so raw-pool tests that cache blocks start from these."""
+    pool.grant_table.set_group_block_size(group, block_size)
+    pool.make_room(num_blocks)
+    blocks = pool.get_new_blocks(num_blocks, group=group)
+    pool.grant_table.confirm_valid([b.block_id for b in blocks], block_size)
+    return blocks
+
+
+def granted_block_table(pool, ids: list[int]):
+    """A block table whose entries the pool actually granted (Percy refuses to
+    release blocks it never handed out). Takes every block up to `max(ids)`
+    from the fresh pool's id-ordered free queue and picks the ones in `ids`."""
+    null_id = pool.null_block.block_id
+    held = pool.get_new_blocks(max(i for i in ids if i != null_id))
+    assert all(block.block_id == i + 1 for i, block in enumerate(held))
+    return [pool.null_block if i == null_id else held[i - 1] for i in ids]
+
+
+def take_blocks(pool, num_blocks: int, group: int = 0):
+    """`get_new_blocks` preceded by the eviction call Percy keeps separate
+    (`make_room`): a cached block is never evicted and re-granted at once."""
+    pool.make_room(num_blocks)
+    return pool.get_new_blocks(num_blocks, group=group)
+
+
+def confirm_slots(pool, blocks, block_size: int) -> None:
+    """Confirm every slot of `blocks`, as a processed step's acks would, so
+    they may be published (Percy I3, I8)."""
+    pool.grant_table.confirm_valid(
+        [b.block_id for b in blocks if not b.is_null], block_size
+    )
+
+
+def take_confirmed_blocks(pool, num_blocks: int, group: int = 0):
+    """`take_blocks` for blocks that stand for computed KV: every slot is
+    confirmed, so the blocks may be published like the manager's."""
+    blocks = take_blocks(pool, num_blocks, group)
+    confirm_slots(pool, blocks, pool.grant_table.block_size_of(group))
+    return blocks
+
+
+@pytest.fixture
+def percy_ack_planned_steps(monkeypatch):
+    """Ack each planned step at once, as if it were processed (Percy M2).
+
+    Percy publishes a block only after a processed step confirms its slots
+    (I3, I8). Tests that drive KV cache managers directly have no processed
+    steps, so this confirms the tokens a manager is asked to cache right
+    before it caches them -- the pre-Percy timing. Scheduler-level tests that
+    process outputs must not use it.
+    """
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.core.kv_cache_utils import get_group_id
+    from vllm.v1.core.single_type_kv_cache_manager import (
+        SingleTypeKVCacheManager,
+    )
+
+    original = SingleTypeKVCacheManager.cache_blocks
+
+    def cache_blocks(self, request, num_tokens, *args, **kwargs):
+        self.confirm_tokens(request.request_id, 0, num_tokens)
+        return original(self, request, num_tokens, *args, **kwargs)
+
+    original_allocate = KVCacheManager.allocate_slots
+
+    def allocate_slots(self, request, *args, **kwargs):
+        blocks = original_allocate(self, request, *args, **kwargs)
+        # The step, and the CoW copies it runs, are processed at once. Like
+        # pre-Percy live moved entries, they stay hidden from same-step hits.
+        for pool in self._pools():
+            for hashes in pool._flush_pending_cow(processed_seq=2**62):
+                for manager in self.coordinator.single_type_managers:
+                    if hasattr(manager, "cached_blocks_this_step"):
+                        manager.cached_blocks_this_step.update(
+                            h
+                            for h in hashes
+                            if get_group_id(h) == manager.kv_cache_group_id
+                        )
+        return blocks
+
+    monkeypatch.setattr(SingleTypeKVCacheManager, "cache_blocks", cache_blocks)
+    monkeypatch.setattr(KVCacheManager, "allocate_slots", allocate_slots)

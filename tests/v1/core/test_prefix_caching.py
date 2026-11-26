@@ -84,9 +84,17 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
-from .utils import mamba_layer, new_kv_cache_group, sliding_window_layer
+from .utils import (
+    grant_confirmed_blocks,
+    mamba_layer,
+    new_kv_cache_group,
+    percy_ack_planned_steps,  # noqa: F401
+    sliding_window_layer,
+)
 
-pytestmark = pytest.mark.cpu_test
+# Percy M2: these tests drive KV cache managers directly, with no processed
+# steps; ack each planned step at once (pre-Percy publish timing).
+pytestmark = [pytest.mark.cpu_test, pytest.mark.usefixtures("percy_ack_planned_steps")]
 
 
 def _swa_layer(sliding_window: int, **spec_kwargs) -> KVCacheLayerConfig:
@@ -1858,6 +1866,7 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     )
     # Adopting a copy took it out of the free blocks; the rest stay allocatable.
     pool = manager.block_pool
+    pool.make_room(pool.get_num_free_blocks())  # Percy: evict, then grant
     taken = pool.get_new_blocks(pool.get_num_free_blocks())
     assert len({block.block_id for block in taken}) == len(taken)
     assert all(block.ref_cnt == 1 for block in taken)
@@ -2011,6 +2020,7 @@ def test_hisparse_finished_request_leaves_free_copies():
     assert coordinator.copies
     pool = manager.block_pool
     assert pool.get_num_free_blocks() == pool.num_gpu_blocks - 1
+    pool.make_room(pool.get_num_free_blocks())  # Percy: evict, then grant
     pool.get_new_blocks(pool.get_num_free_blocks())
     assert not coordinator.copies
     assert not coordinator.spills_to_send
@@ -3692,7 +3702,9 @@ def test_cache_blocks(hash_fn):
     req = make_request("0", list(range(14)), block_size, hash_fn)
 
     # Test that blocks are cached correctly for 2 full blocks from the start.
-    blocks = [KVCacheBlock(block_id=i) for i in range(2)]
+    # Percy: only granted blocks with confirmed slots may be published.
+    blocks = grant_confirmed_blocks(block_pool, 3, block_size)
+    extra_block = blocks.pop()
 
     block_pool.cache_full_blocks(
         request=req,
@@ -3708,7 +3720,7 @@ def test_cache_blocks(hash_fn):
 
     # Test that blocks that don't start from the beginning are cached
     # correctly.
-    blocks += [KVCacheBlock(block_id=2)]
+    blocks += [extra_block]
     block_pool.cache_full_blocks(
         request=req,
         blocks=blocks,
@@ -3736,7 +3748,8 @@ def test_cache_blocks_multi_group():
     req = make_request("0", list(range(14)), block_size, sha256)
 
     # Cache the blocks for group 0.
-    blocks = [KVCacheBlock(block_id=i) for i in range(2)]
+    # Percy: each group publishes its own granted, confirmed blocks.
+    blocks = grant_confirmed_blocks(block_pool, 2, block_size, group=0)
     block_pool.cache_full_blocks(
         request=req,
         blocks=blocks,
@@ -3750,7 +3763,7 @@ def test_cache_blocks_multi_group():
     assert all([block.block_hash is not None for block in blocks])
 
     # Cache the blocks for group 1.
-    blocks = [KVCacheBlock(block_id=i) for i in range(3)]
+    blocks = grant_confirmed_blocks(block_pool, 3, block_size, group=1)
     block_pool.cache_full_blocks(
         request=req,
         blocks=blocks,
@@ -4274,7 +4287,9 @@ def test_null_parent_block_hash():
     # Physical parent is `null_block` (no hash), while the logical parent hash
     # still exists in `request.block_hashes[num_cached_blocks - 1]`.
     assert pool.null_block.block_hash is None
-    new_blocks = pool.get_new_blocks(num_full_blocks - 1)
+    new_blocks = grant_confirmed_blocks(
+        pool, num_full_blocks - 1, block_size, kv_cache_group_id
+    )
     blocks: list[Any] = [
         new_blocks[: num_cached_blocks - 1],
         pool.null_block,  # physical parent
@@ -4641,7 +4656,7 @@ def test_block_removed_event_group_idx(group_id: int):
     )
 
     # Allocate all usable blocks and cache the first two for the target group.
-    all_blocks = pool.get_new_blocks(4)
+    all_blocks = grant_confirmed_blocks(pool, 4, block_size, group_id)
     pool.cache_full_blocks(
         request=req,
         blocks=all_blocks,
@@ -4658,6 +4673,7 @@ def test_block_removed_event_group_idx(group_id: int):
     pool.free_blocks(all_blocks)
 
     # Re-allocate all blocks; the two with hashes trigger BlockRemoved events.
+    pool.make_room(4)  # Percy: eviction is its own call, before the grant
     pool.get_new_blocks(4)
 
     events = pool.take_events()
@@ -6170,12 +6186,7 @@ def test_cache_hit_local_and_external():
         hash_block_size=block_size,
     )
 
-    top_blocks = []
-    head = manager.block_pool.free_block_queue.fake_free_list_head
-    for _ in range(10):
-        top_blocks.append(head.next_free_block)
-        head = head.next_free_block
-    cache_hit = KVCacheBlocks((top_blocks[:5], top_blocks[5:]))
+    cache_hit = KVCacheBlocks(tuple(_stage_cached_hit_blocks(manager, 2, 5)))
 
     manager.allocate_slots(
         make_request(req_id, [0] * (8 * block_size), block_size, sha256),
@@ -6192,18 +6203,29 @@ def test_cache_hit_local_and_external():
     assert len(set(all_block_ids)) == len(all_block_ids), "Block IDs are not unique"
 
 
-def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheBlock]:
-    """Grab the first `num_blocks` blocks at the head of the free queue
-    without removing them. These ref_cnt==0 blocks stand in for evictable
-    cache-hit blocks left behind by a previous (e.g. preempted) request, and
-    sitting at the head guarantees a later group's external `get_new_blocks`
-    would contend for them on unpatched code (issue #33775)."""
-    blocks: list[KVCacheBlock] = []
-    head = manager.block_pool.free_block_queue.fake_free_list_head
-    for _ in range(num_blocks):
-        head = head.next_free_block
-        blocks.append(head)
-    return blocks
+def _stage_cached_hit_blocks(
+    manager: KVCacheManager, num_groups: int, blocks_per_group: int
+) -> list[list[KVCacheBlock]]:
+    """Leave `blocks_per_group` cached-idle blocks per group at the head of the
+    free queue. They stand in for evictable cache-hit blocks left behind by a
+    previous (e.g. preempted) request, and sitting at the head guarantees a
+    later group's external allocation would contend for them on unpatched
+    code (issue #33775). Percy refuses prefix hits on free blocks that were
+    never published, so the stand-ins are published, then released."""
+    pool = manager.block_pool
+    staged: list[list[KVCacheBlock]] = []
+    for group in range(num_groups):
+        block_size = manager.coordinator.single_type_managers[group].block_size
+        blocks = grant_confirmed_blocks(pool, blocks_per_group, block_size, group)
+        assert pool.grant_table.publish([b.block_id for b in blocks])
+        for block in blocks:
+            key = BlockHash(f"staged-{block.block_id}".encode())
+            pool._insert_block_hash(
+                make_block_hash_with_group_id(key, group), block, num_tokens=None
+            )
+        staged.append(blocks)
+    pool.free_blocks([b for blocks in staged for b in blocks], evict_first=True)
+    return staged
 
 
 def _assert_no_double_allocation(manager: KVCacheManager, req_id: str) -> None:
@@ -6237,12 +6259,8 @@ def _cross_group_cache_hit(
     (connector) computed tokens, driving the coordinator's two-phase path.
     Returns the allocated request so callers can free it (e.g. to preempt)."""
     block_size = _two_phase_block_size(manager)
-    hit_blocks = _take_free_blocks(manager, num_groups * local_blocks_per_group)
     cache_hit = KVCacheBlocks(
-        tuple(
-            hit_blocks[i * local_blocks_per_group : (i + 1) * local_blocks_per_group]
-            for i in range(num_groups)
-        )
+        tuple(_stage_cached_hit_blocks(manager, num_groups, local_blocks_per_group))
     )
     prompt_blocks = local_blocks_per_group + num_external_blocks + num_new_blocks
     request = make_request(

@@ -527,6 +527,10 @@ def test_no_spurious_prefix_caching():
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 1
     assert _num_waiting_requests(scheduler) == 1
+    # Percy M2: the local blocks are published once their step is processed.
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request_local])
+    )
 
     local_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
         0

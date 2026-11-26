@@ -643,7 +643,13 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
     first, second = create_requests(num_requests=2, num_tokens=80, same_prompt=True)
     if not external_tokens:
         scheduler.add_request(first)
-        scheduler.schedule()
+        first_output = scheduler.schedule()
+        # Percy M2: the first request's KV is published once its step is
+        # processed; then it is aborted.
+        scheduler.update_from_output(
+            first_output,
+            ModelRunnerOutput(req_ids=[first.request_id], sampled_token_ids=[[0]]),
+        )
         scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
     connector = _aux_output_connector(scheduler)
     connector.max_cache_hit = Mock(  # type: ignore[method-assign]
@@ -705,7 +711,14 @@ def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
     first, second, third = create_requests(num_requests=3, num_tokens=64)
     for request in (first, second):
         scheduler.add_request(request)
-        scheduler.schedule()
+        output = scheduler.schedule()
+        # Percy M2: blocks are published once their step is processed (an
+        # abort before that would release them unconfirmed), then aborted. The
+        # step reports no sample, so it emits no output to attach routing to.
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+        )
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
 
     scheduler.add_request(third)
@@ -896,8 +909,8 @@ def test_scheduler_stats_route_to_existing_output_client():
 
 def test_scheduler_publishes_lookahead_blocks_at_allocation():
     """A lookahead block is published once its lookahead token exists: prompt
-    blocks at their own allocation, the block ending at the first sampled
-    token at the allocation after it is sampled."""
+    blocks once their step is processed (Percy M2: publish on ack), the block
+    ending at the first sampled token at the allocation after it is sampled."""
     block_size = 2
     init_none_hash(sha256)
     scheduler = create_scheduler(
@@ -922,8 +935,8 @@ def test_scheduler_publishes_lookahead_blocks_at_allocation():
     request = make_request("first", [0, 1, 2, 3])
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
-    # Block [2, 4) waits for its lookahead token, the first sampled one.
-    assert num_cached_tokens([0, 1, 2, 3, 5, 7]) == block_size
+    # Percy M2: nothing is published before the step is processed.
+    assert num_cached_tokens([0, 1, 2, 3, 5, 7]) == 0
 
     scheduler.update_from_output(
         scheduler_output,
@@ -932,6 +945,8 @@ def test_scheduler_publishes_lookahead_blocks_at_allocation():
             sampled_token_ids=[[5]],
         ),
     )
+    # Block [2, 4) waits for its lookahead token, the first sampled one.
+    assert num_cached_tokens([0, 1, 2, 3, 5, 7]) == block_size
     scheduler.schedule()
     assert num_cached_tokens([0, 1, 2, 3, 5, 7]) == 2 * block_size
     assert num_cached_tokens([0, 1, 2, 3, 6, 7]) == block_size
@@ -1121,6 +1136,11 @@ def test_streaming_lookahead_hashes_follow_recomputed_kv(recovery):
     output = scheduler.schedule()
     assert session.block_hashes == current.block_hashes
     assert output.num_scheduled_tokens[session.request_id] == session.num_tokens
+    # Percy M2: the recomputed KV is published once its step is processed.
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(req_ids=[session.request_id], sampled_token_ids=[[7]]),
+    )
     new_blocks, hit_tokens, _ = manager.get_computed_blocks(current)
     assert hit_tokens == block_size
     old_blocks, old_hit_tokens, _ = manager.get_computed_blocks(old_probe)
@@ -2736,12 +2756,14 @@ def test_preempt_during_execution():
     )
     scheduler.update_from_output(scheduler_output0, model_runner_output0)
 
-    # Schedule the first request again. This will cause the preemption
-    # of the second request because the KV cache is full.
-    _ = scheduler.schedule()
-    assert len(scheduler.running) == 1
-    assert scheduler.running[0] == requests[0]
-    assert requests[1].status == RequestStatus.PREEMPTED
+    # The KV cache is full, but the second request's prefill (step 2) is
+    # still in flight writing its blocks: they would drain only once step 2
+    # is processed (Percy step ledger), so preempting it now frees nothing
+    # and the first request waits instead of taking blocks a step still
+    # writes.
+    scheduler_output2 = scheduler.schedule()
+    assert requests[0].request_id not in scheduler_output2.num_scheduled_tokens
+    assert requests[1].status == RequestStatus.RUNNING
 
     model_runner_output1 = ModelRunnerOutput(
         req_ids=[requests[1].request_id],
@@ -2752,10 +2774,16 @@ def test_preempt_during_execution():
     )
     scheduler.update_from_output(scheduler_output1, model_runner_output1)
 
-    # The second request (that is preempted) should be updated with the
-    # sampled token id.
+    # The second request's in-flight output is delivered.
     assert len(requests[1].output_token_ids) == 1
     assert requests[1].output_token_ids[0] == 42
+
+    # Step 2 is processed: preempting the second request now frees its
+    # blocks for the first one.
+    _ = scheduler.schedule()
+    assert len(scheduler.running) == 1
+    assert scheduler.running[0] == requests[0]
+    assert requests[1].status == RequestStatus.PREEMPTED
 
 
 def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
@@ -2873,11 +2901,23 @@ def test_preemption_of_aborted_request_is_counted():
     scheduler.add_request(first)
     first_output = scheduler.schedule()
     scheduler.add_request(second)
-    scheduler.schedule()
+    second_output = scheduler.schedule()
     scheduler.update_from_output(
         first_output,
         ModelRunnerOutput(
             req_ids=[first.request_id],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    # The second request's blocks drain only once its prefill step is
+    # processed (Percy step ledger), so it is preempted after that.
+    scheduler.update_from_output(
+        second_output,
+        ModelRunnerOutput(
+            req_ids=[second.request_id],
             sampled_token_ids=[[0]],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -4171,9 +4211,9 @@ def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring):
 
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
-    # No external hit; suffix scoring still reuses the local blocks plain just
-    # loaded, up to prompt_logprob_start.
-    expected = BLOCK_SIZE * 3 if suffix_scoring else BLOCK_SIZE * 4
+    # No external hit for scoring. Percy M2: the blocks plain loads in this
+    # same step are unconfirmed until it is processed, so they are not reused.
+    expected = BLOCK_SIZE * 4
     assert output.num_scheduled_tokens[scoring.request_id] == expected
 
 
@@ -5600,7 +5640,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
-    scheduler.defer_block_free = False
+    # Percy step ledger (the stub skips __init__).
+    scheduler.sched_step_seq = scheduler.processed_step_seq = 0
+    scheduler.deferred_loads = {}
     scheduler.num_spec_tokens = 0
     scheduler.has_mamba_layers = False
     scheduler.make_stats = Mock(return_value=None)  # type: ignore[method-assign]
@@ -8985,6 +9027,8 @@ def _seed_hybrid_prefix(
             fill, block_size, new_computed_blocks=computed_blocks if i == 0 else None
         )
         fill.num_computed_tokens += block_size
+        # Percy M2: the step is processed, acking its KV.
+        manager.confirm_computed_tokens(fill, fill.num_computed_tokens)
         fa_ids, group_mamba_ids = manager.get_block_ids(fill.request_id)
         mamba_ids.append(group_mamba_ids[i])
     manager.free(fill)

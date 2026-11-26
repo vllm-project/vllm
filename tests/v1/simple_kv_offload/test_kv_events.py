@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.v1.core.utils import take_confirmed_blocks
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
@@ -447,7 +448,7 @@ def test_secondary_hash_block_stored_metadata() -> None:
         block_hasher=get_request_block_hasher(BLOCK_SIZE // 2, sha256),
     )
     req.num_computed_tokens = BLOCK_SIZE
-    gpu_block = fix.gpu_block_pool.get_new_blocks(1)[0]
+    gpu_block = take_confirmed_blocks(fix.gpu_block_pool, 1)[0]
     primary_hash = make_block_hash_with_group_id(req.block_hashes[1], 0)
     secondary_hash = make_block_hash_with_group_id(req.block_hashes[0], 0)
     fix.gpu_block_pool._insert_block_hash(
@@ -471,7 +472,7 @@ def test_secondary_hash_block_stored_metadata() -> None:
     assert block_meta is not None
     assert set(block_meta[0]) == {primary_hash, secondary_hash}
 
-    cpu_block = sched.cpu_block_pool.get_new_blocks(1)[0]
+    cpu_block = take_confirmed_blocks(sched.cpu_block_pool, 1)[0]
     sched._process_store_completion(
         gpu_block_ids,
         [cpu_block.block_id],
@@ -551,7 +552,7 @@ def test_lazy_store_emits_block_stored() -> None:
     # Allocate, hash, free -> hashed blocks in free queue.
     req = make_request(num_blocks=2)
     gpu_blocks = []
-    for blk in gpu_pool.get_new_blocks(2):
+    for blk in take_confirmed_blocks(gpu_pool, 2):
         gpu_blocks.append(blk)
     gpu_pool.cache_full_blocks(
         request=req,
@@ -565,7 +566,7 @@ def test_lazy_store_emits_block_stored() -> None:
 
     # Push hashed blocks to LRU head (8 total - 1 null = 7 usable; 2 freed
     # hashed + 5 other free -> consume 5 fillers).
-    fillers = gpu_pool.get_new_blocks(5)
+    fillers = take_confirmed_blocks(gpu_pool, 5)
 
     meta = sched.build_connector_meta(make_scheduler_output({}))
     assert meta.store_event >= 0
@@ -643,8 +644,8 @@ def test_mamba_block_size_not_scaled() -> None:
     cpu_pool = sched.cpu_block_pool
     gpu_pool = fix.gpu_block_pool
 
-    cpu_blk = cpu_pool.get_new_blocks(1)[0]
-    gpu_blk = gpu_pool.get_new_blocks(1)[0]
+    cpu_blk = take_confirmed_blocks(cpu_pool, 1)[0]
+    gpu_blk = take_confirmed_blocks(gpu_pool, 1)[0]
 
     raw_hash = make_request(num_blocks=1).block_hashes[0]
     mamba_hash = make_block_hash_with_group_id(raw_hash, group_id=1)
@@ -690,8 +691,8 @@ def test_multi_group_fa_block_stored_group_idx() -> None:
 
     # Store one block for each group via direct _process_store_completion.
     for gidx in (0, 1):
-        cpu_blk = cpu_pool.get_new_blocks(1)[0]
-        gpu_blk = gpu_pool.get_new_blocks(1)[0]
+        cpu_blk = take_confirmed_blocks(cpu_pool, 1)[0]
+        gpu_blk = take_confirmed_blocks(gpu_pool, 1)[0]
         gpu_blk.block_hash = make_block_hash_with_group_id(raw_hash, group_id=gidx)
         sched._process_store_completion(
             gpu_block_ids=[gpu_blk.block_id],
@@ -809,7 +810,7 @@ def test_scratch_group_store_emits_events_for_cacheable_groups_only() -> None:
 
     req = make_request(num_blocks=num_blocks)
     fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
-    scratch_block = gpu_pool.get_new_blocks(1)
+    scratch_block = take_confirmed_blocks(gpu_pool, 1)
     kv_blocks = KVCacheBlocks(blocks=(fa_blocks, scratch_block))
     req.num_computed_tokens = num_blocks * BLOCK_SIZE
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)

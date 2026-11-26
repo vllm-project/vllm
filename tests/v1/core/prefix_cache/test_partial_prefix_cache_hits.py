@@ -12,7 +12,11 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
-from tests.v1.core.utils import new_kv_cache_group
+from tests.v1.core.utils import (
+    grant_confirmed_blocks,
+    new_kv_cache_group,
+    percy_ack_planned_steps,  # noqa: F401
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
@@ -38,6 +42,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_reusable_prefix_length,
 )
+
+# Percy M2: these tests drive KV cache managers directly, with no processed
+# steps; ack each planned step at once (pre-Percy publish timing).
+pytestmark = pytest.mark.usefixtures("percy_ack_planned_steps")
 
 
 @pytest.fixture(autouse=True)
@@ -1844,7 +1852,7 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
         sha256,
     )
 
-    full_blocks = pool.get_new_blocks(3)
+    full_blocks = grant_confirmed_blocks(pool, 3, block_size, 0)
     pool.cache_full_blocks(
         request=req,
         blocks=full_blocks,
@@ -1861,7 +1869,7 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
         block_size=block_size,
     )
 
-    mamba_block = pool.get_new_blocks(1)[0]
+    mamba_block = grant_confirmed_blocks(pool, 1, block_size, 1)[0]
     pool.cache_partial_block(
         request=req,
         block=mamba_block,
@@ -1928,40 +1936,31 @@ def test_cow_retained_blocks_returned_for_release():
     manager.block_pool.free_blocks(retained)
 
 
-def test_free_cow_retained_blocks_defers_until_copy_step_processed():
-    """Scheduler releases CoW retentions immediately when the copy's step has
-    been processed (or deferral is off), and defers them otherwise."""
-    from collections import deque
-
+def test_free_cow_retained_blocks_stamps_copy_step():
+    """Scheduler releases CoW retentions at once, stamped with the step that
+    runs the copy: the GrantTable keeps the endpoints DRAINING until that step
+    is processed (see test_cow_retentions_deferred_until_copy_step_processed
+    for the withholding itself)."""
     freed: list = []
+    stamps: list = []
+
+    def free_blocks(blocks, step_seq=None):
+        freed.extend(blocks)
+        stamps.append(step_seq)
+
     blocks = [SimpleNamespace(block_id=7), SimpleNamespace(block_id=9)]
     mock = SimpleNamespace(
         kv_cache_manager=SimpleNamespace(
-            block_pool=SimpleNamespace(free_blocks=freed.extend)
+            block_pool=SimpleNamespace(free_blocks=free_blocks)
         ),
-        deferred_frees=deque(),
-        defer_block_free=True,
         processed_step_seq=2,
     )
     free = Scheduler._free_cow_retained_blocks
 
-    # Copy step still in flight: deferred with its fence.
-    free(mock, list(blocks), fence_seq=3)
-    assert not freed
-    assert mock.deferred_frees == deque([(3, blocks[::-1])])
-
-    # Copy step processed: freed immediately.
-    mock.processed_step_seq = 3
+    # Copy step still in flight: released now, stamped with its step.
     free(mock, list(blocks), fence_seq=3)
     assert freed == blocks
-
-    # Deferral disabled: freed immediately regardless of the fence.
-    freed.clear()
-    mock.deferred_frees.clear()
-    mock.defer_block_free = False
-    mock.processed_step_seq = 0
-    free(mock, list(blocks), fence_seq=3)
-    assert freed == blocks
+    assert stamps == [3]
 
 
 def test_full_attention_keeps_proven_partial_hash_boundary():
@@ -1990,7 +1989,7 @@ def test_full_attention_keeps_proven_partial_hash_boundary():
             alignment_tokens=hash_block_size,
         )
 
-    blocks = pool.get_new_blocks(2)
+    blocks = grant_confirmed_blocks(pool, 2, block_size, 0)
     pool.cache_full_blocks(
         request=req,
         blocks=blocks,
@@ -2005,7 +2004,7 @@ def test_full_attention_keeps_proven_partial_hash_boundary():
     pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=hash_block_size
     )
-    blocks = pool.get_new_blocks(2)
+    blocks = grant_confirmed_blocks(pool, 2, block_size, 0)
     pool.cache_full_blocks(
         request=req,
         blocks=blocks[:1],

@@ -757,7 +757,11 @@ class HiSparseCoordinator:
         pages = pages[: max(spare, 0) // num_managers]
         if not pages:
             return []
-        blocks = self.gpu_pool.get_new_blocks(len(pages) * num_managers)
+        num_blocks = len(pages) * num_managers
+        self.gpu_pool.make_room(num_blocks)
+        blocks = self.gpu_pool.get_new_blocks(
+            num_blocks, owner=self.gpu_pool.system_owner("hisparse")
+        )
         for slot, manager in enumerate(self.resident_managers):
             adopted = manager.adopt_resident_pages(
                 request_id, pages, blocks[slot::num_managers]
@@ -1062,6 +1066,17 @@ class HiSparseCoordinator:
             state.ready_prefix_pages += 1
         # The host group uses full-attention retention. Only sealed pages with
         # completed copies can outlive the request, including on cancellation.
+        # A completed copy is the ack that confirms the page's slots.
+        num_full = min(state.ready_prefix_pages, publication.num_pages)
+        host_pool = self.host_manager.block_pool
+        host_pool.grant_table.confirm_valid(
+            [
+                b.block_id
+                for b in blocks[publication.num_cached_blocks : num_full]
+                if not b.is_null
+            ],
+            self.host_manager.block_size,
+        )
         self.host_manager.block_pool.cache_full_blocks(
             request=publication.request,
             blocks=blocks,

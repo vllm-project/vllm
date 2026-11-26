@@ -4909,9 +4909,10 @@ def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
     state = offloading._req_status[request_a.request_id]
     key = state.group_states[0].offload_keys[0]
     block = scheduler.kv_cache_manager.get_blocks(request_a.request_id).blocks[0][0]
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    # Percy M2: the block is published once its step is processed.
     block_id, block_hash = block.block_id, block.block_hash
     assert block_hash is not None
-    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
     assert manager.lookup(key, state.req_context) is LookupResult.HIT_PENDING
 
     scheduler.finish_requests(request_a.request_id, RequestStatus.FINISHED_STOPPED)

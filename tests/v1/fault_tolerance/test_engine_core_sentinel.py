@@ -78,3 +78,18 @@ def test_drain_batch_queue_clears_deferred_step():
     sentinel._drain_batch_queue()
 
     assert sentinel.engine.deferred_step is None
+
+
+def test_drain_batch_queue_retires_abandoned_steps():
+    """Steps dropped from the queue never report their output, so the Percy
+    step ledger must retire them, or the blocks they used stay DRAINING."""
+    batch_queue = deque([(_done_future(exception=RuntimeError("boom")), None, None)])
+    sentinel, scheduler = _make_sentinel(batch_queue)
+    sentinel._drain_batch_queue()
+    scheduler.retire_inflight_steps.assert_called_once_with()
+
+    # Synchronous engine (no batch queue): the failed step is abandoned too.
+    sentinel, scheduler = _make_sentinel(deque())
+    sentinel.engine.batch_queue = None
+    sentinel._drain_batch_queue()
+    scheduler.retire_inflight_steps.assert_called_once_with()

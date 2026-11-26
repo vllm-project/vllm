@@ -98,9 +98,13 @@ def test_no_spec_decode_padding_up_to_max_model_len():
         num_requests=1, num_tokens=max_model_len - num_spec, req_ids=["boundary"]
     )
     request.num_computed_tokens = request.num_tokens - 1
+    loaded_tokens = request.num_computed_tokens
     scheduler.add_request(request)
 
     sched_output = scheduler.schedule()
+    # Percy M2: on a real decode worker that prefix arrives by a KV load, whose
+    # completion acks it; ack it here so the decode step extends it.
+    scheduler.kv_cache_manager.cache_blocks(request, loaded_tokens)
     assert sched_output.num_scheduled_tokens["boundary"] == 1
     assert "boundary" not in sched_output.scheduled_spec_decode_tokens
     assert request.num_computed_tokens < max_model_len
@@ -198,14 +202,12 @@ def test_prefix_caching_for_prefill_dedup():
     sched_outputs: deque[SchedulerOutput] = deque()
     sched_output = scheduler.schedule()
     sched_outputs.append(sched_output)
-    # Make sure prefix caching de-duplicates the prompts in the same step,
-    # so all the blocks except the last are shared between the two requests.
+    # Percy M2: a block is published only once the step writing it is
+    # processed, so two requests with the same prompt in one step do not
+    # share blocks; requests arriving after that step do (below).
     assert len(sched_output.num_scheduled_tokens) == 2
     assert sched_output.num_scheduled_tokens[req0.request_id] == num_prompt_tokens
-    assert (
-        sched_output.num_scheduled_tokens[req1.request_id]
-        == num_prompt_tokens % BLOCK_SIZE
-    )
+    assert sched_output.num_scheduled_tokens[req1.request_id] == num_prompt_tokens
 
     sched_outputs.append(scheduler.schedule())
     while sched_outputs:
@@ -323,7 +325,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
-    scheduler.defer_block_free = False
+    # Percy step ledger (the stub skips __init__).
+    scheduler.sched_step_seq = scheduler.processed_step_seq = 0
+    scheduler.deferred_loads = {}
     scheduler.num_spec_tokens = 0
     scheduler.make_stats = Mock(return_value=None)  # type: ignore[method-assign]
     scheduler.max_model_len = 128
@@ -579,14 +583,14 @@ def test_no_steps_past_max_tokens_with_deep_batch_queue(
 
 @pytest.mark.parametrize("num_spec", [0, 3])
 def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
-    """KV-pressure preemption of requests with in-flight async output.
+    """KV pressure with in-flight async output.
 
     PP=3 + async scheduling (batch queue of 4), a block pool small enough
-    that decodes contend and preempt mid-flight, and staggered arrivals so
-    the batch queue actually pipelines. A preempted request's in-flight steps
-    still return: their tokens must be delivered exactly once, their stale
-    spec-rejection counts must not corrupt the rolled-back counters, and the
-    resume must not resample a position that output later delivers.
+    that decodes contend, and staggered arrivals so the batch queue actually
+    pipelines. Under the Percy step ledger KV pressure never preempts a
+    request whose output is in flight (its blocks cannot drain yet); every
+    token must still be delivered exactly once, in order, and preemptions of
+    processed requests must not corrupt the rolled-back counters.
 
     Regression for the num_output_placeholders underflow EngineCore crash:
     with the fix reverted, the num_spec=3 variant fails with exactly
@@ -602,7 +606,11 @@ def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
     for _ in range(2):
         scheduler.add_request(pending.pop(0))
 
-    # Observe that the scenario under test actually occurs.
+    # Percy step ledger: a request with output in flight was last scheduled
+    # in an unprocessed step, so its blocks cannot drain yet and KV pressure
+    # never preempts it (preempting would free nothing). Its in-flight output
+    # is delivered while it keeps running; the stale-output path stays
+    # covered by the reset_prefix_cache tests, which preempt unconditionally.
     preempts_with_inflight_output = 0
     orig_preempt = scheduler._preempt_request
 
@@ -627,9 +635,7 @@ def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
     )
     engine.run(before_step=add_requests)
 
-    assert preempts_with_inflight_output > 0, (
-        "test did not exercise preemption with in-flight output"
-    )
+    assert preempts_with_inflight_output == 0
     for req in requests:
         assert req.is_finished()
         assert req.num_output_tokens == max_tokens
@@ -654,7 +660,10 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
     accumulated) and stay dropped.
     """
     max_tokens = 24
-    scheduler = _create_async_pp_scheduler(num_spec=3, pp_size=pp_size)
+    # Percy: a preempted request's own blocks drain only once its in-flight
+    # steps are processed, so the same-step resume needs other free blocks;
+    # 16 blocks (15 usable for 8 requests needing 2 each) keep KV pressure.
+    scheduler = _create_async_pp_scheduler(num_spec=3, pp_size=pp_size, num_blocks=16)
     requests = create_requests(
         num_requests=8, num_tokens=8, max_tokens=max_tokens, ignore_eos=True
     )
@@ -728,29 +737,17 @@ def test_requires_kv_delivery_defaults_to_producer_role():
         assert scheduler.requires_kv_delivery is expected, role
 
 
-@pytest.mark.parametrize(
-    ("kv_role", "defer_free"),
-    [
-        ("kv_producer", False),
-        ("kv_consumer", False),
-        ("kv_consumer", True),
-    ],
-)
-def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
+@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer"])
+def test_kv_pressure_preempt_mid_handoff(kv_role: str):
     """P/D race: KV pressure hits while the output of a request's final
     prefill chunk -- the hand-off token that would finish it -- is in flight.
 
-    When the victim's blocks free immediately, the request is preempted. On a
-    producer, that output must be dropped so the request recomputes; delivering
-    it would finish the request and hand off blocks the preemption already
-    freed, so the consumer pulls garbage. A consumer hands nothing off, so it
-    keeps the lossless deliver-stale path.
-
-    A consumer with overlapping batches (async scheduling or PP) instead fences
-    the victim's free behind its in-flight output, so the allocation retry
-    stops instead of preempting; the request then finishes from that output
-    once it lands. The gate depends on the platform (async scheduling is
-    force-disabled on CPU), so force the flag to cover both paths everywhere.
+    The victim's blocks drain only once its in-flight output is processed
+    (Percy step ledger, for producers and consumers alike), so preempting it
+    could not satisfy the allocation: the retry stops instead of preempting,
+    and the request finishes from that output once it lands, handing off real
+    KV. (Before the ledger, an immediate free preempted it here; a producer
+    then had to drop the output, or it would hand off freed blocks.)
     """
     is_producer = kv_role == "kv_producer"
     scheduler = create_scheduler(
@@ -762,9 +759,6 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
         max_num_batched_tokens=512,
     )
     assert scheduler.requires_kv_delivery is is_producer
-    # The production gate requires overlapping batches, which async
-    # scheduling only provides off-CPU.
-    scheduler.defer_block_free = defer_free
 
     # 32-token prompts fill 2 blocks each, exhausting the usable pool, so the
     # next decode allocation targets the tail of the running queue (the
@@ -782,31 +776,17 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
     assert handoff.num_output_placeholders == 1
 
     scheduler.schedule()
-    if defer_free:
-        # The victim's blocks are fenced behind its in-flight output, so
-        # preempting it could not satisfy the allocation; the retry stops
-        # instead of preempting.
-        assert handoff.status == RequestStatus.RUNNING
-        assert handoff.num_stale_output_tokens == 0
-    else:
-        # Blocks free immediately, so the handoff request is preempted.
-        assert handoff.status == RequestStatus.PREEMPTED
-        assert handoff.num_stale_output_tokens == handoff.num_prompt_tokens
-        assert handoff.drop_stale_output is is_producer
+    # The victim's blocks are fenced behind its in-flight output, so
+    # preempting it could not satisfy the allocation; the retry stops
+    # instead of preempting.
+    assert handoff.status == RequestStatus.RUNNING
+    assert handoff.num_stale_output_tokens == 0
 
     scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
 
     assert handoff.num_stale_output_tokens == 0
-    if is_producer:
-        # Dropped: recomputed from the waiting queue, so the hand-off happens
-        # against real KV.
-        assert not handoff.is_finished()
-        assert handoff.status == RequestStatus.PREEMPTED
-        assert handoff.num_output_tokens == 0
-        assert handoff.request_id in scheduler.requests
-    else:
-        assert handoff.is_finished()
-        assert handoff.num_output_tokens == 1
+    assert handoff.is_finished()
+    assert handoff.num_output_tokens == 1
 
 
 def test_resumable_request_handoff():

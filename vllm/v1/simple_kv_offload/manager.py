@@ -666,7 +666,10 @@ class SimpleCPUOffloadScheduler:
 
         # Batch-allocate CPU blocks.
         if gpu_ids:
-            cpu_blocks = cpu_pool.get_new_blocks(len(gpu_ids))
+            cpu_pool.make_room(len(gpu_ids))
+            cpu_blocks = cpu_pool.get_new_blocks(
+                len(gpu_ids), owner=cpu_pool.system_owner("simple_kv_offload")
+            )
             cpu_ids = [blk.block_id for blk in cpu_blocks]
             # Touch GPU blocks to prevent eviction during async copy.
             gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
@@ -738,7 +741,9 @@ class SimpleCPUOffloadScheduler:
             for _, gpu_block_id, _ in entries:
                 stats.published += 1
                 gpu_block = gpu_block_pool.blocks[gpu_block_id]
-                admission = self._classify_store_candidate(gpu_block)
+                admission = self._classify_store_candidate(
+                    gpu_block, allow_pending=True
+                )
                 if admission is _StoreAdmission.NULL_BLOCK:
                     stats.dropped_null_block += 1
                     continue
@@ -758,7 +763,10 @@ class SimpleCPUOffloadScheduler:
                         "the CPU block pool is full; this boundary will not be retried."
                     )
                     continue
-                cpu_block = cpu_block_pool.get_new_blocks(1)[0]
+                cpu_block_pool.make_room(1)
+                cpu_block = cpu_block_pool.get_new_blocks(
+                    1, owner=cpu_block_pool.system_owner("simple_kv_offload")
+                )[0]
                 merged_gpu_block_ids.append(gpu_block_id)
                 merged_cpu_block_ids.append(cpu_block.block_id)
                 if merged_block_meta is not None:
@@ -812,7 +820,11 @@ class SimpleCPUOffloadScheduler:
             # Batch allocate the CPU destinations.
             n_to_alloc = len(gpu_block_ids)
             if n_to_alloc > 0:
-                cpu_blocks_alloc = cpu_block_pool.get_new_blocks(n_to_alloc)
+                cpu_block_pool.make_room(n_to_alloc)
+                cpu_blocks_alloc = cpu_block_pool.get_new_blocks(
+                    n_to_alloc,
+                    owner=cpu_block_pool.system_owner("simple_kv_offload"),
+                )
                 cpu_block_ids = [blk.block_id for blk in cpu_blocks_alloc]
             else:
                 cpu_block_ids = []
@@ -1003,10 +1015,22 @@ class SimpleCPUOffloadScheduler:
 
         return gpu_block_ids, advanced_per_group, block_meta
 
-    def _classify_store_candidate(self, gpu_block: "KVCacheBlock") -> _StoreAdmission:
+    def _classify_store_candidate(
+        self, gpu_block: "KVCacheBlock", allow_pending: bool = False
+    ) -> _StoreAdmission:
         if gpu_block.is_null:
             return _StoreAdmission.NULL_BLOCK
         if gpu_block.block_hash is None:
+            # Percy M2: with `allow_pending`, an entry registered but not acked
+            # yet is stored now (the copy runs after the step writing it) and
+            # cached on the CPU only if its ack has published it by completion.
+            assert self._gpu_block_pool is not None
+            if allow_pending and self._gpu_block_pool.is_publication_pending(
+                gpu_block.block_id
+            ):
+                if gpu_block.block_id in self._in_flight_store_gpu_blocks:
+                    return _StoreAdmission.IN_FLIGHT
+                return _StoreAdmission.READY
             return _StoreAdmission.NOT_HASHED
         if gpu_block.block_id in self._in_flight_store_gpu_blocks:
             return _StoreAdmission.IN_FLIGHT
@@ -1131,10 +1155,19 @@ class SimpleCPUOffloadScheduler:
         cpu_blocks = [self.cpu_block_pool.blocks[bid] for bid in cpu_block_ids]
 
         assert self._gpu_block_pool is not None
+        # The completed copy is the ack: each CPU block holds the GPU block's
+        # confirmed slots.
+        self.cpu_block_pool.grant_table.confirm_valid(
+            cpu_block_ids,
+            [self._gpu_block_pool.grant_table.valid(bid) for bid in gpu_block_ids],
+        )
         for i, (gpu_block_id, cpu_block) in enumerate(zip(gpu_block_ids, cpu_blocks)):
             gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
             primary_hash = gpu_block.block_hash
-            assert primary_hash is not None
+            if primary_hash is None:
+                # Percy M2: the GPU entry was never acked and published, so the
+                # copy holds unconfirmed state: free it uncached.
+                continue
             self.cpu_block_pool._insert_block_hash(
                 primary_hash,
                 cpu_block,
@@ -1312,7 +1345,10 @@ class SimpleCPUOffloadScheduler:
                 block_meta.append({})
         if not gpu_ids:
             return
-        cpu_blocks = self.cpu_block_pool.get_new_blocks(len(gpu_ids))
+        self.cpu_block_pool.make_room(len(gpu_ids))
+        cpu_blocks = self.cpu_block_pool.get_new_blocks(
+            len(gpu_ids), owner=self.cpu_block_pool.system_owner("simple_kv_offload")
+        )
         self._pending_finished_stores.append(
             TransferMeta(gpu_ids, [b.block_id for b in cpu_blocks], block_meta)
         )

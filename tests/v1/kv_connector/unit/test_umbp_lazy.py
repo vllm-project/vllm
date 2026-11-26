@@ -12,7 +12,7 @@ import pytest
 import torch
 
 import vllm.distributed.kv_transfer.kv_connector.v1.umbp.scheduler as umbp_scheduler
-from tests.v1.core.utils import new_kv_cache_group
+from tests.v1.core.utils import confirm_slots, new_kv_cache_group, take_blocks
 from tests.v1.kv_connector.umbp_test_utils import (
     _hybrid_kv_cache_config,
     _kv_cache_config,
@@ -105,6 +105,7 @@ def _request(request_id: str, num_blocks: int, first_token: int = 0) -> Request:
 
 
 def _cache(pool: BlockPool, request: Request, blocks, num_cached: int = 0) -> None:
+    confirm_slots(pool, blocks, _BLOCK_SIZE)  # Percy: publish confirmed slots only
     pool.cache_full_blocks(request, blocks, num_cached, len(blocks), _BLOCK_SIZE, 0)
 
 
@@ -117,7 +118,7 @@ def _finish(
 ) -> list[KVCacheBlock]:
     """Compute `request` into `blocks`, then finish and free it as core does."""
     if blocks is None:
-        blocks = pool.get_new_blocks(len(request.block_hashes))
+        blocks = take_blocks(pool, len(request.block_hashes))
     request.num_computed_tokens = request.num_tokens
     _cache(pool, request, blocks, num_cached)
     scheduler.request_finished(request, ([block.block_id for block in blocks],))
@@ -127,7 +128,7 @@ def _finish(
 
 def _recycle(pool: BlockPool, request: Request) -> KVCacheBlock:
     """Evict the next free block and cache `request`'s first block in it."""
-    [block] = pool.get_new_blocks(1)
+    [block] = take_blocks(pool, 1)
     _cache(pool, request, [block])
     return block
 
@@ -160,13 +161,13 @@ def _take_empty_blocks(pool: BlockPool) -> None:
         for block in pool.free_block_queue.iter_blocks_after(None)
         if block.block_hash is None
     ]
-    pool.get_new_blocks(len(empty))
+    take_blocks(pool, len(empty))
 
 
 def test_lazy_offload_defers_store_until_blocks_enter_free_queue(lazy_scheduler):
     scheduler, pool = lazy_scheduler()
     request = _request("r", 2)
-    blocks = pool.get_new_blocks(2)
+    blocks = take_blocks(pool, 2)
     block_ids = ([block.block_id for block in blocks],)
     scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks,)), 0)
     running = make_scheduler_output(
@@ -195,7 +196,7 @@ def test_lazy_store_pins_blocks_until_the_store_completes(lazy_scheduler):
     assert len(planned) == 2
 
     assert not planned & set(_free_queue(pool))
-    handed_out = pool.get_new_blocks(pool.get_num_free_blocks())
+    handed_out = take_blocks(pool, pool.get_num_free_blocks())
     assert not planned & {block.block_id for block in handed_out}
 
     complete_store(scheduler, metadata.store_event)
@@ -357,7 +358,7 @@ def test_lazy_offload_closes_full_attention_prefix(lazy_scheduler, aliased_head)
     """A tail in the window pulls its prefix head into the store, tail first."""
     scheduler, pool = lazy_scheduler(lazy_offload_max_blocks=1)
     request = _request("r", 2)
-    head, tail = pool.get_new_blocks(2)
+    head, tail = take_blocks(pool, 2)
     if aliased_head:
         # The head was cached under another hash first; ours is its alias.
         _cache(pool, _request("other", 1, first_token=100), [head])
@@ -427,7 +428,7 @@ def test_lazy_offload_scans_when_allocation_moves_the_window(lazy_scheduler, act
     assert _build(scheduler).store_plans == []
 
     other = _request("other", 2, first_token=100)
-    block_ids = ([block.block_id for block in pool.get_new_blocks(2)],)
+    block_ids = ([block.block_id for block in take_blocks(pool, 2)],)
     if activity == "new_request":
         output = make_scheduler_output(
             new_reqs=[
@@ -465,7 +466,7 @@ def test_lazy_offload_does_not_store_running_requests(lazy_scheduler, lazy):
     """Eager mode stores each prefill chunk; lazy mode waits for the free queue."""
     scheduler, pool = lazy_scheduler(lazy_offload=lazy)
     request = _request("r", 3)
-    blocks = pool.get_new_blocks(3)
+    blocks = take_blocks(pool, 3)
     scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks[:1],)), 0)
     _build(
         scheduler,
@@ -513,7 +514,7 @@ def test_lazy_offload_skips_non_transferable_groups(lazy_scheduler):
     )
     scheduler, pool = lazy_scheduler(kv_cache_config=config)
     request = _request("r", 1)
-    transferred, local = pool.get_new_blocks(2)
+    transferred, local = take_blocks(pool, 2)
     _cache(pool, request, [transferred])
     pool.cache_full_blocks(request, [local], 0, 1, _BLOCK_SIZE, 1)
     pool.free_blocks([transferred, local])
@@ -607,7 +608,7 @@ def test_lazy_store_returns_blocks_behind_free_empty_blocks(lazy_scheduler):
 
     assert _free_queue(pool) == before
     # A one-block allocation takes an empty block, not A's oldest one.
-    assert pool.get_new_blocks(1)[0].block_hash is None
+    assert take_blocks(pool, 1)[0].block_hash is None
     assert all(block.block_hash is not None for block in a)
 
 

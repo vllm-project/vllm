@@ -7,6 +7,11 @@ tokens of unprocessed steps whose attention windows still read the blocks
 just below the optimistic boundary (and rejected spec tokens can roll it
 back), so `allocate_slots` frees on the processed-token basis:
 `num_computed_tokens - num_in_flight_tokens`.
+
+The Percy step ledger does not trust that window arithmetic (#47728 was a
+bug in it): a block freed without a holder's own step is stamped with the
+latest scheduled step, so it leaves the row at once but only reaches the
+free pool once every step in flight at the free has been processed.
 """
 
 import torch
@@ -117,16 +122,18 @@ def test_swa_free_waits_for_in_flight_step():
     assert block_pool.get_num_free_blocks() == free_after_prefill
 
     # Prefill output processed; the next allocate frees the out-of-window
-    # blocks.
+    # blocks from the row. The decode (out1) is still in flight, so they drain
+    # (reach the free pool) only once it is processed.
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
     scheduler.schedule()
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
+    assert block_pool.get_num_free_blocks() == free_after_prefill
+    scheduler.update_from_output(out1, _make_model_runner_output(out1))
     assert (
         block_pool.get_num_free_blocks()
         == free_after_prefill + NUM_OUT_OF_WINDOW_BLOCKS
     )
     # Not double-freed on the following steps.
-    scheduler.update_from_output(out1, _make_model_runner_output(out1))
     scheduler.schedule()
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
 
@@ -147,6 +154,8 @@ def test_swa_free_immediate_when_sync():
 
     scheduler.schedule()
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
+    # No step is in flight, so the freed blocks drain immediately.
+    assert scheduler.kv_cache_manager.num_draining_blocks == 0
 
 
 def test_swa_admission_cap_accounts_for_overlapping_batches():
@@ -183,15 +192,17 @@ def test_chunked_local_free_waits_for_in_flight_step():
     assert _num_null_blocks(scheduler, req_id) == 0
     assert block_pool.get_num_free_blocks() == free_after_prefill
 
-    # Prefill output processed; the next allocate frees the out-of-chunk blocks.
+    # Prefill output processed; the next allocate frees the out-of-chunk
+    # blocks from the row; they drain once the in-flight decode is processed.
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
     scheduler.schedule()
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_CHUNK_BLOCKS
+    assert block_pool.get_num_free_blocks() == free_after_prefill
+    scheduler.update_from_output(out1, _make_model_runner_output(out1))
     assert (
         block_pool.get_num_free_blocks() == free_after_prefill + NUM_OUT_OF_CHUNK_BLOCKS
     )
     # Not double-freed on the following steps.
-    scheduler.update_from_output(out1, _make_model_runner_output(out1))
     scheduler.schedule()
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_CHUNK_BLOCKS
 

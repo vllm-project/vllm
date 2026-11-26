@@ -308,6 +308,8 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(enable_prefix_caching=False),
+        num_speculative_tokens=0,
+        num_lookahead_tokens=0,
     )
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(

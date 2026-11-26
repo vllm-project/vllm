@@ -198,9 +198,11 @@ class EngineCoreSentinel:
         the scheduler via update_from_output() with an empty SchedulerOutput.
         """
         engine = self.engine
-        if engine.batch_queue is None:
-            return
         scheduler = cast(Scheduler, engine.scheduler)
+        if engine.batch_queue is None:
+            # The failed synchronous step never reports its output either.
+            scheduler.retire_inflight_steps()
+            return
 
         while engine.batch_queue:
             future, _, _ = engine.batch_queue.pop()
@@ -227,6 +229,9 @@ class EngineCoreSentinel:
         engine.batch_queue.clear()
         # Its sampling is never requested, and while set no step is scheduled.
         engine.deferred_step = None
+        # No step will report its output now, so the Percy step ledger must
+        # catch up, or blocks they used would stay DRAINING forever.
+        scheduler.retire_inflight_steps()
 
     def _clear_contaminated_blocks(self) -> None:
         """Evict KV blocks possibly contaminated by the failed step."""

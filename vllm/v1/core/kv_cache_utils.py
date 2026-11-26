@@ -3,6 +3,7 @@
 """KV-Cache Utilities."""
 
 import copy
+import functools
 import hashlib
 import math
 import os
@@ -164,7 +165,8 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
-    # Deferred frees may contain blocks from multiple pools. Weak to avoid ref cycles.
+    # A free may carry blocks of several pools (e.g. HiSparse host blocks).
+    # Weak to avoid ref cycles.
     pool: "weakref.ref[BlockPool] | None" = field(
         default=None, repr=False, compare=False, kw_only=True
     )
@@ -647,6 +649,32 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str, str]]:
     return [("lora", lora_request.lora_name, lora_request.lora_path)]
 
 
+def request_domain(request: Request) -> int:
+    """The Percy sharing domain (I9) of a request's KV blocks, as uint32.
+
+    0 is the base domain: no LoRA adapter and no client cache salt (the salt
+    is the client's opt-in). Model version, KV format and dtype are fixed per
+    engine, so within one engine they do not split domains.
+    """
+    lora_request = request.lora_request
+    if lora_request is None and not request.cache_salt:
+        return 0
+    return _domain_of(
+        lora_request.lora_name if lora_request else None,
+        lora_request.lora_path if lora_request else None,
+        request.cache_salt or None,
+    )
+
+
+@functools.lru_cache(maxsize=4096)
+def _domain_of(lora_name: str | None, lora_path: str | None, salt: str | None) -> int:
+    digest = hashlib.blake2b(
+        repr((lora_name, lora_path, salt)).encode(), digest_size=4
+    ).digest()
+    # Never 0: that value is reserved for the base domain.
+    return int.from_bytes(digest, "little") or 1
+
+
 def _gen_prompt_embeds_extra_hash_keys(
     request: Request, start_token_idx: int, end_token_idx: int
 ) -> list[tuple[str, bytes]]:
@@ -705,6 +733,9 @@ def generate_block_hash_extra_keys(
         request, start_token_idx, end_token_idx
     )
 
+    # Percy I9: the domain (`request_domain`) derives from the LoRA and
+    # cache-salt keys already chained into every block hash, so it is not
+    # folded in again (that would break parity with the frontend's hasher).
     extra_keys: list[Any] = (
         lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
     )

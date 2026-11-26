@@ -39,6 +39,15 @@ else:
     Request = object
 
 
+# Percy (M1) write window of one request in one KV cache group: the first
+# block-table column the step may write, then the expected gen of each
+# column from there on (0, never a valid gen, for null columns). The worker
+# refuses a slot_mapping write to a column outside the window or whose
+# block's GPU gen differs (W2). None: the group does not write through
+# slot_mapping.
+WriteWindow = tuple[int, ...]
+
+
 @dataclass
 class NewRequestData:
     req_id: str
@@ -55,6 +64,15 @@ class NewRequestData:
     prompt_is_token_ids: list[bool] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
+    # Percy (M1). Per group: the gen of each entry of `block_ids` (NULL_GEN
+    # for null-block entries), the row length and the row digest
+    # (sum of `row_digest_term(col, block_id, gen)` mod 2^64) the worker's
+    # row must have after this step. Empty tuples mean "not checked".
+    block_gens: tuple[list[int], ...] = ()
+    expected_row_len: tuple[int, ...] = ()
+    row_digest: tuple[int, ...] = ()
+    # Per group: the step's write window, see `WriteWindow`.
+    write_window: "tuple[WriteWindow | None, ...]" = ()
 
     @classmethod
     def from_request(
@@ -147,6 +165,17 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Percy (M1), parallel to `req_ids`. `new_block_gens` mirrors the shape
+    # of `new_block_ids`. `revoked`: (group, column) entries the worker
+    # points at the null block BEFORE appending `new_block_ids`, or None.
+    # `expected_row_len`/`row_digest`: per group, the worker's row after
+    # this step. `write_windows`: per group, see `WriteWindow`. Empty lists
+    # mean "not checked" (e.g. hand-built outputs).
+    new_block_gens: list[tuple[list[int], ...] | None] = field(default_factory=list)
+    revoked: list[tuple[tuple[int, int], ...] | None] = field(default_factory=list)
+    expected_row_len: list[tuple[int, ...]] = field(default_factory=list)
+    row_digest: list[tuple[int, ...]] = field(default_factory=list)
+    write_windows: "list[tuple[WriteWindow | None, ...]]" = field(default_factory=list)
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -320,6 +349,17 @@ class SchedulerOutput:
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # Percy: (block_ids, gens) of every generation bump (revoke) since the
+    # previous output, for the workers' generation mirrors.
+    gen_updates: tuple[list[int], list[int]] | None = None
+    # Percy (M1): 1, 2, 3, ... per output the scheduler dispatches; 0 means
+    # unchecked (warmup, dummy and hand-built outputs).
+    msg_seq: int = 0
+    # Percy (M1): gens parallel to `new_block_ids_to_zero`, and
+    # (src_gen, dst_gen) parallel to `kv_cache_block_copies`.
+    new_block_gens_to_zero: list[int] | None = None
+    kv_cache_block_copy_gens: list[tuple[int, int]] | None = None
 
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None

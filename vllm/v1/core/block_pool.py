@@ -4,6 +4,8 @@ import weakref
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
+import numpy as np
+
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
@@ -14,6 +16,7 @@ from vllm.distributed.kv_events import (
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.gc_utils import gc_untrack
+from vllm.v1.core.grant_table import BlockState, GrantError, GrantTable
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -123,6 +126,8 @@ class BlockPool:
         metrics_collector: Optional metrics collector for tracking block residency.
         num_hash_lookahead_tokens: Tokens after each block covered by its hash.
         medium: Storage medium reported in KV cache events.
+        grant_table: The GrantTable governing this pool's block ownership. A
+            default one (all groups at `hash_block_size`) is built if None.
 
     """
 
@@ -135,8 +140,13 @@ class BlockPool:
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_hash_lookahead_tokens: int = 0,
         medium: str = MEDIUM_GPU,
+        grant_table: GrantTable | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        if grant_table is None:
+            grant_table = GrantTable(num_gpu_blocks, [hash_block_size], enable_caching)
+        assert grant_table.num_blocks == num_gpu_blocks
+        self.grant_table = grant_table
         self.num_gpu_blocks = num_gpu_blocks
         self.medium = medium
         self.enable_caching = enable_caching
@@ -171,6 +181,37 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # The free queue holds FREE and CACHED_IDLE blocks only; count the
+        # latter so allocation skips the eviction scan when there are none.
+        self._num_cached_in_queue = 0
+        # CACHED_IDLE blocks a step may still read (not drainable yet); they
+        # count as free but `make_room` cannot evict them.
+        self._undrainable_cached: set[int] = set()
+        self._system_owners: dict[str, int] = {}
+        # Percy M2 (T2, I3, I8): prefix-cache entries registered before their
+        # slots were acked. They are published only once a processed step
+        # confirms the slots (`flush_publications`), and dropped if the block
+        # is released, revoked or re-granted first (the gen is checked).
+        # block_id -> (request, gen, col, block_size, group)
+        self._pending_full: dict[int, tuple[Request, int, int, int, int]] = {}
+        # block_id -> (request, gen, num_tokens, group, block_size, replace)
+        self._pending_partial: dict[int, tuple[Request, int, int, int, int, bool]] = {}
+        self._pending_by_req: dict[str, set[int]] = {}
+        # CoW destinations whose moved entries wait for their copy step:
+        # dst block_id -> (hashes, num_tokens, valid, copy step seq, src, gen).
+        self._pending_cow: dict[
+            int, tuple[list[BlockHashWithGroupId], int | None, int, int, int, int]
+        ] = {}
+
+    def system_owner(self, name: str = "pool") -> int:
+        """Owner id for blocks granted outside any request (connectors, host
+        pools). One id per caller name, so `check_writes` can tell them apart
+        from requests and from each other."""
+        owner = self._system_owners.get(name)
+        if owner is None:
+            owner = self.grant_table.owner_for(f"\0percy-system:{name}")
+            self._system_owners[name] = owner
+        return owner
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -239,6 +280,46 @@ class BlockPool:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert block_mask is None or len(block_mask) == len(new_full_blocks)
+        self._cache_new_full_blocks(
+            request,
+            new_full_blocks,
+            num_cached_blocks,
+            block_size,
+            kv_cache_group_id,
+            block_mask,
+            defer=True,
+        )
+
+    def _cache_new_full_blocks(
+        self,
+        request: Request,
+        new_full_blocks: list[KVCacheBlock],
+        num_cached_blocks: int,
+        block_size: int,
+        kv_cache_group_id: int,
+        block_mask: list[bool] | None,
+        defer: bool,
+    ) -> None:
+        """Publish and hash `new_full_blocks`, the request's columns from
+        `num_cached_blocks` on. With `defer`, an owned block whose slots are
+        not confirmed yet is registered for publication on its ack (T2)."""
+        num_full_blocks = num_cached_blocks + len(new_full_blocks)
+        # T2 (I3): only blocks whose slots are all confirmed are published.
+        published = self._publish_full_blocks(new_full_blocks, block_mask)
+        if defer:
+            for i, blk in enumerate(new_full_blocks):
+                if (
+                    not published[i]
+                    and not blk.is_null
+                    and (block_mask is None or block_mask[i])
+                    and self.grant_table.state(blk.block_id) == BlockState.EXCLUSIVE
+                ):
+                    self._add_pending(
+                        self._pending_full,
+                        request,
+                        blk,
+                        (num_cached_blocks + i, block_size, kv_cache_group_id),
+                    )
         block_hashes = resolve_block_hashes(
             request.block_hashes, self.hash_block_size, block_size
         )
@@ -253,7 +334,7 @@ class BlockPool:
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix caching.
             # We skip null blocks here.
-            if blk.is_null or (block_mask is not None and not block_mask[i]):
+            if not published[i]:
                 continue
             block_hash = new_block_hashes[i]
             num_hash_tokens = (num_cached_blocks + i + 1) * block_size
@@ -299,9 +380,7 @@ class BlockPool:
             )
             curr_mm_idx = 0
             for i in range(num_cached_blocks, num_full_blocks):
-                if blocks[i].is_null:
-                    continue
-                if block_mask is not None and not block_mask[i - num_cached_blocks]:
+                if not published[i - num_cached_blocks]:
                     continue
                 block_start = i * block_size
                 block_end = block_start + block_size
@@ -327,6 +406,34 @@ class BlockPool:
                     lookahead_token_ids=lookahead_token_ids,
                 )
             )
+
+    def _publish_full_blocks(
+        self, blocks: list[KVCacheBlock], block_mask: list[bool] | None
+    ) -> list[bool]:
+        """Publish the non-null, unmasked blocks the GrantTable accepts.
+
+        Returns, per block, whether it was published (and may be hashed).
+        """
+        published = [False] * len(blocks)
+        candidates = [
+            i
+            for i, blk in enumerate(blocks)
+            if not blk.is_null and (block_mask is None or block_mask[i])
+        ]
+        if not candidates:
+            return published
+        ids = np.fromiter(
+            (blocks[i].block_id for i in candidates),
+            dtype=np.int64,
+            count=len(candidates),
+        )
+        ok = self.grant_table.publishable_mask(ids)
+        if ok.any():
+            accepted = self.grant_table.publish(ids[ok])
+            assert accepted
+        for i, keep in zip(candidates, ok.tolist()):
+            published[i] = keep
+        return published
 
     def generate_event_extra_keys(
         self, request: Request, start: int, end: int, start_mm_idx: int
@@ -505,6 +612,27 @@ class BlockPool:
 
         assert block_size % self.hash_block_size == 0
         block_hash = self._get_partial_block_hash(request, num_tokens)
+        # A partial entry points at the block's first slots up to the
+        # boundary; they must be confirmed (scoped I3, see `_seal_or_unhash`).
+        if not self.grant_table.backs_partial_entry(
+            block.block_id, (num_tokens - 1) % block_size + 1
+        ):
+            # Percy M2: register it for when a processed step acks the slots;
+            # the returned key names the entry it will publish.
+            if self.grant_table.state(block.block_id) != BlockState.EXCLUSIVE:
+                return None
+            self._add_pending(
+                self._pending_partial,
+                request,
+                block,
+                (
+                    num_tokens,
+                    kv_cache_group_id,
+                    block_size,
+                    replace_existing_hashes,
+                ),
+            )
+            return make_block_hash_with_group_id(block_hash, kv_cache_group_id)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
             block_hash, kv_cache_group_id
@@ -673,18 +801,109 @@ class BlockPool:
         """
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
+        src_id = src_block.block_id
         num_tokens = src_block.block_hash_num_tokens
-        for block_hash in self._remove_cached_block_hashes(src_block):
-            # `num_tokens` only applies to the first (primary) insertion.
-            self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+        valid = self.grant_table.valid(src_id)
+        hashes = self._remove_cached_block_hashes(src_block)
+        # Entries registered on src but not acked yet follow the copy too:
+        # src's slots are overwritten by the next forward.
+        pending = self._pending_partial.pop(src_id, None)
+        if pending is not None:
+            request, gen, entry_tokens, group, _, _ = pending
+            self._unlink_pending(request.request_id, src_id)
+            if gen == self.grant_table.gen(src_id):
+                key = make_block_hash_with_group_id(
+                    self._get_partial_block_hash(request, entry_tokens), group
+                )
+                if key not in hashes:
+                    hashes.append(key)
+                if num_tokens is None or entry_tokens > num_tokens:
+                    num_tokens = entry_tokens
+        if not hashes:
+            return
+        # Percy M2: dst holds src's confirmed slots only once the copy has run,
+        # in the step being scheduled. Pin dst and publish its entries when
+        # that step is processed (`drain`); until then lookups miss.
+        self.touch([dst_block], record_access=False)
+        self._pending_cow[dst_block.block_id] = (
+            hashes,
+            num_tokens,
+            valid,
+            self.grant_table.latest_sched_seq + 1,
+            src_id,
+            self.grant_table.gen(src_id),
+        )
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
-        """Get new blocks from the free block pool.
+    def make_room(self, num_blocks: int) -> bool:
+        """Make the first `num_blocks` free-queue entries FREE (T8).
 
-        Note that we do not check block cache in this function.
+        The eviction half of allocation, kept apart from `get_new_blocks` so a
+        cached block is never evicted and re-granted in one call. Walks the
+        queue in eviction order, revokes cached-idle blocks no step or peer can
+        still touch (skipping the others, which stay cached), drains them and
+        moves them back to the head in the walk order. In the common case no
+        block is skipped and the order matches eviction-and-reuse exactly.
+
+        Args:
+            num_blocks: The number of blocks the next `get_new_blocks` call
+                will take.
+
+        Returns:
+            Whether `num_blocks` FREE blocks now lead the free queue.
+
+        """
+        if num_blocks <= 0:
+            return True
+        queue = self.free_block_queue
+        if self._num_cached_in_queue == 0:
+            return queue.num_free_blocks >= num_blocks
+        chosen: list[KVCacheBlock] = []
+        to_evict: list[KVCacheBlock] = []
+        skipped = False
+        for block in queue.iter_blocks_after(None):
+            if len(chosen) == num_blocks:
+                break
+            if block.block_hash is None:
+                chosen.append(block)
+            elif self.grant_table.drainable_mask([block.block_id])[0]:
+                chosen.append(block)
+                to_evict.append(block)
+            else:
+                skipped = True
+        if to_evict:
+            for block in to_evict:
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_evicted(block)
+                self._emit_block_removed_events(self._remove_cached_block_hashes(block))
+            self.grant_table.revoke([b.block_id for b in to_evict], 0)
+            self._num_cached_in_queue -= len(to_evict)
+            drained = self.grant_table.drain()
+            assert set(b.block_id for b in to_evict).issubset(drained.tolist())
+            if skipped:
+                # Bring the drained blocks ahead of the cached ones skipped.
+                for block in chosen:
+                    queue.remove(block)
+                self.free_block_queue.prepend_n(chosen)
+            self._queue_drained(drained, [])
+        return len(chosen) >= num_blocks
+
+    def get_new_blocks(
+        self,
+        num_blocks: int,
+        owner: int | None = None,
+        group: int = 0,
+        domain: int = 0,
+    ) -> list[KVCacheBlock]:
+        """Grant new blocks from the head of the free queue (T1).
+
+        Never evicts: the caller runs `make_room(num_blocks)` first.
 
         Args:
             num_blocks: The number of blocks to allocate.
+            owner: The GrantTable owner id the blocks are granted to; None
+                uses this pool's system owner.
+            group: The KV cache group the blocks belong to.
+            domain: The sharing domain of the owner (I9).
 
         Returns:
             A list of new block.
@@ -692,33 +911,34 @@ class BlockPool:
         """
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
+        if num_blocks == 0:
+            return []
+        if self._num_cached_in_queue:
+            for i, block in enumerate(self.free_block_queue.iter_blocks_after(None)):
+                if i == num_blocks:
+                    break
+                if block.block_hash is not None:
+                    raise ValueError(
+                        f"Cannot get {num_blocks} free blocks: a cached block "
+                        "leads the free queue; call make_room() first"
+                    )
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        if owner is None:
+            owner = self.system_owner()
+        self.grant_table.grant([b.block_id for b in ret], owner, group, domain)
 
         if self._reuse_watchers:
             self._notify_reuse(ret)
 
-        # In order to only iterate the list once, we duplicated code a bit
-        if self.enable_caching:
-            if self.metrics_collector:
-                for block in ret:
-                    self._maybe_evict_cached_block(block)
-                    assert block.ref_cnt == 0
-                    block.ref_cnt = 1
-                    self.metrics_collector.on_block_allocated(block)
-            else:
-                for block in ret:
-                    # Most blocks were never cached, so skip the call when possible.
-                    if block.block_hash is not None:
-                        self._maybe_evict_cached_block(block)
-                    assert block.ref_cnt == 0
-                    block.ref_cnt = 1
-        else:
-            for block in ret:
-                assert block.ref_cnt == 0
-                block.ref_cnt = 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+        metrics_collector = self.metrics_collector
+        for block in ret:
+            assert block.ref_cnt == 0 and block.block_hash is None
+            block.ref_cnt = 1
+            if metrics_collector:
+                if self.enable_caching:
+                    metrics_collector.on_block_evicted(block)
+                metrics_collector.on_block_allocated(block)
         return ret
 
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
@@ -739,14 +959,11 @@ class BlockPool:
         `on_reuse` fires when `get_new_blocks` hands a block out (or the
         cache is reset), so the caller can stop reading it.
         """
-        released: list[KVCacheBlock] = []
+        blocks = list(blocks)
         for block in blocks:
             assert block.ref_cnt > 0 and not block.is_null
-            block.ref_cnt -= 1
             self._reuse_watchers[block.block_id] = on_reuse
-            if block.ref_cnt == 0:
-                released.append(block)
-        self.free_block_queue.append_n(released)
+        self._release(blocks, None, prepend=False, prepend_cached=False)
 
     def deprioritize_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
         """Deprioritize free blocks so they are evicted after uncached blocks
@@ -766,6 +983,10 @@ class BlockPool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
+        A cached-idle block is revoked (T8) and drained; a published block
+        still held is force-revoked (T7) and drains once released. Partial
+        entries on a block its owner still writes are lookup metadata only.
+
         Args:
             block: The block to evict.
 
@@ -776,6 +997,8 @@ class BlockPool:
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
+        # Entries still waiting for their ack are dropped with the block's.
+        self._drop_pending([block.block_id])
 
         evicted_hashes = self._remove_cached_block_hashes(block)
         if not evicted_hashes:
@@ -783,37 +1006,114 @@ class BlockPool:
             return False
 
         self._emit_block_removed_events(evicted_hashes)
+        state = self.grant_table.state(block.block_id)
+        if state == BlockState.CACHED_IDLE:
+            self.grant_table.revoke([block.block_id], 0)
+            self._num_cached_in_queue -= 1
+            drained = self.grant_table.drain()
+            if block.block_id not in set(drained.tolist()):
+                self.free_block_queue.remove(block)
+            self._queue_drained(drained, [])
+        elif state == BlockState.SHARED:
+            self.grant_table.revoke([block.block_id], 0)
         return True
 
-    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+    def touch(
+        self,
+        blocks: Sequence[KVCacheBlock],
+        group: int | None = None,
+        domain: int | None = None,
+        record_access: bool = True,
+    ) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
 
+        A prefix hit passes the hitter's `group` and `domain` (I9); an
+        internal pin passes None. An internal pin of a FREE block (a released
+        page re-adopted before reuse, e.g. HiSparse) re-grants it to this
+        pool's system owner.
+
         Args:
             blocks: A list of blocks to touch.
+            group: The KV cache group of the hit, or None for a pin.
+            domain: The sharing domain of the hit, or None for a pin.
+            record_access: Whether the touch counts as a metrics access
+                (False for copy retentions).
+
+        Raises:
+            GrantError: The GrantTable refused the share; nothing changed.
 
         """
-        for block in blocks:
-            if block.is_null:
-                continue
+        blocks = [block for block in blocks if not block.is_null]
+        if not blocks:
+            return
+        ids = np.fromiter(
+            (block.block_id for block in blocks), dtype=np.int64, count=len(blocks)
+        )
+        states = self.grant_table.state_of(ids)
+        free = states == BlockState.FREE
+        if free.any():
+            if group is not None or domain is not None:
+                raise GrantError("touch: a prefix hit found a free block")
+            free_ids, first = np.unique(ids[free], return_index=True)
+            # Re-grant each FREE block once; later occurrences become shares.
+            again = np.ones(int(free.sum()), dtype=bool)
+            again[first] = False
+            share_ids = np.concatenate([ids[~free], ids[free][again]])
+            if share_ids.size and not self._can_share(share_ids, ids[~free]):
+                raise GrantError("touch: the GrantTable refused the share")
+            self.grant_table.grant(free_ids, self.system_owner("reacquire"), 0, 0)
+            if share_ids.size:
+                shared = self.grant_table.share(share_ids)
+                assert shared
+        elif not self.grant_table.share(ids, group, domain):
+            raise GrantError("touch: the GrantTable refused the share")
+        for block, state in zip(blocks, states.tolist()):
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0:
+            if block.ref_cnt == 0 and block.prev_free_block is not None:
                 self.free_block_queue.remove(block)
+                if state == BlockState.CACHED_IDLE:
+                    self._num_cached_in_queue -= 1
             block.ref_cnt += 1
-            if self.metrics_collector:
+            if record_access and self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
+        self._assert_readers(blocks)
+
+    def _can_share(self, share_ids: np.ndarray, held_ids: np.ndarray) -> bool:
+        states = self.grant_table.state_of(held_ids)
+        return bool(
+            np.all(
+                (states == BlockState.SHARED)
+                | (states == BlockState.CACHED_IDLE)
+                | (states == BlockState.EXCLUSIVE)
+            )
+        )
 
     def is_block_writable(self, block: KVCacheBlock) -> bool:
-        """Return whether a block can be mutated by its sole owner."""
-        return not block.is_null and block.ref_cnt == 1 and block.block_hash is None
+        """Return whether a block can be mutated by its sole owner: it holds
+        the write grant (EXCLUSIVE), no other holder pins it, and no
+        prefix-cache entry points at it."""
+        return (
+            not block.is_null
+            and self.grant_table.is_writable(block.block_id)
+            and block.ref_cnt == 1
+            and block.block_hash is None
+        )
 
     def free_blocks(
-        self, ordered_blocks: Iterable[KVCacheBlock], evict_first: bool = False
+        self,
+        ordered_blocks: Iterable[KVCacheBlock],
+        evict_first: bool = False,
+        step_seq: int | None = None,
     ) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
+
+        Each free releases one holder in the GrantTable. A block whose last
+        holder leaves either stays cached (published: CACHED_IDLE) or is
+        revoked; revoked blocks reach the free queue only through `drain`.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
@@ -821,12 +1121,12 @@ class BlockPool:
             evict_first: Also put freed cached blocks at the front of the free
                 queue, so they are evicted before other cached blocks. For
                 blocks whose contents another tier already holds.
+            step_seq: The last step that may use the blocks through the
+                releasing holder; defaults to the latest scheduled step.
 
         """
-        # Identify blocks with hash (LRU cache) and without it (never match APC)
-        blocks_to_evict_last = []
-        blocks_to_evict_first = []
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
+        own: list[KVCacheBlock] = []
         for block in ordered_blocks:
             if block.is_null:  # never pooled; its ref_cnt is not maintained
                 continue
@@ -835,22 +1135,269 @@ class BlockPool:
                 if pool is not None:
                     other_pools.setdefault(pool, []).append(block)
                 continue
+            own.append(block)
+        self._release(own, step_seq, prepend=True, prepend_cached=evict_first)
+        for pool, blocks in other_pools.items():
+            pool.free_blocks(blocks, evict_first=evict_first, step_seq=step_seq)
+
+    def _release(
+        self,
+        blocks: list[KVCacheBlock],
+        step_seq: int | None,
+        prepend: bool,
+        prepend_cached: bool,
+    ) -> None:
+        """Release one holder per entry of `blocks` and queue the blocks
+        that became FREE (drained) or CACHED_IDLE, in `blocks` order."""
+        if not blocks:
+            return
+        if step_seq is None:
+            step_seq = self.grant_table.latest_sched_seq
+        released: list[KVCacheBlock] = []
+        for block in blocks:
             block.ref_cnt -= 1
             if block.ref_cnt == 0:
-                if block.block_hash is None or not self.enable_caching or evict_first:
-                    # LIFO reuse of non-cached blocks for better GPU locality,
-                    # and of cached ones when asked to evict them first.
-                    blocks_to_evict_first.append(block)
-                else:
-                    # FIFO reuse of cached blocks for LRU eviction behavior.
-                    blocks_to_evict_last.append(block)
+                released.append(block)
+        if self._pending_full or self._pending_partial:
+            # The last holder is leaving: publish what its acks confirmed,
+            # drop the rest (never published, so nothing can hit it).
+            self._flush_pending_blocks([b.block_id for b in released])
+            self._drop_pending([b.block_id for b in released])
+        for block in released:
+            if block.block_hash is not None:
+                self._seal_or_unhash(block)
+        self.grant_table.release([b.block_id for b in blocks], step_seq)
+        self._assert_readers(blocks)
 
+        states = self.grant_table.state_of([b.block_id for b in released]).tolist()
+        stale = [
+            b
+            for b, st in zip(released, states)
+            if st == BlockState.CACHED_IDLE and b.block_hash is None
+        ]
+        if stale:
+            # Published, then its entries moved away: nothing can hit it.
+            self.grant_table.revoke([b.block_id for b in stale], 0)
+            states = self.grant_table.state_of([b.block_id for b in released]).tolist()
+        drained = self.grant_table.drain()
+        drained_set = set(drained.tolist())
+        front: list[KVCacheBlock] = []
+        back: list[KVCacheBlock] = []
+        for block, state in zip(released, states):
+            if state == BlockState.CACHED_IDLE:
+                self._num_cached_in_queue += 1
+                if not self.grant_table.drainable_mask([block.block_id])[0]:
+                    self._undrainable_cached.add(block.block_id)
+                (front if prepend_cached else back).append(block)
+            elif block.block_id in drained_set:
+                (front if prepend else back).append(block)
+        self._queue_drained(drained, released, front, back, prepend)
+
+    def _queue_drained(
+        self,
+        drained: np.ndarray,
+        handled: list[KVCacheBlock],
+        front: list[KVCacheBlock] | None = None,
+        back: list[KVCacheBlock] | None = None,
+        prepend: bool = True,
+    ) -> None:
+        """Put blocks into the free queue: `front` at the head and `back` at
+        the tail, in order, plus any other drained block not yet queued."""
+        front = front if front is not None else []
+        back = back if back is not None else []
+        if drained.size:
+            handled_ids = {b.block_id for b in handled}
+            for block_id in drained.tolist():
+                block = self.blocks[block_id]
+                if block_id not in handled_ids and block.prev_free_block is None:
+                    (front if prepend else back).append(block)
         # Blocks to reuse first are prepended to the front of the free queue.
-        self.free_block_queue.prepend_n(blocks_to_evict_first)
+        self.free_block_queue.prepend_n(front)
         # Blocks to reuse last are appended to the end of the free queue.
-        self.free_block_queue.append_n(blocks_to_evict_last)
-        for pool, blocks in other_pools.items():
-            pool.free_blocks(blocks, evict_first=evict_first)
+        self.free_block_queue.append_n(back)
+
+    def _add_pending(
+        self,
+        pending: dict,
+        request: Request,
+        block: KVCacheBlock,
+        info: tuple,
+    ) -> None:
+        block_id = block.block_id
+        pending[block_id] = (request, self.grant_table.gen(block_id), *info)
+        self._pending_by_req.setdefault(request.request_id, set()).add(block_id)
+
+    def _drop_pending(self, block_ids: Iterable[int]) -> None:
+        for block_id in block_ids:
+            for pending in (self._pending_full, self._pending_partial):
+                entry = pending.pop(block_id, None)
+                if entry is not None:
+                    self._unlink_pending(entry[0].request_id, block_id)
+
+    def _unlink_pending(self, request_id: str, block_id: int) -> None:
+        ids = self._pending_by_req.get(request_id)
+        if ids is None:
+            return
+        if block_id not in self._pending_full and block_id not in (
+            self._pending_partial
+        ):
+            ids.discard(block_id)
+        if not ids:
+            del self._pending_by_req[request_id]
+
+    def is_publication_pending(self, block_id: int) -> bool:
+        """Whether the block has an entry waiting for its slots' ack."""
+        return (
+            block_id in self._pending_full
+            or block_id in self._pending_partial
+            or block_id in self._pending_cow
+        )
+
+    def num_pending_publications(self) -> int:
+        """Prefix-cache entries waiting for their slots' acks."""
+        return (
+            len(self._pending_full)
+            + len(self._pending_partial)
+            + len(self._pending_cow)
+        )
+
+    def flush_publications(self, request_id: str) -> None:
+        """Percy M2: publish the request's pending entries whose slots a
+        processed step has now confirmed (T2 on ack)."""
+        block_ids = self._pending_by_req.get(request_id)
+        if block_ids:
+            self._flush_pending_blocks(list(block_ids))
+
+    def _flush_pending_blocks(self, block_ids: Sequence[int]) -> None:
+        grant_table = self.grant_table
+        for block_id in sorted(block_ids):
+            entry = self._pending_partial.get(block_id)
+            if entry is None:
+                continue
+            request, gen, num_tokens, group, block_size, replace = entry
+            if grant_table.gen(block_id) != gen:
+                self._pending_partial.pop(block_id)
+                self._unlink_pending(request.request_id, block_id)
+                continue
+            if not grant_table.backs_partial_entry(
+                block_id, (num_tokens - 1) % block_size + 1
+            ):
+                continue
+            self._pending_partial.pop(block_id)
+            self._unlink_pending(request.request_id, block_id)
+            self.cache_partial_block(
+                request=request,
+                block=self.blocks[block_id],
+                num_tokens=num_tokens,
+                kv_cache_group_id=group,
+                block_size=block_size,
+                replace_existing_hashes=replace,
+            )
+        ready: list[tuple[int, int, int]] = []
+        for block_id in block_ids:
+            entry = self._pending_full.get(block_id)
+            if entry is None:
+                continue
+            request, gen, col, block_size, group = entry
+            if grant_table.gen(block_id) != gen:
+                self._pending_full.pop(block_id)
+                self._unlink_pending(request.request_id, block_id)
+                continue
+            if grant_table.publishable_mask([block_id])[0]:
+                ready.append((group, col, block_id))
+        # Parents before children, so events arrive in prefix order.
+        for group, col, block_id in sorted(ready):
+            request, _, _, block_size, _ = self._pending_full.pop(block_id)
+            self._unlink_pending(request.request_id, block_id)
+            block = self.blocks[block_id]
+            if block.block_hash is not None and (
+                block.block_hash_num_tokens is None
+                or block.block_hash_num_tokens >= (col + 1) * block_size
+            ):
+                continue
+            self._cache_new_full_blocks(
+                request, [block], col, block_size, group, None, defer=False
+            )
+
+    def _flush_pending_cow(
+        self, processed_seq: int
+    ) -> list[list[BlockHashWithGroupId]]:
+        """Publish CoW destinations whose copy step has been processed, then
+        drop the pin taken in `move_block_hashes`. Returns the entries made
+        visible."""
+        published: list[list[BlockHashWithGroupId]] = []
+        done = [
+            block_id
+            for block_id, entry in self._pending_cow.items()
+            if entry[3] <= processed_seq
+        ]
+        for block_id in done:
+            hashes, num_tokens, valid, copy_seq, src_id, src_gen = (
+                self._pending_cow.pop(block_id)
+            )
+            block = self.blocks[block_id]
+            state = self.grant_table.state(block_id)
+            if state == BlockState.EXCLUSIVE and block.block_hash is None:
+                # The copy wrote src's slots as of the steps before it, which
+                # are processed too: that is dst's ack.
+                if self.grant_table.gen(src_id) == src_gen:
+                    valid = max(valid, self.grant_table.valid(src_id))
+                self.grant_table.confirm_valid([block_id], valid)
+                if num_tokens is None or self.grant_table.backs_partial_entry(
+                    block_id,
+                    (num_tokens - 1)
+                    % self.grant_table.block_size_of(self.grant_table.group(block_id))
+                    + 1,
+                ):
+                    for block_hash in hashes:
+                        self._insert_block_hash(block_hash, block, num_tokens)
+                    published.append(hashes)
+                    if self.grant_table.publishable_mask([block_id])[0]:
+                        assert self.grant_table.publish([block_id])
+                else:
+                    self._emit_block_removed_events(hashes)
+            else:
+                self._emit_block_removed_events(hashes)
+            self._release([block], copy_seq, prepend=True, prepend_cached=False)
+        return published
+
+    def drain(self, processed_seq: int | None = None) -> int:
+        """T9: return DRAINING blocks no step or peer can still touch to the
+        free queue (the only path that adds freed blocks to it).
+
+        Args:
+            processed_seq: The latest step whose output has been processed;
+                None keeps the GrantTable's current value.
+
+        Returns:
+            The number of blocks drained.
+
+        """
+        if self._pending_cow and processed_seq is not None:
+            self._flush_pending_cow(processed_seq)
+        drained = self.grant_table.drain(processed_seq)
+        self._queue_drained(drained, [])
+        return int(drained.size)
+
+    def _seal_or_unhash(self, block: KVCacheBlock) -> None:
+        """The last holder of an owned block with prefix-cache entries is
+        leaving. Freeze it (scoped I3: every entry points at confirmed slots,
+        and no writer remains) or, if its slots are not confirmed, drop the
+        entries so the block can be revoked."""
+        if self.grant_table.state(block.block_id) != BlockState.EXCLUSIVE:
+            return
+        size = self.grant_table.block_size_of(self.grant_table.group(block.block_id))
+        num_tokens = block.block_hash_num_tokens
+        num_slots = size if num_tokens is None else (num_tokens - 1) % size + 1
+        if not self.grant_table.publish_partial([block.block_id], num_slots):
+            self._emit_block_removed_events(self._remove_cached_block_hashes(block))
+
+    def _assert_readers(self, blocks: Sequence[KVCacheBlock]) -> None:
+        """ref_cnt stays as the LRU counter; it must equal GrantTable readers."""
+        readers = self.grant_table.readers_of([b.block_id for b in blocks])
+        assert all(b.ref_cnt == r for b, r in zip(blocks, readers.tolist())), (
+            "KVCacheBlock.ref_cnt diverged from GrantTable readers"
+        )
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
@@ -882,14 +1429,22 @@ class BlockPool:
             False otherwise.
 
         """
-        num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
-        if num_used_blocks != 1:  # The null block is always marked as used
+        # Blocks still DRAINING (released, waiting for an in-flight step) hold
+        # no prefix-cache entry and have no holder: they do not block a reset.
+        num_held_blocks = self.grant_table.num_held
+        if num_held_blocks:
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet",
-                num_used_blocks - 1,
+                num_held_blocks,
             )
             return False
+
+        # No block is held, so no entry can still be waiting for an ack.
+        assert not self._pending_cow
+        self._pending_full.clear()
+        self._pending_partial.clear()
+        self._pending_by_req.clear()
 
         # Remove all hashes so that no new blocks will hit. Clear in place: a
         # new map created after the startup gc.freeze() would not be frozen.
@@ -899,6 +1454,17 @@ class BlockPool:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
             )
+
+        # Every cached block is idle in the free queue: revoke them (T8) in
+        # place; any a step may still read leaves the queue until drained.
+        cached = [block for block in self.blocks if block.block_hash is not None]
+        if cached:
+            self.grant_table.revoke([b.block_id for b in cached], 0)
+            self._num_cached_in_queue = 0
+            drained = set(self.grant_table.drain().tolist())
+            for block in cached:
+                if block.block_id not in drained:
+                    self.free_block_queue.remove(block)
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
@@ -923,6 +1489,23 @@ class BlockPool:
 
         """
         return self.free_block_queue.num_free_blocks
+
+    def get_num_allocatable_blocks(self) -> int:
+        """Free blocks a `make_room` + `get_new_blocks` pair can hand out now:
+        the free queue minus cached-idle blocks an in-flight step may still
+        read (they cannot be evicted until drainable).
+
+        Returns:
+            The number of blocks allocatable in this scheduling step.
+
+        """
+        if self._undrainable_cached:
+            ids = np.fromiter(self._undrainable_cached, dtype=np.int64)
+            still = (
+                self.grant_table.state_of(ids) == BlockState.CACHED_IDLE
+            ) & ~self.grant_table.drainable_mask(ids)
+            self._undrainable_cached = set(ids[still].tolist())
+        return self.free_block_queue.num_free_blocks - len(self._undrainable_cached)
 
     def get_num_uncached_free_blocks(self, limit: int) -> int:
         """Count, up to `limit`, the leading uncached free blocks that

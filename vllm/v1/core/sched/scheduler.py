@@ -43,6 +43,7 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
+from vllm.v1.core.grant_table import WriteGrantRefused
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -55,6 +56,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.percy_messages import PercyMessageBuilder
 from vllm.v1.core.sched.pp_utils import PPMicrobatchCap
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
@@ -183,7 +185,6 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
-        self.defer_block_free = False
         self.defer_async_loads = False
         # Whether a preempted request's in-flight output must be dropped; see
         # KVConnectorBase_V1.requires_kv_delivery.
@@ -203,17 +204,13 @@ class Scheduler(SchedulerInterface):
             kv_load_failure_policy = kv_transfer_config.kv_load_failure_policy
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
-            # With overlapping batches (async scheduling or PP), a step may
-            # still be writing a freed request's KV blocks. A consumer KV
-            # Connector can reallocate and fill those blocks via a load that
-            # isn't ordered against that write, so defer freeing them.
-            multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
-            if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
-                self.defer_block_free = True
-            # HiSparse keeps reading a released page until the pool reuses it,
-            # so a load into a reused page must also wait for in-flight steps.
+            # HiSparse keeps reading a released page until the pool reuses it.
+            # With overlapping batches (async scheduling or PP), a consumer
+            # connector's load into a reused page must wait for the steps in
+            # flight. (Freed blocks always drain first; see the step ledger.)
             self.defer_async_loads = (
-                self.defer_block_free
+                self.vllm_config.max_concurrent_batches > 1
+                and kv_transfer_config.is_kv_consumer
                 and kv_cache_config.hisparse_host_num_blocks is not None
             )
 
@@ -412,6 +409,10 @@ class Scheduler(SchedulerInterface):
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
+        self._percy_messages: PercyMessageBuilder | None = None
+        # Percy M2: per dispatched output, each scheduled request's
+        # num_rolled_back_tokens at schedule time.
+        self._percy_rollback_marks: dict[int, dict[str, int]] = {}
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         # PP, not with DP, whose busy loop runs a dummy batch on idle steps.
@@ -479,13 +480,13 @@ class Scheduler(SchedulerInterface):
             and self.kv_cache_manager.mamba_shared_prefix_checkpoint
         )
 
-        # Counts of non-empty steps scheduled / processed. update_from_output
-        # is called once per scheduled step in FIFO order, so these stay in sync.
+        # Percy step ledger: counts of non-empty steps scheduled / processed.
+        # update_from_output is called once per scheduled step in FIFO order,
+        # so these stay in sync. Every release stamps the last step that may
+        # still use the block, and the GrantTable keeps it DRAINING until
+        # processed_step_seq reaches that step (I5), on every path.
         self.sched_step_seq = 0
         self.processed_step_seq = 0
-        # FIFO of (fence_seq, blocks): blocks become safe to free once
-        # processed_step_seq >= fence_seq.
-        self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
         # Request id -> (fence_seq, num_external_tokens, connector prefix cache
         # queries, hits): async KV loads started once processed_step_seq >=
         # fence_seq.
@@ -907,13 +908,21 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Schedule newly needed KV blocks for the request.
+            write_refused = False
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
-                    )
+                    try:
+                        new_blocks = self.kv_cache_manager.allocate_slots(
+                            request,
+                            num_new_tokens,
+                            num_lookahead_tokens=self.num_lookahead_tokens,
+                        )
+                    except WriteGrantRefused as e:
+                        # Percy A1: never send the write; skip the request for
+                        # this step (no preemption, not an OOM).
+                        logger.error("Percy check_writes: %s", e)
+                        write_refused = True
+                        break
 
                     if new_blocks is not None:
                         # The request can be scheduled.
@@ -935,8 +944,9 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running[-1]
 
-                    # A deferred free will not help with immediate allocation.
-                    if not self._request_blocks_can_be_freed(preempted_req):
+                    # Its blocks drain only once its in-flight step is
+                    # processed, so preempting it now frees nothing.
+                    if not self._blocks_drain_now(preempted_req):
                         break
 
                     if self.policy == SchedulingPolicy.PRIORITY:
@@ -991,6 +1001,10 @@ class Scheduler(SchedulerInterface):
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
                         break
+
+            if write_refused:
+                req_index += 1
+                continue
 
             if new_blocks is None:
                 if (
@@ -1510,24 +1524,39 @@ class Scheduler(SchedulerInterface):
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_tokens_past_hit,
-                    num_new_computed_tokens=num_new_local_computed_tokens,
-                    new_computed_blocks=new_computed_blocks,
-                    num_lookahead_tokens=effective_lookahead_tokens,
-                    num_external_computed_tokens=num_external_computed_tokens,
-                    delay_cache_blocks=load_kv_async,
-                    skip_zeroing_group_ids=(
-                        self.connector.get_loaded_kv_cache_group_ids(request)
-                        if load_kv_async and self.connector is not None
-                        else ()
-                    ),
-                    num_encoder_tokens=num_encoder_tokens,
-                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
-                    reserved_blocks=reserved_blocks,
-                    has_scheduled_reqs=bool(self.running),
-                )
+                held_blocks_before = self._holds_kv_blocks(request)
+                try:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_tokens_past_hit,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        delay_cache_blocks=load_kv_async,
+                        skip_zeroing_group_ids=(
+                            self.connector.get_loaded_kv_cache_group_ids(request)
+                            if load_kv_async and self.connector is not None
+                            else ()
+                        ),
+                        num_encoder_tokens=num_encoder_tokens,
+                        full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                        reserved_blocks=reserved_blocks,
+                        has_scheduled_reqs=bool(self.running),
+                    )
+                except WriteGrantRefused as e:
+                    # Percy A1: never send the write. Undo this allocation for a
+                    # request that held no blocks (releasing touched hits) and
+                    # requeue it, as an unschedulable request.
+                    logger.error("Percy check_writes: %s", e)
+                    if not held_blocks_before:
+                        self.kv_cache_manager.free(
+                            request, step_seq=request.last_sched_seq
+                        )
+                    if request.has_encoder_inputs:
+                        self.encoder_cache_manager.free(request)
+                    skip_request(request_queue)
+                    continue
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -1806,10 +1835,17 @@ class Scheduler(SchedulerInterface):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
+            gen_updates=self._take_gen_updates(),
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
         )
+        with record_function_or_nullcontext("schedule: percy_messages"):
+            self.percy_messages.annotate(scheduler_output)
+            self._percy_rollback_marks[id(scheduler_output)] = {
+                req_id: self.requests[req_id].num_rolled_back_tokens
+                for req_id in scheduler_output.num_scheduled_tokens
+            }
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1836,10 +1872,11 @@ class Scheduler(SchedulerInterface):
         # Connector-only block state must not be dispatched to workers.
         scheduler_output.kv_connector_block_state = None
 
-        # Advance the fence only for non-empty steps (those that actually
+        # Advance the step ledger only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).
-        if self.defer_block_free and total_num_scheduled_tokens > 0:
+        if total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
+            self.kv_cache_manager.begin_step(self.sched_step_seq)
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
@@ -1927,9 +1964,9 @@ class Scheduler(SchedulerInterface):
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
-            if self.defer_block_free:
-                # Record the in-flight step, to fence deferred block freeing.
-                request.last_sched_seq = self.sched_step_seq
+            # The last step that may use the request's blocks: their release
+            # stamps it, and they drain once it is processed.
+            request.last_sched_seq = self.sched_step_seq
             request.is_prefill_chunk = request.num_computed_tokens < (
                 request.num_tokens + request.num_output_placeholders
             )
@@ -2410,12 +2447,10 @@ class Scheduler(SchedulerInterface):
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
-        # Every GPU write enqueued by this and earlier steps has completed, so it is
-        # safe to return deferred-free blocks to the pool.
-        if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
-            self.processed_step_seq += 1
-            self._drain_deferred_frees()
-            self._drain_deferred_loads()
+        # Every GPU read and write enqueued by this and earlier steps has
+        # completed: blocks released with this step as their last use drain.
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self._advance_processed_step(self.processed_step_seq + 1)
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -2450,6 +2485,25 @@ class Scheduler(SchedulerInterface):
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
+        # Percy M2: requests a worker check refused this step (W1/I7).
+        row_check_failures = model_runner_output.row_check_failures
+        refused_reqs: list[Request] = []
+        # Percy M2: where each request's writes in this step started, so acks
+        # only extend a contiguous confirmed prefix. The scheduled start counts
+        # drafts of earlier in-flight steps as accepted; the worker writes from
+        # the corrected position, earlier by the tokens their rejections rolled
+        # back since this step was scheduled (exact at any queue depth).
+        step_starts = {
+            r.req_id: r.num_computed_tokens for r in scheduler_output.scheduled_new_reqs
+        }
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        if cached_reqs is not None:
+            step_starts.update(
+                zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens)
+            )
+        rollback_marks = getattr(self, "_percy_rollback_marks", {}).pop(
+            id(scheduler_output), None
+        )
         stopped_preempted_reqs: set[Request] = set()
         # Stopped resumable requests to re-enqueue, in output order.
         continuing_reqs: list[Request] = []
@@ -2479,6 +2533,22 @@ class Scheduler(SchedulerInterface):
                 # cache transfer in KV connector), the aborted request will not
                 # be set to None (in order to finish async KV transfer).
                 # In this case, we use is_finished() to check.
+                continue
+            # Percy M2: the worker-observed start of this step's writes; None
+            # for outputs schedule() did not produce (unchecked).
+            percy_step_start = (
+                step_starts.get(req_id, 0)
+                - (request.num_rolled_back_tokens - rollback_marks[req_id])
+                if rollback_marks is not None and req_id in rollback_marks
+                else None
+            )
+
+            if row_check_failures and req_id in row_check_failures:
+                # Percy M2: a worker refused this request's row (I7): its
+                # writes went nowhere, so discard the output and resync it
+                # (re-sent in full after preemption) instead of acking.
+                if not output_is_stale and request.status == RequestStatus.RUNNING:
+                    refused_reqs.append(request)
                 continue
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
@@ -2518,6 +2588,7 @@ class Scheduler(SchedulerInterface):
                 if not output_is_stale:
                     if request.num_computed_tokens > 0:
                         request.num_computed_tokens -= num_rejected
+                        request.num_rolled_back_tokens += num_rejected
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
 
@@ -2570,9 +2641,12 @@ class Scheduler(SchedulerInterface):
                     )
                 ):
                     # Publish finalized states before retirement or completion.
-                    self.kv_cache_manager.cache_blocks(
+                    self.kv_cache_manager.confirm_computed_tokens(
                         request,
                         request.num_computed_tokens - request.num_in_flight_tokens,
+                        cache=True,
+                        step_start=percy_step_start,
+                        step_seq=self.processed_step_seq,
                     )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
@@ -2626,6 +2700,17 @@ class Scheduler(SchedulerInterface):
                             and params.temperature != 0
                             and params.trace_decode_token_ids is None
                         )
+
+            if not output_is_stale and status_before_stop == RequestStatus.RUNNING:
+                # Percy M2 ack: the KV this request's processed steps wrote,
+                # after rejected drafts were rolled back, is confirmed; publish
+                # the blocks it filled (T2, I3, I8).
+                self.kv_cache_manager.confirm_computed_tokens(
+                    request,
+                    max(0, request.num_computed_tokens - request.num_in_flight_tokens),
+                    step_start=percy_step_start,
+                    step_seq=self.processed_step_seq,
+                )
 
             # Extract sample logprobs before stop handling can replace the
             # sampling parameters for a streaming continuation.
@@ -2713,6 +2798,8 @@ class Scheduler(SchedulerInterface):
         # that continue, so each ends up in exactly one queue.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
+        if refused_reqs:
+            self._resync_refused_requests(refused_reqs)
         if stopped_preempted_reqs:
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.kv_holding_waiting.remove_requests(stopped_preempted_reqs)
@@ -3346,49 +3433,96 @@ class Scheduler(SchedulerInterface):
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
 
-    def _request_blocks_can_be_freed(self, request: Request) -> bool:
-        # We must defer freeing blocks if an async kv connector may
-        # write to them immediately (not ordered with GPU stream).
-        return not self.defer_block_free or (
-            request.last_sched_seq <= self.processed_step_seq
-        )
+    def _resync_refused_requests(self, requests: list[Request]) -> None:
+        """Percy M2: preempt requests a worker check refused, so each is
+        re-sent in full (fresh rows) and recomputed. Their in-flight outputs
+        were computed against the refused row and are dropped."""
+        refused = set(requests)
+        self.running = remove_all(self.running, refused)
+        timestamp = time.monotonic()
+        for request in requests:
+            logger.warning(
+                "Percy: worker refused request %s's row; resyncing it",
+                request.request_id,
+            )
+            self._preempt_request(request, timestamp, drop_stale_output=True)
+
+    def _blocks_drain_now(self, request: Request) -> bool:
+        """Whether releasing the request's blocks would make them reusable
+        immediately: no in-flight step still uses them."""
+        return request.last_sched_seq <= self.processed_step_seq
 
     def _free_request_blocks(self, request: Request):
-        """Free the request's KV blocks, deferring the return to the block
-        pool when an in-flight GPU step may still write them.
+        """Release the request's KV blocks through the GrantTable, stamped
+        with the last step that scheduled it: an owned block is revoked and
+        drains once that step is processed, so an in-flight step never sees
+        it reused (I4, I5).
         """
-        if self._request_blocks_can_be_freed(request):
-            self.kv_cache_manager.free(request)
-            return
-        blocks = self.kv_cache_manager.pop_blocks_for_free(request)
-        if blocks:
-            self.deferred_frees.append((self.sched_step_seq, blocks))
+        self.kv_cache_manager.free(request, step_seq=request.last_sched_seq)
+
+    def _advance_processed_step(self, processed_seq: int) -> None:
+        """Steps up to `processed_seq` finished: drain the blocks they may
+        have used, then start async loads that waited for them.
+
+        Never runs ahead of the scheduled steps: an output schedule() did not
+        produce (hand-built in tests) cannot retire a step still to come.
+        """
+        processed_seq = min(processed_seq, self.sched_step_seq)
+        assert processed_seq >= self.processed_step_seq
+        self.processed_step_seq = processed_seq
+        self.kv_cache_manager.drain(processed_seq)
+        self._drain_deferred_loads()
+
+    def retire_inflight_steps(self) -> None:
+        """Every scheduled step has finished or been abandoned without its
+        output (fault recovery tore down the workers that ran it): no step
+        can still touch a released block, so the ledger catches up."""
+        self._percy_rollback_marks.clear()
+        if self.processed_step_seq < self.sched_step_seq:
+            self._advance_processed_step(self.sched_step_seq)
+
+    @property
+    def percy_messages(self) -> PercyMessageBuilder:
+        """The Percy M1 message builder, bound to the current cache manager."""
+        prev = getattr(self, "_percy_messages", None)
+        builder = prev
+        if builder is None or builder.kv_cache_manager is not self.kv_cache_manager:
+            builder = PercyMessageBuilder(
+                self.kv_cache_manager,
+                num_lookahead_tokens=self.num_lookahead_tokens,
+                # Async scheduling counts in-flight drafts as computed; the
+                # worker rolls back rejected ones and may write from there.
+                num_position_slack=(
+                    self.num_spec_tokens if self._counts_inflight_drafts() else 0
+                ),
+            )
+            if prev is not None:
+                builder.msg_seq = prev.msg_seq
+            self._percy_messages = builder
+        return builder
+
+    def _counts_inflight_drafts(self) -> bool:
+        from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+
+        return self.scheduler_config.async_scheduling or isinstance(
+            self, AsyncScheduler
+        )
+
+    def _take_gen_updates(self) -> tuple[list[int], list[int]] | None:
+        """Generation bumps (revokes) since the previous SchedulerOutput."""
+        block_ids, gens = self.kv_cache_manager.grant_table.take_gen_updates()
+        if not block_ids.size:
+            return None
+        return block_ids.tolist(), gens.tolist()
 
     def _free_cow_retained_blocks(
         self, blocks: list[KVCacheBlock], fence_seq: int
     ) -> None:
-        """Release CoW copy retentions, deferring their return to the block
-        pool while the step that runs the copy may still be in flight.
+        """Release CoW copy retentions stamped with the step that runs the
+        copy (`fence_seq`): a block whose last holder this was drains only
+        once that step is processed.
         """
-        if not self.defer_block_free or fence_seq <= self.processed_step_seq:
-            self.kv_cache_manager.block_pool.free_blocks(blocks)
-            return
-        self.deferred_frees.append((fence_seq, blocks[::-1]))
-
-    def _drain_deferred_frees(self):
-        """Return deferred blocks whose fence step has completed.
-
-        Fences are appended in near-monotonic order (a CoW retention fence
-        can lead request-free fences by one step), so stop at the first
-        pending one; any satisfied entry behind it is merely freed later.
-        """
-        while self.deferred_frees:
-            fence, _ = self.deferred_frees[0]
-            if fence > self.processed_step_seq:
-                break
-            _, blocks = self.deferred_frees.popleft()
-            # Free in reverse order so that the tail blocks are evicted first.
-            self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+        self.kv_cache_manager.block_pool.free_blocks(blocks, step_seq=fence_seq)
 
     def _drain_deferred_loads(self) -> None:
         """Start deferred async loads whose fence step has completed."""
@@ -3817,7 +3951,7 @@ class Scheduler(SchedulerInterface):
                 # There may be a local cache hit on retry.
                 # (Freed blocks are re-recorded for zeroing when
                 # reallocated, so the skipped blocks need no handling.)
-                self.kv_cache_manager.free(request)
+                self.kv_cache_manager.free(request, step_seq=request.last_sched_seq)
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:

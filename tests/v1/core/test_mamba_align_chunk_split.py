@@ -29,9 +29,15 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from .utils import create_requests, new_kv_cache_group
+from .utils import (
+    create_requests,
+    new_kv_cache_group,
+    percy_ack_planned_steps,  # noqa: F401
+)
 
-pytestmark = pytest.mark.cpu_test
+# Percy M2: these tests drive KV cache managers directly, with no processed
+# steps; ack each planned step at once (pre-Percy publish timing).
+pytestmark = [pytest.mark.cpu_test, pytest.mark.usefixtures("percy_ack_planned_steps")]
 
 # Mirrors the deployment where the poisoning was observed (Qwen3.6-27B): mamba
 # block 1600, MTP with 3 draft tokens, prompts shorter than 2 mamba blocks.

@@ -271,9 +271,12 @@ def test_sync_load_failure_with_shared_blocks(
     scheduler_output = scheduler.schedule()
 
     # req_id -> num_computed_tokens
+    # Percy M2: request1's prefix blocks are loaded by this very step, so they
+    # are unconfirmed and not published: request2 cannot share them and
+    # computes its own prefix (it never reads blocks whose load may fail).
     expected_computed_tokens = {
         request1.request_id: num_external_computed_tokens,
-        request2.request_id: common_prefix_len,
+        request2.request_id: 0,
     }
 
     assert len(scheduler.running) == 2
@@ -281,21 +284,24 @@ def test_sync_load_failure_with_shared_blocks(
     for new_req in scheduler_output.scheduled_new_reqs:
         assert new_req.num_computed_tokens == expected_computed_tokens[new_req.req_id]
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+    request2_scheduled = scheduler_output.num_scheduled_tokens[request2.request_id]
 
-    # Simulate a failure in loading some of the shared blocks.
+    # Simulate a failure in loading some of request1's blocks. request2 now
+    # prefills its whole prompt in this step, so no EOS: it keeps running.
     req1_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
     invalid_block_ids = {req1_block_ids[i] for i in invalid_block_idxs}
     model_runner_output = create_model_runner_output(
-        [request1, request2], invalid_block_ids=invalid_block_ids, use_eos=True
+        [request1, request2], invalid_block_ids=invalid_block_ids
     )
 
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # req_id -> num_computed_tokens
-    # all the common prefix blocks will be computed by request1
+    # request1 recomputes from the first invalid block; request2 is unaffected
+    # since it shares none of request1's failed blocks.
     expected_computed_tokens = {
         request1.request_id: min(invalid_block_idxs) * scheduler.block_size,
-        request2.request_id: common_prefix_len,
+        request2.request_id: request2_scheduled,
     }
 
     assert len(scheduler.running) == 2

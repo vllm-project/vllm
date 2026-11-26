@@ -166,6 +166,8 @@ def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
             fill, block_size, new_computed_blocks=computed_blocks if i == 0 else None
         )
         fill.num_computed_tokens += block_size
+        # Percy M2: the step is processed, acking its KV.
+        manager.confirm_computed_tokens(fill, fill.num_computed_tokens)
         gdn_ids.append(manager.get_block_ids(fill.request_id)[1][i])
     manager.free(fill)
     manager.block_pool.evict_blocks(set(gdn_ids))

@@ -6,19 +6,32 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
+import numpy as np
+
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.grant_table import BlockState, WriteGrantRefused
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    make_block_hash_with_group_id,
+    request_domain,
+    resolve_block_hashes,
+    trim_null_head,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
     MambaManager,
+    SingleTypeKVCacheManager,
     get_kv_cache_kind,
 )
 from vllm.v1.kv_cache_interface import (
@@ -186,8 +199,14 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        self.grant_table = self.coordinator.grant_table
         # Called when an allocation is short; returns True only if it can now proceed.
         self.reclaim_blocks: Callable[[str, int, int], bool] | None = None
+        # Percy M2: request id -> tokens whose KV processed steps confirmed.
+        self._confirmed_tokens: dict[str, int] = {}
+        # Request id -> where the next processed step's writes start when an
+        # admission loads external KV within that step (sync KV loads).
+        self._sync_load_from: dict[str, int] = {}
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -344,6 +363,11 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length, request.num_tokens
             )
         )
+        if num_new_computed_tokens and not self._hits_shareable(
+            request, computed_blocks
+        ):
+            # Percy I9: a hit outside the request's domain or group is a miss.
+            return self.empty_kv_cache_blocks, 0, 0
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
@@ -411,9 +435,161 @@ class KVCacheManager:
             return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
+        if num_local and not self._hits_shareable(request, tuple(computed)):
+            # Percy I9: a hit outside the request's domain or group is a miss.
+            return self.empty_kv_cache_blocks, 0, 0, False
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
+
+    def _hits_shareable(
+        self, request: Request, computed_blocks: Sequence[Sequence[KVCacheBlock]]
+    ) -> bool:
+        """Whether every prefix-hit block may be shared with the request (I9):
+        same KV cache group and the request's domain."""
+        domain = request_domain(request)
+        for manager, blocks in zip(
+            self.coordinator.single_type_managers, computed_blocks, strict=True
+        ):
+            block_ids = [b.block_id for b in blocks if not b.is_null]
+            if block_ids and not manager.block_pool.grant_table.shareable(
+                block_ids, manager.kv_cache_group_id, domain
+            ):
+                return False
+        return True
+
+    def _write_marks(self) -> list[tuple[int, int]]:
+        """Lengths of each manager's zero list and pending CoW copies, so the
+        entries one allocation adds can be told apart."""
+        return [
+            (len(m.new_block_ids), len(m._pending_cow_copies))
+            for m in self.coordinator.single_type_managers
+        ]
+
+    def _check_step_writes(
+        self,
+        request: Request,
+        write_start: int,
+        write_end: int,
+        marks: list[tuple[int, int]],
+    ) -> None:
+        """Percy check_writes: every block the step writes for the request
+        must be EXCLUSIVE, owned by it, at its current gen (I2).
+
+        The write set is the row columns covering token positions
+        `[write_start, write_end)` (new and lookahead tokens) in groups whose
+        writes follow positions, plus the blocks this allocation put on the
+        zero list and the CoW destinations it queued. Host-tier pools are
+        out of scope (Percy phase 3).
+
+        One case is a re-derivation rather than a write: recomputing tokens
+        whose KV a published block of the request's own prefix already holds
+        (the last token of a full external hit, a prefix replay, recompute
+        after a failed load). Such a column is exempt only when every written
+        slot is confirmed and the block's primary hash is the request's own
+        hash for that column, so it can only be rewritten with its own
+        tokens; any other published block is refused.
+
+        Raises:
+            WriteGrantRefused: Some block of the write set may not be written.
+
+        """
+        request_id = request.request_id
+        block_ids: list[int] = []
+        for manager, (num_zero, num_cow) in zip(
+            self.coordinator.single_type_managers, marks, strict=True
+        ):
+            if manager.block_pool is not self.block_pool:
+                continue
+            hashes = None
+            for col, block in manager.write_columns(request_id, write_start, write_end):
+                if block.block_hash is not None:
+                    if hashes is None:
+                        hashes = resolve_block_hashes(
+                            request.block_hashes,
+                            self.block_pool.hash_block_size,
+                            manager.block_size,
+                        )
+                    if self._rederives_own_block(
+                        block, col, manager, hashes, write_end
+                    ):
+                        continue
+                block_ids.append(block.block_id)
+            block_ids.extend(manager.new_block_ids[num_zero:])
+            block_ids.extend(
+                dst.block_id for _, dst in manager._pending_cow_copies[num_cow:]
+            )
+        if not block_ids:
+            return
+        ids = np.unique(np.asarray(block_ids, dtype=np.int64))
+        refused = self.grant_table.find_refused_writes(
+            self.grant_table.owner_for(request_id),
+            ids,
+            self.grant_table.gens_of(ids),
+        )
+        if refused.size:
+            raise WriteGrantRefused(request_id, refused.tolist())
+
+    def _rederives_own_block(
+        self,
+        block: KVCacheBlock,
+        col: int,
+        manager: SingleTypeKVCacheManager,
+        hashes: Sequence[BlockHash],
+        write_end: int,
+    ) -> bool:
+        """Whether writing column `col` only recomputes confirmed slots of a
+        published block holding exactly the request's prefix at `col`."""
+        if col >= len(hashes):
+            return False
+        grant_table = self.grant_table
+        block_size = manager.block_size
+        if grant_table.state(block.block_id) != BlockState.SHARED:
+            return False
+        if block.block_hash_num_tokens not in (None, (col + 1) * block_size):
+            return False
+        written_to = min(write_end, (col + 1) * block_size) - col * block_size
+        if grant_table.valid(block.block_id) < written_to:
+            return False
+        return block.block_hash == make_block_hash_with_group_id(
+            hashes[col], manager.kv_cache_group_id
+        )
+
+    def _pools(self) -> list[BlockPool]:
+        """Every pool the managers allocate from and release into (main pool
+        and any host-tier pool); each governs its own GrantTable."""
+        return list(
+            {
+                id(m.block_pool): m.block_pool
+                for m in self.coordinator.single_type_managers
+            }.values()
+        )
+
+    def begin_step(self, sched_seq: int) -> None:
+        """Step `sched_seq` was scheduled: releases without a holder's own
+        step stamp it, since it may use any block a live row holds."""
+        for pool in self._pools():
+            pool.grant_table.begin_step(sched_seq)
+
+    def drain(self, processed_seq: int) -> None:
+        """Step `processed_seq`'s output was processed: return the blocks no
+        step or peer can still touch to their pools' free queues (I5)."""
+        for pool in self._pools():
+            pool.drain(processed_seq)
+
+    @property
+    def num_draining_blocks(self) -> int:
+        """Blocks revoked but not yet reusable, across all pools."""
+        return sum(pool.grant_table.num_draining for pool in self._pools())
+
+    def _forget_request(self, request_id: str) -> None:
+        self._confirmed_tokens.pop(request_id, None)
+        self._sync_load_from.pop(request_id, None)
+        for grant_table in {
+            id(m.block_pool.grant_table): m.block_pool.grant_table
+            for m in self.coordinator.single_type_managers
+        }.values():
+            grant_table.forget_owner(request_id)
 
     def allocate_slots(
         self,
@@ -515,6 +691,9 @@ class KVCacheManager:
             A list of new allocated blocks.
 
         """
+        # Percy I9: blocks granted to and shared with this request carry its
+        # domain.
+        self.grant_table.set_domain(request.request_id, request_domain(request))
         # A step may need no slots of its own while still adopting computed
         # tokens: an async KV load, or a chunk that ends inside the replayed
         # range of a hit (SWA bounded replay).
@@ -584,7 +763,7 @@ class KVCacheManager:
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             full_sequence_shortfall = (
-                required_blocks - self.block_pool.get_num_free_blocks()
+                required_blocks - self.block_pool.get_num_allocatable_blocks()
             )
             if full_sequence_shortfall > 0 and self.reclaim_blocks is None:
                 return None
@@ -623,7 +802,11 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
+        # Percy: cached-idle blocks an in-flight step may still read count as
+        # free but cannot be evicted yet, so they are not available.
+        available_blocks = (
+            self.block_pool.get_num_allocatable_blocks() - reserved_blocks
+        )
         required_blocks = num_blocks_to_allocate + watermark_blocks
         deficit = required_blocks - available_blocks
         if full_sequence_shortfall > 0:
@@ -640,6 +823,7 @@ class KVCacheManager:
         ):
             return None
 
+        write_marks = self._write_marks()
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
@@ -654,12 +838,30 @@ class KVCacheManager:
                 num_tokens_main_model=num_tokens_main_model,
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
+            rid = request.request_id
+            if num_new_computed_tokens:
+                # Prefix hits are published blocks: already confirmed.
+                self._confirmed_tokens[rid] = max(
+                    self._confirmed_tokens.get(rid, 0), num_local_computed_tokens
+                )
+            if num_external_computed_tokens and not delay_cache_blocks:
+                # A sync load: the scheduled step itself writes the external KV.
+                self._sync_load_from[rid] = num_local_computed_tokens
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+        )
+
+        # Percy A1 (I2): check the step's write set before it is published or
+        # sent; a refusal skips the request for this step.
+        self._check_step_writes(
+            request,
+            total_computed_tokens,
+            num_tokens_need_slot,
+            write_marks,
         )
 
         # P/D: delay caching blocks if we have to recv from
@@ -672,6 +874,9 @@ class KVCacheManager:
         # "non-committable" tokens (e.g., draft tokens that could be rejected).
         # Therefore, we cap the number at `request.num_tokens`, ensuring only
         # "finalized" tokens are cached.
+        # Percy M2: this registers the planned entries; a block is published
+        # only once a processed step confirms its slots (I3, I8), see
+        # `confirm_computed_tokens`.
         num_tokens_to_cache = min(
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
@@ -680,16 +885,20 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
-    def free(self, request: Request) -> None:
+    def free(self, request: Request, step_seq: int | None = None) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted
         first when caching is enabled.
 
         Args:
             request: The request to free the blocks.
+            step_seq: The last step that may use the blocks through this
+                request (Percy `last_use`); None uses the latest scheduled
+                step, which is conservative.
 
         """
-        self.coordinator.free(request)
+        self.coordinator.free(request, step_seq=step_seq)
+        self._forget_request(request.request_id)
 
     def remove_skipped_blocks(
         self,
@@ -723,7 +932,9 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
-        return self.coordinator.pop_blocks_for_free(request)
+        blocks = self.coordinator.pop_blocks_for_free(request)
+        self._forget_request(request.request_id)
+        return blocks
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
@@ -835,7 +1046,10 @@ class KVCacheManager:
         return cached_tokens or 0
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
-        """Cache the blocks for the request, if enabled.
+        """Confirm and cache the request's first `num_computed_tokens` tokens.
+
+        Callers are acks: the KV of those tokens is known to be written (a
+        processed step, or a finished KV load).
 
         Args:
             request: The request to cache the blocks.
@@ -843,8 +1057,63 @@ class KVCacheManager:
                 that are already cached and tokens to be cached.
 
         """
-        if self.enable_caching:
-            self.coordinator.cache_blocks(request, num_computed_tokens)
+        self.confirm_computed_tokens(request, num_computed_tokens, cache=True)
+
+    def confirm_computed_tokens(
+        self,
+        request: Request,
+        confirmed_tokens: int,
+        cache: bool = False,
+        step_start: int | None = None,
+        step_seq: int | None = None,
+    ) -> None:
+        """Percy M2 (completion acks): the KV of the request's positions
+        `[0, confirmed_tokens)` was written by processed steps (or a finished
+        load). Raise the blocks' confirmed slots (`valid`, I8) and publish the
+        entries that became full (T2, I3).
+
+        Args:
+            request: The request.
+            confirmed_tokens: Tokens whose KV is confirmed; never lowers.
+            cache: Also register the prefix-cache entries for those tokens,
+                for paths whose allocation skipped it (delayed KV loads).
+            step_start: For an ack from a processed step, the first position
+                that step wrote. Confirmation is a contiguous prefix: a step
+                that started past it leaves a gap no processed step wrote, so
+                it confirms nothing (vLLM #58259 class of frontier bugs).
+            step_seq: The processed step, for groups whose blocks are not
+                addressed by token positions (recurrent state).
+
+        """
+        request_id = request.request_id
+        prev = self._confirmed_tokens.get(request_id, 0)
+        if step_start is not None:
+            sync_from = self._sync_load_from.pop(request_id, None)
+            if sync_from is not None:
+                step_start = min(step_start, sync_from)
+            if step_start > prev:
+                logger.warning(
+                    "Percy: request %s's step started at %d past its confirmed "
+                    "KV prefix %d; not confirming it",
+                    request_id,
+                    step_start,
+                    prev,
+                )
+                return
+        if confirmed_tokens > prev or step_seq is not None:
+            for manager in self.coordinator.single_type_managers:
+                manager.confirm_tokens(
+                    request_id, prev, max(prev, confirmed_tokens), step_seq
+                )
+            self._confirmed_tokens[request_id] = max(prev, confirmed_tokens)
+        if not self.enable_caching:
+            return
+        if cache:
+            self.coordinator.cache_blocks(
+                request, min(confirmed_tokens, request.num_tokens)
+            )
+        for pool in self._pools():
+            pool.flush_publications(request_id)
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]
@@ -891,6 +1160,15 @@ class KVCacheManager:
         for mgr in self.coordinator.single_type_managers:
             ids.extend(mgr.take_new_block_ids())
         return ids
+
+    def take_row_revokes(self) -> list[tuple[str, int, int, int, int]]:
+        """Drain the columns nulled in live rows since the last call, as
+        (request_id, group, column, old_block_id, old_gen)."""
+        return [
+            (req_id, group, col, block_id, gen)
+            for group, mgr in enumerate(self.coordinator.single_type_managers)
+            for req_id, col, block_id, gen in mgr.take_row_revokes()
+        ]
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
         """Re-record the request's blocks from start_token onwards for

@@ -1,18 +1,208 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
+import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.core.grant_table import NULL_BLOCK_ID, NULL_GEN, normalize_gen_updates
 from vllm.v1.worker.gpu.buffer_utils import (
     FusedStagedWriter,
     StagedWriteTensor,
     UvaBackedTensor,
+    UvaBufferPool,
     _load_ptr,
 )
+
+logger = init_logger(__name__)
+
+
+def _as_i32(gens: Sequence[int] | np.ndarray) -> np.ndarray:
+    """u32 gens (Python ints or numpy) as their int32 bit pattern."""
+    return np.asarray(gens, dtype=np.int64).astype(np.uint32).view(np.int32)
+
+
+class PercyGenCheck:
+    """Percy W2: the device generation table and the step's write windows.
+
+    `table[block]` mirrors the GrantTable gen of every block (int32 bit
+    pattern; the null block holds NULL_GEN, which no grant carries). Each
+    step, `window_meta[group, req_state_idx]` = (first column, length,
+    offset into `window_gens`) describes the columns a scheduled request may
+    write and the gens they must hold; length -1 leaves a request unchecked
+    and -2 refuses all its writes. All device buffers keep fixed addresses:
+    the slot-mapping kernel is captured in CUDA graphs (draft decode).
+
+    Args:
+        num_kv_blocks: Blocks in the main KV pool.
+        block_sizes: Tokens per block of each KV cache group.
+        max_num_reqs: Request-state slots (rows of the block tables).
+        max_num_batched_tokens: Tokens per step, which bounds the windows.
+        device: Device of the tables.
+        max_window_extra_tokens: Positions a window may span beyond a
+            request's scheduled tokens: async spec-decode slack before them
+            plus drafter lookahead after them.
+
+    """
+
+    UNCHECKED = -1
+    REFUSED = -2
+
+    def __init__(
+        self,
+        num_kv_blocks: int,
+        block_sizes: Sequence[int],
+        max_num_reqs: int,
+        max_num_batched_tokens: int,
+        device: torch.device,
+        max_window_extra_tokens: int = 0,
+    ) -> None:
+        self.device = device
+        self.num_groups = len(block_sizes)
+        self.table = torch.ones(num_kv_blocks, dtype=torch.int32, device=device)
+        self.table[NULL_BLOCK_ID] = int(_as_i32([NULL_GEN])[0])
+        self.meta_np = np.zeros((self.num_groups, max_num_reqs, 3), dtype=np.int32)
+        self.meta_np[..., 1] = self.UNCHECKED
+        self.meta = torch.from_numpy(self.meta_np).to(device)
+        # A request's window covers positions [computed - slack, computed +
+        # scheduled + lookahead): at most cdiv(scheduled + extra, bs) + 1
+        # columns, and cdiv(s + x, bs) <= s / bs + cdiv(x, bs) + 1. Summed
+        # over requests whose scheduled tokens total at most
+        # max_num_batched_tokens, a group needs at most
+        # cdiv(max_num_batched_tokens, bs) + max_num_reqs * (cdiv(x, bs) + 2).
+        capacity = sum(
+            cdiv(max_num_batched_tokens, bs)
+            + max_num_reqs * (cdiv(max_window_extra_tokens, bs) + 2)
+            for bs in block_sizes
+        )
+        self.gens_np = np.zeros(max(capacity, 1), dtype=np.int32)
+        self.gens = torch.zeros(self.gens_np.shape[0], dtype=torch.int32, device=device)
+        self._num_gens = 0
+        self._staged = device.type != "cpu"
+        if self._staged:
+            self._meta_pool = UvaBufferPool(self.meta_np.size, torch.int32)
+            self._gens_pool = UvaBufferPool(self.gens_np.shape[0], torch.int32)
+            self._ids_pool = UvaBufferPool(1024, torch.int64)
+            self._vals_pool = UvaBufferPool(1024, torch.int32)
+
+    def _to_device(
+        self, pool: "UvaBufferPool | None", x: np.ndarray, out: torch.Tensor
+    ) -> torch.Tensor:
+        if pool is None:
+            return out.copy_(torch.from_numpy(x))
+        # Staged host buffer (round-robin, retired before reuse), then an
+        # in-stream copy into the fixed device buffer.
+        return pool.copy_to_gpu(x, out=out)
+
+    def apply_gen_updates(
+        self, gen_updates: tuple[list[int], list[int]] | None
+    ) -> None:
+        """Copy the step's gen bumps into the device table (G1, I10).
+
+        Ordering: this runs in `execute_model` on the compute stream, after
+        the step's row updates and before any slot mapping of the step is
+        launched; every reader of `table` (the slot-mapping kernel, also when
+        speculators launch it later in the step or replay it inside a CUDA
+        graph) runs on that same stream. So the update is ordered after every
+        earlier step's reads (a running step never sees it) and before every
+        read of this step. The H2D source is cloned into device memory first:
+        no kernel reads pinned host memory.
+        """
+        if not gen_updates or not gen_updates[0]:
+            return
+        ids, gens, dropped = normalize_gen_updates(
+            gen_updates[0], gen_updates[1], self.table.shape[0]
+        )
+        if dropped:
+            logger.error(
+                "Percy: dropped %d gen updates for the null block or out-of-"
+                "range block ids",
+                dropped,
+            )
+        if not ids.size:
+            return
+        vals = gens.view(np.int32)
+        n = ids.shape[0]
+        if self._staged:
+            ids_d = self._ids_pool.copy_to_gpu(ids)
+            vals_d = self._vals_pool.copy_to_gpu(vals)
+        else:
+            ids_d = torch.from_numpy(ids)
+            vals_d = torch.from_numpy(vals.copy())
+        self.table.index_copy_(0, ids_d[:n], vals_d[:n])
+
+    @property
+    def table_bytes_per_block(self) -> int:
+        return self.table.element_size()
+
+    def mismatched_blocks(self, gen_mirror: np.ndarray) -> np.ndarray:
+        """Debug/test only (synchronizes): block ids whose device gen differs
+        from a CPU mirror of the same gens (e.g. `RowVerifier.gen_mirror`)."""
+        device_gens = self.table.cpu().numpy().view(np.uint32)
+        return np.flatnonzero(device_gens != np.asarray(gen_mirror, dtype=np.uint32))
+
+    def begin_windows(self) -> None:
+        """Start a step: every request is unchecked until given a window."""
+        self.meta_np[..., 1] = self.UNCHECKED
+        self._num_gens = 0
+
+    def set_windows(
+        self,
+        req_state_idx: int,
+        windows: "Sequence[Sequence[int] | None]",
+        refused: bool = False,
+    ) -> None:
+        """Record a scheduled request's write windows, one per group: a
+        window is (first column, gen, gen, ...); None leaves the group
+        unchecked; an empty `windows` leaves the request unchecked."""
+        meta = self.meta_np[:, req_state_idx]
+        if refused:
+            meta[:, 1] = self.REFUSED
+            return
+        if not windows:
+            return
+        if len(windows) != self.num_groups:
+            logger.warning_once(
+                "Percy: write windows for %d groups, expected %d; unchecked",
+                len(windows),
+                self.num_groups,
+            )
+            return
+        for group, window in enumerate(windows):
+            if window is None:
+                continue
+            n = len(window) - 1
+            start = self._num_gens
+            if start + n > self.gens_np.shape[0]:
+                # The capacity is a proven bound (see __init__), and growing
+                # would move a graph-captured buffer: a broken bound is a bug.
+                raise RuntimeError(
+                    f"Percy write windows need {start + n} gens, above the "
+                    f"bounded capacity {self.gens_np.shape[0]} (request slot "
+                    f"{req_state_idx}, group {group}, window of {n} columns)"
+                )
+            self.gens_np[start : start + n] = _as_i32(window[1:])
+            meta[group] = (window[0], n, start)
+            self._num_gens = start + n
+
+    def commit_windows(self) -> None:
+        """Copy the step's windows to the device buffers."""
+        self._to_device(
+            self._meta_pool if self._staged else None,
+            self.meta_np.reshape(-1),
+            self.meta.view(-1),
+        )
+        n = self._num_gens
+        if n:
+            self._to_device(
+                self._gens_pool if self._staged else None,
+                self.gens_np[:n],
+                self.gens[:n],
+            )
 
 
 def make_slot_mappings(
@@ -48,6 +238,8 @@ class BlockTables:
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
         sliding_window_reach: list[int] | None = None,
+        num_kv_blocks: int | None = None,
+        max_window_extra_tokens: int = 0,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -57,6 +249,27 @@ class BlockTables:
         self.cp_size = cp_size
         self.cp_rank = cp_rank
         self.cp_interleave = cp_interleave
+
+        # Percy W2: the device gen table and write windows. The slot-mapping
+        # check addresses block-table columns by token position, which only
+        # holds without context parallelism.
+        self.gen_check: PercyGenCheck | None = None
+        if num_kv_blocks is not None and block_sizes:
+            self.gen_check = PercyGenCheck(
+                num_kv_blocks,
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                device,
+                max_window_extra_tokens,
+            )
+            if cp_size > 1:
+                logger.warning_once(
+                    "Percy: the slot_mapping generation check is disabled under "
+                    "context parallelism (cp_size=%d)",
+                    cp_size,
+                )
+        self.gen_check_enabled = self.gen_check is not None and cp_size == 1
 
         self.num_kv_cache_groups = len(self.block_sizes)
         assert len(max_num_blocks_per_group) == self.num_kv_cache_groups
@@ -143,18 +356,25 @@ class BlockTables:
     ) -> None:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
-            block_ids = new_block_ids[i]
-            if self.redirect_writes_to_null_block:
-                block_ids = [0] * len(block_ids)
-            end = start + len(block_ids)
-            row_capacity = self.block_tables[i].gpu.shape[1]
-            if end > row_capacity:
-                raise RuntimeError(
-                    f"Block table write for request {req_index}, group {i} exceeds "
-                    f"row capacity ({end} > {row_capacity})"
-                )
-            self.block_tables[i].stage_write(req_index, start, block_ids)
-            self.num_blocks.np[i, req_index] = end
+            self.write_row(req_index, i, start, new_block_ids[i])
+
+    def write_row(
+        self, req_index: int, group: int, start: int, block_ids: list[int]
+    ) -> None:
+        """Stage `block_ids` into the row from column `start`, which becomes
+        the row's end. Percy W1 merges a step's revokes and appends for a row
+        into this one write: staged writes run in parallel, one per row."""
+        if self.redirect_writes_to_null_block:
+            block_ids = [0] * len(block_ids)
+        end = start + len(block_ids)
+        row_capacity = self.block_tables[group].gpu.shape[1]
+        if end > row_capacity:
+            raise RuntimeError(
+                f"Block table write for request {req_index}, group {group} exceeds "
+                f"row capacity ({end} > {row_capacity})"
+            )
+        self.block_tables[group].stage_write(req_index, start, block_ids)
+        self.num_blocks.np[group, req_index] = end
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:
@@ -257,6 +477,19 @@ class BlockTables:
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
+        gen_check = self.gen_check
+        if self.gen_check_enabled:
+            assert gen_check is not None
+            gen_args = (
+                gen_check.table,
+                gen_check.meta,
+                gen_check.meta.stride(0),
+                gen_check.gens,
+            )
+        else:
+            # Unused by the kernel; any int32 tensor satisfies the signature.
+            unused = self.sliding_window_reach
+            gen_args = (unused, unused, 0, unused)
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             slot_mappings.shape[1],
             idx_mapping,
@@ -270,10 +503,12 @@ class BlockTables:
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
+            *gen_args,
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
+            GEN_CHECK=self.gen_check_enabled,
         )
         return slot_mappings[:, :num_tokens_padded]
 
@@ -362,10 +597,15 @@ def _compute_slot_mappings_kernel(
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
+    gen_table,  # [num_kv_blocks] int32 (u32 bit pattern)
+    window_meta,  # [num_kv_cache_groups, max_num_reqs, 3] int32
+    window_meta_group_stride,
+    window_gens,  # [capacity] int32
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
+    GEN_CHECK: tl.constexpr = False,
 ):
     # kv cache group id
     group_id = tl.program_id(0)
@@ -396,6 +636,19 @@ def _compute_slot_mappings_kernel(
     is_real_req = req_state_idx >= 0
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
+    if GEN_CHECK:
+        # Percy W2: this request's write window in this group, as
+        # (first column, length, offset into window_gens). Length -1 means
+        # unchecked; -2 a refused request (every token PADs).
+        meta = (
+            window_meta
+            + group_id * window_meta_group_stride
+            + tl.maximum(req_state_idx, 0) * 3
+        )
+        win_first = tl.load(meta, mask=is_real_req, other=0)
+        win_len = tl.load(meta + 1, mask=is_real_req, other=-1)
+        win_off = tl.load(meta + 2, mask=is_real_req, other=0)
+        checked = is_real_req & (win_len != -1)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
         positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
@@ -427,6 +680,21 @@ def _compute_slot_mappings_kernel(
         slot_ids = block_numbers * kv_block_size + block_offsets
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+        if GEN_CHECK:
+            # Percy W2 (I6): a written block must hold the gen the scheduler
+            # granted for its column; the null block's gen is never granted.
+            in_token = offset < end_idx
+            w = block_indices - win_first
+            in_window = (w >= 0) & (w < win_len)
+            # Broadcast the per-request scalar with `where`, not `&`, so the
+            # masks stay boolean vectors (also under the Triton interpreter).
+            load_mask = tl.where(checked, in_token & in_window, False)
+            expected = tl.load(window_gens + win_off + w, mask=load_mask, other=0)
+            actual = tl.load(gen_table + block_numbers, mask=load_mask, other=1)
+            # -1 is NULL_GEN's int32 bit pattern: no window may claim it, so
+            # a write aimed at the null block always fails.
+            ok = in_window & (expected == actual) & (expected != -1)
+            slot_ids = tl.where(tl.where(checked, ~ok, False), PAD_ID, slot_ids)
 
         slot_ids = tl.where(mapping_enabled & is_real_req, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)

@@ -670,14 +670,20 @@ def test_finish_requests_frees_slots_in_sorted_order():
     ownership derives from slot indices, and `finished_req_ids` is a set
     whose iteration order is per-process hash-randomized."""
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.percy_rows import RowVerifier
 
     removed: list[str] = []
     fake_runner = SimpleNamespace(
-        _remove_request=removed.append, pooling_runner=None, speculator=None
+        _remove_request=removed.append,
+        pooling_runner=None,
+        speculator=None,
+        row_verifier=RowVerifier(num_groups=1, num_blocks=4),
     )
     scheduler_output = SimpleNamespace(
         finished_req_ids={"req-b", "req-c", "req-a"},
         preempted_req_ids={"req-e", "req-d"},
+        msg_seq=0,
+        gen_updates=None,
     )
     GPUModelRunner.finish_requests(fake_runner, scheduler_output)
     assert removed == sorted(removed)

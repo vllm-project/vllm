@@ -54,6 +54,12 @@ class SingleTypeKVCacheManager(ABC):
     # that address their pages themselves (raw storage, ring buffers) take none.
     uses_slot_mapping: ClassVar[bool] = True
 
+    # Percy check_writes: whether a step's KV writes land in the row columns
+    # covering the written token positions. Groups whose kernels pick their
+    # write target otherwise (recurrent state, rings, cross-attention, host
+    # tiers) are covered by the worker-side block-id checks (W5) instead.
+    writes_follow_positions: ClassVar[bool] = True
+
     block_table_token_alignment: ClassVar[int | None] = 128
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
@@ -215,6 +221,7 @@ class SingleTypeKVCacheManager(ABC):
         self.group_block_size = kv_cache_group.block_size
         self.block_size = kv_cache_group.block_size * self.dcp_world_size
         self.block_pool = block_pool
+        block_pool.grant_table.set_group_block_size(kv_cache_group_id, self.block_size)
         self.enable_caching = enable_caching
         self.retention_interval = retention_interval
         self.max_admission_blocks_per_request = max_admission_blocks_per_request
@@ -257,6 +264,53 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_boundary_state_offloads: list[
             tuple[str, int, KVCacheBlock, int]
         ] = []
+        # Percy M1: columns nulled in place while the request keeps its row,
+        # as (request_id, column, old_block_id, old_gen); the scheduler sends
+        # them to the workers as row revokes.
+        self._row_revokes: list[tuple[str, int, int, int]] = []
+
+    def _null_column(
+        self, request_id: str, blocks: list[KVCacheBlock], col: int
+    ) -> KVCacheBlock:
+        """Replace `blocks[col]` with the null block, recording a row revoke
+        (with the gen before any release bumps it). Returns the old block."""
+        old = blocks[col]
+        if not old.is_null:
+            self._row_revokes.append(
+                (
+                    request_id,
+                    col,
+                    old.block_id,
+                    self.block_pool.grant_table.gen(old.block_id),
+                )
+            )
+        blocks[col] = self._null_block
+        return old
+
+    def take_row_revokes(self) -> list[tuple[str, int, int, int]]:
+        """Drain the row revokes recorded since the last call."""
+        revokes = self._row_revokes
+        self._row_revokes = []
+        return revokes
+
+    def _grant_new_blocks(self, request_id: str, num_blocks: int) -> list[KVCacheBlock]:
+        """Evict for room, then grant `num_blocks` new blocks to the request.
+
+        Callers gate allocation on `BlockPool.get_num_allocatable_blocks`, so
+        a short `make_room` is an accounting bug, reported as such.
+        """
+        if not self.block_pool.make_room(num_blocks):
+            raise RuntimeError(
+                f"make_room could not free {num_blocks} blocks for "
+                f"{request_id}: allocation was not gated on allocatable blocks"
+            )
+        grant_table = self.block_pool.grant_table
+        return self.block_pool.get_new_blocks(
+            num_blocks,
+            owner=grant_table.owner_for(request_id),
+            group=self.kv_cache_group_id,
+            domain=grant_table.domain_for(request_id),
+        )
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -410,7 +464,11 @@ class SingleTypeKVCacheManager(ABC):
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
+            self.block_pool.touch(
+                new_computed_blocks,
+                group=self.kv_cache_group_id,
+                domain=self.block_pool.grant_table.domain_for(request_id),
+            )
         else:
             assert not any(new_computed_blocks), (
                 "Computed blocks should be empty when prefix caching is disabled"
@@ -478,7 +536,7 @@ class SingleTypeKVCacheManager(ABC):
         ) - len(req_blocks)
         req_blocks.extend([self._null_block] * max(num_null_blocks, 0))
         num_new_blocks = max(0, num_computed_blocks - len(req_blocks))
-        allocated_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        allocated_blocks = self._grant_new_blocks(request_id, num_new_blocks)
         req_blocks.extend(allocated_blocks)
         if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
@@ -508,7 +566,7 @@ class SingleTypeKVCacheManager(ABC):
             # correct; the extra block was reserved by
             # get_num_blocks_to_allocate.
             block_idx, source_block = self._partial_hit_reqs.pop(request_id)
-            cow_block = self.block_pool.get_new_blocks(1)[0]
+            cow_block = self._grant_new_blocks(request_id, 1)[0]
             self._apply_cow(request_id, block_idx, source_block, cow_block)
             self.new_block_ids.append(cow_block.block_id)
             cow_blocks.append(cow_block)
@@ -525,7 +583,7 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return null_blocks + cow_blocks
         else:
-            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            new_blocks = self._grant_new_blocks(request_id, num_new_blocks)
             req_blocks.extend(new_blocks)
             if self._record_new_block_ids:
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
@@ -546,6 +604,26 @@ class SingleTypeKVCacheManager(ABC):
         ids = self.new_block_ids
         self.new_block_ids = []
         return ids
+
+    def write_columns(
+        self, request_id: str, start: int, end: int
+    ) -> list[tuple[int, KVCacheBlock]]:
+        """(column, block) pairs a step writes for token positions
+        `[start, end)`.
+
+        Columns not allocated yet and null columns are skipped; empty for
+        groups whose writes do not follow positions.
+        """
+        if not self.writes_follow_positions or start >= end:
+            return []
+        blocks = self.req_to_blocks.get(request_id)
+        if not blocks:
+            return []
+        first = start // self.block_size
+        last = min(len(blocks), cdiv(end, self.block_size))
+        return [
+            (col, blocks[col]) for col in range(first, last) if not blocks[col].is_null
+        ]
 
     def take_pending_cow_copies(
         self,
@@ -599,7 +677,7 @@ class SingleTypeKVCacheManager(ABC):
         assert not source_block.is_null and source_block.ref_cnt > 0
         req_blocks[block_idx] = cow_block
         self._pending_cow_copies.append((source_block, cow_block))
-        cow_block.ref_cnt += 1
+        self.block_pool.touch([cow_block], record_access=False)
 
     def cache_blocks(
         self,
@@ -664,6 +742,30 @@ class SingleTypeKVCacheManager(ABC):
 
         self.num_cached_block[request.request_id] = num_full_blocks
 
+    def confirm_tokens(
+        self,
+        request_id: str,
+        prev_confirmed: int,
+        confirmed: int,
+        step_seq: int | None = None,
+    ) -> None:
+        """Percy M2 ack: the KV of positions `[0, confirmed)` was written by
+        processed steps. Raise `valid` of the request's blocks accordingly
+        (column `c` holds `min(block_size, confirmed - c * block_size)`
+        confirmed slots), starting from the column `prev_confirmed` reached.
+        """
+        blocks = self.req_to_blocks.get(request_id)
+        if not blocks or confirmed <= 0:
+            return
+        bs = self.block_size
+        end = min(len(blocks), cdiv(confirmed, bs))
+        cols = [c for c in range(prev_confirmed // bs, end) if not blocks[c].is_null]
+        if cols:
+            self.block_pool.grant_table.confirm_valid(
+                [blocks[c].block_id for c in cols],
+                [min(bs, confirmed - c * bs) for c in cols],
+            )
+
     def _refine_block_mask(
         self,
         request: Request,
@@ -723,15 +825,19 @@ class SingleTypeKVCacheManager(ABC):
         self._partial_hit_reqs.pop(request_id, None)
         return trim_null_head(req_blocks)
 
-    def free(self, request_id: str) -> None:
+    def free(self, request_id: str, step_seq: int | None = None) -> None:
         """Free the blocks for the request.
 
         Args:
             request_id: The request ID.
+            step_seq: The last step that may use the blocks through this
+                request; None uses the latest scheduled step.
 
         """
         # Free blocks in reverse order so that the tail blocks are freed first.
-        self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
+        self.block_pool.free_blocks(
+            reversed(self.pop_blocks_for_free(request_id)), step_seq=step_seq
+        )
 
     def cache_blocks_on_free(self, request: Request) -> None:
         """Cache blocks that are only retained once the request is freed."""
@@ -804,8 +910,7 @@ class SingleTypeKVCacheManager(ABC):
         for i in range(last_block - 1, first_block - 1, -1):
             if blocks[i] == self._null_block:
                 break
-            freed.append(blocks[i])
-            blocks[i] = self._null_block
+            freed.append(self._null_column(request_id, blocks, i))
         if freed:
             self.block_pool.free_blocks(freed)
 
@@ -1430,8 +1535,7 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         freed: list[KVCacheBlock] = []
         for i in range(last_block - 1, start - 1, -1):
             if not blocks[i].is_null:
-                freed.append(blocks[i])
-                blocks[i] = self._null_block
+                freed.append(self._null_column(request_id, blocks, i))
         if freed:
             self.block_pool.free_blocks(freed)
         self._num_null_prefix_blocks[request_id] = max(start, last_block)
@@ -1557,6 +1661,7 @@ class CircularBufferManager(SingleTypeKVCacheManager):
     zeroes_new_blocks: ClassVar[bool] = False
 
     uses_slot_mapping: ClassVar[bool] = False
+    writes_follow_positions: ClassVar[bool] = False
     block_table_token_alignment: ClassVar[int | None] = None
 
     @classmethod
@@ -1591,7 +1696,7 @@ class CircularBufferManager(SingleTypeKVCacheManager):
         req_blocks = self.req_to_blocks[request_id]
         if req_blocks:
             return []
-        new_blocks = self.block_pool.get_new_blocks(1)
+        new_blocks = self._grant_new_blocks(request_id, 1)
         req_blocks.extend(new_blocks)
         if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(block.block_id for block in new_blocks)
@@ -1841,6 +1946,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    writes_follow_positions: ClassVar[bool] = False
     zeroes_new_blocks: ClassVar[bool] = False
 
     @property
@@ -1929,6 +2035,9 @@ class MambaManager(SingleTypeKVCacheManager):
             self.enable_caching and self.retention_interval is not None
         )
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+        # Percy M2: per request, (step seq, row length) after each allocation:
+        # the state blocks a step may write are those allocated up to it.
+        self._alloc_marks: dict[str, list[tuple[int, int]]] = {}
         if self.prefix_caching:
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -2097,8 +2206,7 @@ class MambaManager(SingleTypeKVCacheManager):
         for i in range(last_block - 1, first_block - 1, -1):
             if blocks[i].is_null:
                 continue
-            freed.append(blocks[i])
-            blocks[i] = self._null_block
+            freed.append(self._null_column(request_id, blocks, i))
         if freed:
             self.block_pool.free_blocks(freed)
         self._num_retired_blocks[request_id] = last_block
@@ -2136,8 +2244,8 @@ class MambaManager(SingleTypeKVCacheManager):
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:
-                    self.block_pool.free_blocks([blocks[last_state_block_idx]])
-                    blocks[last_state_block_idx] = self._null_block
+                    old = self._null_column(request_id, blocks, last_state_block_idx)
+                    self.block_pool.free_blocks([old])
 
     def _needs_internal_checkpoint(
         self,
@@ -2283,6 +2391,20 @@ class MambaManager(SingleTypeKVCacheManager):
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
+        new_blocks = self._allocate_state_blocks(
+            request_id, num_tokens, num_tokens_main_model
+        )
+        self._alloc_marks.setdefault(request_id, []).append(
+            (
+                self.block_pool.grant_table.latest_sched_seq + 1,
+                len(self.req_to_blocks[request_id]),
+            )
+        )
+        return new_blocks
+
+    def _allocate_state_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
         if not self.prefix_caching:
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -2351,7 +2473,9 @@ class MambaManager(SingleTypeKVCacheManager):
                         prev_block_len - self.num_speculative_blocks, prev_block_len
                     ):
                         if block_idx < num_skipped_blocks - checkpoint_block:
-                            self._relocate_speculative_block(req_blocks, block_idx)
+                            self._relocate_speculative_block(
+                                request_id, req_blocks, block_idx
+                            )
                         else:
                             break
                 num_new_blocks = max(num_required_blocks - len(req_blocks), 0)
@@ -2361,7 +2485,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 if not blocks_allocated:
                     max_new_blocks += self.num_speculative_blocks
                 assert num_new_blocks <= max_new_blocks
-                new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+                new_blocks = self._grant_new_blocks(request_id, num_new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
                 if partial_hit is not None:
                     block_idx, source_block = partial_hit
@@ -2376,7 +2500,7 @@ class MambaManager(SingleTypeKVCacheManager):
                         assert req_blocks[block_idx] is source_block
                         self.block_pool.move_block_hashes(source_block, cow_block)
                         self._pending_cow_copies.append((source_block, cow_block))
-                        source_block.ref_cnt += 1
+                        self.block_pool.touch([source_block], record_access=False)
                         producer_tail = self._producer_partial_tail_reqs.pop(
                             request_id, None
                         )
@@ -2385,7 +2509,9 @@ class MambaManager(SingleTypeKVCacheManager):
                             assert marker_block is source_block
                             # This CoW preserved a producer's own boundary
                             # state in cow_block; hand it to the connector for
-                            # partial-tail offload once the copy has run.
+                            # partial-tail offload once the copy has run (Percy
+                            # M2: cached by the connector once the copy step's
+                            # ack publishes it).
                             self._pending_boundary_state_offloads.append(
                                 (
                                     request_id,
@@ -2408,7 +2534,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 return returned_blocks
 
     def _relocate_speculative_block(
-        self, req_blocks: list[KVCacheBlock], block_idx: int
+        self, request_id: str, req_blocks: list[KVCacheBlock], block_idx: int
     ) -> None:
         block = req_blocks[block_idx]
         assert self.block_pool.is_block_writable(block), (
@@ -2416,7 +2542,7 @@ class MambaManager(SingleTypeKVCacheManager):
             "before relocation"
         )
         req_blocks.append(block)
-        req_blocks[block_idx] = self._null_block
+        self._null_column(request_id, req_blocks, block_idx)
 
     def finalize_partial_tail_offload(
         self,
@@ -2435,6 +2561,7 @@ class MambaManager(SingleTypeKVCacheManager):
         return self.kv_cache_group_id, source_block, boundary_tokens
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self._alloc_marks.pop(request_id, None)
         if self.prefix_caching:
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
@@ -2493,6 +2620,22 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
                 block = blocks[idx]
+                if (
+                    self.prefix_caching
+                    and not block.is_null
+                    and block.block_hash is None
+                    and self.block_pool.is_publication_pending(block.block_id)
+                ):
+                    # Percy M2: registered, published on its ack. Offer it now;
+                    # a connector only caches it once it is published.
+                    self._pending_boundary_state_offloads.append(
+                        (
+                            request.request_id,
+                            self.kv_cache_group_id,
+                            block,
+                            (idx + 1) * self.block_size,
+                        )
+                    )
                 # Skip null blocks (skipped mamba states) and blocks that
                 # were not cached this step — with sparse retention
                 # (reachable_block_mask) the intermediate state snapshots carry
@@ -2562,6 +2705,38 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
+
+    def confirm_tokens(
+        self,
+        request_id: str,
+        prev_confirmed: int,
+        confirmed: int,
+        step_seq: int | None = None,
+    ) -> None:
+        """Percy M2 ack for recurrent state. A state block is not addressed by
+        token slots: the steps that allocated it write it (boundary states,
+        reserved checkpoint slots, the running state, speculative states).
+        Once step `step_seq` is processed, every non-null state block the
+        row held after that step's allocation is confirmed whole. Without a
+        step (a finished load, or tests acking a plan) the whole row is."""
+        blocks = self.req_to_blocks.get(request_id)
+        if not blocks or confirmed <= 0:
+            return
+        marks = self._alloc_marks.get(request_id, [])
+        if step_seq is None:
+            end = len(blocks)
+            marks.clear()
+        else:
+            end = 0
+            while marks and marks[0][0] <= step_seq:
+                end = max(end, marks.pop(0)[1])
+            if not end:
+                return
+        end = min(end, len(blocks))
+        start = max(0, min(prev_confirmed // self.block_size - 2, end))
+        ids = [blocks[c].block_id for c in range(start, end) if not blocks[c].is_null]
+        if ids:
+            self.block_pool.grant_table.confirm_valid(ids, self.block_size)
 
     def _cache_partial_tail_block(
         self,
@@ -2727,6 +2902,8 @@ class MambaManager(SingleTypeKVCacheManager):
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
+    writes_follow_positions: ClassVar[bool] = False
+
     @classmethod
     def max_allocated_blocks_per_request(
         cls,
@@ -2815,6 +2992,7 @@ class HiSparseSourceManager(FullAttentionManager):
     """
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+    writes_follow_positions: ClassVar[bool] = False
 
     coordinator: "HiSparseCoordinator | None" = None
     # The host tier keeps prefixes the device groups have already lost.
@@ -2845,6 +3023,9 @@ class HiSparseSourceManager(FullAttentionManager):
             ),
             medium=MEDIUM_CPU,
             event_owner=device_pool,
+        )
+        self.block_pool.grant_table.set_group_block_size(
+            self.kv_cache_group_id, self.block_size
         )
         self._null_block = self.block_pool.null_block
 
@@ -2972,6 +3153,7 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 
     coordinator: "HiSparseCoordinator | None" = None
     zeroes_new_blocks: ClassVar[bool] = False
+    writes_follow_positions: ClassVar[bool] = False
 
     @classmethod
     def prefix_cacheable(cls, config: ManagerConfig) -> bool:
@@ -3119,7 +3301,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_new_blocks = self.blocks_per_request - len(req_blocks)
         if num_new_blocks <= 0:
             return []
-        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        new_blocks = self._grant_new_blocks(request_id, num_new_blocks)
         req_blocks.extend(new_blocks)
         return new_blocks
 
@@ -3193,7 +3375,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         if len(blocks) <= tail_page:
             blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
         if self.get_resident_page(request_id, tail_page) is None:
-            blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
+            blocks[tail_page] = self._grant_new_blocks(request_id, 1)[0]
 
     def add_local_computed_blocks(
         self,
@@ -3219,7 +3401,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_new_blocks = cdiv(num_tokens, self.block_size) - len(req_blocks)
         if num_new_blocks <= 0:
             return []
-        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        new_blocks = self._grant_new_blocks(request_id, num_new_blocks)
         req_blocks.extend(new_blocks)
         return new_blocks
 

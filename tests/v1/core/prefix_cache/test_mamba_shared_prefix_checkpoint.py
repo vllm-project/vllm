@@ -19,9 +19,14 @@ from tests.v1.core.test_prefix_caching import (
     make_kv_cache_manager,
     make_request,
 )
+from tests.v1.core.utils import percy_ack_planned_steps  # noqa: F401
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
+
+# Percy M2: these tests drive KV cache managers directly, with no processed
+# steps; ack each planned step at once (pre-Percy publish timing).
+pytestmark = pytest.mark.usefixtures("percy_ack_planned_steps")
 
 PREFIX = list(range(1, 20_001))
 
