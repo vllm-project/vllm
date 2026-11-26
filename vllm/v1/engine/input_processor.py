@@ -497,13 +497,11 @@ class InputProcessor:
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,
                 )
-            cache_salt = prepare_aux_request(
-                self.vllm_config.aux_output_config,
-                sampling_params,
-                prompt_len,
-                resumable,
-                cache_salt,
-            )
+            aux_config = self.vllm_config.aux_output_config
+            if aux_config.enabled or sampling_params.aux_namespace is not None:
+                cache_salt = prepare_aux_request(
+                    aux_config, sampling_params, prompt_len, resumable, cache_salt
+                )
             start = sampling_params.prompt_logprob_start or 0
             if start and start >= prompt_len - 1:
                 raise VLLMValidationError(
