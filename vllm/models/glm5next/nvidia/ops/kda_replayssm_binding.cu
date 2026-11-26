@@ -83,6 +83,7 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
   const int64_t W = conv_weight.size(1);
   const int64_t S = conv_state.size(0);
   const int64_t R = u_ring.size(2);
+  TVM_FFI_CHECK(R == 32, ValueError) << "rings: " << R << " rows, expected 32";
   const int64_t MO = out.size(0);
   const int device = x.device().device_id;
   check_tensor(x, "x", {M, P, H, D}, kDLBfloat, 16, device, true);
