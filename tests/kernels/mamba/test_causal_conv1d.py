@@ -15,7 +15,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 DEVICE = current_platform.device_type
 
@@ -379,6 +379,53 @@ def test_causal_conv1d_varlen(
     )
     unpadded_out = out[:, : out_ref_tensor.shape[-1]]
     assert torch.allclose(unpadded_out, out_ref_tensor, rtol=rtol, atol=atol)
+
+
+def test_causal_conv1d_varlen_pad_slot_id_skips_sequence():
+    """Regression test for #68412.
+
+    A sequence whose ``cache_indices`` entry equals ``pad_slot_id`` must be
+    skipped: the documented contract says such entries are not processed. A
+    negative cache index otherwise forms an out-of-bounds state pointer that
+    reads and writes the row before ``conv_states``.
+    """
+    device = DEVICE
+    torch.accelerator.empty_cache()
+    set_random_seed(0)
+
+    dim, width = 4, 4
+    # Backing store with a guard row placed right before the state view. If the
+    # padded sequence is processed, the guard row gets overwritten.
+    backing = torch.zeros(4, dim, width - 1, device=device)
+    backing[0] = 1000
+    conv_states = backing[1:]
+
+    x = (
+        torch.arange(1.0, 11.0, device=device)
+        .repeat(dim, 1)
+        .T.contiguous()
+        .T
+    )
+    out = causal_conv1d_fn(
+        x,
+        torch.ones(dim, width, device=device),
+        None,
+        conv_states=conv_states,
+        query_start_loc=torch.tensor([0, 5, 10], dtype=torch.int32, device=device),
+        # Sequence 0 maps to pad_slot_id (-1); sequence 1 maps to state line 1.
+        cache_indices=torch.tensor([PAD_SLOT_ID, 1], dtype=torch.int32, device=device),
+        has_initial_state=torch.tensor([True, False], device=device),
+        activation=None,
+        pad_slot_id=PAD_SLOT_ID,
+    )
+
+    # The guard row must be untouched by the out-of-bounds padded access.
+    assert torch.all(backing[0] == 1000)
+    # The padded sequence is skipped: its output is left unwritten.
+    assert torch.all(out[:, :5] == 0)
+    # The real sequence is processed and produces finite convolution outputs.
+    assert torch.isfinite(out[:, 5:]).all()
+    assert not torch.all(out[:, 5:] == 0)
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
