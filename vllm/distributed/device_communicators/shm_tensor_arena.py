@@ -32,21 +32,24 @@ never carries big tensors costs ~0. Creation is guarded by
 fails fast instead of a `SIGBUS` mid-copy.
 """
 
+import ctypes
+import mmap
 import pickle
 import weakref
-from contextlib import suppress
 from multiprocessing import shared_memory
 from unittest.mock import patch
 
 import numpy as np
 import torch
 
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
     memory_fence,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -56,6 +59,8 @@ _ARENA_SLOT_BYTES = 256 * 1024 * 1024
 # Minimum contiguous CPU-tensor size to divert into the arena; smaller tensors
 # take the out-of-band pickle-buffer path.
 _ARENA_MIN_BYTES = 8 * 1024 * 1024
+# Round registered slot prefixes to 8 MiB without faulting in unused pages.
+_ARENA_PIN_BYTES = 8 * 1024 * 1024
 
 # Reader-side registry: arena shm name -> attached ShmTensorArena, keyed by
 # name rather than a single slot since a process isn't guaranteed to attach
@@ -97,11 +102,12 @@ class ShmTensorArena:
         self.metadata_size = 1 + n_reader
         self.metadata_offset = slot_bytes * n_slots
         self.total_bytes = (slot_bytes + self.metadata_size) * n_slots
-        self._next_slot = 0
+        self._slot_high_water = [0] * n_slots
         self._fallbacks = 0
-        self._pin_attempted = False
-        self._pinned = False
-        self._pinned_ptr = 0
+        self._pin_failed = False
+        self._pinned_sizes = [0] * n_slots
+        self._base_ptr = 0
+        self._cudart: CudaRTLibrary | None = None
         # slots queued for release once the storage of the tensor `get_tensor`
         # handed out is freed; flushed at the next dequeue.
         self._pending_release: list[int] = []
@@ -165,27 +171,37 @@ class ShmTensorArena:
         except RuntimeError:
             return None
         memory_fence()
-        for probe in range(self.n_slots):
-            idx = (self._next_slot + probe) % self.n_slots
+        best_fit: int | None = None
+        best_grow: int | None = None
+        for idx in range(self.n_slots):
             with self._meta(idx) as meta:
-                free = meta[0] == 0 or sum(meta[1:]) == self.n_reader
-                if not free:
+                if meta[0] != 0 and sum(meta[1:]) != self.n_reader:
                     continue
+            hw = self._slot_high_water[idx]
+            if hw >= nbytes:
+                if best_fit is None or hw < self._slot_high_water[best_fit]:
+                    best_fit = idx
+            elif best_grow is None or hw > self._slot_high_water[best_grow]:
+                best_grow = idx
+        chosen = best_fit if best_fit is not None else best_grow
+        if chosen is not None:
+            with self._meta(chosen) as meta:
                 meta[0] = 0  # claim
-            slot_mv = self._slot(idx, nbytes)
+            slot_mv = self._slot(chosen, nbytes)
             try:
                 dst = torch.frombuffer(slot_mv, dtype=torch.uint8, count=nbytes)
                 dst.copy_(src)
             finally:
                 slot_mv.release()
-            with self._meta(idx) as meta:
+            with self._meta(chosen) as meta:
                 for i in range(1, self.n_reader + 1):
                     meta[i] = 0
                 memory_fence()
                 meta[0] = 1
                 memory_fence()
-            self._next_slot = (idx + 1) % self.n_slots
-            return idx
+            if nbytes > self._slot_high_water[chosen]:
+                self._slot_high_water[chosen] = nbytes
+            return chosen
         self._fallbacks += 1
         if self._fallbacks == 1 or self._fallbacks % 100 == 0:
             logger.info(
@@ -198,46 +214,86 @@ class ShmTensorArena:
 
     # ---- reader side ----
 
-    def _ensure_pinned(self):
-        """Pin the whole arena mapping via cudaHostRegister in THIS process
-        (lazy, once). Without it the HtoD of a zero-copy tensor pays
-        first-touch page faults on the tmpfs mapping plus pageable staging
-        (~hundreds of ms for 200MB); registration allocates+pins the pages
-        once, making every later HtoD a true DMA. Failure (no CUDA in this
-        process, etc.) is fine — the copy still works, just slower."""
-        if self._pin_attempted:
-            return
-        self._pin_attempted = True
-        try:
-            if not current_platform.is_cuda_alike():
-                return
-            import ctypes
+    @property
+    def _pinned(self) -> bool:
+        return any(self._pinned_sizes)
 
-            buf = self.shared_memory.buf
-            assert buf is not None
-            ptr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
-            ret = current_platform.cudart().cudaHostRegister(ptr, self.total_bytes, 0)
-            self._pinned = int(ret) == 0
-            if self._pinned:
-                self._pinned_ptr = ptr
+    def _unregister_slot(self, idx: int) -> bool:
+        assert self._cudart is not None
+        ret = self._cudart.cudaHostUnregister(self._base_ptr + idx * self.slot_bytes)
+        if ret == 0:
+            self._pinned_sizes[idx] = 0
+            return True
+        self._cudart.cudaGetLastError()
+        logger.info(
+            "ShmTensorArena: host-unregister failed for slot %d: error %d",
+            idx,
+            ret,
+        )
+        return False
+
+    def _ensure_pinned(self, idx: int, nbytes: int) -> bool:
+        """Register only the used prefix of a slot, retaining it for reuse."""
+        registered = self._pinned_sizes[idx]
+        if registered >= nbytes:
+            return True
+        if self._pin_failed:
+            # Demote a smaller prefix so get_tensor can stay zero-copy pageable
+            # instead of falling back to an owned CPU copy.
+            if registered:
+                self._unregister_slot(idx)
+            return False
+        try:
+            if not current_platform.is_cuda_alike() or self.slot_bytes % mmap.PAGESIZE:
+                self._pin_failed = True
+                return False
+            if self._cudart is None:
+                # CudaRTLibrary exposes raw CUDA/HIP error codes and
+                # cudaGetLastError without raising.
+                self._cudart = CudaRTLibrary()
+            if not self._base_ptr:
+                buf = self.shared_memory.buf
+                assert buf is not None
+                self._base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
+            size = min(self.slot_bytes, round_up(nbytes, _ARENA_PIN_BYTES))
+            if registered and not self._unregister_slot(idx):
+                self._pin_failed = True
+                return False
+            ptr = self._base_ptr + idx * self.slot_bytes
+            ret = self._cudart.cudaHostRegister(ptr, size, 0)
+            if ret == 0:
+                self._pinned_sizes[idx] = size
+                return True
+            self._cudart.cudaGetLastError()
             logger.info(
-                "ShmTensorArena: cudaHostRegister(%d MB) -> %s",
-                self.total_bytes >> 20,
-                "pinned" if self._pinned else f"error {int(ret)}",
+                "ShmTensorArena: host-register failed for slot %d: error %d",
+                idx,
+                ret,
             )
         except Exception as e:
             logger.info("ShmTensorArena: host-register skipped: %s", e)
+        self._pin_failed = True
+        return False
 
     def _unpin(self):
-        """Undo the pin from _ensure_pinned via cudaHostUnregister; must run
-        before the mapping is closed. Failures are ignored — at interpreter
-        shutdown the CUDA context may already be gone, and the registration
-        dies with the process anyway."""
-        if not self._pinned:
+        """Undo per-slot pins via cudaHostUnregister before closing the mapping.
+
+        Avoids module-global lookups so teardown remains safe during interpreter
+        shutdown.
+        """
+        if not self._pinned or self._cudart is None:
             return
-        self._pinned = False
-        with suppress(Exception):
-            current_platform.cudart().cudaHostUnregister(self._pinned_ptr)
+        cudart = self._cudart
+        base_ptr = self._base_ptr
+        slot_bytes = self.slot_bytes
+        for idx, size in enumerate(self._pinned_sizes):
+            if size:
+                try:
+                    if cudart.cudaHostUnregister(base_ptr + idx * slot_bytes):
+                        cudart.cudaGetLastError()
+                except Exception:
+                    pass
+                self._pinned_sizes[idx] = 0
 
     def get_tensor(
         self, idx: int, nbytes: int, dtype: torch.dtype, shape: tuple[int, ...]
@@ -246,7 +302,19 @@ class ShmTensorArena:
         release once the returned tensor's storage is freed, i.e. once the
         caller has dropped it along with any views/slices or wrappers (such
         as `torch.nn.Parameter`) sharing that storage."""
-        self._ensure_pinned()
+        fully_pinned = self._ensure_pinned(idx, nbytes)
+        if not fully_pinned and self._pinned_sizes[idx]:
+            # CUDA cannot copy a range spanning registered and unregistered
+            # memory. Copy to owned pageable memory and release the slot now.
+            with self._slot(idx, nbytes) as slot_mv:
+                tensor = (
+                    torch.frombuffer(slot_mv, dtype=torch.uint8, count=nbytes)
+                    .clone()
+                    .view(dtype)
+                    .view(shape)
+                )
+            self._mark_released([idx])
+            return tensor
         # The tensor's storage holds the only reference to `holder` and drops
         # it when freed, firing the finalizer. (`weakref.finalize` can't
         # target the tensor itself, which views and wrappers don't keep alive,

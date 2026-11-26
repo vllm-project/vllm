@@ -1317,25 +1317,101 @@ def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
 
 
 def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
-    """A reader that cudaHostRegister-ed its mapping must cudaHostUnregister
-    the same pointer before the mapping is closed; an unpinned arena must not
-    unregister memory it never registered."""
-    writer, (reader,) = _make_arena(n_reader=1)
+    """A reader that cudaHostRegister-ed slots must cudaHostUnregister every
+    registered slot before closing, continuing even if one call fails; an
+    unpinned arena must not unregister memory it never registered."""
+    writer, (reader,) = _make_arena(n_reader=1, n_slots=3)
     cudart = mock.MagicMock()
+    monkeypatch.setattr(shm_tensor_arena, "CudaRTLibrary", lambda: cudart)
     cudart.cudaHostRegister.return_value = 0
-    cudart.cudaHostUnregister.return_value = 0
+    cudart.cudaHostUnregister.side_effect = [1, 0]
+    cudart.cudaGetLastError.return_value = 0
     monkeypatch.setattr(
-        shm_tensor_arena,
-        "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, cudart=lambda: cudart),
+        shm_tensor_arena.current_platform, "is_cuda_alike", lambda: True
     )
-    reader._ensure_pinned()
+    reader._ensure_pinned(0, 1)
+    reader._ensure_pinned(2, 1)
     assert reader._pinned
-    ptr = cudart.cudaHostRegister.call_args.args[0]
+    ptrs = [call.args[0] for call in cudart.cudaHostRegister.call_args_list]
     del reader
-    cudart.cudaHostUnregister.assert_called_once_with(ptr)
+    assert [call.args[0] for call in cudart.cudaHostUnregister.call_args_list] == ptrs
+    cudart.cudaGetLastError.assert_called_once()
     del writer  # never pinned -> no unregister
-    cudart.cudaHostUnregister.assert_called_once()
+    assert cudart.cudaHostUnregister.call_count == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("operation", ["cudaHostRegister", "cudaHostUnregister"])
+def test_arena_growth_failure_keeps_h2d_source_safe(operation):
+    """Clear real runtime errors, demote sibling prefixes, and never copy across
+    a partial registration."""
+    writer, (reader,) = _make_arena(n_reader=1, slot_bytes=16 << 20, n_slots=2)
+    first = torch.ones(1, dtype=torch.uint8)
+    idx0 = writer.write_tensor(first)
+    v0 = _get_view(reader, idx0, first)
+    idx1 = writer.write_tensor(first)
+    v1 = _get_view(reader, idx1, first)
+    assert v0.is_pinned() and v1.is_pinned()
+    del v0, v1
+    _drain(reader)
+    cudart = reader._cudart
+    assert cudart is not None
+    original = getattr(cudart, operation)
+
+    def reject(*args):
+        error = original(0, 0, 0) if operation == "cudaHostRegister" else original(0)
+        assert error != 0
+        return error
+
+    larger = torch.full((9 << 20,), 7, dtype=torch.uint8)
+    assert writer.write_tensor(larger) == idx0
+    with mock.patch.object(cudart, operation, side_effect=reject) as failure:
+        result = _get_view(reader, idx0, larger)
+        failure.assert_called_once()
+    assert cudart.cudaGetLastError() == 0
+    assert not result.is_pinned()
+    assert torch.equal(result.to("cuda").cpu(), larger)
+    if operation == "cudaHostRegister":
+        assert reader._pinned_sizes[idx0] == 0
+        # Sibling slot with a smaller prefix demotes cleanly to zero-copy pageable.
+        assert writer.write_tensor(larger) == idx1
+        sibling = _get_view(reader, idx1, larger)
+        assert reader._pinned_sizes[idx1] == 0
+        assert not sibling.is_pinned()
+        assert torch.equal(sibling.to("cuda").cpu(), larger)
+        assert writer.write_tensor(first) is None
+        del result, sibling
+        _drain(reader)
+        assert writer.write_tensor(first) is not None
+    else:
+        # Owned copy releases its slot immediately (no _drain needed) and
+        # survives that slot being overwritten with new data.
+        assert {writer.write_tensor(first), writer.write_tensor(first)} == {idx0, idx1}
+        assert torch.equal(result, larger)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_arena_best_fit_and_growing_prefix_h2d():
+    """Reuse fitted slots instead of pinning all slots; growth preserves H2D."""
+    writer, (reader,) = _make_arena(n_reader=1, slot_bytes=128 << 20, n_slots=4)
+    # Sequential requests at concurrency 1 should stay on slot 0.
+    for size, expected_pinned in (
+        (9 << 20, 16 << 20),
+        (17 << 20, 24 << 20),
+        (33 << 20, 40 << 20),
+        (65 << 20, 72 << 20),
+        (9 << 20, 72 << 20),
+    ):
+        src = torch.arange(size, dtype=torch.uint8)
+        idx = writer.write_tensor(src)
+        assert idx == 0
+        view = _get_view(reader, idx, src)
+        assert reader._pinned_sizes == [expected_pinned, 0, 0, 0]
+        assert view.is_pinned()
+        dev = view.to("cuda", non_blocking=True)
+        del view
+        _drain(reader)
+        assert torch.equal(dev.cpu(), src)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -1347,7 +1423,7 @@ def test_arena_event_gated_release():
     needed as the H2D source, while the GPU tensor is what's retained for the
     rest of the step."""
     writer, (reader,) = _make_arena(n_reader=1)
-    reader._ensure_pinned()
+    reader._ensure_pinned(0, 2 << 20)
     if not reader._pinned:
         pytest.skip("cudaHostRegister unavailable in this environment")
     src = torch.randn(512, 1024)

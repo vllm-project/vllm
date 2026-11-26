@@ -128,7 +128,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
 )
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
-from vllm.v1.worker.gpu.ec_connector import get_ec_connector
+from vllm.v1.worker.gpu.ec_connector import ActiveECConnector, get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
@@ -294,6 +294,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
         self.ec_connector = get_ec_connector(vllm_config, self.encoder_cache)
+        if self.encoder_cache is not None and isinstance(
+            self.ec_connector, ActiveECConnector
+        ):
+            self.encoder_cache.allow_storage_relocation = False
 
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         num_prefill_lookahead = max(1, vllm_config.num_prefill_lookahead_tokens)
@@ -1300,9 +1304,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
-        if self.encoder_cache is not None:
-            for mm_hash in scheduler_output.free_encoder_mm_hashes:
-                self.encoder_cache.free_encoder_cache(mm_hash)
+        if self.encoder_cache is not None and scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.free_encoder_cache(
+                scheduler_output.free_encoder_mm_hashes
+            )
 
     def update_pp_decode_requests(self):
         # For non-last PP ranks, update decode requests with sampler output from
