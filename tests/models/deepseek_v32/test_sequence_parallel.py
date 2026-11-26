@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
 from vllm.models.deepseek_v32.nvidia import mtp as deepseek_v32_mtp
 from vllm.sequence import IntermediateTensors
@@ -178,7 +179,7 @@ def test_pp_stage_sends_tp_reduced_residual_stream(monkeypatch):
     model.start_layer, model.end_layer = 0, 1
     model.use_sequence_parallel = False
     model.use_residual_sequence_parallel = False
-    model.residual_sp_min_tokens = deepseek_v32_model.RESIDUAL_SP_MIN_TOKENS
+    model.residual_sp_min_tokens = envs.VLLM_RESIDUAL_SP_MIN_TOKENS
     model.aux_hidden_state_layers = ()
     model.pp_buffers = {}
 

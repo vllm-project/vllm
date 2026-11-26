@@ -55,8 +55,6 @@ from vllm.v1.attention.backends.mla.index_group import (
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
 
-RESIDUAL_SP_MIN_TOKENS = 1024
-
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
     def __init__(
@@ -228,9 +226,11 @@ class DeepseekV32Model(torch.nn.Module):
         )
         speculative_config = vllm_config.speculative_config
         attention_config = vllm_config.attention_config
+        self.residual_sp_min_tokens = envs.VLLM_RESIDUAL_SP_MIN_TOKENS
         # Preserve LoRA's global row mapping and auxiliary-state layouts.
         self.use_residual_sequence_parallel = (
-            parallel_config.tensor_parallel_size > 1
+            self.residual_sp_min_tokens > 0
+            and parallel_config.tensor_parallel_size > 1
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and parallel_config.decode_context_parallel_size == 1
@@ -242,7 +242,6 @@ class DeepseekV32Model(torch.nn.Module):
             )
             and not envs.VLLM_BATCH_INVARIANT
         )
-        self.residual_sp_min_tokens = RESIDUAL_SP_MIN_TOKENS
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
