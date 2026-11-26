@@ -114,6 +114,20 @@ def test_pooling_rejects_media_before_fetching_on_text_model(
         media_server.server_close()
 
 
+def test_pooling_rejects_request_tokenizer_options(server: RemoteOpenAIServer):
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"padding": False},
+        },
+        timeout=10,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "chat_template_kwargs"
+
+
 @pytest.fixture(scope="module")
 def server():
     args = [

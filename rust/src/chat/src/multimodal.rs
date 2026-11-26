@@ -68,13 +68,15 @@ pub struct MultimodalModelInfo {
     /// serves, so requests carrying them name the Rust frontend.
     unserved_modalities: Vec<MmModality>,
     media_connector: Arc<MediaConnector>,
-    /// Maximum number of input items allowed per prompt for each modality.
-    limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Maximum number of input items allowed per prompt for each modality:
+    /// the `--limit-mm-per-prompt` count, else the model's default, else 999.
+    item_limits: HashMap<MmModality, usize>,
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
 ///
-/// Modalities absent from the map default to 999 items.
+/// Modalities absent from the map default to the model's default count, else
+/// 999 items.
 pub type MmLimitPerPrompt = HashMap<MmModality, MmLimitSpec>;
 
 pub use vllm_engine_core_client::protocol::multimodal::MmModality;
@@ -621,6 +623,17 @@ impl MultimodalModelInfo {
         .copied()
         .collect();
 
+        let item_limits = [MmModality::Image, MmModality::Video, MmModality::Audio]
+            .into_iter()
+            .map(|modality| {
+                let limit = (limit_mm_per_prompt.get(&modality))
+                    .and_then(MmLimitSpec::count)
+                    .or_else(|| models::default_item_limit(&context.metadata(), modality))
+                    .unwrap_or(DEFAULT_MM_ITEMS_PER_PROMPT);
+                (modality, limit)
+            })
+            .collect();
+
         Ok(Some(Self {
             context,
             placeholder_token_ids,
@@ -629,7 +642,7 @@ impl MultimodalModelInfo {
             audio,
             unserved_modalities,
             media_connector,
-            limit_mm_per_prompt,
+            item_limits,
         }))
     }
 
@@ -930,7 +943,7 @@ fn extract_media_parts(
                 max_long_side_pixel: None,
             }),
             ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
-                url: Arc::new(input_audio_data_url(data, format.as_deref())?),
+                url: Arc::new(input_audio_data_url(data, *format)),
                 uuid: uuid.clone(),
             }),
             ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
@@ -941,19 +954,26 @@ fn extract_media_parts(
         .collect()
 }
 
+/// Container format of an `input_audio` content block. Serde takes OpenAI's
+/// lowercase names, as the HTTP schema does; `FromStr` ignores case.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::Display,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum InputAudioFormat {
+    Wav,
+    Mp3,
+}
+
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.
-fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
+fn input_audio_data_url(data: &str, format: Option<InputAudioFormat>) -> String {
     let mime_type = match format {
-        Some(format) if format.eq_ignore_ascii_case("wav") => "audio/wav",
-        Some(format) if format.eq_ignore_ascii_case("mp3") => "audio/mpeg",
-        Some(format) => {
-            return Err(Error::UnsupportedInputAudioFormat {
-                format: format.to_owned(),
-            });
-        }
+        Some(InputAudioFormat::Wav) => "audio/wav",
+        Some(InputAudioFormat::Mp3) => "audio/mpeg",
         None => "application/octet-stream",
     };
-    Ok(format!("data:{mime_type};base64,{data}"))
+    format!("data:{mime_type};base64,{data}")
 }
 
 /// The modality a content part counts against, or `None` for plain text.
@@ -985,7 +1005,8 @@ impl MultimodalModelInfo {
     /// Reject requests exceeding `--limit-mm-per-prompt`'s configured
     /// per-modality item count, before any fetch/decode work is spent on them.
     ///
-    /// Modalities without a configured count default to 999 items.
+    /// Modalities without a configured count default to the model's default
+    /// count, else 999 items.
     fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
         self.validate_modality_limits(media_parts.iter().filter_map(media_part_limit_modality))
     }
@@ -1000,11 +1021,7 @@ impl MultimodalModelInfo {
         }
 
         for (modality, count) in counts {
-            let limit = self
-                .limit_mm_per_prompt
-                .get(&modality)
-                .and_then(MmLimitSpec::count)
-                .unwrap_or(DEFAULT_MM_ITEMS_PER_PROMPT);
+            let limit = self.item_limits[&modality];
             if count > limit {
                 return Err(Error::MmLimitExceeded {
                     modality: modality.as_str().to_string(),
@@ -2561,21 +2578,16 @@ mod tests {
     #[test]
     fn input_audio_uses_connector_data_urls() {
         assert_eq!(
-            input_audio_data_url("AAAA", Some("wav")).unwrap(),
+            input_audio_data_url("AAAA", Some(InputAudioFormat::Wav)),
             "data:audio/wav;base64,AAAA"
         );
         assert_eq!(
-            input_audio_data_url("BBBB", Some("MP3")).unwrap(),
+            input_audio_data_url("BBBB", Some(InputAudioFormat::Mp3)),
             "data:audio/mpeg;base64,BBBB"
         );
         assert_eq!(
-            input_audio_data_url("CCCC", None).unwrap(),
+            input_audio_data_url("CCCC", None),
             "data:application/octet-stream;base64,CCCC"
-        );
-        assert!(
-            input_audio_data_url("AAAA", Some("flac"))
-                .unwrap_err()
-                .is_request_validation_error()
         );
     }
 
@@ -2725,7 +2737,7 @@ mod tests {
         );
         // Confirms the HTTP-mapping bug found during implementation stays fixed:
         // this must map to 400, not 500.
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 
     #[test]
@@ -2764,6 +2776,64 @@ mod tests {
             error.to_report_string(),
             "At most 999 image(s) may be provided in one prompt."
         );
+    }
+
+    fn video_url_part() -> MediaContentPart {
+        MediaContentPart::VideoUrl {
+            url: "https://example.com/clip.mp4".to_string().into(),
+            uuid: None,
+            fps: None,
+            max_long_side_pixel: None,
+        }
+    }
+
+    /// A model's default item cap applies to a modality that
+    /// `--limit-mm-per-prompt` gives no count, as in Python.
+    #[test]
+    fn validate_mm_limits_applies_the_model_default_without_a_configured_count() {
+        let videos = |count| std::iter::repeat_with(video_url_part).take(count).collect::<Vec<_>>();
+        let count_less_options = MmLimitSpec::Options {
+            count: None,
+            extra: BTreeMap::from([("num_frames".to_string(), serde_json::json!(4))]),
+        };
+
+        for info in [
+            qwen3_vl_info(),
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Video, count_less_options)])),
+        ] {
+            assert!(info.validate_mm_limits(&videos(32)).is_ok());
+            let error = info.validate_mm_limits(&videos(33)).unwrap_err();
+            assert_eq!(
+                error.to_report_string(),
+                "At most 32 video(s) may be provided in one prompt."
+            );
+        }
+
+        let configured =
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Video, MmLimitSpec::Count(64))]));
+        assert!(configured.validate_mm_limits(&videos(64)).is_ok());
+
+        // The default follows the checkpoint's architecture, not a path that
+        // happens to select the `qwen3_vl` spec.
+        let mut config = qwen3_vl_config();
+        config["model_type"] = "qwen2_5_vl".into();
+        let context = MultimodalModelContext {
+            model_id: "qwen3-eval/Qwen2.5-VL-3B-Instruct".to_string(),
+            model_type: Some("qwen2_5_vl".to_string()),
+            config,
+            tokenizer: TokenizerResolver(Arc::new(qwen3_vl_tokenizer())),
+        };
+        assert_eq!(context.resolve_model_spec().unwrap().name(), "qwen3_vl");
+        let path_matched = from_context(
+            context,
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+            HashMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(path_matched.validate_mm_limits(&videos(999)).is_ok());
     }
 
     fn parse_limits(json: &str) -> MmLimitPerPrompt {
