@@ -31,6 +31,22 @@ def exclude_from_core_dump(mmap_obj: mmap.mmap) -> None:
         )
 
 
+def registration_pins_pages() -> bool:
+    """Whether registering host memory with the GPU runtime pins its pages.
+
+    `cudaHostRegister` pins them. `hipHostRegister` does not: amdgpu tracks the
+    range as a userptr through an MMU notifier, so the kernel may still migrate
+    its pages (memory compaction, NUMA balancing, `move_pages(2)`), and each
+    time it does KFD stops every queue of the process until the whole
+    registered range is valid again. That takes about 0.25-0.5 s per GiB of
+    4 KiB pages (MI355X), so a large long-lived registration such as a CPU KV
+    cache can stall the GPU for tens of seconds.
+    """
+    from vllm.platforms import current_platform
+
+    return not current_platform.is_rocm()
+
+
 def pin_tensor(tensor: torch.Tensor) -> None:
     """Register one CPU range, bypassing the caching host allocator's rounding."""
     err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)

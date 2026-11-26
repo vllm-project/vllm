@@ -868,3 +868,99 @@ def test_cpu_caches_round_trip_on_pinned_host_buffer(hugepages, hugepage_with_fr
     finally:
         if worker._backend is not None:
             worker._backend.shutdown()
+
+
+def _staged_backend(
+    slots_per_half: int,
+) -> tuple[DmaCopyBackend, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """A staged backend over three layers of different block sizes (one not a
+    multiple of 8 bytes) with room for `slots_per_half` blocks a half."""
+    num_gpu, num_cpu = 8, 16
+    sizes = {"a": 4096, "b": 1000, "c": 1024}
+    gpu = {
+        n: (torch.arange(num_gpu * b, device="cuda") % (97 + i))
+        .to(torch.int8)
+        .view(num_gpu, b)
+        for i, (n, b) in enumerate(sizes.items())
+    }
+    cpu = {n: torch.zeros(num_cpu, b, dtype=torch.int8) for n, b in sizes.items()}
+    low_pri, _ = torch.cuda.Stream.priority_range()
+    backend = DmaCopyBackend()
+    backend.init(
+        gpu,
+        cpu,
+        gpu["a"].device,
+        torch.cuda.Stream(priority=low_pri),
+        torch.cuda.Stream(priority=low_pri),
+        staging_bytes=2 * slots_per_half * sum(sizes.values()),
+    )
+    return backend, gpu, cpu
+
+
+def _transfer(backend, src, dst, *, is_store: bool) -> None:
+    events: list[tuple[int, torch.Event]] = []
+    backend.launch_copy(src, dst, is_store, 0, events)
+    deadline = time.time() + 10.0
+    while not events and time.time() < deadline:
+        time.sleep(0.0005)
+    assert events, "background copy was never enqueued"
+    events[0][1].synchronize()
+
+
+@pytest.mark.parametrize("slots_per_half", [1, 3, 8])
+def test_staged_copies_round_trip(slots_per_half):
+    """Staged copies (the CPU caches are never registered) move every block
+    through the two staging halves in both directions, for transfers of one or
+    several chunks, scattered block ids and layers of different block sizes."""
+    backend, gpu, cpu = _staged_backend(slots_per_half)
+    assert backend._staging is not None
+    assert backend._staging.slots == slots_per_half
+    expected = {n: t.clone() for n, t in gpu.items()}
+    gpu_ids = [3, 0, 7, 1, 6, 2, 5, 4]
+    cpu_ids = [15, 2, 9, 4, 11, 0, 13, 6]
+    try:
+        _transfer(backend, gpu_ids, cpu_ids, is_store=True)
+        for n in gpu:
+            assert torch.equal(cpu[n][cpu_ids], expected[n][gpu_ids].cpu())
+            assert not cpu[n][[i for i in range(16) if i not in cpu_ids]].any()
+            gpu[n].zero_()
+        torch.accelerator.synchronize()
+        # Load back into other GPU blocks.
+        back = [5, 6, 7, 0, 1, 2, 3, 4]
+        _transfer(backend, cpu_ids, back, is_store=False)
+        for n in gpu:
+            assert torch.equal(gpu[n][back].cpu(), expected[n][gpu_ids].cpu())
+    finally:
+        backend.shutdown()
+
+
+def test_cpu_pool_registered_only_where_registration_pins():
+    """On ROCm the CPU KV cache is not registered (staged copies); elsewhere it
+    is registered and the batch copies address it directly."""
+    names = ["layer.0", "layer.1"]
+    num_blocks = 4
+    raw = torch.zeros(2 * num_blocks * BLOCK_BYTES, dtype=torch.int8, device="cuda")
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=names,
+                layer_stride=num_blocks * BLOCK_BYTES,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    worker = SimpleCPUOffloadWorker(None, config, raw.nbytes)
+    try:
+        worker.register_kv_caches(
+            dict(zip(names, raw.view(2, num_blocks, BLOCK_BYTES)))
+        )
+        assert isinstance(worker._backend, DmaCopyBackend)
+        staged = current_platform.is_rocm()
+        assert worker.staged_copies == staged
+        assert (worker._backend._staging is not None) == staged
+        assert bool(worker._pinned_host_ranges) == (not staged)
+    finally:
+        worker.shutdown()
