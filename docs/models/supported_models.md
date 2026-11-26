@@ -385,7 +385,6 @@ th {
 | `AfmoeForCausalLM` | Afmoe | TBA | ✅︎ | ✅︎ |
 | `AliceAIForCausalLM` | AliceAI | `yandex/AliceAI-Foundation-80B-A3B-Base` | ✅︎ | |
 | `ApertusForCausalLM` | Apertus | `swiss-ai/Apertus-8B-2509`, `swiss-ai/Apertus-70B-Instruct-2509`, etc. | ✅︎ | ✅︎ |
-| `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | | ✅︎ |
 | `BailingMoeForCausalLM` | Ling | `inclusionAI/Ling-lite-1.5`, `inclusionAI/Ling-plus`, etc. | ✅︎ | ✅︎ |
 | `BailingMoeV2ForCausalLM` | Ling | `inclusionAI/Ling-mini-2.0`, etc. | ✅︎ | ✅︎ |
 | `BailingMoeV2_5ForCausalLM` | Ling | `inclusionAI/Ling-2.5-1T`, `inclusionAI/Ring-2.5-1T` | | ✅︎ |
@@ -470,7 +469,6 @@ th {
 | `SolarForCausalLM` | Solar Pro | `upstage/solar-pro-preview-instruct`, etc. | ✅︎ | ✅︎ |
 | `Step1ForCausalLM` | Step-Audio | `stepfun-ai/Step-Audio-EditX`, etc. | ✅︎ | ✅︎ |
 | `Step3p5ForCausalLM` | Step-3.5-flash | `stepfun-ai/Step-3.5-Flash`, etc. | | ✅︎ |
-| `TeleFLMForCausalLM` | TeleFLM | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc. | ✅︎ | ✅︎ |
 | `Zamba2ForCausalLM` | Zamba2 | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc. | | |
 | `ZayaForCausalLM` | ZAYA1 | `Zyphra/ZAYA1-8B`, `Zyphra/ZAYA1-74B-preview`, etc. | | |
 
@@ -478,6 +476,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | ✅︎ | ✅︎ |
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
 | `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
@@ -737,6 +736,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 !!! note
     For `Gemma4ForConditionalGeneration`:
+    - Gemma 4 and Gemma 4 Unified use the checkpoint's resize settings by default. For requests that supply pre-resized images with `do_resize=False`, each dimension must be divisible by the pooled patch size (normally 48 pixels), and the image must fit `max_soft_tokens`. Unresized video frames have a fixed limit of 70 soft tokens per frame.
     - audio input is only supported by the `gemma-4-E2B` and `gemma-4-E4B` variants.
     - The model does not ingest videos directly. However, vLLM’s Gemma 4 implementation supports video inputs by handling video processing internally. Users can send videos directly in the message structure to vLLM, where they are converted into text and image frames before being passed to the model.
     - Gemma 4 assistant checkpoints for speculative decoding use vLLM’s Gemma

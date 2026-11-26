@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-21
+  date_updated: 2026-11-24
   tasks:
     - multimodal
     - text
@@ -43,6 +43,11 @@ model:
   context_length: 1048576
   base_args:
     - "--trust-remote-code"
+    # The checkpoint's generation_config.json sets no sampling defaults, so a
+    # request that omits them would sample at top_p 1.0. These are the model
+    # card's values; see the guide's Client usage.
+    - "--override-generation-config"
+    - '{"temperature":1.0,"top_p":0.95}'
 
 features:
   tool_calling:
@@ -117,12 +122,29 @@ features:
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
+  strict_tool_calls:
+    label: "Strict tool calls"
+    description: "Constrain tool calls to each tool's declared arguments; use with Tool calling."
+    # Not offered under pd_cluster: its Dynamo router passes feature args to a
+    # worker that rejects this flag.
+    strategies:
+      - single_node_tp
+      - single_node_tep
+      - multi_node_tp
+      - multi_node_tep
+    # The tool-call parser has not been exercised on TPU.
+    hardware:
+      ironwood: unsupported
+    args:
+      - "--tool-strict-level"
+      - "parameter"
 
 opt_in_features:
   - spec_decoding
   - text_only
   - low_latency_decode
   - nvfp4_kv_cache
+  - strict_tool_calls
 
 variants:
   default:
@@ -2428,6 +2450,22 @@ guide: |
   is free after the engines are up. The tested GB300 prefill workers used 128 GiB per GPU
   (512 GiB per tray).
 
+  ## Strict tool calls
+
+  Without a grammar, K3.1 sometimes calls a tool with empty or placeholder arguments. The opt-in
+  **Strict tool calls** feature adds `--tool-strict-level parameter`, which constrains every
+  tool call to a declared tool and to that tool's declared argument names and types, as if each
+  tool had set `strict: true`. On the
+  [Kimi Vendor Verifier](https://github.com/MoonshotAI/Kimi-Vendor-Verifier) Tool Call benchmark
+  (70 samples x 5 epochs, 8x MI355X, single-node TP8, Python frontend) K3.1 Pro scored 0.786
+  without the flag and 0.980 with it. The Rust frontend builds its own grammar and was not
+  measured. The limits are those in the
+  [Kimi-K3 recipe](https://recipes.vllm.ai/moonshotai/Kimi-K3)'s Tool calling note: a tool
+  schema the grammar cannot compile fails the whole request, and arguments still need
+  validating on the client. The feature is not offered for prefill/decode disaggregation:
+  Dynamo workers do not accept the flag and constrain tool calls through their own
+  `--dyn-enable-structural-tag`, which the AgentX PD presets set.
+
   ## Client usage
 
   ```bash
@@ -2435,11 +2473,17 @@ guide: |
     -H "Content-Type: application/json" \
     -d '{
       "model": "moonshotai/Kimi-K3.1-Pro",
-      "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}],
-      "temperature": 0.7,
-      "top_p": 0.95
+      "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}]
     }'
   ```
+
+  The model card reports its results at `temperature = 1.0` and `top-p = 0.95`, but the
+  checkpoint's `generation_config.json` sets no sampling defaults, so the command passes them
+  as server defaults with `--override-generation-config`. They apply only to the parameters a
+  request omits; a value sent by the client still wins. Without the flag vLLM serves such a
+  request at `top_p = 1.0`: on DeepSWE (113 tasks, 8x MI355X, one run each) a coding agent that
+  sends neither parameter resolved 75 tasks at that fallback and 88 with `temperature = 1.0`
+  and `top_p = 0.95` set in the agent.
 
   ## References
 

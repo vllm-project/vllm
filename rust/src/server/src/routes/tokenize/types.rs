@@ -7,7 +7,6 @@ use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::DefaultOnNull;
-use validator::{Validate, ValidationErrors};
 use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{Prompt, TextRequest};
@@ -17,9 +16,7 @@ use crate::routes::openai::chat_completions::convert::{
     convert_message, convert_tools, normalize_generation_prompt_mode,
 };
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
-use crate::routes::openai::utils::types::{
-    ChatMessage, Normalizable, Tool, default_true, validate_messages,
-};
+use crate::routes::openai::utils::types::{ChatMessage, Tool, default_true};
 
 /// `POST /tokenize` body. Untagged: a JSON object with `messages` parses as the
 /// chat variant; one with `prompt` parses as the completion variant.
@@ -68,10 +65,9 @@ impl TokenizeCompletionRequest {
 }
 
 #[serde_with::serde_as]
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TokenizeChatRequest {
     pub model: Option<String>,
-    #[validate(custom(function = "validate_messages"))]
     pub messages: Vec<ChatMessage>,
     #[serde(default = "default_true")]
     pub add_generation_prompt: bool,
@@ -167,23 +163,6 @@ pub struct TokenizeResponse {
 pub struct DetokenizeResponse {
     pub prompt: String,
 }
-
-// ---- trait impls required by ValidatedJson ----
-impl Validate for TokenizeRequest {
-    fn validate(&self) -> Result<(), ValidationErrors> {
-        if let Self::Chat(req) = self {
-            req.validate()?;
-        }
-        Ok(())
-    }
-}
-impl Validate for DetokenizeRequest {
-    fn validate(&self) -> Result<(), ValidationErrors> {
-        Ok(())
-    }
-}
-impl Normalizable for TokenizeRequest {} // default no-op normalize()
-impl Normalizable for DetokenizeRequest {}
 
 #[cfg(test)]
 mod tests {
