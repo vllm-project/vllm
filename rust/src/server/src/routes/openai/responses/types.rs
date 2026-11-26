@@ -13,10 +13,9 @@ use std::fmt;
 
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
-    Function, FunctionChoice, InputAudio, ReasoningEffort, StringOrArray, ToolChoiceValue,
-    ToolReference, default_true, deserialize_request_top_k,
+    Function, FunctionChoice, ImageDetail, InputAudio, ReasoningEffort, StringOrArray,
+    ToolChoiceValue, ToolReference, default_true, deserialize_request_top_k,
 };
-use llm_multimodal::ImageDetail;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
