@@ -406,6 +406,14 @@ class MsgpackSerde(ObjectSerde):
         return value, nbytes, serialized_metadata, len(serialized_metadata)
 
     def deserialize(self, data_view: memoryview) -> Any:
+        # Format marker 0x01: the rest of the payload is a single raw msgpack
+        # body encoding a MultiModalKwargsItem with all tensors inline as ext
+        # type 3 raw views (written by the Rust frontend's shm cache). Pickle
+        # protocol >= 2 streams always start with \x80 (PROTO), so the marker
+        # byte is unambiguous against the legacy format below.
+        if data_view[0] == 0x01:
+            return self.mm_decoder.decode([data_view[1:]])
+
         # pickle.loads do not read past the end of a pickled object
         # within a large buffer, so we can skip storing the metadata size
         type_name, nbytes, len_arr = pickle.loads(data_view)

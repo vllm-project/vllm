@@ -12,17 +12,15 @@
 //! tool-response messages.
 
 use itertools::Itertools as _;
-use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatToolChoice, Error as ChatError, GenerationPromptMode,
-    ResolvedToolContext,
+    ChatOptions, ChatRequest, ChatToolChoice, GenerationPromptMode, ResolvedToolContext,
 };
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
-use super::tools::{ResponsesToolNames, ToolIdentity};
+use super::tools::{ResponsesToolNames, ToolIdentity, hoist_additional_tools};
 use super::types::{
     InputTokensDetails, OutputTokensDetails, ResponseEchoFields, ResponseInputContentPart,
     ResponseInputItem, ResponseInputReasoning, ResponseInputRole, ResponseItemStatus,
@@ -32,7 +30,7 @@ use super::types::{
     ServiceTier,
 };
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request};
+use crate::error::{ApiError, bail_invalid_request, chat_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::{
@@ -83,16 +81,16 @@ pub(crate) fn prepare_responses_request(
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedResponsesRequest, ApiError> {
-    validate::validate_request_compat(&request)?;
     lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
 
     let request_id = format!("resp_{}", ctx.request_id);
 
     let ResponsesRequest {
         model: _,
-        input,
+        mut input,
         instructions,
-        tools,
+        mut tools,
         tool_choice,
         parallel_tool_calls,
         max_output_tokens,
@@ -143,6 +141,7 @@ pub(crate) fn prepare_responses_request(
 
     let response_model = lora_resolution.response_model();
 
+    hoist_additional_tools(&mut input, &mut tools);
     let (messages, continue_final) = convert_input(&instructions, input)?;
     let generation_prompt_mode = if continue_final {
         GenerationPromptMode::ContinueFinalAssistant
@@ -159,18 +158,7 @@ pub(crate) fn prepare_responses_request(
         requested_tool_choice,
         parallel_tool_calls.unwrap_or(true),
     )
-    .map_err(|error| {
-        let param = match &error {
-            ChatError::ToolChoiceRequiresTools | ChatError::ToolChoiceFunctionNotFound { .. } => {
-                "tool_choice"
-            }
-            _ => "tools",
-        };
-        ApiError::invalid_request(
-            format!("failed to resolve request tools: {}", error.as_report()),
-            Some(param),
-        )
-    })?;
+    .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
 
     let tool_choice_echo = echo_tool_choice(&tool_context);
 
@@ -354,13 +342,23 @@ fn normalize_tool_choice(
                 name: tool_names.resolve_choice(name, tools)?,
             }
         }
-        ResponseToolChoice::Object(ResponseToolChoiceObject::AllowedTools { tools, .. }) => {
-            bail_invalid_request!(
-                param = "tool_choice",
-                "allowed_tools tool_choice is not supported yet: {}.",
-                tools.iter().map(ToolReference::identifier).join(", ")
-            );
-        }
+        ResponseToolChoice::Object(ResponseToolChoiceObject::AllowedTools {
+            mode,
+            tools: allowed,
+        }) => ChatToolChoice::AllowedTools {
+            mode,
+            names: allowed
+                .into_iter()
+                .map(|tool| match tool {
+                    ToolReference::Function { name } => tool_names.resolve_choice(name, tools),
+                    tool => bail_invalid_request!(
+                        param = "tool_choice",
+                        "allowed_tools tool `{}` is not supported; only function tools are.",
+                        tool.identifier()
+                    ),
+                })
+                .collect::<Result<_, _>>()?,
+        },
     }))
 }
 
@@ -375,6 +373,15 @@ fn echo_tool_choice(tool_context: &ResolvedToolContext) -> ResponseToolChoice {
             ResponseToolChoice::Object(ResponseToolChoiceObject::Function(FunctionChoice {
                 name: name.clone(),
             }))
+        }
+        ChatToolChoice::AllowedTools { mode, names } => {
+            ResponseToolChoice::Object(ResponseToolChoiceObject::AllowedTools {
+                mode: *mode,
+                tools: names
+                    .iter()
+                    .map(|name| ToolReference::Function { name: name.clone() })
+                    .collect(),
+            })
         }
     }
 }
@@ -458,6 +465,9 @@ fn convert_input(
                 if !text.is_empty() {
                     assistant.push_reasoning(&mut messages, text);
                 }
+            }
+            ResponseInputItem::AdditionalTools(_) => {
+                unreachable!("additional_tools items are hoisted into the tools before conversion")
             }
             ResponseInputItem::ItemReference {} => {
                 bail_invalid_request!(
@@ -794,8 +804,9 @@ fn should_continue_final_message(items: &[ResponseInputItem]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::{Value, json};
-    use vllm_chat::{ChatTokenUsage, ChatTool};
+    use vllm_chat::{AllowedToolsMode, ChatTokenUsage, ChatTool};
     use vllm_llm::TokenUsage;
 
     use super::*;
@@ -866,6 +877,137 @@ mod tests {
                 [AssistantContentBlock::ToolCall(call)] if call.name == "crm__get_contact"
             ),
             "{content:?}"
+        );
+    }
+
+    /// Allowed function names resolve like a named choice, the tools all stay
+    /// in the prompt, and the resolved choice is echoed.
+    #[test]
+    fn allowed_tools_choice_resolves_names_and_keeps_every_tool() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "input": "Who is Ada?",
+            "tools": [
+                {"type": "function", "name": "get_weather"},
+                {
+                    "type": "namespace",
+                    "name": "crm",
+                    "description": "CRM tools.",
+                    "tools": [{"type": "function", "name": "get_contact"}]
+                }
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "function", "name": "get_contact"}]
+            }
+        }))
+        .expect("deserialize request");
+        let served = LoraModelResolution {
+            model_names: ServedModelNames::new(vec!["test-model".to_string()]),
+            lora_request: None,
+        };
+
+        let prepared = prepare_responses_request(request, &served, Default::default())
+            .expect("prepare request");
+
+        let tool_context = &prepared.chat_request.tool_context;
+        let names = tool_context.initial_tools.iter().map(|tool| tool.name.as_str());
+        assert_eq!(
+            names.collect::<Vec<_>>(),
+            ["get_weather", "crm__get_contact"]
+        );
+        assert_eq!(
+            tool_context.tool_choice,
+            ChatToolChoice::AllowedTools {
+                mode: AllowedToolsMode::Required,
+                names: vec!["crm__get_contact".to_string()],
+            }
+        );
+        expect![[r#"{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"crm__get_contact"}]}"#]].assert_eq(&serde_json::to_string(&prepared.meta.tool_choice).unwrap());
+    }
+
+    #[test]
+    fn allowed_tools_choice_rejects_unsupported_tool_types() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "input": "hi",
+            "tools": [{"type": "function", "name": "get_weather"}],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [{"type": "mcp", "server_label": "deepwiki"}]
+            }
+        }))
+        .expect("deserialize request");
+        let served = LoraModelResolution {
+            model_names: ServedModelNames::new(vec!["test-model".to_string()]),
+            lora_request: None,
+        };
+
+        let Err(error) = prepare_responses_request(request, &served, Default::default()) else {
+            panic!("mcp tools are not supported");
+        };
+        expect![[r#"
+            InvalidRequest {
+                message: "allowed_tools tool `mcp:deepwiki` is not supported; only function tools are.",
+                param: Some(
+                    "tool_choice",
+                ),
+            }
+        "#]].assert_debug_eq(&error);
+    }
+
+    #[test]
+    fn additional_tools_items_reach_the_model_like_tools() {
+        let served = LoraModelResolution {
+            model_names: ServedModelNames::new(vec!["test-model".to_string()]),
+            lora_request: None,
+        };
+        let prepare = |tool_choice: Option<Value>| {
+            let mut request = json!({
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [{
+                            "type": "namespace",
+                            "name": "clock",
+                            "description": "",
+                            "tools": [{"type": "function", "name": "sleep"}]
+                        }]
+                    },
+                    {"role": "user", "content": "hi"}
+                ],
+            });
+            if let Some(tool_choice) = tool_choice {
+                request["tool_choice"] = tool_choice;
+            }
+            let request = serde_json::from_value(request).expect("deserialize request");
+            prepare_responses_request(request, &served, Default::default())
+                .expect("prepare request")
+        };
+
+        let prepared = prepare(None);
+        assert_eq!(prepared.chat_request.messages, [ChatMessage::user("hi")]);
+        let tool_context = &prepared.chat_request.tool_context;
+        let names = tool_context.initial_tools.iter().map(|tool| tool.name.as_str());
+        assert_eq!(names.collect::<Vec<_>>(), ["clock__sleep"]);
+        // Tool choice is resolved against the hoisted tools, or it would
+        // become `none` for a request without top-level `tools`.
+        assert_eq!(tool_context.tool_choice, ChatToolChoice::Auto);
+        assert!(
+            matches!(&prepared.meta.tools[..], [ResponsesTool::Namespace(namespace)] if namespace.name == "clock"),
+            "{:?}",
+            prepared.meta.tools
+        );
+
+        let resolved =
+            |tool_choice| prepare(Some(tool_choice)).chat_request.tool_context.tool_choice;
+        assert_eq!(resolved(json!("required")), ChatToolChoice::Required);
+        assert_eq!(
+            resolved(json!({"type": "function", "name": "sleep"})),
+            ChatToolChoice::Function {
+                name: "clock__sleep".to_string()
+            }
         );
     }
 

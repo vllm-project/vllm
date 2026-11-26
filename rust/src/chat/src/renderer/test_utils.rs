@@ -38,7 +38,7 @@ pub(crate) fn fixture_chat_request(path: &Path, options: FixtureRequestOptions) 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum FixtureFile {
-    WithRequest(FixtureRequest),
+    WithRequest(Box<FixtureRequest>),
     MessagesOnly(Vec<FixtureMessage>),
 }
 
@@ -63,7 +63,7 @@ pub(crate) struct FixtureRequest {
 impl FixtureFile {
     fn into_request(self) -> FixtureRequest {
         match self {
-            Self::WithRequest(request) => request,
+            Self::WithRequest(request) => *request,
             Self::MessagesOnly(messages) => FixtureRequest {
                 tools: Vec::new(),
                 messages,

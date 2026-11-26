@@ -36,6 +36,8 @@ const PYTHON_ONLY: &[&str] = &[
     // spec_bench dataset
     "--spec-bench-category",
     "--spec-bench-output-len",
+    // random-mm dataset: Rust's random-mm only generates images
+    "--random-mm-video-encode-fps",
     // client-side chat templating / request shaping
     "--chat-template-kwargs",
     "--custom-ensure-client-side-data",
