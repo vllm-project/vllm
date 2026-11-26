@@ -516,7 +516,7 @@ impl Tokenizer for TiktokenTokenizer {
     fn vocab_size(&self) -> usize {
         // Exclusive upper bound on token ids the tokenizer can decode (BPE base
         // tokens plus the registered special/reserved slots), used to range-check
-        // `allowed_token_ids` so tiktoken models are not exempt from validation.
+        // `bad_words` token IDs so tiktoken models are not exempt from validation.
         self.metadata.vocab_upper_bound as usize
     }
 }
