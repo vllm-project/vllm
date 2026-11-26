@@ -25,6 +25,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_supported
@@ -48,15 +49,15 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.utils import compute_skip_topk_layers
-from vllm.models.hy_v4.nvidia.indexer_fusion import (
-    fused_indexer_k_norm_rope,
-    fused_indexer_q_rope_quant,
-)
-from vllm.models.hy_v4.nvidia.mrope import (
+from vllm.models.hy_v4.common.mrope import (
     apply_mrope,
     fused_mrope_norm,
     rope_into,
     token_rope,
+)
+from vllm.models.hy_v4.nvidia.indexer_fusion import (
+    fused_indexer_k_norm_rope,
+    fused_indexer_q_rope_quant,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
@@ -772,7 +773,7 @@ class HYV4MLAAttention(nn.Module):
                     attn_out = attn_out * torch.sigmoid(gate_score)
                     attn_out = attn_out.reshape(*attn_out.shape[:-2], -1)
                 else:
-                    attn_out = attn_out * torch.sigmoid(gate_score)
+                    attn_out = fused_sigmoid_gate_mul(attn_out, gate_score)
 
         out, _ = self.o_proj(attn_out)
         return self.post_proj_norm(out) if self.post_proj_norm is not None else out

@@ -14,6 +14,11 @@ from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.chat_utils.chat_template import has_request_chat_template
+from vllm.renderers.chat_utils.item_tracker import (
+    MediaRequestBudgets,
+    use_media_request_budgets,
+)
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -67,7 +72,16 @@ class PoolingIOProcessor:
 
         # Shared thread pool executor for preprocessing
         self._executor: Executor = self.renderer._executor
-        self.render_async = make_async(self.render, executor=self._executor)
+        self.render_async = make_async(
+            self._render_with_media_budgets, executor=self._executor
+        )
+
+    def _render_with_media_budgets(
+        self, render_params: AnyRenderParam, budgets: MediaRequestBudgets
+    ) -> PoolingEngineInput:
+        # Executor threads need the request scope installed explicitly.
+        with use_media_request_budgets(budgets):
+            return self.render(render_params)
 
     #######################################
     # online APIs
@@ -291,19 +305,15 @@ class PoolingIOProcessor:
         chat_template_kwargs: dict[str, Any] | None,
         trust_request_chat_template: bool,
     ):
-        if not trust_request_chat_template and (
-            request_chat_template is not None
-            or (
-                chat_template_kwargs
-                and chat_template_kwargs.get("chat_template") is not None
-            )
-        ):
+        if not has_request_chat_template(request_chat_template, chat_template_kwargs):
+            return
+        if not trust_request_chat_template:
             raise VLLMValidationError(
                 "Chat template is passed with request, but "
                 "--trust-request-chat-template is not set. "
                 "Refused request with untrusted chat template."
             )
-        return None
+        self.renderer.validate_request_chat_template()
 
     def _params_to_seq(
         self,
