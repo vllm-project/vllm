@@ -627,7 +627,9 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._bounded_replay = bounded_replay
-    sched._kv_cache_manager = None
+    sched._kv_cache_manager = SimpleNamespace(
+        get_state_checkpoint_tokens=lambda num_tokens: 0
+    )
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -680,6 +682,7 @@ def make_nixl_push_scheduler(
     `NixlConnectorScheduler`) and carries push-specific state. Only the
     fields touched by the unit tests are populated.
     """
+    from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
@@ -704,7 +707,9 @@ def make_nixl_push_scheduler(
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
     sched._bounded_replay = False
-    sched._kv_cache_manager = None
+    sched._kv_cache_manager = SimpleNamespace(
+        get_state_checkpoint_tokens=lambda num_tokens: 0
+    )
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,

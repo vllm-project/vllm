@@ -106,11 +106,8 @@ class NixlBaseConnectorScheduler:
             g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
 
-        # Set from `bind_kv_cache_manager` when a Mamba group prefix-caches
-        # states at block boundaries. P/D loads then stop at a Mamba "align"
-        # checkpoint, so the decoder receives a state it can prefix-cache and
-        # recomputes the prompt tail itself.
-        self._kv_cache_manager: KVCacheManager | None = None
+        # Set by `bind_kv_cache_manager`, see `_num_prefill_backoff_tokens`.
+        self._kv_cache_manager: KVCacheManager
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -418,27 +415,21 @@ class NixlBaseConnectorScheduler:
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         self._kv_cache_manager = kv_cache_manager
 
-    def _ssm_checkpoint_cut(self, num_prompt_tokens: int) -> int:
-        """The Mamba checkpoint a local prefill of the full prompt would
-        cache (honouring the hash lookahead), capped to leave
-        `_prefill_backoff()` tokens to the decoder; 0 if there is none."""
-        if self._kv_cache_manager is None:
-            return 0
-        # A prefill of n tokens checkpoints at or below n - 1; shift n so the
-        # cut also clears a wider backoff window (multi-module MTP).
-        return self._kv_cache_manager.get_state_checkpoint_tokens(
-            num_prompt_tokens - self._prefill_backoff() + 1
-        )
-
     def _num_prefill_backoff_tokens(self, num_prompt_tokens: int) -> int:
         """Trailing prompt tokens the prefiller skips and the decoder
-        recomputes: `_prefill_backoff()`, or for a prefix-cached Mamba
-        align model everything past `_ssm_checkpoint_cut()`, so the transferred
-        running state is one the decoder caches for later local turns."""
+        recomputes: `_prefill_backoff()`, widened for a prefix-cached Mamba
+        model down to the last checkpoint a local prefill would cache. P then
+        backs off up to one block and sends a state that sits on a checkpoint;
+        D recomputes the tail and caches that state, so later D-local turns of
+        the conversation hit it."""
         backoff = self._prefill_backoff()
         if backoff and num_prompt_tokens <= backoff:
             return 0
-        checkpoint = self._ssm_checkpoint_cut(num_prompt_tokens)
+        # A prefill of n tokens checkpoints at or below n - 1; shift n so the
+        # cut also clears a wider backoff window (multi-module MTP).
+        checkpoint = self._kv_cache_manager.get_state_checkpoint_tokens(
+            num_prompt_tokens - backoff + 1
+        )
         if checkpoint > 0:
             return num_prompt_tokens - checkpoint
         return backoff
@@ -498,9 +489,8 @@ class NixlBaseConnectorScheduler:
         """P-side only: drop the trailing `_num_prefill_backoff_tokens()`
         prompt tokens so the prefiller stops short of what the decoder
         recomputes locally. For Mamba that is the single token needed to yield
-        h(N-1) (or down to a checkpoint boundary, see
-        `_ssm_checkpoint_cut()`); for multi-module MTP it is the drafter's
-        whole lookahead window.
+        h(N-1), or the tail past a prefix-cache checkpoint; for multi-module
+        MTP it is the drafter's whole lookahead window.
 
         Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
