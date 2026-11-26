@@ -133,46 +133,73 @@ fn numbers_fit_protobuf_struct(value: &Value) -> bool {
     }
 }
 
+fn reject_unsupported_fields(request: &GenerateRequest) -> Result<()> {
+    if request.mm_features.is_some() {
+        return Err(Error::Unsupported {
+            field: "multimodal inputs",
+        });
+    }
+    if request.lora_request.is_some() {
+        return Err(Error::Unsupported {
+            field: "lora_request",
+        });
+    }
+    if request.kv_hints.is_some() {
+        return Err(Error::Unsupported { field: "kv_hints" });
+    }
+    if request.data_parallel_rank.is_some() {
+        return Err(Error::Unsupported {
+            field: "data_parallel_rank",
+        });
+    }
+
+    let sampling_params = &request.sampling_params;
+    if sampling_params.extra_args.is_some() {
+        return Err(Error::Unsupported {
+            field: "extra_args",
+        });
+    }
+    if sampling_params.structured_outputs.is_some() {
+        return Err(Error::Unsupported {
+            field: "structured_outputs",
+        });
+    }
+    if sampling_params.logprobs.is_some() || sampling_params.logprob_token_ids.is_some() {
+        return Err(Error::Unsupported { field: "logprobs" });
+    }
+    if sampling_params.prompt_logprobs.is_some()
+        || sampling_params.prompt_logprob_token_ids.is_some()
+    {
+        return Err(Error::Unsupported {
+            field: "prompt_logprobs",
+        });
+    }
+    if sampling_params.repetition_detection.is_some() {
+        return Err(Error::Unsupported {
+            field: "repetition_detection",
+        });
+    }
+    if sampling_params.stream_interval.is_some() {
+        return Err(Error::Unsupported {
+            field: "stream_interval",
+        });
+    }
+    if sampling_params.routed_experts_prompt_start != 0 {
+        return Err(Error::Unsupported {
+            field: "routed_experts_prompt_start",
+        });
+    }
+
+    Ok(())
+}
+
 fn to_grpc_request(
     model: &str,
     rpc_request_id: Uuid,
     request: GenerateRequest,
 ) -> Result<Request<pb::GenerateRequest>> {
+    reject_unsupported_fields(&request)?;
     let sampling_params = request.sampling_params;
-    for (field, present) in [
-        ("multimodal inputs", request.mm_features.is_some()),
-        ("lora_request", request.lora_request.is_some()),
-        ("kv_hints", request.kv_hints.is_some()),
-        ("data_parallel_rank", request.data_parallel_rank.is_some()),
-        ("extra_args", sampling_params.extra_args.is_some()),
-        (
-            "structured_outputs",
-            sampling_params.structured_outputs.is_some(),
-        ),
-        (
-            "logprobs",
-            sampling_params.logprobs.is_some() || sampling_params.logprob_token_ids.is_some(),
-        ),
-        (
-            "prompt_logprobs",
-            sampling_params.prompt_logprobs.is_some()
-                || sampling_params.prompt_logprob_start.is_some()
-                || sampling_params.prompt_logprob_token_ids.is_some(),
-        ),
-        (
-            "repetition_detection",
-            sampling_params.repetition_detection.is_some(),
-        ),
-        ("stream_interval", sampling_params.stream_interval.is_some()),
-        (
-            "routed_experts_prompt_start",
-            sampling_params.routed_experts_prompt_start != 0,
-        ),
-    ] {
-        if present {
-            return Err(Error::Unsupported { field });
-        }
-    }
     let kwargs = request
         .reasoning_parser_kwargs
         .filter(|k| !k.chat_template_kwargs.is_empty())
