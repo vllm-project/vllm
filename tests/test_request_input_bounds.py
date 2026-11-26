@@ -251,27 +251,31 @@ def test_aux_prompt_start_validated_before_engine_submission(start, alias, expec
 
 
 @pytest.mark.parametrize(
-    "key_prefix,resumable,stop,skip_clone,error",
+    "key_prefix,enabled,resumable,stop,skip_clone,error",
     [
-        ("job", False, None, False, None),
-        (None, False, None, False, "requires AuxOutputConfig.object_key_prefix"),
-        ("job", True, None, False, "streaming input"),
-        ("job", False, ["END"], False, "stop strings"),
-        ("job", False, ["END"], True, "stop strings"),
+        ("job", True, False, None, False, None),
+        (None, True, False, None, False, "requires AuxOutputConfig.object_key_prefix"),
+        ("job", False, False, None, False, "enable_return_routed_experts"),
+        ("job", True, True, None, False, "streaming input"),
+        ("job", True, False, ["END"], False, "stop strings"),
+        ("job", True, False, ["END"], True, "stop strings"),
     ],
     ids=[
         "accepted",
         "no-key-prefix",
+        "aux-disabled",
         "resumable",
         "stop-set-after-construction",
         "stop-set-after-construction-shallow-copy",
     ],
 )
 def test_aux_namespace_validated_before_engine_submission(
-    key_prefix, resumable, stop, skip_clone, error
+    key_prefix, enabled, resumable, stop, skip_clone, error
 ):
     processor = _mock_input_processor()
-    processor.vllm_config.aux_output_config.object_key_prefix = key_prefix
+    processor.vllm_config.aux_output_config = AuxOutputConfig(
+        enable_return_routed_experts=enabled, object_key_prefix=key_prefix
+    )
     prompt = {"type": "token", "prompt_token_ids": [1, 2, 3], "cache_salt": "user"}
     params = SamplingParams(aux_namespace="g/0", skip_clone=skip_clone)
     if stop is not None:

@@ -25,22 +25,13 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
-    from vllm.config import AuxOutputConfig, VllmConfig
+    from vllm.config import VllmConfig
     from vllm.distributed.kv_events import ExternalBlockHash
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
-
-
-def check_aux_output_config(config: AuxOutputConfig) -> None:
-    """Startup checks of the auxiliary-output configuration as a whole; the
-    legacy routed-experts flag is applied after the config is built."""
-    if config.object_key_prefix is None:
-        return
-    if not config.enabled:
-        raise ValueError("object_key_prefix requires enable_return_routed_experts.")
 
 
 def flush_aux_output(scheduler: object, collective_rpc: Callable[..., Any]) -> None:

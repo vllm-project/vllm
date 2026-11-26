@@ -8,10 +8,7 @@ import pytest
 
 from vllm.config import AuxOutputConfig, VllmConfig
 from vllm.config.utils import hash_config
-from vllm.distributed.aux_output_connector.connector import (
-    check_aux_output_config,
-    object_put_timeout_s,
-)
+from vllm.distributed.aux_output_connector.connector import object_put_timeout_s
 from vllm.engine.arg_utils import EngineArgs
 
 pytestmark = pytest.mark.cpu_test
@@ -89,29 +86,10 @@ def test_legacy_routed_experts_flag_enables_an_object_key_prefix(as_config):
     assert args.aux_output_config.enable_return_routed_experts
 
 
-@pytest.mark.parametrize(
-    "kwargs,error",
-    [
-        ({}, 400.0),
-        (
-            {"enable_return_routed_experts": False},
-            "requires enable_return_routed_experts",
-        ),
-    ],
-    ids=["derived-timeout", "no-routed-experts"],
-)
-def test_object_key_prefix_startup_checks(monkeypatch, kwargs, error):
+def test_object_put_timeout_follows_execute_model_timeout(monkeypatch):
     # Not the default execute-model timeout: the derived default follows it.
     monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "500")
-    config = AuxOutputConfig(
-        **{"enable_return_routed_experts": True, "object_key_prefix": "run-1", **kwargs}
-    )
-    if not isinstance(error, str):
-        check_aux_output_config(config)
-        assert object_put_timeout_s() == error
-        return
-    with pytest.raises(ValueError, match=error):
-        check_aux_output_config(config)
+    assert object_put_timeout_s() == 400.0
 
 
 @pytest.mark.parametrize(

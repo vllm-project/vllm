@@ -40,9 +40,10 @@ def prepare_aux_request(
     if (namespace := params.aux_namespace) is None:
         return cache_salt
     verify_aux_namespace(params)
-    if (key_prefix := config.object_key_prefix) is None:
+    if (key_prefix := config.object_key_prefix) is None or not config.enabled:
         raise VLLMValidationError(
-            "aux_namespace requires AuxOutputConfig.object_key_prefix.",
+            "aux_namespace requires AuxOutputConfig.object_key_prefix and "
+            "enable_return_routed_experts.",
             parameter="aux_namespace",
         )
     if resumable:

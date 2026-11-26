@@ -11,7 +11,6 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
-    check_aux_output_config,
     retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -496,7 +495,6 @@ class Scheduler(SchedulerInterface):
         if self.collect_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
-        check_aux_output_config(vllm_config.aux_output_config)
         self.aux_output_connector = (
             AuxOutputSchedulerConnector(
                 self.kv_cache_manager,
