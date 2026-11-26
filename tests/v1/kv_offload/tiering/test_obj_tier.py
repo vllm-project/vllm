@@ -7,9 +7,11 @@ without S3 credentials or a live object store. They verify the manager's
 state machine: job submission, transfer completion polling, and lookup.
 """
 
+import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -94,6 +96,7 @@ def _make_offloading_config(
 
 _OFFLOADING_SPEC = SimpleNamespace(
     config=_make_offloading_config(enable_kv_cache_events=False),
+    async_init=False,
     blocks_per_chunk=1,
 )
 
@@ -234,6 +237,7 @@ def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
     """Offloading spec stub with an explicit global KV events flag."""
     return SimpleNamespace(
         config=_make_offloading_config(enable_kv_cache_events),
+        async_init=False,
         blocks_per_chunk=1,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=enable_kv_cache_events,
@@ -317,7 +321,8 @@ def test_invalid_locality_raises_at_construction(locality):
         _make_tier(locality=locality)
 
 
-def test_failed_descriptor_setup_releases_primary_registration(monkeypatch):
+@pytest.mark.parametrize("async_init", [False, True])
+def test_failed_descriptor_setup_releases_primary_registration(monkeypatch, async_init):
     from vllm.v1.kv_offload.tiering.obj import manager as obj_module
 
     agent = MagicMock()
@@ -334,13 +339,25 @@ def test_failed_descriptor_setup_releases_primary_registration(monkeypatch):
     agent.prep_xfer_dlist.side_effect = RuntimeError("descriptor setup failed")
     monkeypatch.setattr(obj_module, "nixl_agent", lambda *args: agent)
     monkeypatch.setattr(obj_module, "nixl_agent_config", lambda **kwargs: None)
-    with pytest.raises(RuntimeError, match="descriptor setup failed"):
-        ObjectStoreSecondaryTierManager(
-            offloading_spec=TieringOffloadingSpec(make_offloading_config()),
+    spec = TieringOffloadingSpec(make_offloading_config())
+    spec.async_init = async_init
+    with (
+        nullcontext()
+        if async_init
+        else pytest.raises(RuntimeError, match="descriptor setup failed")
+    ):
+        tier = ObjectStoreSecondaryTierManager(
+            offloading_spec=spec,
             primary_kv_view=memoryview(np.zeros((2, 1024), dtype=np.uint8)),
             tier_type="obj",
             store_config=_STORE_CONFIG,
         )
+        if async_init:
+            assert not tier.is_ready()
+            tier.start_background_init(threading.Lock())
+            tier.shutdown()
+            assert not tier.is_ready()
+    assert agent.register_memory.call_count == 1
     assert not registrations
 
 
@@ -1026,6 +1043,7 @@ def test_obj_tier_replicated_layout_collapses_mapper_identity():
         config=_make_offloading_config(
             False, tp_size=2, world_size=2, rank=1, replicated_layout=True
         ),
+        async_init=False,
         blocks_per_chunk=1,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False,
@@ -1036,6 +1054,7 @@ def test_obj_tier_replicated_layout_collapses_mapper_identity():
         config=_make_offloading_config(
             False, tp_size=4, world_size=4, rank=3, replicated_layout=True
         ),
+        async_init=False,
         blocks_per_chunk=1,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False,
@@ -1063,6 +1082,7 @@ def test_obj_tier_namespace_includes_blocks_per_chunk():
     for blocks_per_chunk in (1, 4):
         spec = SimpleNamespace(
             config=_make_offloading_config(False, blocks_per_chunk=blocks_per_chunk),
+            async_init=False,
             blocks_per_chunk=blocks_per_chunk,
         )
         tiers.append(_make_tier(offloading_spec=spec)[0])

@@ -54,40 +54,6 @@ def test_tiering_metrics_tracker_records_lookup_metrics():
     assert ("1:fs",) not in values[TieringOffloadingMetrics.CHUNK_HITS]
 
 
-def test_adding_tier_preserves_inflight_jobs_and_lookup_metrics():
-    tracker = TieringMetricsTracker(
-        tier_types=["fs"], num_primary_chunks=2, primary_chunk_size=16
-    )
-    key = to_keys([1])[0]
-    tracker.on_new_request(_CTX)
-    tracker.on_lookup(_CTX, key, tracker.tier_label(0), LookupResult.HIT, 0.0)
-    job = JobMetadata(TransferJob(0, [key], np.array([0]), False, _CTX), 0)
-    tracker.on_job_registered(job)
-
-    tracker.add_tier("p2p")
-    stats = tracker.take_stats()
-    assert stats is not None
-    values = stats.data["data"]
-    assert values[TieringOffloadingMetrics.CHUNK_HITS] == {("1:fs",): 1}
-    assert values[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS] == {
-        ("1:fs",): 1,
-        ("2:p2p",): 0,
-    }
-    tracker.on_lookup(_CTX, key, tracker.tier_label(0), LookupResult.HIT, 0.0)
-    tracker.on_lookup(_CTX, key, tracker.tier_label(1), LookupResult.MISS, 0.0)
-    tracker.on_job_finished(job, JobResult(job_id=0, success=True, transfer_time=0.5))
-    stats = tracker.take_stats()
-    assert stats is not None
-    values = stats.data["data"]
-    assert values[TieringOffloadingMetrics.CHUNK_QUERIES] == {("2:p2p",): 1}
-    assert values[TieringOffloadingMetrics.WRITE_BYTES] == {("1:fs",): 16}
-    assert values[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS] == {
-        ("1:fs",): 0,
-        ("2:p2p",): 0,
-    }
-    tracker.assert_idle()
-
-
 def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     tracker = TieringMetricsTracker(
         tier_types=["fs"],

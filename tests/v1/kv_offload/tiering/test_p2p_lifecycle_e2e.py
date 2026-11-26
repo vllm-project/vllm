@@ -26,6 +26,7 @@ def test_inference_continues_during_secondary_memory_registration(
     from vllm import SamplingParams, TokensPrompt
     from vllm.config import KVTransferConfig
     from vllm.distributed.nixl_utils import NixlWrapper
+    from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
@@ -60,7 +61,7 @@ def test_inference_continues_during_secondary_memory_registration(
         invalid_root = tmp_path / "not-a-directory"
         invalid_root.write_text("A file cannot be used as the FS tier root.")
         secondary_tiers = [
-            {"type": "example", "custom_param": 1},
+            {"type": "example", "custom_param": 1, "access_mode": "write"},
             *secondary_tiers,
             {"type": "fs", "root_dir": str(invalid_root)}
             if failure == "fs"
@@ -107,16 +108,21 @@ def test_inference_continues_during_secondary_memory_registration(
             while True:
                 result = runner.llm.generate([prompt], params, use_tqdm=False)[0]
                 assert result.outputs[0].token_ids == first.outputs[0].token_ids
-                attached_tiers = {
+                configured_tiers = {
                     metric.labels["tier"]
                     for metric in runner.llm.get_metrics()
                     if metric.name == "vllm:kv_offload_config_info"
                 }
-                if attached_tiers == expected_tiers:
+                assert configured_tiers == expected_tiers
+                if any(
+                    metric.value > 0
+                    for metric in runner.llm.get_metrics()
+                    if metric.name == TieringOffloadingMetrics.CHUNK_QUERIES
+                    and metric.labels["tier"].endswith(":p2p")
+                ):
                     break
-                assert time.monotonic() < deadline, (
-                    f"Expected tiers {expected_tiers}, got {attached_tiers}"
-                )
+                assert time.monotonic() < deadline, "P2P never served a lookup"
+                assert runner.llm.reset_prefix_cache(reset_connector=True)
             assert len(live_registrations) == 1
         finally:
             release.set()

@@ -119,25 +119,20 @@ synchronously and log a warning.
 
 The engine can serve requests before CPU offloading is ready. Until every worker
 finishes pre-faulting and pinning, external lookups miss and no CPU stores are
-submitted. With Tiering, secondary tiers are built in a separate background
-thread only after every worker is ready, then attached to the manager. If one
-secondary tier fails to initialize, its error is logged and setup continues for
-the remaining tiers. Successfully initialized tiers are attached together in
-their configured order; if all fail, the engine continues with CPU offloading
-alone. Requests already running at attach time continue without the new secondary
-tiers; subsequent requests can use them. Synchronous initialization still fails
-startup if any configured secondary tier fails to initialize.
+submitted. With Tiering, P2P and object storage tiers register their memory in
+the background after every worker is ready. Filesystem tiers initialize
+synchronously. Each request uses the tiers ready at admission, including for
+stores that complete later. In async mode a tier initialization error is logged
+and the engine can continue using the remaining tiers. Configurations that include
+KVCR or a custom tier without `supports_async_init` use synchronous setup.
 
 `async_init_pin_pace` controls the pause between background pin calls (default
 `2.0`, as a multiple of each call's duration). Preparing memory later does not
 reduce its eventual RAM requirement: an insufficient container memory limit can
 cause an OOM kill after the server becomes healthy.
 
-`/health` does not indicate that secondary tiers are attached. In particular,
-readiness gating for the P2P tier's prefill/decode handoff mode is separate from
-background initialization. Shutdown waits up to 120 seconds for secondary-tier
-setup; if it is still running, shutdown raises instead of unmapping memory that
-setup may still access.
+An engine can pass `/health` while a P2P tier is still preparing for handoff.
+Shutdown waits for active registration before releasing the primary memory.
 
 ## Direct Storage Setup
 
@@ -176,7 +171,7 @@ Files are named by block content hash, so blocks written by an earlier run or by
 | `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
-| `async_init` | no | `false` | both | Prepare the CPU tier in the background; with Tiering, build secondary tiers after every worker is ready. See [Background initialization](#background-initialization). CUDA only. |
+| `async_init` | no | `false` | both | Prepare the CPU tier in the background; with Tiering, register P2P and object storage memory after every worker is ready. See [Background initialization](#background-initialization). CUDA only. |
 | `async_init_pin_pace` | no | `2.0` | both | Pause after each background pin call, as a multiple of its duration. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
@@ -230,8 +225,7 @@ The connector publishes one Prometheus gauge, `vllm:kv_offload_config_info`, and
 
 The gauge holds one series for each configuration that the manager reports. A manager that holds one configuration gives one series. A manager that holds several adds a label of its own, which tells the series apart.
 
-With background initialization, newly attached secondary tiers publish their
-configuration facts with the next connector stats payload.
+Tier configuration labels are available during background initialization.
 
 | Label | Declared by | Meaning | Notes |
 | --- | --- | --- | --- |

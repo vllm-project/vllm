@@ -75,6 +75,7 @@ class FileSystemTierManager(SecondaryTierManager):
         prefix-caching hash algorithm, which seeds `NONE_HASH` randomly.
     """
 
+    supports_async_init: ClassVar[bool] = True
     medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(

@@ -250,6 +250,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     tier exists.
     """
 
+    supports_async_init: ClassVar[bool] = True
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
     tolerates_off_thread_polling: ClassVar[bool] = True
 
@@ -385,18 +386,22 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             blocks_per_file=offloading_spec.blocks_per_chunk,
             parallel_agnostic=True,
         ).get_run_config()
-        self._data: DataTransport = NixlTransport(
-            self._nixl_agent_name,
-            primary_kv_view,
-            config_fields=config_fields,
-            backends=backends,
-            num_threads=int(num_threads),
-        )
-        try:
-            self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
-        except Exception:
-            self._data.close()
-            raise
+        self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
+
+        def init_data() -> None:
+            try:
+                self._data: DataTransport = NixlTransport(
+                    self._nixl_agent_name,
+                    primary_kv_view,
+                    config_fields=config_fields,
+                    backends=backends,
+                    num_threads=int(num_threads),
+                )
+            except Exception:
+                self._control.close()
+                raise
+
+        self._init_region(init_data)
 
         self._sessions: dict[str, P2PSession] = {}
         # peer_id → (backoff, retry_at); see _schedule_reconnect_backoff.
@@ -1261,6 +1266,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def shutdown(self) -> None:
+        super().shutdown()
+        if not self.is_ready():
+            self._control.close()
+            return
         self._drain_inflight_for_shutdown()
         for session in self._sessions.values():
             # Orphan ctxs from close() are intentionally dropped: the manager

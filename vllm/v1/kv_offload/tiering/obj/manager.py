@@ -128,6 +128,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as `{prefix}/{hash_shard}/{hash}.bin`.
     """
 
+    supports_async_init: ClassVar[bool] = True
     medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
@@ -198,7 +199,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # during drain_jobs().
         self._pending_results: list[JobResult] = []
         self._primary_reg = None
-        self._block_size_bytes: int = 0
         root_dir = f"{prefix}/" if prefix else ""
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self._file_mapper = FileMapper.from_offloading_spec(
@@ -209,16 +209,18 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
         self._next_obj_dev_id: int = 1  # dev_id=0 is reserved for _exists() probes
 
-        self._probe_connectivity()
+        self._dram_prepped_handle: nixl_prepped_dlist_handle | None = None
+        self._init_region(self._register_primary_region)
 
+    def _register_primary_region(self) -> None:
+        self._probe_connectivity()
+        primary_kv_view = self._primary_kv_view
         base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
         assert primary_kv_view.strides is not None
         stride = primary_kv_view.strides[0]
         dram_descriptors = _build_primary_dram_descriptors(
             base_addr, len(primary_kv_view), stride
         )
-        self._primary_reg = self._agent.register_memory(dram_descriptors, "DRAM")
-        self._block_size_bytes = stride
         all_blocks = [
             (base_addr + i * stride, stride, NIXL_DEV_ID)
             for i in range(len(primary_kv_view))
@@ -226,18 +228,21 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # NIXL_INIT_AGENT marks this as the local side; make_prepped_xfer requires
         # local_xfer_side tagged with NIXL_INIT_AGENT and remote_xfer_side tagged
         # with the peer agent name ("ObjAgent").
+        self._primary_reg = self._agent.register_memory(dram_descriptors, "DRAM")
         try:
-            self._dram_prepped_handle: nixl_prepped_dlist_handle = (
-                self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
+            self._dram_prepped_handle = self._agent.prep_xfer_dlist(
+                "NIXL_INIT_AGENT", all_blocks, "DRAM"
+            )
+            self._lookup_manager = ObjAsyncLookupManager(
+                tier=self, tier_type=self.tier_type
             )
         except Exception:
+            if self._dram_prepped_handle is not None:
+                self._agent.release_dlist_handle(self._dram_prepped_handle)
+                self._dram_prepped_handle = None
             self._agent.deregister_memory(self._primary_reg)
             self._primary_reg = None
             raise
-
-        self._lookup_manager = ObjAsyncLookupManager(
-            tier=self, tier_type=self.tier_type
-        )
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
@@ -479,6 +484,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             time.sleep(0.001)
 
     def shutdown(self) -> None:
+        super().shutdown()
+        if not self.is_ready():
+            return
         self._lookup_manager.shutdown()
         for job_id, entry in self._transfers.items():
             try:

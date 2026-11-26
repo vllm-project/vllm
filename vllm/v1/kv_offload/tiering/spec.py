@@ -52,7 +52,7 @@ Example out-of-tree tier configuration:
 }
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from typing_extensions import override
@@ -343,6 +343,17 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
+        if self.async_init:
+            for _, tier_cls in self._get_secondary_tiers(self.extra_config):
+                if not tier_cls.supports_async_init:
+                    logger.warning(
+                        "%s requires synchronous primary memory setup; "
+                        "disabling async_init",
+                        tier_cls.__name__,
+                    )
+                    self.async_init = False
+                    break
+
         # Pause between tier-poll rounds for tiers that need servicing
         # between engine steps. Zero or negative disables the thread, which
         # restores per-step servicing.
@@ -436,10 +447,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
                 # Create secondary tiers
                 primary_kv_view = primary_tier.get_kv_memoryview()
-                if not self.async_init:
-                    secondary_tiers.extend(
-                        self._create_secondary_tiers(primary_kv_view)
-                    )
+                secondary_tiers.extend(self._create_secondary_tiers(primary_kv_view))
 
                 # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
                 # get_worker(). Secondary tier transfers are handled by the
@@ -448,11 +456,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
                     tier_poll_interval_s=self.tier_poll_interval_s,
-                    secondary_tier_factory=(
-                        lambda: self._create_secondary_tiers(primary_kv_view)
-                    )
-                    if self.async_init and self.secondary_tier_configs
-                    else None,
                 )
                 self._manager = tiering_manager
             except Exception:
@@ -540,7 +543,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @classmethod
     def _get_secondary_tiers(
-        cls, extra_config: dict[str, Any]
+        cls, extra_config: Mapping[str, Any]
     ) -> list[tuple[dict[str, Any], type[SecondaryTierManager]]]:
         """Resolve every configured secondary tier to its manager class.
 

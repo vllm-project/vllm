@@ -194,6 +194,7 @@ def _init_offloading_spec() -> SimpleNamespace:
     """Minimal offloading_spec for driving the real __init__."""
     return SimpleNamespace(
         config=SimpleNamespace(parallel=SimpleNamespace(data_parallel_index=0)),
+        async_init=False,
         blocks_per_chunk=1,
     )
 
@@ -2633,6 +2634,7 @@ class TestBindHostPortDefaults:
             ),
         )
         spec = SimpleNamespace(
+            async_init=False,
             blocks_per_chunk=1,
             config=SimpleNamespace(
                 parallel=SimpleNamespace(data_parallel_index=dp_index)

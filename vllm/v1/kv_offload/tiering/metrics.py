@@ -59,10 +59,6 @@ class TieringMetricsTracker:
         self._tier_states = [_TierState() for _ in tier_types]
         self._stats = OffloadingConnectorStats()
 
-    def add_tier(self, tier_type: str) -> None:
-        self._tier_types.append(tier_type)
-        self._tier_states.append(_TierState())
-
     @functools.cache  # noqa: B019
     def tier_label(self, tier_idx: int) -> TierLabel:
         return (f"{tier_idx + 1}:{self._tier_types[tier_idx]}",)
