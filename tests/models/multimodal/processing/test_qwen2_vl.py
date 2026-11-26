@@ -586,6 +586,7 @@ def test_qwen2_5_video_pruning_preserves_encoder_compute_cost(pruning_rate):
         )
         position = result["mm_placeholders"]["video"][0]
         grid = result["mm_kwargs"].get_data()["video_grid_thw"][0]
+        assert isinstance(grid, torch.Tensor)
         merge_size = processor.info.get_hf_config().vision_config.spatial_merge_size
         compute_tokens = int(grid.prod()) // merge_size**2
         assert position.get_num_encoder_tokens() == compute_tokens
