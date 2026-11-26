@@ -2,16 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from http import HTTPStatus
+
 import prometheus_client
 import regex as re
-from fastapi import FastAPI, Response
-from prometheus_client import make_asgi_app
+from fastapi import FastAPI, Request, Response
+from prometheus_client import generate_latest, make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_fastapi_instrumentator import routing as _pfi_routing
+from starlette.responses import PlainTextResponse
 from starlette.routing import Match, Mount
 from starlette.types import Scope
 
-from vllm.v1.metrics.prometheus import get_prometheus_registry
+from vllm.logger import init_logger
+from vllm.v1.metrics.prometheus import (
+    MultiprocessMetricsReadError,
+    get_prometheus_registry,
+)
+
+logger = init_logger(__name__)
 
 
 def _patch_instrumentator_route_walk() -> None:
@@ -61,17 +70,45 @@ def attach_router(app: FastAPI):
     # with header "Content-Type: text/plain; version=0.0.4; charset=utf-8"
     # instead of the default "application/json" which is incorrect.
     # See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/163#issue-1296092364
-    Instrumentator(
-        excluded_handlers=[
-            "/metrics",
-            "/health",
-            "/load",
-            "/ping",
-            "/version",
-            "/server_info",
-        ],
-        registry=registry,
-    ).add().instrument(app).expose(app, response_class=PrometheusResponse)
+    instrumentator = (
+        Instrumentator(
+            excluded_handlers=[
+                "/metrics",
+                "/health",
+                "/load",
+                "/ping",
+                "/version",
+                "/server_info",
+            ],
+            registry=registry,
+        )
+        .add()
+        .instrument(app)
+    )
+
+    if registry is prometheus_client.REGISTRY:
+        instrumentator.expose(app, response_class=PrometheusResponse)
+    else:
+        # Instrumentator.expose builds its own multiprocess registry on every
+        # request. Use vLLM's registry so both routes get the same diagnostics.
+        @app.get("/metrics", response_class=PrometheusResponse)
+        def metrics() -> Response:
+            return PrometheusResponse(generate_latest(registry))
+
+        @app.exception_handler(MultiprocessMetricsReadError)
+        async def multiprocess_metrics_error(
+            _request: Request, exc: MultiprocessMetricsReadError
+        ) -> Response:
+            logger.error(
+                "Prometheus metrics scrape failed while reading multiprocess files.",
+                exc_info=exc,
+            )
+            return PlainTextResponse(
+                "Prometheus multiprocess metrics are unavailable. Check that "
+                "PROMETHEUS_MULTIPROC_DIR is writable, local, and cleared "
+                "between vLLM runs.\n",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
 
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app(registry=registry))

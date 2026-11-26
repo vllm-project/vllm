@@ -3,8 +3,11 @@
 
 import os
 import tempfile
+from collections.abc import Iterable
+from struct import error as StructError
 
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
+from prometheus_client.metrics_core import Metric
 
 from vllm.logger import init_logger
 
@@ -36,6 +39,18 @@ def setup_multiprocess_prometheus():
         )
 
 
+class MultiprocessMetricsReadError(Exception):
+    """The Prometheus collector could not read its multiprocess files."""
+
+
+class _MultiprocessCollector(multiprocess.MultiProcessCollector):
+    def collect(self) -> Iterable[Metric]:
+        try:
+            yield from super().collect()
+        except (OSError, StructError) as exc:
+            raise MultiprocessMetricsReadError from exc
+
+
 def get_prometheus_registry() -> CollectorRegistry:
     """Get the appropriate prometheus registry based on multiprocessing
     configuration.
@@ -47,7 +62,7 @@ def get_prometheus_registry() -> CollectorRegistry:
     if os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None:
         logger.debug("Using multiprocess registry for prometheus metrics")
         registry = CollectorRegistry()
-        multiprocess.MultiProcessCollector(registry)
+        _MultiprocessCollector(registry)
         return registry
 
     return REGISTRY
