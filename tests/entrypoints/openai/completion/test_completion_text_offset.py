@@ -184,6 +184,18 @@ async def test_echo_offsets_use_renderer_tokenizer_executor(tmp_path):
             await task
         renderer.shutdown()
 
+    # The closed renderer pool must reject work, even if the default pool is open.
+    with pytest.raises(
+        RuntimeError, match="cannot schedule new futures after shutdown"
+    ):
+        await _get_prompt_text_offsets_async(
+            renderer,
+            ids,
+            text,
+            prompt_input=tokens_input(ids, prompt=text),
+            source_text=text,
+        )
+
 
 def _logprobs(i: int) -> dict[int, Logprob]:
     token_id, token = TOKENS[i]
