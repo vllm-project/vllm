@@ -265,7 +265,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.flashinfer import has_flashinfer
@@ -444,6 +444,21 @@ def split_kv_b_proj(
     return weight.split([qk_nope_head_dim, v_head_dim], dim=-1)
 
 
+def prepare_dcp_v_up_proj(layer: nn.Module, manager: MLADCPManager | None) -> None:
+    if manager is None:
+        return
+    # A peer daemon can have a different symmetric-memory topology. Reuse the
+    # gathered projection when both ranks use it, or build it from the local shard.
+    if manager.v_up_proj_combine is None:
+        layer.W_UV_dcp = None
+    elif hasattr(layer, "W_UV") and (
+        not is_weights_pre_processed() or layer.W_UV_dcp is None
+    ):
+        replace_parameter(
+            layer, "W_UV_dcp", manager.group.all_gather(layer.W_UV.contiguous(), dim=0)
+        )
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -500,8 +515,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_lora_rank = kv_lora_rank
         self.kv_b_proj = kv_b_proj
         self.dcp_q_replicate = dcp_q_replicate
-        self.W_UK_T_dcp_qrep: torch.Tensor | None = None
-        self.W_UV_dcp: torch.Tensor | None = None
+        self.register_parameter("W_UK_T_dcp_qrep", None)
+        self.register_parameter("W_UV_dcp", None)
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -1587,10 +1602,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
     def process_weights_after_loading(self) -> None:
-        act_dtype = self.act_dtype
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
-        self.impl.process_weights_after_loading(act_dtype)
+        self.impl.process_weights_after_loading(self.act_dtype)
 
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both
@@ -1615,9 +1629,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "FP4/FP8 MLA BMM paths."
                 )
 
+        if not is_weights_pre_processed():
+            self._prepare_bmm_weights()
+        prepare_dcp_v_up_proj(self, self.dcp_manager)
+
+        # If we should not load quant weights, we initialize the scales to 1.0
+        # as the default value. See [Note: Register q/k/v/prob scales in state dict]
+        # for more details.
+        quant_method = (
+            resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
+            if self.quant_config
+            else None
+        )
+        if not should_load_quant_weights(quant_method):
+            set_default_quant_scales(self, register_buffer=False)
+
+    def _prepare_bmm_weights(self) -> None:
         W_UK, W_UV = split_kv_b_proj(
             self.kv_b_proj,
-            act_dtype,
+            self.act_dtype,
             self.kv_lora_rank,
             self.num_heads,
             self.qk_nope_head_dim,
@@ -1701,26 +1731,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "W_UK_T_dcp_qrep",
                     get_dcp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
                 )
-            if (
-                self.dcp_manager is not None
-                and self.dcp_manager.v_up_proj_combine is not None
-            ):
-                replace_parameter(
-                    self,
-                    "W_UV_dcp",
-                    get_dcp_group().all_gather(self.W_UV.contiguous(), dim=0),
-                )
-
-        # If we should not load quant weights, we initialize the scales to 1.0
-        # as the default value. See [Note: Register q/k/v/prob scales in state dict]
-        # for more details.
-        quant_method = (
-            resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
-            if self.quant_config
-            else None
-        )
-        if not should_load_quant_weights(quant_method):
-            set_default_quant_scales(self, register_buffer=False)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend

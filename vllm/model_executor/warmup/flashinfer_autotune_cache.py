@@ -69,6 +69,13 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
     factors = vllm_config.compile_factors(include_version=False)
+    parallel = vllm_config.parallel_config
+    if (
+        parallel.decode_context_parallel_size > 1
+        and parallel.prefill_context_parallel_size == 1
+        and envs.is_set("VLLM_DCP_Q_REPLICATE")
+    ):
+        factors["dcp_q_replicate_env"] = envs.VLLM_DCP_Q_REPLICATE
     mm_config = get_flashinfer_mm_encoder_autotune_config(vllm_config)
     if mm_config is not None:
         factors["flashinfer_mm_encoder_autotune"] = (

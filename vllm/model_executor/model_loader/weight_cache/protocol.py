@@ -18,14 +18,22 @@ import socket
 import stat
 import struct
 import tempfile
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from typing import Any, NamedTuple
 
 import torch
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+import vllm.envs as envs
 import vllm.version
-from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import (
+    CacheConfig,
+    KernelConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
@@ -364,22 +372,24 @@ class WeightCacheKey:
     mm_disabled_modalities: tuple[str, ...] = ()
     """With the two flags above, decides which components (e.g. the vision
     tower) are built; skipped ones are absent from the daemon's export."""
+    pcp_size: int = 1
+    pcp_rank: int = 0
+    dcp_size: int = 1
+    dcp_q_replicate: bool = False
+    dcp_q_replicate_env: bool | None = None
+    mla_fp4_bmm: bool = False
+    mla_fp8_bmm: bool = False
 
     @classmethod
     def from_model_config(
         cls,
         model_config: ModelConfig,
-        tp_size: int,
-        tp_rank: int,
+        parallel_config: ParallelConfig,
         *,
         cache_config: CacheConfig,
-        pp_size: int = 1,
-        pp_rank: int = 0,
         is_draft: bool = False,
         dp_size: int = 1,
         dp_rank: int = 0,
-        enable_expert_parallel: bool = False,
-        expert_placement_strategy: str = "linear",
         kernel_config: KernelConfig | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
@@ -403,13 +413,30 @@ class WeightCacheKey:
         )
         mm_config = model_config.multimodal_config
         mm_limits = mm_config.limit_per_prompt if mm_config else {}
+        tp_size = parallel_config.tensor_parallel_size
+        pcp_size = parallel_config.prefill_context_parallel_size
+        dcp_size = parallel_config.decode_context_parallel_size
+        pp_rank, rank_in_stage = divmod(parallel_config.rank, tp_size * pcp_size)
+        pcp_rank, tp_rank = divmod(rank_in_stage, tp_size)
+        can_replicate_q = dcp_size > 1 and pcp_size == 1
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
             tp_size=tp_size,
             tp_rank=tp_rank,
-            pp_size=pp_size,
-            pp_rank=pp_rank,
+            pp_size=1 if is_draft else parallel_config.pipeline_parallel_size,
+            pp_rank=0 if is_draft else pp_rank,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
+            dcp_size=dcp_size,
+            dcp_q_replicate=can_replicate_q and bool(parallel_config.dcp_q_replicate),
+            dcp_q_replicate_env=(
+                envs.VLLM_DCP_Q_REPLICATE
+                if can_replicate_q and envs.is_set("VLLM_DCP_Q_REPLICATE")
+                else None
+            ),
+            mla_fp4_bmm=bool(rocm_aiter_ops.is_fp4bmm_enabled()),
+            mla_fp8_bmm=bool(rocm_aiter_ops.is_fp8bmm_enabled()),
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
             quant_config_hash=_hash_quant_config(
@@ -426,8 +453,8 @@ class WeightCacheKey:
             is_draft=is_draft,
             dp_size=dp_size,
             dp_rank=dp_rank,
-            enable_expert_parallel=enable_expert_parallel,
-            expert_placement_strategy=expert_placement_strategy,
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
+            expert_placement_strategy=parallel_config.expert_placement_strategy,
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
             linear_backend_per_quant=linear_backend_per_quant,
@@ -442,7 +469,7 @@ class WeightCacheKey:
         return [
             f.name
             for f in fields(self)
-            if getattr(self, f.name) != getattr(other, f.name)
+            if getattr(self, f.name) != getattr(other, f.name, MISSING)
         ]
 
 

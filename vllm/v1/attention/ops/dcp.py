@@ -1650,6 +1650,12 @@ def get_direct_dcp_kv_gather_workspace(
     )
 
 
+def clear_direct_dcp_workspaces() -> None:
+    get_direct_dcp_a2a_workspace.cache_clear()
+    get_direct_dcp_q_gather_workspace.cache_clear()
+    get_direct_dcp_kv_gather_workspace.cache_clear()
+
+
 # MLA DCP backend selection
 
 
@@ -1685,6 +1691,8 @@ class MLADCPManager:
         parallel_config = vllm_config.parallel_config
         self.group = get_dcp_group()
         self.device = torch.device(device)
+        if self.device.type == "meta":
+            self.device = self.group.device
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"

@@ -14,7 +14,7 @@ Engines then load from the daemons with:
 
     vllm serve /path/to/model --tensor-parallel-size 4 --load-format ipc_cache
 
-Tensor, expert and data parallelism are supported, including across nodes;
+Tensor, expert, pipeline, data and context parallelism are supported across nodes;
 see vllm/model_executor/model_loader/weight_cache/daemon.py for the rank
 layout and rendezvous details.
 
@@ -31,7 +31,6 @@ import threading
 import time
 import typing
 from collections.abc import Sequence
-from itertools import product
 from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
 
@@ -328,13 +327,11 @@ class PreloadSubcommand(CLISubcommand):
         check_ipc_platform_support()
         parallel_config = vllm_config.parallel_config
         _reject_unsupported_parallelism(parallel_config)
-        tp_size = parallel_config.tensor_parallel_size
-        pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
-        world_size = dp_size * pp_size * tp_size
+        world_size = parallel_config.world_size_across_dp
 
-        placements = plan_local_ranks(parallel_config)
-        local_world_size = len(placements)
+        global_ranks = plan_local_ranks(parallel_config)
+        local_world_size = len(global_ranks)
         if dp_size == 1:
             nnodes = parallel_config.nnodes
             node_rank = parallel_config.node_rank
@@ -391,17 +388,6 @@ class PreloadSubcommand(CLISubcommand):
 
         ctx = multiprocessing.get_context("spawn")
         ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
-        # Local index == device index; global rank enumerates DP, PP, then TP.
-        expected_ready = {
-            (
-                format_daemon_role(is_draft),
-                dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
-            )
-            for (is_draft, _, _), (_, dp_rank, pp_rank, tp_rank) in product(
-                groups, placements
-            )
-            if daemon_serves_model(is_draft, pp_rank, pp_size)
-        }
         seed_addresses = parse_seed_addresses(args.weight_cache_seed)
         _validate_seed_args(
             args,
@@ -435,12 +421,12 @@ class PreloadSubcommand(CLISubcommand):
 
         procs: list[BaseProcess] = []
         serving: list[BaseProcess] = []
+        expected_ready: set[tuple[str, int]] = set()
         for group_index, (is_draft, config, init_method) in enumerate(groups):
             # Draft daemons live past the target group's port block at every
             # source node.
             port_offset = group_index * world_size
-            for local_rank, dp_rank, pp_rank, tp_rank in placements:
-                global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
+            for local_rank, global_rank in enumerate(global_ranks):
                 offset = port_offset + global_rank
                 peer_source = seed_address(
                     seed_addresses,
@@ -480,8 +466,6 @@ class PreloadSubcommand(CLISubcommand):
                             args.weight_cache_socket_dir,
                             ready_queue,
                             is_draft,
-                            dp_rank,
-                            pp_rank,
                             seed_config,
                             mirror_devices[local_rank]
                             if mirror_devices is not None
@@ -495,8 +479,9 @@ class PreloadSubcommand(CLISubcommand):
                         ),
                     )
                 )
-                if daemon_serves_model(is_draft, pp_rank, pp_size):
+                if daemon_serves_model(is_draft, global_rank, config.parallel_config):
                     serving.append(procs[-1])
+                    expected_ready.add((format_daemon_role(is_draft), global_rank))
         health_state = _HealthState(serving)
         health_server = None
         health_thread = None

@@ -57,6 +57,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     accumulate_mla_context_chunk,
     init_mla_context_partial,
     neutralize_empty_context_partials,
+    prepare_dcp_v_up_proj,
     split_kv_b_proj,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -378,7 +379,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         )
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_manager: MLADCPManager | None = None
-        self.W_UV_dcp: torch.Tensor | None = None
+        self.register_parameter("W_UV_dcp", None)
         if self.dcp_world_size > 1:
             query_dtype = (
                 torch.float8_e4m3fn
@@ -465,15 +466,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
             # (L, N, P) -> (N, P, L)
             replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0))
-            if (
-                self.dcp_manager is not None
-                and self.dcp_manager.v_up_proj_combine is not None
-            ):
-                replace_parameter(
-                    self,
-                    "W_UV_dcp",
-                    self.dcp_manager.group.all_gather(self.W_UV.contiguous(), dim=0),
-                )
+        prepare_dcp_v_up_proj(self, self.dcp_manager)
 
         quant_method = (
             resolve_quant_method(self.quant_config, self, prefix=self.layer_name)

@@ -22,9 +22,8 @@ Key benefits:
   disk.
 
 !!! note
-    Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
-    expert and data parallelism are supported, including across nodes;
-    pipeline parallelism is rejected when launching the daemon.
+    Weight preloading supports CUDA and ROCm. Use the same parallel layout
+    for the daemon and the engine, including across nodes.
 
 ## Quick start
 
@@ -50,6 +49,17 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 The daemon itself must load from disk (or seed from a peer replica, see
 below); passing `--load-format ipc_cache` or `peer_cache` to `vllm preload`
 is an error.
+
+For context parallelism, pass the same PCP and DCP options to both commands.
+Each DP replica runs `PP × PCP × TP` daemons. DCP uses those existing ranks.
+For example, with a model and attention backend that support DCP:
+
+```bash
+vllm preload --model deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --tensor-parallel-size 2 --decode-context-parallel-size 2
+vllm serve deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --tensor-parallel-size 2 --decode-context-parallel-size 2 --load-format ipc_cache
+```
 
 ## Local sharing backends
 
@@ -377,7 +387,8 @@ daemons at a trusted deployment.
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
-   architecture, TP/DP size/rank, dtype, quantization method and config, text
+   architecture, parallel shard layout, DCP query replication, dtype,
+   quantization method and config, text
    RoPE parameters, model revision, KV cache dtype and quantization skip layers,
    the multimodal options that skip model components, and vLLM version. On any
    mismatch the engine falls back to disk loading (unless `fallback` is
@@ -416,11 +427,9 @@ vllm preload --model /path/to/model --tensor-parallel-size 16 \
 ```
 
 For data parallelism (e.g. a TP1 x DP16 x EP decode fleet), run one launcher
-per node with the engine's DP placement flags. Local GPU `i` serves DP rank
-`start_rank + i // tp_size` and TP rank `i % tp_size`, and all
-`dp_size * tp_size` daemons form one world group on `--data-parallel-address`
-/ `--weight-cache-master-port` so the expert shards are laid out exactly as in
-the engine:
+per node with the engine's DP placement flags. The daemons form one world
+group on `--data-parallel-address` / `--weight-cache-master-port` so the
+expert shards are laid out exactly as in the engine:
 
 ```bash
 # node r (4 local GPUs)
@@ -431,9 +440,8 @@ vllm preload --model /path/to/model --tensor-parallel-size 1 \
     --weight-cache-master-port 29600
 ```
 
-Data parallelism also combines with multi-node tensor parallelism: pass both
-flag sets. Each node then serves a contiguous block of the
-`dp_size * tp_size` global ranks.
+To combine data parallelism with multi-node tensor parallelism, pass both flag
+sets. Each node serves its local workers for each DP replica assigned to it.
 
 ## Speculative decoding
 
@@ -487,8 +495,8 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
 - **Platform**: CUDA and ROCm only; other platforms raise
   `UnsupportedPlatformForIPCError` even when `fallback` is enabled, since it
   is a permanent misconfiguration rather than a transient daemon outage.
-- **Parallelism**: tensor, expert, pipeline and data parallelism are
-  supported, including across nodes.
+- **Parallelism**: tensor, expert, pipeline, data, prefill-context and
+  decode-context parallelism are supported, including across nodes.
 - **Autotune preloading**: tuning runs across the daemon's world group,
   including across nodes and DP ranks. With model-based speculative decoding
   both daemon groups skip it (the target cannot run the drafter's dummy
@@ -562,7 +570,7 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
-  agree on model, dtype, quantization, and TP/DP layout, otherwise the
+  agree on model, dtype, quantization, and parallel shard layout, otherwise the
   fingerprint mismatch triggers the disk fallback. For multimodal models, also
   pass the same `--language-model-only`, `--mm-encoder-only`, and zero
   `--limit-mm-per-prompt` entries to both: they decide which components (such
