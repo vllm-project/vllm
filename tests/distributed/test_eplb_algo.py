@@ -5,6 +5,7 @@ import os
 import signal
 import socket
 import struct
+import sys
 import threading
 import time
 from contextlib import closing, suppress
@@ -93,17 +94,27 @@ def test_policy_process_recreates_private_resources_and_preserves_state():
     assert not psutil.pid_exists(first[0])
 
 
-def test_policy_process_does_not_initialize_accelerators_or_distributed():
+def test_policy_process_does_not_initialize_accelerators_or_distributed(monkeypatch):
     """CPU planning must not create an inference device context or process group."""
+    from vllm.platforms.interface import Platform, PlatformEnum
+
+    class FakeAcceleratorPlatform(Platform):
+        _enum = PlatformEnum.CUDA
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "current_platform", FakeAcceleratorPlatform()
+    )
 
     class Policy(DefaultEplbPolicy):
         def rebalance_experts(self, stats, old_global_expert_indices=None):
+            import vllm.platforms as platforms
+
             return torch.tensor(
                 [
                     torch.cuda.is_initialized(),
                     torch.xpu.is_initialized(),
                     torch.distributed.is_initialized(),
-                    not current_platform.is_cpu(),
+                    not platforms.current_platform.is_cpu(),
                     os.environ.get("VLLM_TARGET_DEVICE") != "cpu",
                 ]
             )
@@ -111,6 +122,25 @@ def test_policy_process_does_not_initialize_accelerators_or_distributed():
     with closing(EplbPolicyProcess(Policy())) as process:
         result = process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
     assert not result.any()
+
+
+def test_policy_process_ignores_shadowing_cwd_package(tmp_path, monkeypatch):
+    """Launching from a directory with another vllm/ tree keeps parent's sys.path."""
+    shadow_pkg = tmp_path / "vllm"
+    shadow_pkg.mkdir()
+    (shadow_pkg / "__init__.py").write_text(
+        'raise RuntimeError("shadowed vllm imported from cwd")\n',
+        encoding="utf-8",
+    )
+    clean_sys_path = [
+        p for p in sys.path if p and os.path.abspath(p) != os.path.abspath(tmp_path)
+    ]
+    monkeypatch.setattr(sys, "path", clean_sys_path)
+    monkeypatch.chdir(tmp_path)
+
+    with closing(EplbPolicyProcess(DefaultEplbPolicy())) as process:
+        result = process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
+    assert result.shape == (1, 4)
 
 
 def test_policy_process_ignores_sigint():

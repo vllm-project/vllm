@@ -87,7 +87,11 @@ class EplbPolicyProcess:
         self._connection, child = socket.socketpair()
         death_reader, death_writer = os.pipe()
         env = os.environ.copy()
-        env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+        paths = [p or os.getcwd() for p in sys.path]
+        if paths:
+            env["PYTHONPATH"] = os.pathsep.join(paths)
+        else:
+            env.pop("PYTHONPATH", None)
         env["VLLM_TARGET_DEVICE"] = "cpu"
         env["VLLM_PLUGINS"] = ""
         env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
@@ -98,6 +102,7 @@ class EplbPolicyProcess:
             self._process = subprocess.Popen(
                 [
                     sys.executable,
+                    "-P",
                     "-m",
                     __name__,
                     str(child.fileno()),
