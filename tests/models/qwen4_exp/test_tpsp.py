@@ -3,7 +3,7 @@
 """Multi-GPU equivalence tests for Qwen4Exp HC and MoE sequence parallelism."""
 
 from dataclasses import MISSING, fields
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -129,11 +129,13 @@ def _make_decoder(config: VllmConfig, rank: int) -> Qwen4ExpDecoderLayer:
         if config.parallel_config.enable_expert_parallel:
             experts.w13_weight.add_(rank * 0.01)
         experts.quant_method.process_weights_after_loading(experts)
+        layer.mlp.experts.process_weights_after_loading()
     return layer
 
 
 def _check_decoder_ple(rank: int) -> None:
-    """Compare HC SP with full tokens across a PLE prefill and cached decode."""
+    """Compare HC SP with full tokens across a PLE prefill and cached decode,
+    and (ROCm) the PLE's full-row calls the specialized decode makes."""
     configs = [_make_config(rank, hc_sp=enabled) for enabled in (False, True)]
     layers = [_make_decoder(config, rank) for config in configs]
     states = []
@@ -145,6 +147,10 @@ def _check_decoder_ple(rank: int) -> None:
             state = state.transpose(-1, -2).contiguous()
         ple.kv_cache = (state,)
         states.append(state)
+    # (layer, full_rows) per PLE call, each with its own conv state: the layer
+    # without SP by default and with full_rows, the HC SP layer with full_rows.
+    lanes = ((0, False), (0, True), (1, True))
+    lane_states = [torch.zeros_like(states[i]) for i, _ in lanes]
 
     # Three prefill tokens straddle the TP=2 boundary and require SP padding.
     for case in (
@@ -194,6 +200,33 @@ def _check_decoder_ple(rank: int) -> None:
         torch.testing.assert_close(outputs[1], outputs[0], atol=0.002, rtol=0.02)
         torch.testing.assert_close(states[1], states[0], atol=0.002, rtol=0.02)
 
+        # The specialized decode (ROCm --monokernel) calls the PLE on every row.
+        if not current_platform.is_rocm():
+            continue
+        lane_outputs = []
+        for (i, full_rows), state in zip(lanes, lane_states):
+            ple = layers[i].ple
+            assert ple is not None
+            decoder_state, ple.kv_cache = ple.kv_cache, (state,)
+            with (
+                set_current_vllm_config(configs[i]),
+                set_forward_context({ple.prefix: metadata}, configs[i]),
+            ):
+                if hasattr(ple, "start_prefetch"):
+                    ple.start_prefetch(ids, qsl, context)
+                output = ple(hidden, ids, qsl, context, full_rows=full_rows)
+            ple.kv_cache = decoder_state
+            lane_outputs.append(output.clone())
+        # Without SP, full_rows selects the same computation.
+        torch.testing.assert_close(lane_outputs[1], lane_outputs[0], atol=0, rtol=0)
+        torch.testing.assert_close(lane_states[1], lane_states[0], atol=0, rtol=0)
+        torch.testing.assert_close(
+            lane_outputs[2], lane_outputs[0], atol=0.002, rtol=0.02
+        )
+        torch.testing.assert_close(
+            lane_states[2], lane_states[0], atol=0.002, rtol=0.02
+        )
+
 
 def _check_moe_sp(rank: int, config: VllmConfig) -> None:
     """Compare native SP with full-token GR and the MoE wrapper's public interface."""
@@ -239,16 +272,14 @@ def _check_moe_sp(rank: int, config: VllmConfig) -> None:
     torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.02)
 
 
-def _check_compiled_sp_ops() -> None:
-    """Compiled SP collectives stay correct for token counts unseen at trace time."""
-    from vllm.models.qwen4_exp.amd.ops.sequence_parallel import (
-        sp_reduce_scatter,
-        sp_shard,
-    )
+def _check_compiled_sp_ops(module: ModuleType) -> None:
+    """A module's bound SP collectives handle token counts unseen at trace time."""
+    # Guard-free traces are cached by code; do not reuse another module's trace.
+    torch._dynamo.reset()
 
     def collectives(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        gathered = sp_all_gather(sp_shard(x) * 2)[: x.shape[0]]
-        reduced = sp_all_gather(sp_reduce_scatter(x))[: x.shape[0]]
+        gathered = sp_all_gather(module.sp_shard(x) * 2)[: x.shape[0]]
+        reduced = sp_all_gather(module.sp_reduce_scatter(x))[: x.shape[0]]
         return gathered, reduced
 
     # vLLM drops Dynamo guards, so one trace must serve every token count.
@@ -260,7 +291,7 @@ def _check_compiled_sp_ops() -> None:
     traced = torch.randn(8, 16)
     torch._dynamo.mark_dynamic(traced, 0)
     compiled(traced)
-    for num_tokens in (7, 3, 1):
+    for num_tokens in (7, 3, 1, 192, 191):
         torch.manual_seed(num_tokens)
         x = torch.randn(num_tokens, 16)
         torch.testing.assert_close(compiled(x), collectives(x), atol=0, rtol=0)
@@ -287,7 +318,10 @@ def _run_sp(rank: int, port: int, moe_sp: bool, compiled_ops: bool = False) -> N
                 if moe_sp:
                     _check_moe_sp(rank, config)
                 elif compiled_ops:
-                    _check_compiled_sp_ops()
+                    from vllm.models.qwen4_exp.amd import ple_layer
+
+                    for module in (qwen4_model, ple_layer):
+                        _check_compiled_sp_ops(module)
                 else:
                     _check_decoder_ple(rank)
     finally:
@@ -311,5 +345,5 @@ def test_moe_sp_equivalence(monkeypatch) -> None:
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only SP ops")
 @multi_gpu_test(num_gpus=2)
 def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
-    """Padding in compiled SP collectives must not specialize on the traced size."""
+    """Compiled SP padding in the model and PLE must not specialize on trace size."""
     mp.spawn(_run_sp, args=(get_open_port(), False, True), nprocs=2)
