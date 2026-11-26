@@ -5978,6 +5978,7 @@ steps:
   - >-
     pytest -v -s -rs
     "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_restore_matches_recompute[tp2]"
+    "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_synchronous_restore_survives_block_zeroing[mixed-precision-tp2]"
     "v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py::test_objects_outlive_the_writer_and_restore_on_another_gpu"
 
 - label: ":amd: (MI355 DPX) V1 Attention Shard %N" # TBD
