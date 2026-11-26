@@ -112,3 +112,37 @@ def test_packed_row_over_the_limit_raises():
             options=["e"],
             max_packed=8,
         )
+
+
+def test_option_text_appends_a_description_only_when_present():
+    assert drex_prompt.option_text("red", None) == "red"
+    assert drex_prompt.option_text("red", "") == "red"
+    assert drex_prompt.option_text("red", "a warm color") == "red: a warm color"
+
+
+def test_choice_options_keep_criteria_order():
+    texts, order = drex_prompt.model_options("choice", [("A", "first"), ("B", None)])
+    assert texts == ["A: first", "B"]
+    assert order == [0, 1]
+
+
+def test_noul_options_are_packed_no_then_yes():
+    # The question type stores options as (yes, no); the model reads (no, yes).
+    texts, order = drex_prompt.model_options(
+        "noul", [("yes", "it is true"), ("no", "it is false")]
+    )
+    assert texts == ["no: it is false", "yes: it is true"]
+    assert order == [1, 0]
+
+
+def test_score_options_are_level_labels_in_order():
+    texts, order = drex_prompt.model_options(
+        "score", [("0", "low"), ("1", "mid"), ("2", "high")]
+    )
+    assert texts == ["0", "1", "2"]
+    assert order == [0, 1, 2]
+
+
+def test_unknown_question_type_is_rejected():
+    with pytest.raises(ValueError, match="does not answer"):
+        drex_prompt.model_options("weird", [("a", None)])

@@ -46,6 +46,48 @@ def user_tokens(tokenizer: Tokenizer, text: str) -> list[int]:
     return tokenizer(rewritten, add_special_tokens=False).input_ids
 
 
+def option_text(name: str, description: str | None) -> str:
+    """Render one option as `name` or `name: description`."""
+    if not description:
+        return name
+    return f"{name}: {description}"
+
+
+def model_options(
+    question_type: str, options: Sequence[tuple[str, str | None]]
+) -> tuple[list[str], list[int]]:
+    """Map a question's options to the texts the model reads and their order.
+
+    `options` is in the question type's own order. The returned `order` maps
+    each model position back to that order, so the read can be reordered to the
+    caller's order before answering.
+
+    Args:
+        question_type: One of `choice`, `noul`, `score`.
+        options: `(name, description)` pairs in the question type's order.
+
+    Returns:
+        The option texts in model order and the model-to-question permutation.
+
+    Raises:
+        ValueError: If the question type is not one Drex answers.
+
+    """
+    if question_type == "choice":
+        return [option_text(name, desc) for name, desc in options], list(
+            range(len(options))
+        )
+    if question_type == "noul":
+        if len(options) != 2:
+            raise ValueError("a noul question needs a true and a false description")
+        # The type stores (yes, no); the model reads (no, yes) like the API.
+        yes, no = options
+        return [option_text(*no), option_text(*yes)], [1, 0]
+    if question_type == "score":
+        return [name for name, _ in options], list(range(len(options)))
+    raise ValueError(f"Drex does not answer {question_type!r} questions")
+
+
 def pack(
     tokenizer: Tokenizer,
     state: str,
