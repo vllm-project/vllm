@@ -14,7 +14,7 @@ import psutil
 import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -71,7 +71,7 @@ def _get_max_swap_rows(vllm_config: VllmConfig) -> int:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PagedCacheView:
     cache: torch.Tensor
     attention_cache: torch.Tensor
@@ -100,14 +100,16 @@ class PagedCacheView:
         )
         row_bytes = row_width * itemsize
         if block_stride % (block_size * row_bytes):
-            return cls(cache, cache, block_size, block_size)
+            # Blocks whole rows apart: kernels read the strided cache as flat rows.
+            assert block_stride % row_bytes == 0
+            return cls(cache, cache, block_size, block_stride // row_bytes)
         attention_cache = (
             raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
         )
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedHiSparseConfig:
     top_k: int
     device_buffer_size: int
@@ -289,7 +291,7 @@ def drop_hisparse_host_pool(vllm_config: VllmConfig) -> None:
 
 
 def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
-    """Whether replicated MLA host KV can share one local mmap."""
+    """Whether replicated MLA host KV can share one mmap per node."""
     parallel = vllm_config.parallel_config
     return (
         get_hisparse_backend().supports_shared_host_pool
@@ -299,8 +301,26 @@ def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
         and parallel.decode_context_parallel_size == 1
         and parallel.world_size == parallel.tensor_parallel_size
         and parallel.distributed_executor_backend == "mp"
-        and parallel.nnodes_within_dp == 1
     )
+
+
+def get_hisparse_host_leader_rank(
+    vllm_config: VllmConfig, tp_rank: int | None = None
+) -> int:
+    """TP rank that creates and writes this node's shared host pool.
+
+    Args:
+        vllm_config: Engine config; its `local_world_size` sets the node size.
+        tp_rank: TP rank to resolve; defaults to this process's TP rank.
+
+    Returns:
+        The first TP rank on `tp_rank`'s node.
+
+    """
+    if tp_rank is None:
+        tp_rank = get_tensor_model_parallel_rank()
+    local_world_size = vllm_config.parallel_config.local_world_size
+    return tp_rank // local_world_size * local_world_size
 
 
 def get_hisparse_host_block_stride(
@@ -317,12 +337,14 @@ def allocate_hisparse_host_pools(
     num_blocks: int,
     host_block_stride: int,
 ) -> tuple[list[torch.Tensor], SharedOffloadRegion]:
-    """Allocate one host mmap shared by local TP ranks."""
+    """Allocate one host mmap shared by each node's TP ranks."""
     tp_group = get_tp_group()
+    local_world_size = vllm_config.parallel_config.local_world_size
     region = SharedOffloadRegion(
         engine_id=(
             f"hisparse_{vllm_config.instance_id}_"
-            f"dp{vllm_config.parallel_config.data_parallel_index}"
+            f"dp{vllm_config.parallel_config.data_parallel_index}_"
+            f"tp{get_hisparse_host_leader_rank(vllm_config)}"
         ),
         num_chunks=1,
         rank=0,
@@ -330,7 +352,7 @@ def allocate_hisparse_host_pools(
         cpu_page_size=sum(tensor_sizes),
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
-        populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        populate_shard=(tp_group.rank_in_group % local_world_size, local_world_size),
         num_segments=REGION_SEGMENTS,
     )
     pinned: list[torch.Tensor] = []
@@ -432,7 +454,7 @@ def hisparse_prefill_staging_remap(
     return new_bt, row_ids
 
 
-@dataclass
+@dataclass(slots=True)
 class HiSparsePrefillStagingPlan:
     block_table: torch.Tensor
     row_ids: torch.Tensor
@@ -511,6 +533,10 @@ class HiSparsePrefillStagingPlan:
         self.gpu_row_ids = torch.where(hit, gpu_rows, -1).reshape(1, -1).to(torch.int32)
         self.miss_mask = ((self.gpu_row_ids < 0) & valid_rows.view(1, -1)).int()
         self.gpu_source_key = source_key
+
+
+def hisparse_staging_block_capacity(seq_lens_cpu: torch.Tensor, block_size: int) -> int:
+    return int(((seq_lens_cpu + block_size - 1) // block_size).sum())
 
 
 def build_hisparse_prefill_staging_plan(
@@ -723,8 +749,19 @@ class HiSparseRuntime:
         num_blocks: int,
         block_size: int,
         block_table: torch.Tensor,
+        owner: HiSparseRuntime | None = None,
     ) -> None:
-        """Bind this runtime's strided view into the shared GPU HMA slab."""
+        """Bind this runtime's strided view into the shared GPU HMA slab.
+
+        A cross-layer KV-sharing layer binds its target's hot rows and passes
+        the target as `owner`: both then track the rows in the owner's slot map.
+        """
+        if owner is not None:
+            assert self.is_group_leader and not self.index_group.followers
+            group, owner_group = self.index_group, owner.index_group
+            group.device_global_indices = owner_group.device_global_indices
+            group.lru_slots = owner_group.lru_slots
+            group.swap_stats = owner_group.swap_stats
         self.hot = PagedCacheView.bind(
             raw_tensor,
             dtype=self.kv_dtype,
@@ -1212,6 +1249,30 @@ class HiSparseCacheHandle:
         )
         self.block_table = block_table
         self.slot_mapping = slot_mapping
+
+    def ensure_prefill_gpu_sources(
+        self, plan: HiSparsePrefillStagingPlan, num_decodes: int
+    ) -> None:
+        assert self.view is not None and self.block_table is not None
+        state_indices = self.runtime.request_state_indices
+        assert state_indices is not None
+        plan.ensure_gpu_sources(
+            self.block_table, state_indices[num_decodes:], self.view.block_size
+        )
+
+    def stage_prefill_rows(
+        self,
+        source_cache: torch.Tensor,
+        plan: HiSparsePrefillStagingPlan,
+        num_decodes: int,
+    ) -> torch.Tensor:
+        resident_cache = None
+        if self.view is not None and self.block_table is not None:
+            self.ensure_prefill_gpu_sources(plan, num_decodes)
+            resident_cache = self.view.cache
+        return self.runtime.gather_prefill_cache(
+            source_cache, plan, resident_cache=resident_cache
+        )
 
     def swap_in(
         self,

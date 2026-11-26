@@ -129,6 +129,7 @@ class MlaQuery:
         poll: bool = True,
         late: bool = False,
         release: bool = True,
+        pdl: bool = True,
     ):
         assert not nvfp4 or (dsa and fp8), "nvfp4_ds_mla takes the FP8 DSA query"
         # The q_a RMSNorm in the Triton form (K3 MLA), else vllm_c's (K3.1 DSA).
@@ -161,7 +162,11 @@ class MlaQuery:
         self.grid = (self.cluster, heads, (batch + self.tokens - 1) // self.tokens)
         self.tile_poll = self.wide and batch > 64
         carveout = 100 if batch > 1 else None
-        self.options = dict(cluster=self.cluster, preferred_smem_carveout=carveout)
+        # pdl: launch with programmatic dependency (land early, wait in-kernel);
+        # off: start only once the kernel it follows completes.
+        self.options = dict(
+            cluster=self.cluster, preferred_smem_carveout=carveout, pdl=pdl
+        )
         self.q_b_cp_async = q_b_cp_async
 
     @cute.jit

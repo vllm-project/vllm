@@ -413,7 +413,11 @@ class MuseSparkQKVOGateParallelLinear(ColumnParallelLinear):
             if name == "bias" and self.bias is None:
                 continue
             param = getattr(self, name)
-            self.weight_loader(param, loaded_weight, shard_id)
+            # Online quantization wraps this loader on the parameter.
+            if self.quant_method.uses_meta_device:
+                param.weight_loader(param, loaded_weight, shard_id)
+            else:
+                self.weight_loader(param, loaded_weight, shard_id)
             yield name
 
 

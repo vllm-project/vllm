@@ -102,8 +102,8 @@ class GatedResidual(nn.Module):
         if use_combine:
             self.input_mix_weight_down_block_inject = MergedColumnParallelLinear(
                 self.hyper_hidden_size,
-                [self.hc_lowrank, self.hc_count]
-                + ([self.pad_size] if self.pad_size else []),
+                [self.hc_lowrank, self.hc_count],
+                padding_size=self.pad_size,
                 bias=False,
                 params_dtype=config.params_dtype,
                 quant_config=None,

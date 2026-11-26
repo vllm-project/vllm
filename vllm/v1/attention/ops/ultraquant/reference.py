@@ -140,7 +140,7 @@ def _ue8m0_snap_tensor(
     return s_snapped, byte
 
 
-@dataclass
+@dataclass(slots=True)
 class UltraQuantEncoded:
     """Encoded ultraquant representation of one tensor along its last axis.
 

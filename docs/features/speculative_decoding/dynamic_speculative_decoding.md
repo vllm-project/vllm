@@ -72,4 +72,4 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 ## Limitations
 
 * Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
-* Not compatible with data parallelism (`--data-parallel-size > 1`). Each DP rank schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens` value.
+* Not compatible with data parallelism (`--data-parallel-size > 1`) for MoE models. Their DP ranks step together, but each schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. For MoE models with DP, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens` value. Dense models run each DP rank as an independent engine, so each rank uses its own schedule.

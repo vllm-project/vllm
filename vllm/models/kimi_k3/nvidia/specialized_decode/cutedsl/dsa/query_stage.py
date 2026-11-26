@@ -104,6 +104,7 @@ def compile_query(
     overlap="serial",
     cap=64,
     release=True,
+    pdl=True,
 ):
     """MlaQuery (dsa) of one batch of rows. `fakes`: the fake weight and cache
     tensors (q_a norm, kv_a norm, Q_B, W_UK, the MLA cache). Under DCP the query
@@ -112,12 +113,14 @@ def compile_query(
     q mailbox rows (DcpBox.cap). `overlap` (overlap.MODES): "fork" and "front"
     leave the q_c rows to QueryNorm or IndexFront, and every mode but "serial" the
     mailbox poll to QueryWait.
-    `release`: launch the next kernel early (PDL)."""
+    `release`: launch the next kernel early (PDL). `pdl`: MlaQuery itself
+    launches with PDL (else it starts once the kernel it follows completes)."""
     qnorm, kvnorm, qb, uk, kv = fakes
     scalar = fake((1,), (1,), torch.float32, 4)
     if runs_split(heads, batch, dcp, fp8):
         # Under DCP QueryWait polls the q mailbox (MlaAbsorb only publishes).
         assert not dcp or overlap != "serial", "the split query does not poll"
+        assert pdl, "the split query launches with PDL"
         # FlashMLA sparse's BF16 query rows hold QUERY_HEADS (64) heads.
         assert fp8, "the split query writes the FlashInfer (per-tensor FP8) query"
         norm = (
@@ -146,6 +149,7 @@ def compile_query(
         poll=overlap == "serial",
         late=overlap in ("late", "late_front"),
         release=release,
+        pdl=pdl,
     )
     eps = cutlass.Float32(1e-6)
     q_args = (projected, qnorm, kvnorm, qb, uk, kv, slots, scalar, scalar, eps)

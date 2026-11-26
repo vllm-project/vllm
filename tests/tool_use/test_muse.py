@@ -38,7 +38,11 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
 from vllm.tool_parsers import schema_types
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
-from vllm.tool_parsers.muse_tool_parser import MuseToolParser
+from vllm.tool_parsers.muse_tool_parser import (
+    _NAME_RE,
+    _PARAM_RE,
+    MuseToolParser,
+)
 
 R: MuseReasoningParser
 T: MuseToolParser
@@ -100,6 +104,66 @@ def _call(name):
 
 
 # ---------------------------------------------------------------- tool calls
+
+
+def test_attribute_scan_stops_at_the_tag_boundary():
+    """A repeated open tag must not restart the attribute search per tag."""
+    assert _NAME_RE.match('<atem:invoke name="f"') is not None
+    for n in (2, 10, 100, 1000):
+        assert _NAME_RE.match("<atem:invoke " * n + 'name="f"') is None
+        assert (
+            _PARAM_RE.match("<atem:parameter " * n + 'name="k">v</atem:parameter>')
+            is None
+        )
+
+    raw = (
+        "<|start|>assistant to=weather.get<|message|>"
+        + "<atem:invoke " * 4000
+        + "</atem:invoke><|eot|>"
+    )
+    assert not MuseToolParser.extract_tool_calls(T, raw, _NO_REQ).tools_called
+
+
+def test_streaming_parses_once_per_completed_invoke(monkeypatch):
+    """Streaming parses once per completed invoke, not on every delta."""
+    request = ChatCompletionRequest(model="muse", messages=[])
+    tail = (
+        "<|start|>assistant to=read.read<|message|><atem:function_calls>\n"
+        '<atem:invoke name="read.read">\n'
+        '<atem:parameter name="path">/etc/hostname</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+
+    real = MuseToolParser._parse_tool_calls
+    parses = 0
+
+    def counting(cls, *args, **kwargs):
+        nonlocal parses
+        parses += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(MuseToolParser, "_parse_tool_calls", classmethod(counting))
+
+    for pad in (0, 500, 5000):
+        for chunk in (1, 4, 17):
+            raw = " to=self<|message|>" + "." * pad + "<|eom|>" + tail
+            parses = 0
+            parser = MuseToolParser(object())
+            names, prev, i = [], "", 0
+            while i < len(raw):
+                cur = raw[: i + chunk]
+                delta = MuseToolParser.extract_tool_calls_streaming(
+                    parser, prev, cur, cur[len(prev) :], [], [], [], request
+                )
+                if delta is not None and delta.tool_calls:
+                    names += [_fn_of(tc)[0] for tc in delta.tool_calls]
+                prev = cur
+                i += chunk
+            deltas = len(raw) // chunk + 1
+            assert names == ["read.read"], f"pad={pad} chunk={chunk}: {names}"
+            assert parses == 1, (
+                f"pad={pad} chunk={chunk}: parsed {parses}x over {deltas} deltas"
+            )
 
 
 def test_single_tool_call_after_reasoning():
@@ -447,9 +511,9 @@ def test_truncated_cot_no_toolcall_streaming():
 
 # ------------------------------------------------------- name normalization
 #
-# Muse emits `get_weather.get_weather` for a bare-registered
-# `get_weather`, and `weather.get` verbatim for a namespaced one. The parser
-# normalizes against the tools actually registered on the request.
+# Muse emits `get_weather.get_weather` (or `Bash.command`, `Glob.`, ...) for a
+# bare-registered tool, and `weather.get` verbatim for a namespaced one. The
+# parser normalizes against the tools actually registered on the request.
 
 
 def test_doubled_bare_name_collapses():
@@ -459,6 +523,83 @@ def test_doubled_bare_name_collapses():
     assert out.tools_called and out.tool_calls[0].function.name == "get_weather", (
         out.tool_calls[0].function.name
     )
+
+
+_BASH = {
+    "name": "Bash",
+    "parameters": {
+        "type": "object",
+        "properties": {"command": {"type": "string"}, "n": {"type": "integer"}},
+    },
+}
+
+
+def _tools_req(kind: str, *names: str, bash: bool = True):
+    """A real request registering `names` as bare tools, plus a typed `Bash`."""
+    functions = [{"name": n} for n in names] + ([_BASH] if bash else [])
+    if kind == "chat":
+        return ChatCompletionRequest(
+            model="muse",
+            messages=[],
+            tools=[{"type": "function", "function": f} for f in functions],
+        )
+    return ResponsesRequest(
+        input="hi", tools=[{"type": "function", **f} for f in functions]
+    )
+
+
+@pytest.mark.parametrize("kind", ["chat", "responses"])
+@pytest.mark.parametrize(
+    "emitted, expected",
+    [
+        ("Bash.command", "Bash"),  # a parameter name
+        ("Read.read", "Read"),  # a lowercased repeat
+        ("Bash.execute", "Bash"),  # a made-up verb
+        ("Glob.", "Glob"),  # nothing after the dot
+        ("forecast.forecast", "forecast"),  # the doubled form always collapses
+        ("forecast.daily", "forecast.daily"),  # an exact match wins
+        ("forecast.weekly", "forecast.weekly"),  # may mean a missing sibling
+        ("calendar.calendar", "calendar.calendar"),  # `calendar` is not registered
+    ],
+)
+def test_bare_name_with_any_suffix_collapses(kind, emitted, expected):
+    req = _tools_req(kind, "Read", "Glob", "forecast", "forecast.daily", "calendar.get")
+    out = MuseToolParser(object(), req.tools).extract_tool_calls(_call(emitted), req)
+    assert out.tool_calls[0].function.name == expected
+
+
+@pytest.mark.parametrize("kind", ["chat", "responses"])
+@pytest.mark.parametrize("chunk", [1, 7, 1000])
+def test_collapsed_name_streams_once_with_its_parameter_types(kind, chunk):
+    req = _tools_req(kind)
+    raw = (
+        "<|start|>assistant to=Bash.command<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="Bash.command">\n'
+        '<atem:parameter name="command">007</atem:parameter>\n'
+        '<atem:parameter name="n">7</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls><|eom|>"
+    )
+    parser, prev, calls = MuseToolParser(object(), req.tools), "", []
+    for end in range(chunk, len(raw) + chunk, chunk):
+        cur = raw[:end]
+        delta = parser.extract_tool_calls_streaming(
+            prev, cur, cur[len(prev) :], [], [], [], req
+        )
+        calls += delta.tool_calls if delta and delta.tool_calls else []
+        prev = cur
+    names = [_fn_of(tc)[0] for tc in calls if _fn_of(tc)[0]]
+    arguments = "".join(_fn_of(tc)[1] or "" for tc in calls)
+    assert names == ["Bash"], names
+    assert json.loads(arguments) == {"command": "007", "n": 7}
+
+
+def test_registered_doubled_name_is_kept():
+    # An exact match wins over collapsing the doubled form.
+    req = _tools_req("chat", "get_weather", "get_weather.get_weather", bash=False)
+    out = MuseToolParser(object(), req.tools).extract_tool_calls(
+        _call("get_weather.get_weather"), req
+    )
+    assert out.tool_calls[0].function.name == "get_weather.get_weather"
 
 
 def test_namespaced_name_preserved():

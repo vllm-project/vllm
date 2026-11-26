@@ -12,13 +12,16 @@ a subclass sets their size. DeepSeek-V4.1's builder does, and with
 candidate consumers share.
 """
 
-import bisect
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
@@ -32,6 +35,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    _ROCM_MXFP4_DECODE_ROWS_KERNEL,
     build_rocm_mxfp4_decode_schedule,
     rocm_mxfp4_consumer_rows,
     rocm_mxfp4_decode_schedule_words,
@@ -47,8 +51,10 @@ logger = init_logger(__name__)
 _GATHER_MIN_CUT_DECODE = 3.0
 _GATHER_MIN_CUT_PREFILL = 1.5
 
+_DECODE_SHARD_MIN_ROWS = 64
 
-@dataclass
+
+@dataclass(slots=True)
 class RocmMxfp4PrefillPlan:
     """One prefill chunk as the requests the kernel launches on, all in one
     launch: the kernel finds each row's request through query_start_loc, and
@@ -73,7 +79,7 @@ class RocmMxfp4PrefillPlan:
     use_gather: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class RocmMxfp4GatherLaunch:
     """Query rows [token_start, token_end) of one request, which the candidate
     consumers score against the pool in one launch."""
@@ -91,7 +97,7 @@ class RocmMxfp4GatherLaunch:
     reused by the rest."""
 
 
-@dataclass
+@dataclass(slots=True)
 class RocmMxfp4NativeDecode:
     """A decode step whose requests all have next_n query rows, as the
     kernel's sequences: a workgroup then walks a KV tile once for up to
@@ -132,12 +138,59 @@ def native_decode(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class DecodeRowShard:
+    start: int
+    stop: int
+    span: int
+    num_rows: int
+
+    @classmethod
+    def plan(
+        cls, num_rows: int, unit: int, world: int, rank: int, capacity: int
+    ) -> "DecodeRowShard | None":
+        if world < 2 or num_rows < _DECODE_SHARD_MIN_ROWS:
+            return None
+        span = cdiv(num_rows, world * unit) * unit
+        if num_rows + span > capacity:
+            return None
+        start = min(rank * span, num_rows)
+        return cls(start, min(start + span, num_rows), span, num_rows)
+
+    def narrow(
+        self,
+        row_lens: torch.Tensor,
+        row_block_table: torch.Tensor,
+        native: RocmMxfp4NativeDecode | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, RocmMxfp4NativeDecode | None]:
+        lo, hi = self.start, self.stop
+        if native is not None:
+            seqs = slice(lo // native.next_n, hi // native.next_n)
+            native = replace(
+                native,
+                context_lens=native.context_lens[seqs],
+                block_table=native.block_table[seqs],
+            )
+        return row_lens[lo:hi], row_block_table[lo:hi], native
+
+
+def step_has_prefill(cm: CommonAttentionMetadata, decode_threshold: int) -> bool:
+    return (
+        cm.max_query_len > decode_threshold
+        and cm.is_prefilling is not None
+        and bool(cm.is_prefilling.any())
+    )
+
+
 @dataclass
 class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     prefill_plans: list[RocmMxfp4PrefillPlan] = field(default_factory=list)
     """Parallel to `prefill.chunks`."""
     decode_row_lens: torch.Tensor | None = None
     """[rows] int32 compressed context of each decode query row."""
+    decode_step_row_lens: torch.Tensor | None = None
+    """`decode_row_lens` for every decode row of the step, before
+    `decode_shard` narrows it to a TP rank's rows."""
     decode_block_ends: torch.Tensor | None = None
     """[rows] int32 candidate blocks each decode row sees, for the source's
     pool."""
@@ -145,6 +198,7 @@ class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     """The same rows as next_n-row sequences, for the dense launches."""
     decode_schedule: torch.Tensor | None = None
     """The dense decode launches' work schedule, built once for the step."""
+    decode_shard: DecodeRowShard | None = None
     decode_use_gather: bool = False
     """Whether the candidate consumers gather for the decode rows."""
     decode_gather: tuple[dict, torch.Tensor] | None = None
@@ -176,7 +230,7 @@ def plan_prefill_chunks(
     plans = []
     for chunk in chunks:
         t0, t1 = chunk.token_start, chunk.token_end
-        first = bisect.bisect_right(query_start_loc, t0) - 1
+        first = chunk.req_start
         requests = []
         for req in range(chunk.num_reqs):
             lo = max(query_start_loc[first + req], t0) - t0
@@ -360,6 +414,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         # A two-level (candidate block) indexer's builder sets these.
         self.candidate_block_size = 0
         self.min_gather_width: float | None = None
+        self.decode_shard_world, self.decode_shard_rank = 1, 0
 
         self.decode_block_ends_buffer = torch.zeros(
             self.arange_buffer.shape[0], dtype=torch.int32, device=device
@@ -384,6 +439,11 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             dtype=torch.int32,
             device=device,
         )
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _ROCM_MXFP4_DECODE_ROWS_KERNEL.register_warmup(
+                compress_ratio=self.compress_ratio,
+                block_cols=self.expanded_block_table_buffer.shape[1],
+            )
 
     def _split_indexer_prefill_chunks(  # type: ignore[override]
         self,
@@ -401,6 +461,44 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             request_offset,
         )
 
+    def should_build_custom_decode_rows(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> bool:
+        return (
+            not self.supports_varlen and common_attn_metadata.dcp_local_seq_lens is None
+        )
+
+    def _build_decode_rows(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_decodes: int,
+        num_decode_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cm = common_attn_metadata
+        block_table = cm.block_table_tensor
+        assert block_table.shape[1] == self.expanded_block_table_buffer.shape[1]
+        _ROCM_MXFP4_DECODE_ROWS_KERNEL(
+            cm.query_start_loc,
+            cm.seq_lens,
+            block_table,
+            self.decode_seq_lens_buffer,
+            self.expanded_block_table_buffer,
+            self.decode_lens_buffer,
+            self.per_req_decode_lens_buffer,
+            self.context_lens_buffer,
+            self.decode_block_ends_buffer,
+            num_decodes,
+            num_decode_tokens,
+            cm.num_reqs,
+            self.candidate_block_size,
+            self.compress_ratio,
+        )
+        return (
+            self.decode_seq_lens_buffer[:num_decode_tokens],
+            self.expanded_block_table_buffer[:num_decode_tokens],
+            self.decode_lens_buffer[:num_decode_tokens],
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -412,27 +510,50 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             **{f.name: getattr(base, f.name) for f in fields(base)}
         )
         cm = common_attn_metadata
+        fused = base.decode is not None and self.should_build_custom_decode_rows(cm)
         context_lens = self.context_lens_buffer[: cm.num_reqs]
-        torch.floor_divide(
-            cm.seq_lens[: cm.num_reqs], self.compress_ratio, out=context_lens
-        )
+        if not fused:
+            torch.floor_divide(
+                cm.seq_lens[: cm.num_reqs], self.compress_ratio, out=context_lens
+            )
         if base.decode is not None:
             lengths = base.decode.seq_lens.view(-1)
-            metadata.decode_row_lens = lengths
-            block = self.candidate_block_size
-            if block:
-                ends = self.decode_block_ends_buffer[: lengths.shape[0]]
-                torch.add(lengths, block - 1, out=ends)
-                ends.floor_divide_(block)
-                metadata.decode_block_ends = ends
+            metadata.decode_step_row_lens = lengths
             query_start_loc = cm.query_start_loc_cpu[: base.num_decodes + 1]
-            metadata.decode_native = native_decode(
+            native = native_decode(
                 lengths,
                 base.decode.block_table,
                 torch.diff(query_start_loc).tolist(),
                 self.native_next_n,
                 context_lens,
             )
+            decode_shard = None
+            if not step_has_prefill(cm, self.decode_threshold):
+                decode_shard = DecodeRowShard.plan(
+                    lengths.shape[0],
+                    1 if native is None else native.next_n,
+                    self.decode_shard_world,
+                    self.decode_shard_rank,
+                    self.vllm_config.scheduler_config.max_num_batched_tokens,
+                )
+            if decode_shard is not None:
+                lengths, block_table, native = decode_shard.narrow(
+                    lengths, base.decode.block_table, native
+                )
+                metadata.decode = replace(
+                    base.decode, block_table=block_table, seq_lens=lengths[:, None]
+                )
+                metadata.decode_shard = decode_shard
+            metadata.decode_row_lens = lengths
+            metadata.decode_native = native
+            block = self.candidate_block_size
+            if block:
+                lo = 0 if decode_shard is None else decode_shard.start
+                ends = self.decode_block_ends_buffer[lo : lo + lengths.shape[0]]
+                if not fused:
+                    torch.add(lengths, block - 1, out=ends)
+                    ends.floor_divide_(block)
+                metadata.decode_block_ends = ends
             metadata.decode_schedule = build_rocm_mxfp4_decode_schedule(
                 lengths,
                 self.num_heads,
@@ -444,15 +565,19 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             )
         if base.prefill is not None:
             assert cm.seq_lens_cpu_upper_bound is not None
+            qsl, qsl_cpu = cm.query_start_loc, cm.query_start_loc_cpu
+            if (shardq_qsl := base.prefill.shardq_query_start_loc_cpu) is not None:
+                # The chunks are over the ShardQ-gathered tokens.
+                qsl, qsl_cpu = async_tensor_h2d(shardq_qsl, self.device), shardq_qsl
             metadata.prefill_plans = plan_prefill_chunks(
                 base.prefill.chunks,
-                cm.query_start_loc_cpu.tolist(),
+                qsl_cpu.tolist(),
                 cm.seq_lens_cpu_upper_bound,
                 context_lens,
                 self.compress_ratio,
                 self.candidate_block_size,
                 self.min_gather_width,
-                cm.query_start_loc,
+                qsl,
             )
         return metadata
 
@@ -473,6 +598,10 @@ class DeepseekV41RocmMxfp4IndexerMetadataBuilder(RocmMxfp4IndexerMetadataBuilder
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, **kwargs)
         hf_config = vllm_config.model_config.hf_text_config
         self.candidate_block_size = getattr(hf_config, "candidate_block_size", 0)
+        tp = vllm_config.parallel_config.tensor_parallel_size
+        if tp > 1 and not envs.VLLM_BATCH_INVARIANT:
+            self.decode_shard_world = tp
+            self.decode_shard_rank = get_tensor_model_parallel_rank()
         self.num_candidate_cols = 0
         if vllm_config.attention_config.indexer_sparse_logits:
             prefix = "attention_config.indexer_sparse_logits"

@@ -6,6 +6,7 @@ indexer_kv_dtype="mxfp4" on SM100): the decode's FP4 writers against the stock w
 (bit-exact: the same block-scaled MXF4 MMA and BF16 head sum), with the exact
 top-k of its own logits (TP) and the DCP logits layout and local select."""
 
+import functools
 from types import SimpleNamespace
 
 import pytest
@@ -627,8 +628,9 @@ def test_prefill_cache_round_trip(q):
 # --------------------------------------------------------------------------
 # DCP top-k exchange (topk_exchange): 8 simulated ranks on one GPU
 # --------------------------------------------------------------------------
-def _local_select(rows, n, pitch, world):
-    """IndexerLocalTopk with its exchange push, compiled for [rows] rows."""
+def _local_select(rows, n, pitch, world, clusters=1):
+    """IndexerLocalTopk with its exchange push, compiled for [rows] rows
+    (`clusters` CTAs per row)."""
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import make_fake_stream
@@ -653,7 +655,7 @@ def _local_select(rows, n, pitch, world):
         cutlass.Int32(1),
         make_fake_stream(),
     )
-    return cute.compile(IndexerLocalTopk(rows, n, pitch, world), *args)
+    return cute.compile(IndexerLocalTopk(rows, n, pitch, world, clusters), *args)
 
 
 def _local_workspace(world, rank, max_rows, topk, n):
@@ -820,6 +822,269 @@ def test_dcp_topk_exchange_merge(case):
         count = (got[2] >= 0).sum(1)
         want = ends.clamp(max=topk) if kind != "short" else ends.clamp(max=topk)
         assert torch.equal(count.int(), want), (case, call)
+
+
+EXCHANGE16_CASES = {
+    # (global contexts, q, logits kind, merging rank); 8 rows
+    "a1": ([136505], 8, "random", 5),
+    "a1r0": ([136505], 8, "random", 0),
+    "short": ([100, 3000], 4, "random", 13),
+    "coarse": ([32773, 136505], 4, "coarse", 5),
+    "dups": ([32773, 136505], 4, "dups", 2),
+    "ints": ([136505, 60000], 4, "ints", 5),
+    "tied": ([136505, 32773], 4, "zero", 15),
+    "sat": ([32773, 136505], 4, "sat", 5),
+}
+
+
+@pytest.mark.parametrize("case", list(EXCHANGE16_CASES))
+def test_dcp16_topk_exchange_merge_digits(case, monkeypatch):
+    """16 simulated DCP ranks (interleave 1) on one GPU, 8 rows: the "digits"
+    merge (MERGE_SELECT) against the radix merge over the same pushes (rows,
+    counts, saturation words, seq2 and epochs bit-equal) and the #63 merge's
+    select + rescue (dcp_topk_select). Two calls (both epoch parities).
+    "ints" / "tied": hundreds to thousands of ties at the threshold score (the
+    block-wide tie select); "coarse" / "dups": the ballot tie ranking; "sat":
+    the merging rank holds most of the top-K of some rows (its rescue push);
+    the merging ranks 2, 5 and 13 put their slots across a 512-key stride
+    (the rotated row order)."""
+    from types import SimpleNamespace as NS
+
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+        _RowsOutput,
+        dcp_topk_select,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+        dynamic_view,
+        stream,
+        to_cute,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa import (
+        topk_exchange as tx,
+    )
+
+    contexts, q, kind, rank0 = EXCHANGE16_CASES[case]
+    world, topk = 16, 2048
+    n = dcp_merge_local_topk(topk, world)
+    rows = len(contexts) * q
+    ends = torch.tensor(
+        [c + 1 + j for c in contexts for j in range(q)], dtype=torch.int32
+    ).cuda()
+    max_local = -(-int(ends.max()) // world)
+    pitch = -(-max_local // 512) * 512
+    width = n + n // 32
+    local = _local_select(rows, n, pitch, world)
+    pairs = tx.ll_pairs(n)
+
+    def exchange():
+        recv = torch.zeros(2, world, rows, 4 * pairs, dtype=torch.int32, device="cuda")
+        return NS(
+            recv=recv,
+            peers=torch.tensor([recv.data_ptr()] * world, device="cuda"),
+            epoch=torch.zeros(rows, dtype=torch.int32, device="cuda"),
+            rows=rows,
+            world=world,
+            rank=rank0,
+            local_topk=n,
+        )
+
+    ex_d, ex_r = exchange(), exchange()
+    ws_d = _local_workspace(world, rank0, rows, topk, n)
+    ws_r = _local_workspace(world, rank0, rows, topk, n)
+    ws_ref = _local_workspace(world, rank0, rows, topk, n)
+    merge_d = tx.ExchangeMerge(ex_d, ws_d, rows, topk, UNIT)
+    assert merge_d.select == "digits"
+    monkeypatch.setattr(tx, "MERGE_SELECT", {})
+    merge_r = tx.ExchangeMerge(ex_r, ws_r, rows, topk, UNIT)
+    assert merge_r.select == "radix"
+    # This rank's MLA cache rows: reversed page ids per request.
+    mla_blocks = -(-max_local // UNIT) + 1
+    mla_table = torch.arange(len(contexts) * mla_blocks, dtype=torch.int32).cuda()
+    mla_table = mla_table.flip(0).view(len(contexts), mla_blocks).contiguous()
+    req_id = torch.arange(len(contexts), dtype=torch.int32).repeat_interleave(q)
+    req_id = req_id.cuda()
+    gen = torch.Generator(device="cuda").manual_seed(len(case))
+    for call in range(2):
+        span = world * pitch
+        if kind == "zero":
+            g = torch.zeros(rows, span, device="cuda")
+        elif kind == "dups":
+            vals = torch.tensor([-1.5, 0.25, 0.25, 3.0], device="cuda")
+            g = vals[torch.randint(0, 4, (rows, span), device="cuda", generator=gen)]
+        else:
+            g = torch.randn(rows, span, device="cuda", generator=gen)
+        if kind == "coarse":  # ~40 values: tens of ties at the threshold score
+            g = (g * 4).round() / 4
+        if kind == "ints":  # 7 values: hundreds to thousands of ties
+            g = g.round()
+        if kind == "sat":  # this rank's keys of every other request's rows lead
+            boost = (torch.arange(span, device="cuda") % world == rank0).float() * 8
+            g[::2] += boost
+        g = g.bfloat16()
+        packs, logits_r, ends_r = [], [], []
+        for r in range(world):
+            lg = torch.empty(rows, pitch, dtype=torch.bfloat16, device="cuda")
+            lg.copy_(g[:, r::world][:, :pitch])
+            le = ((ends - r + world - 1) // world).clamp_min(0).int()
+            outs = []
+            for ex in (ex_d, ex_r):
+                out = torch.zeros(rows, width, dtype=torch.int32, device="cuda")
+                valid = torch.zeros(rows, dtype=torch.int32, device="cuda")
+                local(
+                    to_cute(lg.view(torch.int16).view(-1)),
+                    to_cute(le, 4),
+                    to_cute(out, 4),
+                    to_cute(valid, 4),
+                    dynamic_view(ex.peers),
+                    dynamic_view(ex.epoch),
+                    cutlass_i32(r),
+                    cutlass_i32(rows),
+                    stream(torch.device("cuda")),
+                )
+                outs.append(out)
+            assert torch.equal(outs[0], outs[1])
+            packs.append(outs[0])
+            logits_r.append(lg[:, :max_local])
+            ends_r.append(le)
+        torch.accelerator.synchronize()
+        assert torch.equal(ex_d.recv, ex_r.recv), (case, call)
+        got = {}
+        for name, merge in (("digits", merge_d), ("radix", merge_r)):
+            rows_out = torch.full((rows, topk), -7, dtype=torch.int32, device="cuda")
+            valid_out = torch.full((rows,), -7, dtype=torch.int32, device="cuda")
+            merge(logits_r[rank0], ends_r[rank0], req_id, mla_table, UNIT, rows_out,
+                  valid_out)  # fmt: skip
+            got[name] = rows_out, valid_out
+        ref = [torch.full((rows, topk), -9, dtype=torch.int32, device="cuda")]
+        ref += [torch.full((rows,), -9, dtype=torch.int32, device="cuda")]
+        ref += [torch.full((rows, topk), -9, dtype=torch.int32, device="cuda")]
+        rows_ref = _RowsOutput(
+            req_id=req_id,
+            block_table=mla_table,
+            rows_out=ref[0],
+            valid_out=ref[1],
+            dcp_rank=rank0,
+            block_size=UNIT,
+            stride_rows=UNIT,
+        )
+        dcp_topk_select(
+            torch.stack(packs),
+            n,
+            ref[2],
+            topk=topk,
+            rows=rows_ref,
+            exact=ws_ref.args(logits_r[rank0], ends_r[rank0]),
+        )
+        torch.accelerator.synchronize()
+        for name in ("digits", "radix"):
+            for a, b, what in zip(got[name], ref, ("rows", "counts")):
+                assert torch.equal(a, b), (case, call, name, what)
+        assert torch.equal(ws_d.sat_word, ws_r.sat_word), (case, call)
+        assert torch.equal(ws_d.sat_word, ws_ref.sat_word), (case, call)
+        assert torch.equal(ws_d.seq2, ws_ref.seq2), (case, call)
+        assert torch.equal(ws_r.seq2, ws_ref.seq2), (case, call)
+        for ex in (ex_d, ex_r):
+            assert torch.equal(ex.epoch, torch.full_like(ex.epoch, call + 1))
+        if kind == "sat":
+            assert int((ws_ref.sat_word >> 16).ne(0).sum()) > 0, "no saturated row"
+        if kind in ("ints", "zero"):
+            # Some row's ties at its K-th score exceed the ballot ranking's 256.
+            scores = (torch.stack(packs)[:, :, :n] >> 16) & 0xFFFF
+            kth = (ws_ref.sat_word & 0xFFFF).view(1, rows, 1)
+            ties = ((scores == kth) & (torch.stack(packs)[:, :, :n] != 0)).sum((0, 2))
+            assert int(ties.max()) > tx.TIE_REGS * 32, (case, ties.tolist())
+
+
+LOCAL_CLUSTER_PITCH = 37376  # local keys per row of the logits (a multiple of 512)
+LOCAL_CLUSTER_CASES = {
+    # (local keys of the 8 rows, logits kind); n = 192, split from 1024 vectors
+    "around_split": ([190, 192, 193, 2047, 2056, 8191, 8195, 8448], "random"),
+    "long": ([12805, 16392, 24000, 32776, 33776, 37000, 8195, 16392], "random"),
+    "all_tied": ([12805, 16392, 24000, 32776, 33776, 37000, 8448, 2056], "zero"),
+    "coarse": ([12805, 16392, 24000, 32776, 33776, 37000, 8448, 2056], "coarse"),
+    "top_ties": ([12805, 16392, 24000, 32776, 33776, 37000, 8448, 2056], "top"),
+}
+
+
+@functools.cache
+def _local_select_cached(rows, n, pitch, world, clusters):
+    return _local_select(rows, n, pitch, world, clusters)
+
+
+@pytest.mark.parametrize("case", list(LOCAL_CLUSTER_CASES))
+def test_local_topk_cluster_bitwise(case):
+    """The DCP local top-N over a 4-CTA cluster per row (indexer.LOCAL_CLUSTER: DCP16
+    at 8 rows) against one CTA per row: B' rows, valid counts and the exchange pushes
+    into the 16 peer slots equal bit for bit. Rows below the split threshold (CTA 0
+    alone, up to n keys: every key), split rows whose candidate lists fit and lists
+    that overflow (every key tied: passes 2-4 on every CTA of the cluster), tens of
+    ties at the threshold ("coarse") and hundreds at the maximum ("top_ties"); both
+    epoch parities and two exchange ranks."""
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_merge_local_topk
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+        dynamic_view,
+        stream,
+        to_cute,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa import (
+        indexer,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa import (
+        topk_exchange as tx,
+    )
+
+    world, rows, pitch = 16, 8, LOCAL_CLUSTER_PITCH
+    assert indexer.local_cluster(world, rows) == 4
+    n = dcp_merge_local_topk(2048, world)
+    lengths, kind = LOCAL_CLUSTER_CASES[case]
+    assert max(lengths) <= pitch
+    split_from = indexer.IndexerLocalTopk(rows, n, pitch, world, 4).split_from
+    split = [(k + 7) // 8 >= split_from for k in lengths]
+    assert any(split) and (case != "around_split" or not all(split))
+    kernels = {c: _local_select_cached(rows, n, pitch, world, c) for c in (1, 4)}
+    gen = torch.Generator(device="cuda").manual_seed(len(case))
+    g = torch.randn(rows, pitch, device="cuda", generator=gen)
+    if kind == "zero":
+        g.zero_()
+    elif kind == "coarse":  # ~40 values: tens of ties at the threshold score
+        g = (g * 4).round() / 4
+    elif kind == "top":  # 400 keys of each row tied at its maximum
+        for r, k in enumerate(lengths):
+            at = torch.randperm(k, device="cuda", generator=gen)[:400]
+            g[r, at] = 8.0
+    logits = g.bfloat16().view(torch.int16).view(-1)
+    ends = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    width = n + n // 32
+    pairs = tx.ll_pairs(n)
+    for xrank, parity in ((3, 0), (12, 1)):
+        got = {}
+        for c, local in kernels.items():
+            recv = torch.zeros(
+                2, world, rows, 4 * pairs, dtype=torch.int32, device="cuda"
+            )
+            peers = torch.tensor([recv.data_ptr()] * world, device="cuda")
+            epoch = torch.full((rows,), parity, dtype=torch.int32, device="cuda")
+            out = torch.full((rows, width), -5, dtype=torch.int32, device="cuda")
+            valid = torch.full((rows,), -5, dtype=torch.int32, device="cuda")
+            local(
+                to_cute(logits),
+                to_cute(ends, 4),
+                to_cute(out, 4),
+                to_cute(valid, 4),
+                dynamic_view(peers),
+                dynamic_view(epoch),
+                cutlass_i32(xrank),
+                cutlass_i32(rows),
+                stream(torch.device("cuda")),
+            )
+            torch.accelerator.synchronize()
+            got[c] = out, valid, recv
+        for a, b, what in zip(got[1], got[4], ("rows", "valid", "pushes")):
+            assert torch.equal(a, b), (case, xrank, what)
+        assert torch.equal(got[4][1], ends.clamp(max=n)), case
+        part = (parity + 1) % 2  # the push's slot parity: (epoch + 1) & 1
+        assert got[4][2][part, xrank].any(), case  # the pushes landed
 
 
 def cutlass_i32(v):

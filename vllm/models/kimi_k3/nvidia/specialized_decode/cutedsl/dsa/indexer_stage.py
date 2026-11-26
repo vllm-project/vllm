@@ -109,6 +109,7 @@ class IndexerStage:
             is_deep_select_supported,
         )
         from vllm.model_executor.layers.sparse_attn_indexer import (
+            dcp_decode_logits_width,
             kv_cache_as_quant_view,
         )
         from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_topk_merge_fits
@@ -119,7 +120,6 @@ class IndexerStage:
             fp8_fp4_paged_mqa_logits,
             mqa_logits_mx_inputs,
         )
-        from vllm.utils.math_utils import cdiv
 
         indexer, n = self.indexer, self.local_topk
         index_md: Any = get_forward_context().attn_metadata[indexer.k_cache.prefix]
@@ -138,7 +138,9 @@ class IndexerStage:
         slots, valid = self.dcp_rows[:batch], self.dcp_valid[:batch]
         ids = None if self.dcp_ids is None else self.dcp_ids[:rows, : self.topk]
         # As the stock hook: interleave 1 bounds the local lengths.
-        max_local_len = cdiv(self.max_model_len, indexer.dcp_world_size)
+        max_local_len = dcp_decode_logits_width(
+            self.max_model_len, indexer.dcp_world_size, 1
+        )
         merge = dict(
             local_topk=n,
             topk=self.topk,
@@ -201,7 +203,7 @@ class IndexerStage:
             seq_lens,
             decode.block_table,
             decode.schedule_metadata,
-            max_model_len=self.max_model_len,
+            max_model_len=max_local_len,
             logits_dtype=torch.bfloat16,
             indices=decode.indices,
         )

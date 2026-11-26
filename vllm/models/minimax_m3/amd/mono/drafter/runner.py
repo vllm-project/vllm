@@ -10,6 +10,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import row_major_weight
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.models.minimax_m3.amd.mono.config import MonoUnsupported
 from vllm.models.minimax_m3.amd.mono.drafter import layout
@@ -48,14 +49,14 @@ def _bf16(t: torch.Tensor) -> torch.Tensor:
 def _layer_weights(layer) -> dict[str, torch.Tensor]:
     a, m = layer.self_attn, layer.mlp
     w = {
-        "qkv_w": a.qkv_proj.weight,
-        "qkv_s": a.qkv_proj.weight_scale,
-        "o_w": a.o_proj.weight,
-        "o_s": a.o_proj.weight_scale,
-        "gu_w": m.gate_up_proj.weight,
-        "gu_s": m.gate_up_proj.weight_scale,
-        "d_w": m.down_proj.weight,
-        "d_s": m.down_proj.weight_scale,
+        "qkv_w": row_major_weight(a.qkv_proj),
+        "qkv_s": a.qkv_proj.weight_scale.view(torch.uint8),
+        "o_w": row_major_weight(a.o_proj),
+        "o_s": a.o_proj.weight_scale.view(torch.uint8),
+        "gu_w": row_major_weight(m.gate_up_proj),
+        "gu_s": m.gate_up_proj.weight_scale.view(torch.uint8),
+        "d_w": row_major_weight(m.down_proj),
+        "d_s": m.down_proj.weight_scale.view(torch.uint8),
         "in_ln": _bf16(layer.input_layernorm.weight),
         "post_ln": _bf16(layer.post_attention_layernorm.weight),
         "q_norm": _bf16(a.q_norm.weight),
@@ -114,6 +115,11 @@ class DrafterRunner:
             name: torch.stack([w[name] for w in self.layers]).contiguous()
             for name in _GEMV
         }
+        # The packed copies are what the kernels read; drop the per-layer ones
+        # (row_major_weight may have made them).
+        for w in self.layers:
+            for name in _GEMV:
+                del w[name]
         tab = torch.zeros(layout.LAYERS, 16, dtype=torch.int64)
         for i, (w, kv) in enumerate(zip(self.layers, self.caches)):
             for name, slot in _NORMS.items():

@@ -11,7 +11,15 @@ from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams, merge_kwargs
-from vllm.renderers.hf import resolve_chat_template, safe_apply_chat_template
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormat,
+    ChatTemplateContentFormatOption,
+)
+from vllm.renderers.hf import (
+    resolve_chat_template,
+    resolve_chat_template_content_format,
+    safe_apply_chat_template,
+)
 from vllm.renderers.inputs.preprocess import (
     extract_target_prompt,
     parse_model_prompt,
@@ -25,7 +33,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyPoolingRequest,
     AnyRenderParam,
@@ -42,13 +50,14 @@ from ..typing import (
 )
 from ..utils import reserve_tokens
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
-from .typing import ScoreData, ScoreInput, ScoringData
+from .types import ScoreData, ScoreInput, ScoringData
 from .utils import (
     compress_token_type_ids,
     compute_maxsim_score,
     get_num_special_tokens_for_pair,
-    parse_score_data,
+    parse_score_messages,
     score_data_to_prompts,
+    truncate_score_content,
     truncate_text_to_tokens,
     validate_score_input,
 )
@@ -252,7 +261,9 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         ]
         num_requests = len(parsed_prompts)
 
-        tok_params = request.build_tok_params(self.model_config)
+        tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -547,7 +558,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             request=request
         )
 
-        tok_params = request.build_tok_params(self.model_config)
+        cmpl_tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
+        chat_tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_chat_tok_params
+        )
+
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
@@ -555,10 +572,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             ScoringRenderParams(
                 data_1=data_1[i],
                 data_2=data_2[i],
+                tok_params=chat_tok_params
+                if isinstance(data_1[i], list)
+                else cmpl_tok_params,
                 chat_template=self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
-                tok_params=tok_params,
                 prompt_extras=ctx.prompt_extras,
                 skip_mm_cache=False,
                 params=ctx.pooling_params,
@@ -588,9 +608,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+
+        cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
+        chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
+
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
@@ -606,9 +627,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                         if ctx.chat_template is None
                         else ctx.chat_template
                     ),
+                    chat_template_content_format=ctx.chat_template_content_format,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
-                    tok_params=tok_params,
+                    tok_params=chat_tok_params
+                    if isinstance(data_1[i], list)
+                    else cmpl_tok_params,
                     prompt_extras=prompt_extras,
                     skip_mm_cache=False,
                     params=ctx.pooling_params,
@@ -657,6 +681,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             data_2=render_params["data_2"],
             encode_kwargs=tok_params.get_encode_kwargs(),
             chat_template=render_params["chat_template"],
+            chat_template_content_format=render_params["chat_template_content_format"],
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
             chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
@@ -713,6 +738,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
         chat_template_kwargs: dict[str, Any] | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -723,21 +749,39 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.saved_chat_template_kwargs, chat_template_kwargs
             )
 
-        prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
-            data_1,
-            data_2,
-            model_config,
+        given_format = chat_template_content_format or self.chat_template_content_format
+        content_format: ChatTemplateContentFormat = "string"
+        if chat_template is not None:
+            content_format = (
+                resolve_chat_template_content_format(
+                    chat_template,
+                    tools=None,
+                    given_format=given_format,
+                    tokenizer=tokenizer,
+                    model_config=model_config,
+                )
+                if given_format == "auto"
+                else given_format
+            )
+
+        conversation, mm_data, mm_uuids = parse_score_messages(
+            data_1, data_2, model_config, content_format
         )
 
-        # Limit the query and document separately before composing them.
-        if max_tokens_per_query > 0 and isinstance(prompt_1, str):
-            prompt_1 = truncate_text_to_tokens(
-                prompt_1, tokenizer, max_tokens_per_query
-            )
-        if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
-            prompt_2 = truncate_text_to_tokens(prompt_2, tokenizer, max_tokens_per_doc)
+        # Limit text before composing the pair, preserving image blocks.
+        for message, limit in zip(
+            conversation, (max_tokens_per_query, max_tokens_per_doc)
+        ):
+            if limit > 0:
+                assert message["content"] is not None
+                message["content"] = truncate_score_content(
+                    message["content"], tokenizer, limit
+                )
+
+        prompt_1, prompt_2 = (message["content"] for message in conversation)
 
         def default_tokenizer_encode():
+            assert isinstance(prompt_1, str) and isinstance(prompt_2, str)
             local_kwargs = encode_kwargs.copy()
 
             if self.supports_score_template:
@@ -807,10 +851,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 full_prompt = safe_apply_chat_template(
                     model_config,
                     tokenizer,
-                    [
-                        {"role": "query", "content": prompt_1},
-                        {"role": "document", "content": prompt_2},
-                    ],
+                    conversation,
                     chat_template=chat_template,
                     tools=None,
                     tokenize=False,
@@ -818,6 +859,19 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 )
                 prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             except ChatTemplateResolutionError:
+                conversation, mm_data, mm_uuids = parse_score_messages(
+                    data_1, data_2, model_config
+                )
+                prompt_1, prompt_2 = (message["content"] for message in conversation)
+                assert isinstance(prompt_1, str) and isinstance(prompt_2, str)
+                if max_tokens_per_query > 0:
+                    prompt_1 = truncate_text_to_tokens(
+                        prompt_1, tokenizer, max_tokens_per_query
+                    )
+                if max_tokens_per_doc > 0:
+                    prompt_2 = truncate_text_to_tokens(
+                        prompt_2, tokenizer, max_tokens_per_doc
+                    )
                 full_prompt, prompt_inputs = default_tokenizer_encode()
 
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
@@ -831,6 +885,34 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             engine_prompt["multi_modal_uuids"] = mm_uuids
 
         return full_prompt, engine_prompt
+
+
+_JINA_QUERY_MARKER = "<|rerank_token|>"
+_JINA_DOC_MARKER = "<|embed_token|>"
+_JINA_MARKER_BYTES = (_JINA_QUERY_MARKER.encode(), _JINA_DOC_MARKER.encode())
+
+
+def _strip_jina_markers(text: str) -> str:
+    if _JINA_QUERY_MARKER not in text and _JINA_DOC_MARKER not in text:
+        return text
+
+    # Compact the kept prefix in one pass. These markers cannot overlap, so
+    # deleting each suffix as it completes also removes markers formed by
+    # earlier deletions, without rescanning the text.
+    buffer = bytearray(text, "utf-8", errors="surrogatepass")
+    marker_end = ord(">")
+    kept = 0
+    for byte in buffer:
+        buffer[kept] = byte
+        kept += 1
+        if byte == marker_end:
+            for marker in _JINA_MARKER_BYTES:
+                if buffer.endswith(marker, 0, kept):
+                    kept -= len(marker)
+                    break
+
+    del buffer[kept:]
+    return buffer.decode(errors="surrogatepass")
 
 
 class JinaRankingIOProcessorMixin(PoolingIOProcessor):
@@ -848,29 +930,12 @@ class JinaRankingIOProcessorMixin(PoolingIOProcessor):
     def format_docs_prompts_func(
         query: str,
         docs: list[str],
-        special_tokens: dict[str, str] | None = None,
         instruction: str | None = None,
         no_thinking: bool = True,
     ) -> str:
         # TODO: Try converting the code below into a chat template.
-
-        default_special_tokens = {
-            "query_embed_token": "<|rerank_token|>",
-            "doc_embed_token": "<|embed_token|>",
-        }
-        if special_tokens is None:
-            special_tokens = default_special_tokens
-
-        def sanitize_input(text: str) -> str:
-            while True:
-                previous = text
-                for token in special_tokens.values():
-                    text = text.replace(token, "")
-                if text == previous:
-                    return text
-
-        query = sanitize_input(query)
-        docs = [sanitize_input(doc) for doc in docs]
+        query = _strip_jina_markers(query)
+        docs = [_strip_jina_markers(doc) for doc in docs]
 
         prefix = (
             "<|im_start|>system\n"
@@ -884,24 +949,21 @@ class JinaRankingIOProcessorMixin(PoolingIOProcessor):
         if no_thinking:
             suffix += "<think>\n\n</think>\n\n"
 
-        doc_emb_token = special_tokens["doc_embed_token"]
-        query_emb_token = special_tokens["query_embed_token"]
-
         prompt = (
             f"I will provide you with {len(docs)} passages, each indicated by a numerical identifier. "  # noqa: E501
             f"Rank the passages based on their relevance to query: {query}\n"
         )
 
         if instruction:
-            instruction = sanitize_input(instruction)
+            instruction = _strip_jina_markers(instruction)
             prompt += f"<instruct>\n{instruction}\n</instruct>\n"
 
         doc_prompts = [
-            f'<passage id="{i}">\n{doc}{doc_emb_token}\n</passage>'
+            f'<passage id="{i}">\n{doc}{_JINA_DOC_MARKER}\n</passage>'
             for i, doc in enumerate(docs)
         ]
         prompt += "\n".join(doc_prompts) + "\n"
-        prompt += f"<query>\n{query}{query_emb_token}\n</query>"
+        prompt += f"<query>\n{query}{_JINA_QUERY_MARKER}\n</query>"
 
         return prefix + prompt + suffix
 

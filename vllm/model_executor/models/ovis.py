@@ -423,7 +423,8 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
         with self._mark_language_model(vllm_config):
             self.llm = init_vllm_registered_model(
-                vllm_config=vllm_config.with_hf_config(config.get_text_config()),
+                vllm_config=vllm_config,
+                hf_config=config.get_text_config(),
                 prefix=maybe_prefix(prefix, "llm"),
             )
 

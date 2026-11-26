@@ -544,14 +544,14 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 idx_ws, lens_ws = workspace_manager.get_simultaneous(*index_specs)
                 # The chunk's compressed columns stay in the workspace's tail
                 # span, which the scratch of the layers in between leaves
-                # alone. A kv source has just inserted this step's rows, so it
-                # always gathers; the consumers after it in the same forward
-                # reuse its columns while the span still holds this source and
-                # chunk, and rewrite only their SWA columns.
+                # alone. A kv source or the first local reader of a pipeline cache
+                # replica always gathers, since its cache holds new rows; consumers
+                # after it in the same forward reuse its columns while the span still
+                # holds this source and chunk, and rewrite only their SWA columns.
                 kv_ws, intact = workspace_manager.get_retained(
                     (self.compressed_cache_prefix, chunk), *kv_spec
                 )
-                if self.is_kv_source or not intact:
+                if self.always_gathers_compressed_kv or not intact:
                     dequantize_and_gather_k_cache(
                         kv_ws[:, :chunk_n],
                         self._compressed_kv_cache(),

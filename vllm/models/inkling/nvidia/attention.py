@@ -6,6 +6,7 @@ from typing import cast
 
 import torch
 from torch import nn
+from transformers import InklingTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -26,13 +27,12 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
-    SlidingWindowSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
-from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
     _INKLING_FA4_REL_ATTENTION_KERNEL,
@@ -68,7 +68,7 @@ class RelLogitsProj(nn.Module):
 class InklingAttention(nn.Module, AttentionLayerBase):
     def __init__(
         self,
-        config: InklingModelConfig,
+        config: InklingTextConfig,
         *,
         num_heads: int,
         num_kv_heads: int,
@@ -180,23 +180,20 @@ class InklingAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         block_size = vllm_config.cache_config.block_size
-        if self.is_local:
-            assert self.local_extent is not None
-            return SlidingWindowSpec(
-                block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_dim,
-                dtype=self.kv_cache_torch_dtype,
-                sliding_window=self.local_extent,
-            )
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
         )
+        if self.is_local:
+            assert self.local_extent is not None
+            return SlidingWindowManager.layer_config(
+                spec, sliding_window=self.local_extent
+            )
+        return FullAttentionManager.layer_config(spec)
 
     def _split_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
         key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
@@ -260,7 +257,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 fa_md.slot_mapping,
                 off_k,
                 off_v,
-                self.conv_owner.block_size,
+                self.conv_owner.cache_block_size,
                 log_scaling if not self.is_local else None,
             )
             q = q.view(num_tokens, self.num_heads, self.head_dim)

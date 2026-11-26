@@ -87,7 +87,7 @@ def make_weights(
     return w1_q, w2_q, w1_scale, w2_scale
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestConfig:
     dtype: torch.dtype
     topk: int
@@ -97,7 +97,7 @@ class TestConfig:
     num_experts: int
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestTensors:
     rank_tokens: torch.Tensor  # all ranks make this many tokens
     rank_token_scales: torch.Tensor | None
@@ -234,6 +234,7 @@ def deep_ep_moe_impl(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         a1_scale=test_tensors.rank_token_scales,
     )
 

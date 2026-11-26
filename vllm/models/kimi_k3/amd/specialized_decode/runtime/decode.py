@@ -50,7 +50,7 @@ Kernel = WholeLayer | FfnLayer | MlaOpsLayer
 
 
 class Step(NamedTuple):
-    """A planned step: `width` rows of whole uniform spec-verify requests."""
+    """A planned step: `width` rows of whole uniform decode requests."""
 
     width: int
     attn_metadata: Mapping[str, Any]  # by layer name
@@ -63,21 +63,43 @@ class Step(NamedTuple):
 
 
 def step_reason(
-    attn_metadata, kda_prefix: str, width: int, mla_prefix: str = ""
+    attn_metadata, kda_prefix: str, width: int, q: int, mla_prefix: str = ""
 ) -> str | None:
     """None if a step's KDA and MLA metadata (identical on every TP rank) are a
-    pure spec-verify step of whole uniform requests filling `width` rows, else
-    why not."""
+    pure, uniform regular-decode or spec-verify step filling `width` rows, else
+    why not. `q` is the deployment's configured rows per request."""
     if not isinstance(attn_metadata, dict):
         return "no metadata"
     m: Any = attn_metadata.get(kda_prefix)
-    if m is None or m.spec_sequence_masks is None:
-        return "not spec-verify"
-    if m.num_prefills or m.num_decodes or m.num_spec_decodes < 1:
+    if m is None:
+        return "no metadata"
+    if m.num_prefills:
         return "not pure decode"
-    q = m.spec_state_indices_tensor.size(-1)
-    if m.uniform_spec_sequence_length != q or m.num_spec_decodes * q != width:
-        return "not uniform"
+    if m.num_spec_decodes:
+        if m.num_decodes:
+            return "not pure decode"
+        if m.spec_sequence_masks is None:
+            return "not spec-verify"
+        actual_q = m.spec_state_indices_tensor.size(-1)
+        if (
+            actual_q != q
+            or m.uniform_spec_sequence_length != actual_q
+            or m.num_spec_decodes * actual_q != width
+        ):
+            return "not uniform"
+    else:
+        if q != 1:
+            return "not spec-verify"
+        if m.num_decodes < 1:
+            return "not pure decode"
+        state_indices = m.non_spec_state_indices_tensor
+        if (
+            state_indices is None
+            or state_indices.ndim != 1
+            or m.num_decodes != width
+            or state_indices.size(0) != width
+        ):
+            return "not uniform"
     if mla_prefix:
         a: Any = attn_metadata.get(mla_prefix)
         if a is None or a.decode is None:
@@ -131,8 +153,9 @@ class SpecializedDecode:
         if m1:
             why = mla_weight_reasons(backbone)
             m1 = tp_agree(not why, tp.cpu_group)
-            if not m1 and dcp.world_size == 1:
-                # DCP1 runs M1c only (``runtime.step_reasons``)
+            if not m1 and dcp.world_size == 1 and config.q > 1:
+                # Speculative DCP1 runs M1c only (``runtime.step_reasons``).
+                # Ordinary q=1 falls back to vLLM's MLA ops, then K2.
                 agree(why or ["another TP rank's MLA layers"], tp.cpu_group,
                       "DCP1 without M1")  # fmt: skip
             if not m1:
@@ -177,8 +200,8 @@ class SpecializedDecode:
         self.failstop = FailStop(
             runner.health[FAILED : FAILED + 1], runner.rank, tp.world_size, tp.cpu_group
         )
-        # (data_ptr, numel) of the first KDA layer's state prepare_kv bound
-        self._kv: tuple[int, int] | None = None
+        # `_kv_key` of the KV cache prepare_kv bound
+        self._kv: tuple | None = None
         m1c = [w for w in config.widths if m1c_at(runner, w)]
         mla = f"M1 (M1c in K2 at widths {m1c})" if m1c else "M1"
         logger.info(
@@ -190,13 +213,17 @@ class SpecializedDecode:
             len(builds),
         )
 
-    def _kv_key(self) -> tuple[int, int] | None:
+    def _kv_key(self) -> tuple | None:
+        """The first KDA layer's recurrent state by all but its number of slots:
+        an extensible KV cache re-binds its views at the same addresses with the
+        final block count, which `cache_reasons` does not depend on."""
         state = self.kda[0].layer.self_attn.kv_cache
         if not isinstance(state, (list, tuple)) or len(state) != 2:
             return None
-        if state[1].numel() == 0:
+        s = state[1]
+        if s.numel() == 0:
             return None
-        return state[1].data_ptr(), state[1].numel()
+        return s.data_ptr(), s.dtype, s.shape[1:], s.stride()
 
     def prepare_kv(self) -> None:
         """Checks and binds the KDA states and MLA caches vLLM just bound (the
@@ -217,7 +244,7 @@ class SpecializedDecode:
           (profiling, dummy runs);
         - PIECEWISE steps (captured without attention metadata);
         - widths without kernels (more than max_num_seqs requests);
-        - steps that are not pure spec-verify steps of whole uniform requests
+        - steps that are not pure, uniform regular-decode or spec-verify steps
           (`step_reason`).
 
         Eager steps run the kernels too. Every predicate is the same on all TP
@@ -239,7 +266,16 @@ class SpecializedDecode:
             return None
         md = context.attn_metadata
         runner = self.runner
-        if step_reason(md, runner.kda_prefix, width, runner.mla_prefix) is not None:
+        if (
+            step_reason(
+                md,
+                runner.kda_prefix,
+                width,
+                self.config.q,
+                runner.mla_prefix,
+            )
+            is not None
+        ):
             return None
         assert isinstance(md, dict)
         if self._kv_key() != self._kv:

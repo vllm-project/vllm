@@ -43,7 +43,7 @@ from vllm.v1.attention.backends.utils import (
     resolve_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheLayout,
     KVCacheTensor,
     compute_layer_kv_cache_shape_bytes,
@@ -243,7 +243,7 @@ def _create_backend_impl(
         kv_cache_dtype=config.kv_cache_dtype,
     )
 
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=config.block_size,
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,
@@ -257,7 +257,7 @@ def _create_backend_impl(
 
 def _create_metadata_builder(
     backend_class,
-    kv_cache_spec: FullAttentionSpec,
+    kv_cache_spec: AttentionSpec,
     vllm_config: VllmConfig,
     device: torch.device,
     backend_name: str = "",
@@ -345,14 +345,14 @@ def _create_input_tensors(
     return q_list, k_list, v_list
 
 
-def _kv_cache_spec(config: BenchmarkConfig, dtype: torch.dtype) -> FullAttentionSpec:
+def _kv_cache_spec(config: BenchmarkConfig, dtype: torch.dtype) -> AttentionSpec:
     if config.kv_cache_dtype == "auto":
         cache_dtype = dtype
     elif config.kv_cache_dtype.startswith("fp8"):
         cache_dtype = current_platform.fp8_dtype()
     else:
         cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[config.kv_cache_dtype]
-    return FullAttentionSpec(
+    return AttentionSpec(
         block_size=config.block_size,
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,

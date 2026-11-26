@@ -28,7 +28,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
 - The submitting human must review every changed line and run relevant tests.
 - PR descriptions for AI-assisted work **must** include:
     - Why this is not duplicating an existing PR.
-    - Test commands run and results.
+    - Test commands run and results (for unit tests, reproducible pytest command and exact pytest summary line including time).
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
 - User-visible changes (features, CLI args, config fields, env vars, models,
@@ -53,7 +53,7 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Always use `uv` for Python environment management:
-uv venv --python 3.12
+uv venv --python 3.14
 source .venv/bin/activate
 
 # Always make sure `pre-commit` and its hooks are installed:
@@ -162,3 +162,4 @@ vulnerability process.
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
 - **Rust frontend (`rust/`)**: [`rust/AGENTS.md`](rust/AGENTS.md)
   — Crate ownership, design principles, Python parity, and testing conventions.
+- **C++/CUDA kernels (`csrc/`)**: [`csrc/AGENTS.md`](csrc/AGENTS.md)

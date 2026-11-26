@@ -58,7 +58,7 @@ MAX_QKV_ROWS = qkv_rows(TP)
 INDEX_CP_FROM_BLOCKS = 288
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IndexHeads:
     """The index q heads in a rank's fused projection, a build parameter:
     `count` of them (1, or all TP in head order under indexer context

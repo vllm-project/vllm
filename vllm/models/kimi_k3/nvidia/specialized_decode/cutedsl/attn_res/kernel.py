@@ -5,6 +5,9 @@
 The delta is a tensor (read after the PDL wait) or `slots` Lamport mailbox slots
 summed in slot order, rounded to BF16 and re-armed. The final boundary rounds the
 mixture to BF16 before its RMSNorm. Prefix and saved blocks must be complete at launch.
+With `precomputed` the saved-block statistics (`statistics`: logits, softmax maximum
+and exponent sum, FP32 mixture) come in as arguments 9-10, stored by an earlier kernel
+with the same arithmetic (`oproj.consumer`), so the kernel starts at the delta.
 
 The statistics take the stock kernel's forms (attn_res_kernel.cu, --use_fast_math):
 the logit's and the fused output norm's reciprocal RMS, and at the final boundary
@@ -27,6 +30,7 @@ from ..common.primitives import (
     fma,
     group_barrier,
     launch,
+    load_f32x4,
     load_words,
     push_float,
     rcp_approx,
@@ -72,11 +76,16 @@ def arm_exchanges(bars, counts):
 
 
 class ClusterAttnRes:
-    """`final`: the last AttnRes, normalized by the backbone norm."""
+    """`final`: the last AttnRes, normalized by the backbone norm. `precomputed`:
+    arguments 9-10 are the statistics' FP32 mixture [rows, 7168] and (maximum,
+    exponent sum) [rows, 2], read instead of running `pre`."""
 
-    def __init__(self, nb, *, slots=1, has_delta=True, write=-1, final=False):
+    def __init__(
+        self, nb, *, slots=1, has_delta=True, write=-1, final=False, precomputed=False
+    ):
         self.nb, self.slots, self.has_delta = nb, slots, has_delta
         self.write, self.final = write, final
+        self.precomputed = precomputed
         self.npre = 2 * nb
         self.npost = (2 if final else 4) if nb else 1
         self.kpre = 1 << max(self.npre - 1, 0).bit_length()
@@ -88,9 +97,17 @@ class ClusterAttnRes:
 
     @cute.jit
     def exchange(
-        self, values, count: cutlass.Constexpr, kpad: cutlass.Constexpr, bufs, r, ids
+        self,
+        values,
+        count: cutlass.Constexpr,
+        kpad: cutlass.Constexpr,
+        bufs,
+        r,
+        ids,
+        group: cutlass.Constexpr[int] = 0,
     ):
-        """Cluster-sum `count` per-thread partials into round `r`'s total row."""
+        """Cluster-sum `count` per-thread partials into round `r`'s total row;
+        `group`: the 128-thread group running it (its named barrier)."""
         wb, peer_buf, total, bars = bufs
         peer_buf, total, bar = peer_buf[r, None], total[r, None], bars.iterator + r
         rank, _, tid = ids
@@ -98,7 +115,7 @@ class ClusterAttnRes:
         reduced, index = scatter_reduce(values, lane, kpad)
         if (lane & (32 // kpad - 1)) == 0 and index < count:
             wb[warp * 16 + index] = reduced
-        group_barrier(0)
+        group_barrier(group)
         if tid < count:
             value = (wb[tid] + wb[16 + tid]) + (wb[32 + tid] + wb[48 + tid])
             for peer in cutlass.range_constexpr(7):
@@ -109,7 +126,7 @@ class ClusterAttnRes:
             for peer in cutlass.range_constexpr(7):
                 sums[peer % 2] += peer_buf[peer * 16 + tid]
             total[tid] = sums[0] + sums[1]
-        group_barrier(0)
+        group_barrier(group)
 
     @cute.kernel
     def kernel(self, args):
@@ -121,8 +138,13 @@ class ClusterAttnRes:
         cute.arch.griddepcontrol_launch_dependents()
         state = self.state()
         rows, ids = (prefix, blocks, norm, query, out_norm), (rank, token, tid)
-        self.pre(state, bufs, rows, eps, ids)
-        self.post(state, bufs, delta, rows, output, eps, out_eps, ids, args[9:])
+        if cutlass.const_expr(self.precomputed):
+            self.load_statistics(state, args[9], args[10], ids)
+            cute.arch.cluster_wait()
+            self.post(state, bufs, delta, rows, output, eps, out_eps, ids, args[11:])
+        else:
+            self.pre(state, bufs, rows, eps, ids)
+            self.post(state, bufs, delta, rows, output, eps, out_eps, ids, args[9:])
         cute.arch.griddepcontrol_wait()
 
     def state(self):
@@ -135,7 +157,8 @@ class ClusterAttnRes:
         peer_buf = alloc(smem, Float32, (3, 112))
         total = alloc(smem, Float32, (3, 16))
         bars = alloc(smem, Uint64, 3, 8)
-        arm_exchanges(bars, (self.npre, self.npost, int(self.final)))
+        npre = 0 if self.precomputed else self.npre
+        arm_exchanges(bars, (npre, self.npost, int(self.final)))
         return warp_buf, peer_buf, total, bars
 
     @cute.jit
@@ -143,12 +166,9 @@ class ClusterAttnRes:
         """Inputs complete at launch, then the saved-block statistics exchange."""
         prefix, blocks, norm, query, out_norm = rows
         rank, token, tid = ids
-        warp_buf, peer_buf, total, bars = bufs
-        mixture, scal = state
         # Rows: saved blocks, combined weight, gamma, old prefix, new prefix.
         v = cute.make_rmem_tensor((self.nb + 4, 8), Float32)
         col = (rank * 128 + tid) * 8
-        W = self.nb
         for source in cutlass.range_constexpr(self.nb):
             words = load_words(
                 block_ptr(blocks, token, source, col), count=4, mutable=True
@@ -156,14 +176,38 @@ class ClusterAttnRes:
             unpack(words, v, source)
         self.weights(v, norm, query, col)
         cute.arch.cluster_wait()
+        self.statistics(state, bufs, v, eps, ids)
+
+    @cute.jit
+    def statistics(
+        self,
+        state,
+        bufs,
+        v,
+        eps: Float32,
+        ids,
+        block=None,
+        group: cutlass.Constexpr[int] = 0,
+    ):
+        """The saved-block statistics (one cluster exchange) into `state`. Block
+        `source` is row `source` of `v`, or the (tensor, row) `block(source)`
+        returns; row `nb` of `v` is the combined weight. `group`: the 128-thread
+        group running it."""
+        total = bufs[2]
+        mixture, scal = state
+        W = self.nb
         maximum, exp_sum = Float32(0), Float32(0)
         mixture.fill(0)
         if cutlass.const_expr(self.nb > 0):
             values = zeros(self.kpre, Float32)
             for source in cutlass.range_constexpr(self.nb):
-                values[source] = dot8(v, source, v, source)
-                values[self.nb + source] = dot8(v, source, v, W)
-            self.exchange(values, self.npre, self.kpre, bufs, 0, ids)
+                if cutlass.const_expr(block is None):
+                    t, r = v, source
+                else:
+                    t, r = block(source)
+                values[source] = dot8(t, r, t, r)
+                values[self.nb + source] = dot8(t, r, v, W)
+            self.exchange(values, self.npre, self.kpre, bufs, 0, ids, group)
             logits = cute.make_rmem_tensor(self.nb, Float32)
             for b in cutlass.range_constexpr(self.nb):
                 logits[b] = total[0, self.nb + b] * attn_res_rstd(total[0, b], eps)
@@ -173,9 +217,28 @@ class ClusterAttnRes:
             for source in cutlass.range_constexpr(self.nb):
                 e = cute.math.exp(logits[source] - maximum, fastmath=True)
                 exp_sum += e
+                if cutlass.const_expr(block is None):
+                    t, r = v, source
+                else:
+                    t, r = block(source)
                 for i in cutlass.range_constexpr(8):
-                    mixture[0, i] = fma(e, v[source, i], mixture[0, i])
+                    mixture[0, i] = fma(e, t[r, i], mixture[0, i])
         scal[0], scal[1] = maximum, exp_sum
+
+    @cute.jit
+    def load_statistics(self, state, mix, scal, ids):
+        """`statistics` of this thread's columns, stored by an earlier kernel."""
+        mixture, sc = state
+        rank, token, tid = ids
+        col = (rank * 128 + tid) * 8
+        for half in cutlass.range_constexpr(2):
+            values = load_f32x4(at(mix, token, col + 4 * half), mutable=True)
+            for i in cutlass.range_constexpr(4):
+                mixture[0, 4 * half + i] = values[i]
+        pair = load_words(
+            at(scal, token, 0), mutable=True, result_type=Float32, word_type="f32"
+        )
+        sc[0], sc[1] = pair[0], pair[1]
 
     @cute.jit
     def weights(self, v, norm, query, col):

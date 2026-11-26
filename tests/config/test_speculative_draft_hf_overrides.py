@@ -12,6 +12,7 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 """
 
 import functools
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +21,16 @@ from transformers import AutoConfig, Glm5NextConfig, PreTrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+
+_YARN_ROPE_PARAMETERS = {
+    "mrope_interleaved": True,
+    "mrope_section": [11, 11, 10],
+    "rope_type": "yarn",
+    "rope_theta": 10_000_000,
+    "partial_rotary_factor": 0.25,
+    "factor": 4.0,
+    "original_max_position_embeddings": 262_144,
+}
 
 
 def _make_hf_config(**kwargs) -> PreTrainedConfig:
@@ -33,9 +44,17 @@ def _make_hf_config(**kwargs) -> PreTrainedConfig:
 
 
 @pytest.mark.cpu_test
-def test_dict_overrides_are_not_forwarded_to_draft():
-    """Dict overrides are target-specific key patches; the draft must get
-    only the architecture-mapping override."""
+def test_non_rope_dict_overrides_are_not_forwarded_to_draft():
+    """Non-rope dict patches stay target-only; the draft keeps arch mapping."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides({"num_hidden_layers": 1})
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
+    assert getattr(hf_config, "num_hidden_layers", None) != 1
+
+
+@pytest.mark.cpu_test
+def test_max_position_embeddings_dict_override_stays_target_only():
+    """Independent drafts must keep the max-model-len clamp (#63909 regression)."""
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"max_position_embeddings": 1234}
     )
@@ -67,6 +86,7 @@ def _make_speculative_config(
     hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
     draft = MagicMock(
         hf_config=hf_config,
+        hf_text_config=hf_config,
         architectures=hf_config.architectures,
         max_model_len=128,
         # Self-contained DSpark draft models declare their speculator.
@@ -205,6 +225,63 @@ def test_minimax_dspark_without_subfolder_raises(tmp_path):
         )
 
 
+_EAGLE3_TARGET_CONFIG = {
+    "architectures": ["LlamaForCausalLM"],
+    "model_type": "llama",
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 4,
+    "head_dim": 16,
+    "vocab_size": 1000,
+    "max_position_embeddings": 128,
+}
+
+_EAGLE3_DRAFT_CONFIG = {
+    **_EAGLE3_TARGET_CONFIG,
+    "architectures": ["Eagle3LlamaForCausalLM"],
+    "num_hidden_layers": 1,
+    "draft_vocab_size": 500,
+    "target_hidden_size": 64,
+    "eagle_config": {
+        "use_aux_hidden_state": True,
+        "eagle_aux_hidden_state_layer_ids": [1, 2, 3],
+    },
+}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "draft_dir,subfolder",
+    [("eagle3", None), ("draft", "draft")],
+    ids=["method-default", "explicit"],
+)
+def test_draft_from_target_subfolder(tmp_path, draft_dir, subfolder):
+    """Without `model`, the draft is taken from `subfolder` of the target
+    checkpoint, which defaults to the method name."""
+    (tmp_path / "config.json").write_text(json.dumps(_EAGLE3_TARGET_CONFIG))
+    (tmp_path / draft_dir).mkdir()
+    (tmp_path / draft_dir / "config.json").write_text(json.dumps(_EAGLE3_DRAFT_CONFIG))
+    target = ModelConfig(
+        model=str(tmp_path),
+        tokenizer=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+    )
+
+    spec = SpeculativeConfig(
+        method="eagle3",
+        subfolder=subfolder,
+        num_speculative_tokens=3,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    assert spec.model == str(tmp_path / draft_dir)
+    assert spec.draft_model_config.hf_config.architectures == ["Eagle3LlamaForCausalLM"]
+
+
 @pytest.mark.cpu_test
 def test_mtp_stages_are_independent_of_dspark_width():
     hf_kwargs = dict(
@@ -222,6 +299,61 @@ def test_mtp_stages_are_independent_of_dspark_width():
         _make_speculative_config(
             hf_kwargs, "DeepSeekV4MTPModel", method="mtp", num_speculative_tokens=5
         )
+
+
+@pytest.mark.cpu_test
+def test_dict_yarn_overrides_reach_the_draft_config():
+    """CLI nested YaRN overrides must apply when the draft has text_config."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        {"text_config": {"rope_parameters": _YARN_ROPE_PARAMETERS}}
+    )
+    nested = PreTrainedConfig(
+        architectures=["LlamaForCausalLM"],
+        model_type="llama",
+        num_hidden_layers=4,
+    )
+    base = PreTrainedConfig(
+        architectures=["LlamaForCausalLM"],
+        model_type="llama",
+        num_hidden_layers=4,
+        text_config=nested,
+    )
+    hf_config = composed(base)
+    text_cfg = getattr(hf_config, "text_config", None)
+    assert text_cfg is not None
+    rope = getattr(text_cfg, "rope_parameters", None)
+    assert rope is not None
+    assert rope["rope_type"] == "yarn"
+    assert rope["factor"] == 4.0
+
+
+@pytest.mark.cpu_test
+def test_nested_overrides_skip_flat_draft_config():
+    """External flat drafters must not get a bare text_config dict."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        {"text_config": {"rope_parameters": _YARN_ROPE_PARAMETERS}}
+    )
+    hf_config = composed(_make_hf_config(model_type="llama"))
+    # flat llama config has no text_config; nested key must be skipped
+    assert getattr(hf_config, "text_config", None) is None
+
+
+@pytest.mark.cpu_test
+def test_top_level_rope_parameters_replace_on_draft():
+    """Top-level rope keys reach the draft; unrelated keys stay target-only."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        {
+            "num_hidden_layers": 1,
+            "rope_parameters": _YARN_ROPE_PARAMETERS,
+        }
+    )
+    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
+    assert hf_config.architectures == ["DeepSeekMTPModel"]
+    assert getattr(hf_config, "num_hidden_layers", None) != 1
+    rope = getattr(hf_config, "rope_parameters", None)
+    assert rope is not None
+    assert rope["rope_type"] == "yarn"
+    assert rope["factor"] == 4.0
 
 
 @pytest.mark.cpu_test
@@ -268,7 +400,7 @@ def test_arch_mapping_applies_before_callable_override():
 def test_inkling_override_exposes_all_mtp_depths():
     text_config = _make_hf_config(
         architectures=["InklingForCausalLM"],
-        model_type="inkling_model",
+        model_type="inkling_text",
         local_layer_ids=[1, 3],
     )
     config = _make_hf_config(
@@ -328,6 +460,7 @@ def _make_mtp_speculative_config(
     draft_model_config = MagicMock(
         model="draft",
         hf_config=draft_hf_config,
+        hf_text_config=draft_hf_config,
         architectures=draft_hf_config.architectures,
         max_model_len=128,
         speculator_config_class=None,
