@@ -7870,6 +7870,90 @@ async fn completions_echo_logprobs_of_request_aborted_during_prefill() {
     }
 }
 
+/// Like Python, a chat or generate request the engine finishes during prefill,
+/// such as an abort, gets empty output `logprobs`, and its `prompt_logprobs`
+/// hold only the unscored positions: the first token and any before
+/// `prompt_logprob_start`.
+#[tokio::test]
+async fn chat_and_generate_logprobs_of_request_aborted_during_prefill() {
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({"model": model, "messages": [{"role": "user", "content": "Hi!"}],
+                   "logprobs": true, "top_logprobs": 1, "prompt_logprobs": 0}),
+            json!([null]),
+        ),
+        (
+            "/inference/v1/generate",
+            json!({"token_ids": [9707, 11, 1879, 0],
+                   "sampling_params": {"logprobs": 0, "prompt_logprobs": 0,
+                                       "prompt_logprob_start": 1}}),
+            json!([null, null]),
+        ),
+        (
+            "/inference/v1/generate",
+            json!({"token_ids": [9707, 11, 1879, 0], "output_mode": "text",
+                   "sampling_params": {"logprobs": 0, "prompt_logprobs": 0}}),
+            json!([null]),
+        ),
+    ];
+    for (uri, request, expected_prompt_logprobs) in cases {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-openai",
+            |request_id| {
+                RequestBatchOutputs {
+                    outputs: vec![EngineCoreOutput {
+                        request_id: request_id.to_string(),
+                        finish_reason: Some(EngineCoreFinishReason::Abort),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router_with_gates(
+            Arc::new(AppState::new(vec![model.to_string()], chat)),
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        );
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let response: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+
+        assert_eq!(status, StatusCode::OK, "{uri} {request}: {response}");
+        let choice = &response["choices"][0];
+        assert_eq!(choice["finish_reason"], json!("abort"), "{uri}: {response}");
+        assert_eq!(
+            choice["logprobs"],
+            json!({"content": []}),
+            "{uri}: {response}"
+        );
+        assert_eq!(
+            response["prompt_logprobs"], expected_prompt_logprobs,
+            "{uri} {request}: {response}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn include_usage_adds_final_usage_chunk_before_done() {
