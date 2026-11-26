@@ -84,7 +84,7 @@ def test_transformers_image_request_kwargs(
     ]
 
     with vllm_runner(
-        SMOLVLM_ID, model_impl="transformers", max_model_len=8192
+        SMOLVLM_ID, model_impl="transformers", max_model_len=8192, enforce_eager=True
     ) as vllm_model:
         request_outputs = vllm_model.generate_greedy(
             [{**prompt, "mm_processor_kwargs": kwargs} for prompt in prompts],
@@ -94,6 +94,7 @@ def test_transformers_image_request_kwargs(
         SMOLVLM_ID,
         model_impl="transformers",
         max_model_len=8192,
+        enforce_eager=True,
         mm_processor_kwargs=kwargs,
     ) as vllm_model:
         server_outputs = vllm_model.generate_greedy(prompts, MAX_TOKENS)
