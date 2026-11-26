@@ -28,6 +28,11 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator.alloc_conf import (
+    EXPANDABLE_SEGMENTS,
+    conf_flag_enabled,
+    expandable_segments_enabled,
+)
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -466,8 +471,19 @@ class Worker(WorkerBase):
         return get_mem_allocator_instance().use_memory_pool(tag=tag)
 
     @contextmanager
-    def _scoped_allocator_max_split(self, max_split_size_mb: int):
-        """Limit CUDA/ROCm allocator splitting, restoring settings on exit."""
+    def _scoped_allocator_max_split(
+        self, max_split_size_mb: int, skip_if_expandable: bool = False
+    ):
+        """Limit CUDA/ROCm allocator splitting, restoring settings on exit.
+
+        Args:
+            max_split_size_mb: The limit to apply.
+            skip_if_expandable: Apply no limit while expandable segments are
+                enabled. `empty_cache()` then unmaps the free pages of a
+                partly used segment, so nothing is stranded, and the limit
+                would only stop freed blocks from serving smaller requests.
+
+        """
         if (
             not current_platform.is_cuda_alike()
             or torch.cuda.memory.get_allocator_backend() != "native"
@@ -482,6 +498,15 @@ class Worker(WorkerBase):
             original_settings = torch.cuda.memory._snapshot()["allocator_settings"][
                 "PYTORCH_CUDA_ALLOC_CONF"
             ]
+
+        if skip_if_expandable:
+            expandable = expandable_segments_enabled()
+            if expandable is None:
+                expandable = conf_flag_enabled(original_settings, EXPANDABLE_SEGMENTS)
+            if expandable:
+                logger.debug("Expandable segments enabled: max_split_size_mb not set")
+                yield
+                return
 
         # The setter resets other allocator options unless they are included.
         prefix = original_settings.strip().rstrip(",")
@@ -793,7 +818,9 @@ class Worker(WorkerBase):
             # counted as consumed and taken from the KV cache. Blocks above the
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
-            self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
+            self._scoped_allocator_max_split(
+                max_split_size_mb=_MAX_SPLIT_SIZE_MB, skip_if_expandable=True
+            ),
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
