@@ -219,6 +219,9 @@ class MoRIIODataTransport(DataTransport):
         peer = self._peers.pop(agent_name, None)
         if peer is None:
             return
+        # TODO: this only drops the control-plane entry; the peer's RDMA endpoints
+        # (one QP per producer restart) stay open until the process exits. Release
+        # them here once MoRI-IO supports per-peer teardown.
         self._deregister_remote_engine(peer.engine_desc)
         # A READ still in flight to this peer keeps its own reference; sending
         # on the closed socket raises ZMQError, which check_xfer_state handles.
