@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Check column order on replicated inputs and full projection on distinct rows."""
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -17,7 +19,7 @@ def projection_round_trip(env: dict[str, str], world_size: int) -> None:
     set_env_vars_and_device(env)
     from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.models.muse_spark.amd.model import TokenShard
-    from vllm.models.muse_spark.amd.ops.skinny_gemm import project_columns
+    from vllm.models.muse_spark.amd.ops import skinny_gemm as projection
 
     config = VllmConfig()
     with set_current_vllm_config(config):
@@ -38,13 +40,32 @@ def projection_round_trip(env: dict[str, str], world_size: int) -> None:
             idx = torch.arange(out_features)
             layer.weight[idx, (idx * 13) % inner] = 1
             x = (torch.arange(7 * inner).view(7, inner) % 127).bfloat16()
-            expected = layer(x)[0]
-            assert torch.equal(project_columns(layer, x, True, None), expected)
             shard = TokenShard(x.shape[0])
             local = shard.local(x)
-            assert torch.equal(
-                project_columns(layer, local, True, shard), layer(local)[0]
-            )
+            with (
+                patch.object(
+                    projection, "skinny_gemm", wraps=projection.skinny_gemm
+                ) as gemm,
+                patch.object(
+                    projection,
+                    "tensor_model_parallel_all_gather",
+                    wraps=projection.tensor_model_parallel_all_gather,
+                ) as gather,
+            ):
+                assert torch.equal(
+                    projection.project_columns(layer, x, True, None), layer(x)[0]
+                )
+                gemm.assert_called_once()
+                gather.assert_called_once()
+
+                gemm.reset_mock()
+                gather.reset_mock()
+                assert torch.equal(
+                    projection.project_columns(layer, local, True, shard),
+                    layer(local)[0],
+                )
+                gemm.assert_not_called()
+                gather.assert_not_called()
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Muse Spark ROCm model path")
