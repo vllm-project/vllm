@@ -4,11 +4,11 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/models/deepseek_v41/mono/kernels/moe.py
 """The mono layer's MoE stages: one layer's FFN, from the FFN seam's normed rows
-to the reduced output (its TP all-reduce in-kernel, ``allreduce``).
+to the reduced output (its TP all-reduce in-kernel, `allreduce`).
 
-One launch a layer and rank, ``BLOCKS`` x ``THREADS``, S = ``tokens`` rows,
+One launch a layer and rank, `BLOCKS` x `THREADS`, S = `tokens` rows,
 E = 384 routed experts, top-6. The rank holds every routed expert's 1/TP of the
-intermediate width (TP-sharded MoE) and the shared expert's 1/TP (``Dims``).
+intermediate width (TP-sharded MoE) and the shared expert's 1/TP (`Dims`).
 Stages, with TP8's task counts:
 
     xq      (S): the row as MXFP8 for the routed experts (aiter
@@ -209,7 +209,7 @@ def scratch_layout(key: MoeBuild) -> dict[str, tuple[int, int]]:
 
 
 def peer_bytes(tokens: int, d: Dims) -> int:
-    """FFN: the MoE output's all-reduce (``allreduce``)."""
+    """FFN: the MoE output's all-reduce (`allreduce`)."""
     return allreduce.region_bytes(tokens, d)
 
 
@@ -256,9 +256,9 @@ def stage_xq(c, t):
 
 
 def put_mxfp8_group(c, words_mb, codes_mb, t, g, v, amax):
-    """Token t's group g of 32 values ``v`` as MXFP8 (the ceil code of
-    ``amax`` / 448, x / scale clamped, RNE) -> scratch ``words_mb`` /
-    ``codes_mb`` (plain words: the token's X8RDY announces them)."""
+    """Token t's group g of 32 values `v` as MXFP8 (the ceil code of
+    `amax` / 448, x / scale clamped, RNE) -> scratch `words_mb` /
+    `codes_mb` (plain words: the token's X8RDY announces them)."""
     code = code_ceil(amax * fx.Float32(1.0 / FP8_MAX))
     inv = rcp_pow2(code)
     words = []
@@ -281,7 +281,7 @@ FLT_MIN = 1.1754943508222875e-38
 
 
 def vllm_mx_code(amax):
-    """VLLM's ``mxfp8_e4m3_quantize`` scale code of a 32-group: the smallest
+    """VLLM's `mxfp8_e4m3_quantize` scale code of a 32-group: the smallest
     power of two >= RN(max(amax, FLT_MIN) / 448), clamped to [0, 254]."""
     a = fx.max(amax, fx.Float32(FLT_MIN))
     q = div_rn(a, fx.Float32(FP8_MAX), fx.Float32(1.0 / FP8_MAX))
@@ -289,11 +289,13 @@ def vllm_mx_code(amax):
     e = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).select(
         fx.Int32(1), fx.Int32(0)
     )
+    sub = (bits > 0x400000).select(fx.Int32(1), fx.Int32(0))
+    e = (bits < 0x800000).select(sub, e)
     return fx.min(fx.max(e, fx.Int32(0)), fx.Int32(254))
 
 
 def put_mxfp8_group_vllm(c, words_mb, codes_mb, t, g, v, amax):
-    """``put_mxfp8_group`` with vLLM's rule (``vllm_mx_code``; x * 2^(127 - code),
+    """`put_mxfp8_group` with vLLM's rule (`vllm_mx_code`; x * 2^(127 - code),
     which code 0 keeps finite)."""
     code = vllm_mx_code(amax)
     inv = ((254 - code) << 23).bitcast(fx.Float32)
@@ -316,11 +318,11 @@ def put_mxfp8_group_vllm(c, words_mb, codes_mb, t, g, v, amax):
 # ---------------------------------------------------------------- router
 @traced
 def stage_router(c, task):
-    """Router task (token group, row tile, K part): K part ``part`` of rows
-    16 ``tile`` .. of the bf16 gate weight [experts, hidden] times the group's
-    tokens (``RouteShape.router_groups``), a token tile at a time -- the
-    decode router's tile (``router``), the
-    same tiles in the same order -> the part's f32 sum (``route`` sums the
+    """Router task (token group, row tile, K part): K part `part` of rows
+    16 `tile` .. of the bf16 gate weight [experts, hidden] times the group's
+    tokens (`RouteShape.router_groups`), a token tile at a time -- the
+    decode router's tile (`router`), the
+    same tiles in the same order -> the part's f32 sum (`route` sums the
     parts in order, rounds to bf16). Every tile's x loads issue first: a task
     over every token's tiles in series read their x serially (48 rows: a router
     CTA 9 us, 8 of them x)."""
@@ -415,7 +417,7 @@ def stage_route(c, t):
 def _hash_picks(c, t, logits):
     """A hash layer's picks of token t: lane k < topk's expert, given (the
     bias argument holds the step's [S, topk] ids), and its score from the
-    logits (expert e's on lane e % 64, ``logits[e // 64]``); the scores' sum
+    logits (expert e's on lane e % 64, `logits[e // 64]`); the scores' sum
     in top-k order."""
     lane, topk = c["lane"], c["rs"].topk
     eid = fx.Int32(
@@ -441,7 +443,7 @@ def _hash_picks(c, t, logits):
 
 
 def _topk_picks(c, logits):
-    """``stage_route``'s top-k of a token from its f32 logits (lane l holds
+    """`stage_route`'s top-k of a token from its f32 logits (lane l holds
     experts l + 64 i): lane k < topk's expert, its score, the scores' sum."""
     lane, a = c["lane"], c["args"]
     experts, topk = c["rs"].experts, c["rs"].topk
@@ -493,10 +495,10 @@ def _topk_picks(c, logits):
 
 @traced
 def load_route(c, tab):
-    """Every token's (ids, weights) into LDS ``tab``, then the union U of the ids
+    """Every token's (ids, weights) into LDS `tab`, then the union U of the ids
     (ascending): tab[2 S topk ..] = |U|, the experts of U, each (t, k)'s slot in
     U, each expert's slot, the picks in slot order (a slot's ascending) and each
-    slot's first position (``RouteShape``).
+    slot's first position (`RouteShape`).
 
     A pick a thread, no scan in series: each pick ORs its token's bit into its
     expert's token bitmap, so an expert's pick count is its bitmap's popcount,
@@ -625,10 +627,10 @@ def _silu_mul(g, u, limit):
 
 @traced
 def stage_shared(c, task, gops, t0, n):
-    """Gate rows 16 task .. (weights ``gops``), up rows 576 + 16 task .. against
-    tokens t0 .. t0 + n (their x in LDS; ``n`` traced: a tile a CTA picks at run
+    """Gate rows 16 task .. (weights `gops`), up rows 576 + 16 task .. against
+    tokens t0 .. t0 + n (their x in LDS; `n` traced: a tile a CTA picks at run
     time) -> bf16 -> silu x up -> SMID; an odd task then quantizes its group of
-    32 (``smid_quant``)."""
+    32 (`smid_quant`)."""
     tid, red, d = c["tid"], c["red"], c["d"]
     a = c["args"]
     rows = None if isinstance(n, int) else n
@@ -665,7 +667,7 @@ def stage_shared(c, task, gops, t0, n):
 
 @traced
 def smid_quant(c, task, t0, n):
-    """Odd shared task ``task``: its 16 columns (LDS ``pair``) and the even
+    """Odd shared task `task`: its 16 columns (LDS `pair`) and the even
     task's (SMID) are a quantize_fp8 group of 32 (amax floored 1e-4, the ceil
     code) -> SMQ / SMC, a thread a token. Once here, not in each of the 256 CTAs
     whose down stage reads them: that took a down CTA 14 us at 48 rows."""
@@ -697,9 +699,9 @@ def smid_quant(c, task, t0, n):
 def gemv_fp4_pair(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, scale_cols, col):
     """Tiles rg0 and rg0 + 1 (16 rows each, one 32-row scale block) of expert
     e's (16, 16)-preshuffled MXFP4 weight [n_rows, k] times 16 MXFP8 rows in
-    LDS, over this wave's K slice ``ks`` (``ug_rounds``) -> both tiles' partial
+    LDS, over this wave's K slice `ks` (`ug_rounds`) -> both tiles' partial
     C, a Vector of 8 (rows 4 (lane / 16) .., column lane % 16, whose LDS row is
-    ``col``). Each B operand read from LDS feeds both tiles' MFMAs: the waves of
+    `col`). Each B operand read from LDS feeds both tiles' MFMAs: the waves of
     a task share x, so a wave a tile over all of K read it once a tile.
     """
     lane, wave = c["lane"], c["wave"]
@@ -744,8 +746,8 @@ def gemv_fp4_pair(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, scale_cols, col):
 
 
 def ug_rounds(k, ks, slices):
-    """K slice ``ks`` of ``slices``' rounds (first step of the scales loaded,
-    first step, steps, steps of scales loaded); ``ks`` traced: the steps are.
+    """K slice `ks` of `slices`' rounds (first step of the scales loaded,
+    first step, steps, steps of scales loaded); `ks` traced: the steps are.
     Halves: the 8-step scale blocks 2 r + ks, the odd block left split 4 + 4,
     so both run k / 256 steps. Quarters: steps 8 i + 2 ks, + 1 of each block
     i, a round loading only their scales (the shuffled layout keeps 2 steps'
@@ -765,7 +767,7 @@ def ug_rounds(k, ks, slices):
 
 
 def fp4_pair_loads(c, w, ws, e, n_rows, k, rg0, scale_cols, sc0, st0, n, sc_steps):
-    """``gemv_fp4_pair``'s loads of a round: the scales of steps sc0 .. sc0 +
+    """`gemv_fp4_pair`'s loads of a round: the scales of steps sc0 .. sc0 +
     sc_steps (of the tiles' 32-row block: 128 bytes a step, sc_steps / 2 dwords
     a lane) and both tiles' weight operands of steps st0 .. st0 + n. Loads
     only."""
@@ -784,7 +786,7 @@ def fp4_pair_loads(c, w, ws, e, n_rows, k, rg0, scale_cols, sc0, st0, n, sc_step
 
 
 def scale_block_loads(c, ws, first_row, scale_cols):
-    """The loads of the 32-row e8m0 block holding ``first_row``: in aiter's
+    """The loads of the 32-row e8m0 block holding `first_row`: in aiter's
     shuffle_scale order a block is contiguous (both 16-row halves, all of K), so
     a few 16-byte loads a lane fetch it, where a byte load a K step doubled the
     stage's load instructions and bound it by their issue (2026-09-29, ug). A
@@ -807,20 +809,20 @@ def scale_block_loads(c, ws, first_row, scale_cols):
 
 
 def down_scale_words(d) -> int:
-    """A down tile's 32-row scale block in LDS: ``scale_block_store`` writes
+    """A down tile's 32-row scale block in LDS: `scale_block_store` writes
     whole 256-word rounds."""
     return down_lds_words(d.down_scale_cols * 8)
 
 
 def wsl_words(d) -> int:
     """A wave's LDS scale words: an ug batch's 256, or a down round's blocks --
-    a (task, slot) each, ``DOWN_R_MAX`` at most (``stage_down``)."""
+    a (task, slot) each, `DOWN_R_MAX` at most (`stage_down`)."""
     return max(256, DOWN_R_MAX * down_scale_words(d))
 
 
 def scale_block_store(c, svs, sl):
-    """``scale_block_loads``' words -> this wave's LDS block ``sl``
-    (``down_scale_words``; a lane past the block writes past it, inside it)."""
+    """`scale_block_loads`' words -> this wave's LDS block `sl`
+    (`down_scale_words`; a lane past the block writes past it, inside it)."""
     lane = c["lane"]
     for i in range_constexpr(len(svs)):
         fx.ptr_store(svs[i], sl + (256 * i + lane * 4))
@@ -828,8 +830,8 @@ def scale_block_store(c, svs, sl):
 
 def lds_scales(sl, local_row, lane, st0, blk, scale_cols):
     """K steps st0 .. st0 + blk's scale bytes of this lane's row from a 32-row
-    scale block in LDS (``local_row`` its row in the block). An even step and
-    the next are bytes 2 apart of one word (``scale_index``'s d): a read a
+    scale block in LDS (`local_row` its row in the block). An even step and
+    the next are bytes 2 apart of one word (`scale_index`'s d): a read a
     pair, not a step (down: 3 reads a slot, not 5)."""
     out, word = [], None
     for i in range(blk):
@@ -846,7 +848,7 @@ def lds_u8(ptr, i):
 
 def fp4_tile_weights(c, w, e, n_rows, k, rg, st0, blk, k_real=None):
     """The weight operands of expert e's 16-row tile rg, K steps st0 .. st0 +
-    blk: loads only, nothing waits on them here. ``k_real``: a lane whose 32
+    blk: loads only, nothing waits on them here. `k_real`: a lane whose 32
     columns lie past it (zero weights) reads its row group's first lane's
     address instead (no extra traffic) and holds zero."""
     lane = c["lane"]
@@ -869,8 +871,8 @@ def fp4_tile_weights(c, w, e, n_rows, k, rg, st0, blk, k_real=None):
 
 
 def fp4_pair_mfma(c, k, xl, xsl, st0, n, avs, sas, accs, col):
-    """``accs`` (two tiles') chained through ``n`` K steps from st0 against MXFP8
-    rows in LDS (column lane % 16: row ``col``): a step's B operand loaded once
+    """`accs` (two tiles') chained through `n` K steps from st0 against MXFP8
+    rows in LDS (column lane % 16: row `col`): a step's B operand loaded once
     for both tiles' MFMAs."""
     lane = c["lane"]
     x_row = lds_row(k // 4)
@@ -903,13 +905,13 @@ def fp8_operand(halves):
 
 
 def down_lds_words(n):
-    """A down wave's LDS block of n words: ``scale_block_store`` writes whole
+    """A down wave's LDS block of n words: `scale_block_store` writes whole
     256-word rounds."""
     return -(-n // 256) * 256
 
 
 def st_dev(v, region, i):
-    """Word i of scratch ``region`` (plain words, not tagged pairs) at device
+    """Word i of scratch `region` (plain words, not tagged pairs) at device
     scope: past the per-XCD L2, so another CTA reads it after the flag."""
     bo.buffer_store(v, rsrc(region.value), i, cache_modifier=CM_DEV)
 
@@ -917,7 +919,7 @@ def st_dev(v, region, i):
 @traced
 def take_ug_task(c):
     """This CTA's next ug task past the first round, from the launch's queue
-    (``ugq``, a word a tag, counting from 0): the CTAs that ran a shared,
+    (`ugq`, a word a tag, counting from 0): the CTAs that ran a shared,
     router or route task come to it late and so take fewer, where a fixed
     placement gave every CTA the same count and down waited on theirs. A
     task's result is the same whichever CTA runs it."""
@@ -932,11 +934,11 @@ def take_ug_task(c):
 
 @traced
 def stage_ug(c, task):
-    """One token tile: slot task // ug_parts of U (``RouteShape.ug_parts``), the
-    ``ug_groups`` FP4 groups of intermediate columns from 32 ug_groups (task %
-    ug_parts) (``ug_wave_pair``); then silu x up, rounded to bf16, and the
+    """One token tile: slot task // ug_parts of U (`RouteShape.ug_parts`), the
+    `ug_groups` FP4 groups of intermediate columns from 32 ug_groups (task %
+    ug_parts) (`ug_wave_pair`); then silu x up, rounded to bf16, and the
     MXFP8 requant of each token's 32 values of a group -> MID (the stage-1
-    epilogue and the stage-2 input quant). Past one: ``stage_ug_tile``."""
+    epilogue and the stage-2 input quant). Past one: `stage_ug_tile`."""
     s, tid, lane, tab = c["S"], c["tid"], c["lane"], c["tab"]
     rs = c["rs"]
     ug_parts = rs.ug_parts
@@ -954,11 +956,11 @@ def stage_ug(c, task):
 
 
 def ug_wave_pair(c, part0):
-    """This wave's share of an ug task from group ``part0``: group p of its
-    ``ug_groups`` (wave / (2 slices)), its 16-column half bb = wave % 2 -- w13's
+    """This wave's share of an ug task from group `part0`: group p of its
+    `ug_groups` (wave / (2 slices)), its 16-column half bb = wave % 2 -- w13's
     gate tile 2 b and up tile 2 b + 1 (aiter GUGU interleaves them a 16-row
     tile; b = 2 (part0 + p) + bb), one 32-row scale block -- over K slice ks =
-    wave / 2 % slices (``gemv_fp4_pair``): (p, 2 b, ks, whether the group is in
+    wave / 2 % slices (`gemv_fp4_pair`): (p, 2 b, ks, whether the group is in
     the real width)."""
     wave, slices = c["wave"], c["rs"].ug_k_slices
     p = wave // (2 * slices)
@@ -980,7 +982,7 @@ def pairwise_sum(vs):
 
 
 def ug_tile_task(c, task):
-    """Past one token tile, ug task ``task``: its slot's expert, its first
+    """Past one token tile, ug task `task`: its slot's expert, its first
     group, and its pick tile's first pick and the picks from it."""
     tab, rs, s = c["tab"], c["rs"], c["S"]
     ug_parts = rs.ug_parts
@@ -995,8 +997,8 @@ def ug_tile_task(c, task):
 
 @traced
 def stage_ug_tile(c, task, total):
-    """Past one token tile: ug task ``task`` of ``total`` (a pick tile of its
-    slot), then the next task from the queue (``take_ug_task``). No next task's
+    """Past one token tile: ug task `task` of `total` (a pick tile of its
+    slot), then the next task from the queue (`take_ug_task`). No next task's
     weights prefetched under this one: held across its epilogue and gather they
     spilled the merged K2 (S = 24 / 48), and without them it ran faster."""
     tid, lane = c["tid"], c["lane"]
@@ -1015,7 +1017,7 @@ def stage_ug_tile(c, task, total):
 @traced
 def ug_pass(c, e, part0, first, count, col):
     """An ug task's GEMV and epilogue for the slot's picks first .. first +
-    min(count, 16) (column lane % 16's x in LDS row ``col``)."""
+    min(count, 16) (column lane % 16's x in LDS row `col`)."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     a, d, rs = c["args"], c["d"], c["rs"]
     p, rg0, ks, real = ug_wave_pair(c, part0)
@@ -1054,9 +1056,9 @@ def ug_pass(c, e, part0, first, count, col):
 
 @traced
 def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
-    """MXFP8 rows ``token_of(j)``, j < ``live`` (<= the x tile; traced or int), of
-    scratch ``words_mb`` / ``codes_mb`` into LDS rows j of ``xl`` / ``xsl``:
-    the first ``live`` lanes wait on their token's X8RDY, then plain 16-byte
+    """MXFP8 rows `token_of(j)`, j < `live` (<= the x tile; traced or int), of
+    scratch `words_mb` / `codes_mb` into LDS rows j of `xl` / `xsl`:
+    the first `live` lanes wait on their token's X8RDY, then plain 16-byte
     loads (half the bytes of the tagged pairs a poll would read)."""
     tid, rows = c["tid"], c["rs"].x_tile
     if tid < rows:
@@ -1096,8 +1098,8 @@ def gather_x8r(c, first, count):
 
 @traced
 def ug_epilogue(c, part0, idx, first, count):
-    """Thread ``idx``'s value of an ug task: silu x up of its (group, pick j,
-    column), the group's MXFP8 scale, its byte of MID (the pick's row, ``first``
+    """Thread `idx`'s value of an ug task: silu x up of its (group, pick j,
+    column), the group's MXFP8 scale, its byte of MID (the pick's row, `first`
     + j in the pick order)."""
     lane, red, d, rs = c["lane"], c["red"], c["d"], c["rs"]
     cols = rs.tile_picks
@@ -1145,7 +1147,7 @@ def ug_epilogue(c, part0, idx, first, count):
 # ---------------------------------------------------------------- down
 @traced
 def stage_down(c, tasks):
-    """Rows 16 task .. of the hidden output for each of ``tasks`` (a CTA's one or
+    """Rows 16 task .. of the hidden output for each of `tasks` (a CTA's one or
     two, run together: a second pass would double the CTA's time): routed
     experts of U (a wave each, round robin), the shared expert, their sum ->
     pushed to every rank."""
@@ -1230,7 +1232,7 @@ def take_down_rank(c):
 
 
 def down_weights(c, tasks, rnd, slots, nu):
-    """Round ``rnd``'s weights of ``stage_down``: each (task, slot)'s scale block
+    """Round `rnd`'s weights of `stage_down`: each (task, slot)'s scale block
     and weight operands, this wave's slots of U (a slot past U: the last's).
     Loads only."""
     s, wave, tab, a, d = c["S"], c["wave"], c["tab"], c["args"], c["d"]
@@ -1314,15 +1316,15 @@ def mid_operands(c, first, count):
 
 
 def mid_code_index(d, row, group):
-    """MIDS word of pick row ``row``'s MXFP8 group ``group`` (32 columns): a K
+    """MIDS word of pick row `row`'s MXFP8 group `group` (32 columns): a K
     step's 4 groups apart, so the steps of one group % 4 lie together
-    (``mid_operands``' lane j reads groups j, j + 4, ..)."""
+    (`mid_operands`' lane j reads groups j, j + 4, ..)."""
     steps = d.inter // 128
     return row * (d.inter // 32) + group % 4 * steps + group // 4
 
 
 def down_ug_flags(c, ucs):
-    """This lane's ug flags of a down round's slots ``ucs``: flag f a (slot,
+    """This lane's ug flags of a down round's slots `ucs`: flag f a (slot,
     pick tile past one token tile, part), a tile past the slot's repeating its
     last; lane l takes flags l, l + 64, .. (TP2's 18 parts a tile, 48 rows:
     108 flags a round)."""
@@ -1355,9 +1357,9 @@ def _down_ug_flag(c, ucs, f, per_slot):
 
 @traced
 def down_shared(c, tasks):
-    """Each of ``tasks``' rows of the shared expert's down projection
-    (its MXFP8 intermediate, ``load_smid_tile``) for every
-    token, bf16 -> LDS ``sdl[task][token][16 rows]`` (``down_combine``):
+    """Each of `tasks`' rows of the shared expert's down projection
+    (its MXFP8 intermediate, `load_smid_tile`) for every
+    token, bf16 -> LDS `sdl[task][token][16 rows]` (`down_combine`):
     every task's weights in flight first."""
     s, tid, red, d = c["S"], c["tid"], c["red"], c["d"]
     a = c["args"]
@@ -1381,7 +1383,7 @@ def down_shared(c, tasks):
 
 def push_ffn(c, t, col, vals):
     """A partial bf16 pair of the MoE output at (t, col) into the all-reduce
-    (``allreduce.push``)."""
+    (`allreduce.push`)."""
     d = c["d"]
     allreduce.push(
         lambda dst, pair, v: c["put_bf"](dst, 2 * pair, v),
@@ -1400,9 +1402,9 @@ def push_ffn(c, t, col, vals):
 
 @traced
 def down_combine(c, task, j, t0, n):
-    """Down task ``task`` (the CTA's j-th) for tokens t0 .. t0 + n: the routed
+    """Down task `task` (the CTA's j-th) for tokens t0 .. t0 + n: the routed
     contributions summed in bf16 in each token's top-k order, plus the shared expert's
-    (``down_shared``), the sum pushed to every rank."""
+    (`down_shared`), the sum pushed to every rank."""
     s, tid, tab = c["S"], c["tid"], c["tab"]
     topk = c["rs"].topk
     if tid < ROWS * n:
@@ -1432,9 +1434,9 @@ def down_combine(c, task, j, t0, n):
 
 @traced
 def down_mfma(c, j, task, sl, mid, first, count, av, live):
-    """Down task ``task`` (the CTA's j-th) on a slot of U: the routed MFMA of its
-    picks first .. first + min(count, 16) (their B operands ``mid``:
-    ``mid_operands``; the scale block in ``sl``), each pick's contribution."""
+    """Down task `task` (the CTA's j-th) on a slot of U: the routed MFMA of its
+    picks first .. first + min(count, 16) (their B operands `mid`:
+    `mid_operands`; the scale block in `sl`), each pick's contribution."""
     lane, tab, d = c["lane"], c["tab"], c["d"]
     sas = lds_scales(
         sl, task % 2 * 16 + lane % 16, lane, 0, d.inter // 128, d.down_scale_cols
@@ -1459,7 +1461,7 @@ def down_mfma(c, j, task, sl, mid, first, count, av, live):
 
 
 def contrib_store(c, j, i, v):
-    """Task j's routed contribution word i (``[pick (t, k)][16 rows]`` f32 bits)."""
+    """Task j's routed contribution word i (`[pick (t, k)][16 rows]` f32 bits)."""
     fx.ptr_store(v.bitcast(fx.Int32), c["contrib"] + (j * c["rs"].picks * 16 + i))
 
 
@@ -1473,7 +1475,7 @@ def contrib_load(c, j, i):
 @traced
 def load_smid_tile(c, t0, n, groups):
     """The shared expert's MXFP8 intermediate of tokens t0 .. t0 + n (SMQ /
-    SMC, ``smid_quant``) into LDS ``shared_xl`` / ``shared_xsl`` rows 0 .., by every
+    SMC, `smid_quant`) into LDS `shared_xl` / `shared_xsl` rows 0 .., by every
     thread."""
     tid, words = c["tid"], c["d"].sh_inter // 4
     poll_copy(
@@ -1498,7 +1500,7 @@ def load_smid_tile(c, t0, n, groups):
 @traced
 def stage_reduce(c, task):
     """Columns 128 task ..: the TP ranks' partials, this rank's first, then
-    rank + 1, + 2, .., in fp32 -> bf16 -> ``out``."""
+    rank + 1, + 2, .., in fp32 -> bf16 -> `out`."""
     s, tid = c["S"], c["tid"]
     if const_expr(c["two_hop"]):
         # this task's columns' owner sums them for every rank (``allreduce``)
@@ -1515,8 +1517,8 @@ def stage_reduce(c, task):
 
 @traced
 def reduce_pair(c, task, idx, how="sum"):
-    """Thread ``idx``'s column pair of token idx / 64 (``how``: the
-    ``allreduce`` way)."""
+    """Thread `idx`'s column pair of token idx / 64 (`how`: the
+    `allreduce` way)."""
     s, d = c["S"], c["d"]
     a = c["args"]
     if idx < s * RED_COLS // 2:
@@ -1536,7 +1538,7 @@ def reduce_pair(c, task, idx, how="sum"):
 
 
 def moe_smem(s, rs, timeline):
-    """The MoE stages' LDS (``timeline``: with its own stamp record)."""
+    """The MoE stages' LDS (`timeline`: with its own stamp record)."""
 
     @fx.struct
     class Smem:
@@ -1552,12 +1554,12 @@ def moe_smem(s, rs, timeline):
 
 
 def stage_lds(s, rs):
-    """Word offsets into ``Smem.stage`` of the buffers only one stage reads: the
-    shared stage's MXFP8 x tile; the waves' scale blocks (``wsl``, the ug and
+    """Word offsets into `Smem.stage` of the buffers only one stage reads: the
+    shared stage's MXFP8 x tile; the waves' scale blocks (`wsl`, the ug and
     down stages'), then the ug stage's routed MXFP8 x tile, or the down stage's
-    token tile of the shared expert's MXFP8 intermediate (``load_smid_tile``),
-    each down task's routed contributions (``contrib_store``) and its shared
-    expert rows (``down_shared``). A barrier ends every stage."""
+    token tile of the shared expert's MXFP8 intermediate (`load_smid_tile`),
+    each down task's routed contributions (`contrib_store`) and its shared
+    expert rows (`down_shared`). A barrier ends every stage."""
     d = rs.dims
     # the x tile the shared / ug stages hold (every token's up to one tile)
     rows = min(s, rs.x_tile)
@@ -1590,7 +1592,7 @@ def stage_lds(s, rs):
 
 def moe_context(s, rs, lds, mb, bases, layout, scratch, args, rank, sym):
     """The MoE stages' context: LDS, mailbox, scratch regions, arguments. Its lane
-    math starts from a ``fresh`` thread id: in K2 it is not the attention and
+    math starts from a `fresh` thread id: in K2 it is not the attention and
     seam stages', held from theirs on."""
     tid = fresh(fx.thread_idx.x)
     c = {
@@ -1628,7 +1630,7 @@ def moe_context(s, rs, lds, mb, bases, layout, scratch, args, rank, sym):
 
 @traced
 def run_moe(c, key, bid, tls, tl0):
-    """The MoE stages, in order; ``timeline`` stamps from point ``tl0`` + 1."""
+    """The MoE stages, in order; `timeline` stamps from point `tl0` + 1."""
     s, timeline, tid = key.tokens, key.timeline, c["tid"]
     router_tasks = c["rs"].router_tasks
     route0, shared0 = c["rs"].route0, c["rs"].shared0
@@ -1728,6 +1730,6 @@ def await_x(c, tokens):
 
 
 def moe_args(*values) -> dict:
-    """The MoE stages' arguments by name, in ``ARGS`` order."""
+    """The MoE stages' arguments by name, in `ARGS` order."""
     assert len(values) == len(ARGS)
     return dict(zip(ARGS, values))

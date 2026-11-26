@@ -121,6 +121,16 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
             self._LRUCache__order.move_to_end(key)  # type: ignore
 
     @overload
+    def peek(self, key: _K, /) -> _V | None: ...
+
+    @overload
+    def peek(self, key: _K, /, default: _V | _T) -> _V | _T: ...
+
+    def peek(self, key: _K, /, default: _V | _T | None = None) -> _V | _T | None:
+        """Look up a value without copying the cache or updating order or stats."""
+        return self._Cache__data.get(key, default)  # type: ignore
+
+    @overload
     def get(self, key: _K, /) -> _V | None: ...
 
     @overload

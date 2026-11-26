@@ -32,7 +32,7 @@ _DTYPES = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class Candidate:
     name: str
     runs: list[Callable[[], None]]

@@ -33,6 +33,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+    is_moe_layer_gptq_quantized,
+    match_dynamic_override,
     normalize_and_validate_gptq_desc_act,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -216,6 +218,14 @@ class MoeWNA16Config(QuantizationConfig):
             linear_config.packed_modules_mapping = self.packed_modules_mapping
             return linear_config.get_quant_method(layer, prefix)
         elif isinstance(layer, RoutedExperts):
+            # Honour the checkpoint's exclusions the way AutoGPTQ does.
+            dynamic = self.full_config.get("dynamic") or {}
+            if match_dynamic_override(dynamic, layer_name=prefix) is False or (
+                not is_moe_layer_gptq_quantized(
+                    prefix, self.full_config.get("modules_in_block_to_quantize") or []
+                )
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             return MoeWNA16Method(self, layer.moe_config)
         return None
 
@@ -428,7 +438,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             backend=self.wna16_backend,
             layer=layer,
             quant_config=self.quant_config,
-            input_dtype=None,
             w13=layer.w13_qweight,
             w2=layer.w2_qweight,
             w13_scale=layer.w13_scales,
@@ -449,8 +458,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w2_scales,
             w13_qzeros,
             w2_qzeros,
-            w13_input_global_scale,
-            w2_input_global_scale,
             _,  # w13_bias
             _,  # w2_bias
         ) = converted
@@ -467,20 +474,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             assert w13_qzeros is not None and w2_qzeros is not None
             replace_parameter(layer, "w13_qzeros", w13_qzeros)
             replace_parameter(layer, "w2_qzeros", w2_qzeros)
-
-        # Marlin-specific parameters (not needed for Flashinfer)
-        if self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM:
-            # Register input global scales if present
-            if w13_input_global_scale is not None:
-                layer.register_parameter(
-                    "w13_input_global_scale",
-                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
-                )
-            if w2_input_global_scale is not None:
-                layer.register_parameter(
-                    "w2_input_global_scale",
-                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
-                )
 
         self._setup_kernel(layer)
 

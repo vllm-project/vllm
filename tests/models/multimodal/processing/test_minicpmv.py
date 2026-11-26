@@ -5,7 +5,9 @@
 
 import numpy as np
 import pytest
+import torch
 
+from vllm.model_executor.models.minicpmv import MiniCPMVProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
 
@@ -21,6 +23,7 @@ def test_get_hf_processor_for_same_model_different_kwargs(model_id: str):
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     info = processor.info
+    assert isinstance(info, MiniCPMVProcessingInfo)
     processor_1 = info.get_hf_processor(max_slice_nums=1)
     processor_2 = info.get_hf_processor(max_slice_nums=2)
     assert processor_1.image_processor.max_slice_nums == 1
@@ -42,6 +45,7 @@ def test_image_processor_for_different_models(model_ids):
         limit_mm_per_prompt={"image": 1},
     )
     first_processor = MULTIMODAL_REGISTRY.create_processor(first_ctx.model_config)
+    assert isinstance(first_processor.info, MiniCPMVProcessingInfo)
     first_image_processor = first_processor.info.get_image_processor()
 
     second_ctx = build_model_context(
@@ -49,6 +53,7 @@ def test_image_processor_for_different_models(model_ids):
         limit_mm_per_prompt={"image": 1},
     )
     second_processor = MULTIMODAL_REGISTRY.create_processor(second_ctx.model_config)
+    assert isinstance(second_processor.info, MiniCPMVProcessingInfo)
     second_image_processor = second_processor.info.get_image_processor()
 
     second_processor.info.get_sliced_grid(ImageSize(width=128, height=128))
@@ -88,3 +93,41 @@ def test_prompt_has_dif_BPE_boundaries_in_context(model_id: str):
     image_placeholders = processed["mm_placeholders"].get("image", [])
     assert len(image_placeholders) == 1
     assert image_placeholders[0].length > 0
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "openbmb/MiniCPM-Llama3-V-2_5",
+        "openbmb/MiniCPM-V-4",
+        "openbmb/MiniCPM-o-2_6",
+    ],
+)
+@pytest.mark.parametrize("max_slice_nums", [1, 2])
+def test_request_slice_limit_matches_image_features(model_id, max_slice_nums):
+    """Request overrides must reserve one query block per processed image crop."""
+    kwargs = {"max_slice_nums": max_slice_nums}
+    image = np.zeros((896, 896, 3), dtype=np.uint8)
+    results = []
+    for kwargs_on_init in (True, False):
+        ctx = build_model_context(
+            model_id,
+            mm_processor_kwargs=kwargs if kwargs_on_init else None,
+            limit_mm_per_prompt={"image": 1},
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        result = processor(
+            "(<image>./</image>)\nDescribe the image.",
+            mm_items=processor.info.parse_mm_data({"image": image}),
+            hf_processor_mm_kwargs={} if kwargs_on_init else kwargs,
+        )
+        tgt_sizes = result["mm_kwargs"].get_data()["tgt_sizes"]
+        assert isinstance(tgt_sizes, torch.Tensor)
+        assert isinstance(processor.info, MiniCPMVProcessingInfo)
+        num_crops = tgt_sizes.numel() // 2
+        num_queries = processor.info.get_image_processor().image_feature_size
+        placeholder = result["mm_placeholders"]["image"][0]
+        assert placeholder.get_num_embeds() == num_crops * num_queries
+        results.append(result)
+
+    assert results[0]["prompt_token_ids"] == results[1]["prompt_token_ids"]

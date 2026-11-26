@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU DeepSeek-V4 attention subclass.
 
-``forward_mqa`` resolves SWA/compressed top-k indices to paged-cache slot
-ids and calls the fused ``flash_mla_with_kvcache_cpu`` kernel. ``_o_proj``
+`forward_mqa` resolves SWA/compressed top-k indices to paged-cache slot
+ids and calls the fused `flash_mla_with_kvcache_cpu` kernel. `_o_proj`
 stays eager -- not on the attention hot path.
 """
 
@@ -13,9 +13,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -58,15 +58,15 @@ def _deepseek_v4_cpu_prepare_and_attn(
 
     Wraps cache writes with no explicit tensor args (SWA/compressor/indexer
     state), which torch.compile can't otherwise track as mutations -- one
-    opaque call sidesteps that. ``_o_proj`` is folded in too because CPU's
-    ``DYNAMO_TRACE_ONCE`` mode traces exactly once, during warmup when
-    ``attn_metadata`` is ``None``; tracing ``_o_proj`` separately would bake
+    opaque call sidesteps that. `_o_proj` is folded in too because CPU's
+    `DYNAMO_TRACE_ONCE` mode traces exactly once, during warmup when
+    `attn_metadata` is `None`; tracing `_o_proj` separately would bake
     that warmup branch into the compiled graph permanently, dead-code-
     eliminating the whole attention computation upstream.
     """
     layer_name_str = _resolve_layer_name(layer_name)
     self = get_forward_context().no_compile_layers[layer_name_str]
-    self._prepare_and_attn_fn(
+    self._prepare_and_attn(
         hidden_states,
         qr,
         kv,
@@ -109,8 +109,8 @@ direct_register_custom_op(
 def _dequant_linear_weight(layer: torch.nn.Module) -> torch.Tensor:
     """Dequantize a linear layer's weight, including FP8 block scales.
 
-    ``_o_proj`` reads ``wo_a.weight`` directly (not via
-    ``quant_method.apply()``), so the per-block FP8 scale must be applied
+    `_o_proj` reads `wo_a.weight` directly (not via
+    `quant_method.apply()`), so the per-block FP8 scale must be applied
     here explicitly.
     """
     weight = layer.weight
@@ -150,10 +150,10 @@ def _fused_indexer_q_rope_quant_cpu(
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """CPU-only equivalent of ``fused_indexer_q_rope_quant``'s FP8 path
+    """CPU-only equivalent of `fused_indexer_q_rope_quant`'s FP8 path
     (CPU never reaches its MXFP4 arm -- Blackwell-only). Returns
-    ``(q_fp8, weights_out)``, folding the per-token q scale into
-    ``index_weights``. ``positions``/``index_q_cos_sin_cache`` are already
+    `(q_fp8, weights_out)`, folding the per-token q scale into
+    `index_weights`. `positions`/`index_q_cos_sin_cache` are already
     contiguous int64/fp32, so no conversion is needed here.
     """
     assert positions.ndim == 1
@@ -177,8 +177,8 @@ def _fused_indexer_q_rope_quant_cpu(
 
 class DeepseekV4CPUIndexerCache(DeepseekV4IndexerCache):
     """CPU indexer K-cache descriptor: same fields as the shared base, just
-    pointing ``get_attn_backend()`` at ``DeepseekV4CPUIndexerBackend``
-    instead of the shared, CUDA/XPU-oriented ``DeepseekV4IndexerBackend``."""
+    pointing `get_attn_backend()` at `DeepseekV4CPUIndexerBackend`
+    instead of the shared, CUDA/XPU-oriented `DeepseekV4IndexerBackend`."""
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return DeepseekV4CPUIndexerBackend
@@ -186,8 +186,8 @@ class DeepseekV4CPUIndexerCache(DeepseekV4IndexerCache):
 
 class DeepseekV4CPUIndexer(DeepseekV4Indexer):
     """CPU indexer: the C4A short-context fallback runs as eager PyTorch
-    instead of Triton. Never constructed directly -- ``__class__`` is
-    swapped onto an existing ``DeepseekV4Indexer`` instance post-construction.
+    instead of Triton. Never constructed directly -- `__class__` is
+    swapped onto an existing `DeepseekV4Indexer` instance post-construction.
     """
 
     def forward(
@@ -203,8 +203,8 @@ class DeepseekV4CPUIndexer(DeepseekV4Indexer):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """CPU override: no aux streams, so wq_b_and_q_quant and the
         compressor run straight-line instead of through
-        ``maybe_execute_in_parallel``; the short-context check drops the
-        CUDA-only ``is_current_stream_capturing()`` guard (always False
+        `maybe_execute_in_parallel`; the short-context check drops the
+        CUDA-only `is_current_stream_capturing()` guard (always False
         here)."""
         compressor = self.compressor
 
@@ -283,15 +283,15 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         self._wo_a_packed: torch.Tensor | None = None
         self._wrap_wo_a_process_weights_after_loading()
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         """Cache fp32-contiguous copies of tensors CPU kernels want that way
         but that arrive bf16 (rotary cos/sin table, compressor RMSNorm
         weights) -- cast once here instead of per forward call.
 
         Runs after every quantized layer's own
-        ``process_weights_after_loading`` (see ``is_deferred_attention_layer``);
-        ``wo_a``'s packing must happen *before* that phase instead, so it's a
-        separate monkeypatch in ``__init__``.
+        `process_weights_after_loading` (see `is_deferred_attention_layer`);
+        `wo_a`'s packing must happen *before* that phase instead, so it's a
+        separate monkeypatch in `__init__`.
         """
         self.rotary_emb.cos_sin_cache = self.rotary_emb.cos_sin_cache.to(
             torch.float32
@@ -302,10 +302,10 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             self.indexer.compressor.cache_norm_weight_fp32()
 
     def _wrap_wo_a_process_weights_after_loading(self) -> None:
-        """Snapshot and pack ``wo_a``'s weight into a bf16 copy for
-        ``bmm_cpu`` before the FP8 kernel's own
-        ``process_weights_after_loading`` VNNI-repacks it in place for
-        row-major reads ``_o_proj`` never does."""
+        """Snapshot and pack `wo_a`'s weight into a bf16 copy for
+        `bmm_cpu` before the FP8 kernel's own
+        `process_weights_after_loading` VNNI-repacks it in place for
+        row-major reads `_o_proj` never does."""
         wo_a = self.wo_a
         quant_method = wo_a.quant_method
         orig_pwal = quant_method.process_weights_after_loading
@@ -317,18 +317,17 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             dequant = dequant.view(self.n_local_groups, self.o_lora_rank, k_dim)
             self._wo_a_packed = torch.ops._C.convert_weight_packed(dequant.contiguous())
             orig_pwal(layer)
-            # orig_pwal VNNI-repacks layer.weight/scale for ordinary-linear
-            # use that _o_proj never needs -- free them, same pattern as
-            # dispatch_cpu_unquantized_gemm's remove_weight=True.
-            replace_parameter(layer, "weight", layer.weight.new_empty(0))
+            # _o_proj reads only the packed copy: it becomes the loaded weight's
+            # storage, and the (small) scale keeps its data.
+            replace_parameter(layer, "weight", self._wo_a_packed)
+            self._wo_a_packed = layer.weight.data
             scale_attr = (
                 "weight_scale_inv"
                 if hasattr(layer, "weight_scale_inv")
                 else "weight_scale"
             )
             if hasattr(layer, scale_attr):
-                scale = getattr(layer, scale_attr)
-                replace_parameter(layer, scale_attr, scale.new_empty(0))
+                retire_parameter(layer, scale_attr)
 
         quant_method.process_weights_after_loading = (  # type: ignore[method-assign]
             _capture_and_pack
@@ -341,7 +340,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """CPU override: wraps attention-prep + MLA + output projection in the
-        CPU-only opaque custom op (see ``_deepseek_v4_cpu_prepare_and_attn``).
+        CPU-only opaque custom op (see `_deepseek_v4_cpu_prepare_and_attn`).
         """
         num_tokens = hidden_states.shape[0]
         o_padded = torch.empty(
@@ -436,9 +435,9 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-        """CPU override: two ``RMSNorm`` calls instead of the shared
-        ``fused_q_kv_rmsnorm``, whose raw ``@triton.jit`` kernel fails to
-        link under triton-cpu (``undefined symbol: __truncdfbf2``)."""
+        """CPU override: two `RMSNorm` calls instead of the shared
+        `fused_q_kv_rmsnorm`, whose raw `@triton.jit` kernel fails to
+        link under triton-cpu (`undefined symbol: __truncdfbf2`)."""
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         return self.q_norm(qr), None, self.kv_norm(kv)
 
@@ -504,7 +503,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         out: torch.Tensor,
     ) -> None:
-        """CPU override: identical body, minus ``@eager_break_during_capture``
+        """CPU override: identical body, minus `@eager_break_during_capture`
         (this platform never captures a CUDA graph, so it was a no-op)."""
         if self.indexer is not None and index_q is not None:
             assert index_weights is not None

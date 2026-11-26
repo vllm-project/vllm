@@ -148,7 +148,7 @@ def _cdiv(a: int, b: int) -> int:
 
 
 def _score_cols(max_seq_len: int, world: int = 1) -> int:
-    """Block-axis width both kernels demand of a shard of ``world``.
+    """Block-axis width both kernels demand of a shard of `world`.
 
     Their contract, not a copy of the indexer's helper: lanes read whole
     wave-wide strips and hold a power-of-two count of them.
@@ -410,7 +410,7 @@ def _distributed_run(fn, world_size: int) -> None:
 
 @pytest.mark.parametrize("cp_world", [2, 4])
 def test_indexer_cp_selects_what_an_unsharded_indexer_selects(cp_world):
-    """The real thing: ``cp_world`` processes, real IPC, real exchange.
+    """The real thing: `cp_world` processes, real IPC, real exchange.
 
     Each rank runs the production CP decode over its block shard and compares
     the selection against an unsharded decode of the same inputs over the

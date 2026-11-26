@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""E2E test for the scale-out EC connector flow (render -> encode -> prefill).
+r"""E2E test for the scale-out EC connector flow (render -> encode -> prefill).
 
-Mimics the bash-script style of ``tests/v1/kv_connector/nixl_integration``:
-the instances are started by ``run_scale_out_ec_e2e_test.sh`` and this file is
+Mimics the bash-script style of `tests/v1/kv_connector/nixl_integration`:
+the instances are started by `run_scale_out_ec_e2e_test.sh` and this file is
 the HTTP client that drives the disaggregated request path and compares its
 output against a single-instance baseline.
 
@@ -14,9 +14,9 @@ Topology under test (started by the bash script):
     prefill (EC consumer) -- /inference/v1/generate
 
 The client renders each multimodal chat request once, sends the full
-``kwargs_data`` to the encode instance, then sends metadata-only features
-(``mm_metadata`` without ``kwargs_data``) plus the encode response's
-``ec_transfer_params`` to the prefill instance, and finally derenders the
+`kwargs_data` to the encode instance, then sends metadata-only features
+(`mm_metadata` without `kwargs_data`) plus the encode response's
+`ec_transfer_params` to the prefill instance, and finally derenders the
 output token ids. The derendered text must match the baseline exactly.
 
 Usage (from the bash script, or manually):
@@ -190,14 +190,10 @@ def run_disagg_one(args, request: dict) -> str:
             f"encode response has no ec_transfer_params: {encode_response}"
         )
 
-    # 3. Prefill: metadata-only features. kwargs_data is dropped; the
-    #    embeddings arrive through the EC connector.
+    # 3. Prefill: metadata-only features from an mm_payload="metadata" render;
+    #    the embeddings arrive through the EC connector.
     if features is not None:
-        prefill_features = {
-            "mm_hashes": features["mm_hashes"],
-            "mm_placeholders": features["mm_placeholders"],
-            "mm_metadata": features["mm_metadata"],
-        }
+        prefill_features = _render_metadata_features(args, request, rendered)
         _check_metadata_only_rejected_without_ec(args, token_ids, prefill_features)
     else:
         prefill_features = None
@@ -227,6 +223,24 @@ def run_disagg_one(args, request: dict) -> str:
         },
     ).json()
     return derendered["choices"][0]["message"]["content"]
+
+
+def _render_metadata_features(args, request: dict, rendered: dict) -> dict:
+    """Render without tensors and check it matches the full render."""
+    metadata_rendered = post_json(
+        f"{args.render_url}/v1/chat/completions/render",
+        request | {"mm_payload": "metadata"},
+    ).json()
+    assert metadata_rendered["token_ids"] == rendered["token_ids"]
+    metadata_features = metadata_rendered["features"]
+    assert metadata_features["kwargs_data"] is None
+    prefill_features = {
+        key: metadata_features[key]
+        for key in ("mm_hashes", "mm_placeholders", "mm_metadata")
+    }
+    for key, value in prefill_features.items():
+        assert value == rendered["features"][key], key
+    return prefill_features
 
 
 def _check_metadata_only_rejected_without_ec(

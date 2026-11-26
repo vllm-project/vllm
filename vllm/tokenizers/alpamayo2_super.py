@@ -3,11 +3,11 @@
 """Tokenizer for Alpamayo 2 Super.
 
 The checkpoint ships the base Qwen3-VL tokenizer. The reference implementation
-(NVlabs/alpamayo2, ``build_alpamayo2_super_tokenizer``) appends the discrete
+(NVlabs/alpamayo2, `build_alpamayo2_super_tokenizer`) appends the discrete
 trajectory tokens and the model's special tokens in code; the model's
-embeddings and ``traj_ids`` assume those ids. Append them the same way, so
+embeddings and `traj_ids` assume those ids. Append them the same way, so
 prompts with ego-trajectory tokens tokenize as in training and generated
-special tokens such as ``<|traj_future_start|>`` detokenize.
+special tokens such as `<|traj_future_start|>` detokenize.
 """
 
 from pathlib import Path

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""E2E tests for ``thinking_token_budget`` with reasoning models.
+"""E2E tests for `thinking_token_budget` with reasoning models.
 
 Covers Qwen3-0.6B and Qwen3.5 FP8 + MTP.
 """
@@ -70,6 +70,7 @@ def server():
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",
+        "--enable-per-request-metrics",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -86,6 +87,7 @@ def server_with_auto_reasoning_config():
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",
+        "--enable-per-request-metrics",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -173,7 +175,9 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
-async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI):
+async def test_thinking_token_budget_limits_reasoning_with_metrics(
+    client: openai.AsyncOpenAI,
+):
     """Test that thinking_token_budget limits the number of reasoning tokens.
 
     Counts reasoning decode tokens by id, which is robust to how tokens are
@@ -186,14 +190,19 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 
     prompt_token_ids: list[int] = []
     decode_token_ids: list[int] = []
+    metrics = None
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=100,
+        temperature=0,
         stream=True,
+        stream_options={"include_usage": True},
         extra_body={"thinking_token_budget": THINK_BUDGET, "return_token_ids": True},
     )
     async for chunk in stream:
+        if chunk.usage is not None:
+            metrics = chunk.model_extra.get("metrics")
         if not chunk.choices:
             continue
         if getattr(chunk, "prompt_token_ids", None):
@@ -210,6 +219,37 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
         f"reasoning tokens ({reasoning_token_count}) != "
         f"thinking_token_budget ({THINK_BUDGET})"
     )
+    assert metrics is not None
+    assert metrics["time_to_first_content_token_ms"] > metrics["time_to_first_token_ms"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default"], indirect=True)
+async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
+    """/v1/responses applies thinking_token_budget like /v1/chat/completions."""
+    extra_body = {"thinking_token_budget": THINK_BUDGET}
+    chat = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES,
+        max_tokens=100,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+    response = await client.responses.create(
+        model=MODEL_NAME,
+        input=MESSAGES,
+        max_output_tokens=100,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+
+    reasoning = "".join(
+        part.text
+        for item in response.output
+        if item.type == "reasoning"
+        for part in item.content or []
+    )
+    assert reasoning == chat.choices[0].message.reasoning
 
 
 @pytest.mark.asyncio
@@ -218,11 +258,11 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 async def test_thinking_token_budget_qwen35_fp8_mtp_concurrent_mixed_budget_and_plain(
     server_qwen35_fp8_mtp_tp2,
 ):
-    """Concurrent chat requests: some with ``thinking_token_budget``, some without.
+    """Concurrent chat requests: some with `thinking_token_budget`, some without.
 
     Exercises the scheduler / input processor under a mixed batch on the same
     Qwen3.5 FP8 + MTP (TP=2) server. Budgeted calls are checked with
-    ``_count_reasoning_decode_token_ids_between_markers`` on full token ids.
+    `_count_reasoning_decode_token_ids_between_markers` on full token ids.
     """
     _batch_spec: list[tuple[Literal["budget"], int] | tuple[Literal["plain"], None]] = [
         ("budget", 1),

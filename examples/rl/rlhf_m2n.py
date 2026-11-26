@@ -5,20 +5,20 @@ sharding-aware weight transfer.
 
 Layout (4 GPUs, no colocation):
   * GPUs 0-1: two FSDP2 training workers, one per GPU.
-  * GPUs 2-3: one vLLM ``LLM`` actor with ``tensor_parallel_size=2``.
+  * GPUs 2-3: one vLLM `LLM` actor with `tensor_parallel_size=2`.
 
 The trainer and the inference workers share one NCCL communicator of 4 ranks:
-trainer ranks ``[0, 2)`` and inference ranks ``[2, 4)``. Every parameter moves
-with a single ``reshard`` that redistributes it from the FSDP layout to the
+trainer ranks `[0, 2)` and inference ranks `[2, 4)`. Every parameter moves
+with a single `reshard` that redistributes it from the FSDP layout to the
 inference layout — the trainer sends its local shards and never all-gathers a
 full tensor, which broadcast-based weight sync would force it to do.
 
-Every FSDP rank builds an ``M2NTrainerWeightTransferEngine`` and calls
-``send_weights()``; all ranks run every reshard, and only rank 0 drives the
-inference side through its ``RayVLLMWeightSyncClient``.
+Every FSDP rank builds an `M2NTrainerWeightTransferEngine` and calls
+`send_weights()`; all ranks run every reshard, and only rank 0 drives the
+inference side through its `RayVLLMWeightSyncClient`.
 
-Requires the ``nccl-extensions`` package (NCCL 2.30.5+). The backend creates
-the data-plane communicator with ``nccl4py`` and passes it directly to M2N.
+Requires the `nccl-extensions` package (NCCL 2.30.5+). The backend creates
+the data-plane communicator with `nccl4py` and passes it directly to M2N.
 
 This example was written for 4xH100.
 """
@@ -39,10 +39,10 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    ModuleSource,
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.m2n_source import DTensorModuleSource
 from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
 
@@ -104,9 +104,9 @@ class FSDPTrainWorker:
     ):
         """Build the trainer engine on every FSDP rank.
 
-        `DTensorModuleSource` reads each parameter's FSDP device mesh and
-        placements, so the engine knows the source layout without gathering
-        anything. Rank 0 additionally drives the inference-side handshake.
+        `ModuleSource` reads each parameter's FSDP device mesh and placements,
+        so the engine knows the source layout without gathering anything.
+        Rank 0 additionally drives the inference-side handshake.
         """
         self.engine = WeightTransferTrainerFactory.trainer_init(
             init_info=M2NTrainerInitInfo(
@@ -121,7 +121,7 @@ class FSDPTrainWorker:
                 rank=self.rank,  # FSDP rank; sender is 0
             ),
             client=RayVLLMWeightSyncClient(llm_handle),
-            source=DTensorModuleSource(self.model, FSDP_WORLD_SIZE),
+            source=ModuleSource(self.model),
         )
 
     def send_weights(self):

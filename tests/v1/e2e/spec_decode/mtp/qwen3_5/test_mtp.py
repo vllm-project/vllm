@@ -1,18 +1,184 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING
 
+import pytest
+import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
+
+from tests.models.utils import check_logprobs_close
 from tests.utils import single_gpu_only
-from vllm import SamplingParams
+from vllm import SamplingParams, TokensPrompt
+from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
 from vllm.platforms import current_platform
+from vllm.v1.metrics.reader import Vector
 
 from ...utils import (
     assert_request_outputs_match,
     compute_acceptance_len,
+    get_spec_decode_metric_value,
     get_test_prompts,
 )
 from .._correctness import check_mtp_correctness
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+
+class MTPInputRecorder:
+    """Worker extension that observes draft inputs without changing them."""
+
+    model_runner: "GPUModelRunner"
+
+    def start_mtp_input_recording(self) -> None:
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+        from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
+            MultiModuleMTPSpeculator,
+        )
+
+        speculator = self.model_runner.speculator
+        assert isinstance(speculator, MultiModuleMTPSpeculator)
+        last_token_indices = speculator.last_token_indices
+        self.mtp_inputs: list[tuple[list[int], list[int]]] = []
+
+        def record_inputs(_module, _args, kwargs):
+            if kwargs["spec_step_idx"] == 0:
+                with gpu_sync_allowed():
+                    count = int(last_token_indices[0].item()) + 1
+                    ids = kwargs["input_ids"][:count].tolist()
+                    positions = kwargs["positions"][:count].tolist()
+                assert all(p >= 0 for p in positions), (
+                    f"Invalid MTP replay inputs: ids={ids}, positions={positions}"
+                )
+                self.mtp_inputs.append((ids, positions))
+
+        self.mtp_input_hook = speculator.model.register_forward_pre_hook(
+            record_inputs, with_kwargs=True
+        )
+
+    def read_mtp_inputs(self) -> list[tuple[list[int], list[int]]]:
+        self.mtp_input_hook.remove()
+        return self.mtp_inputs
+
+
+def _add_random_mtp_module(model_name: str, path: Path) -> Path:
+    """Copy of `model_name` with a second MTP module of random weights."""
+    src = Path(download_weights_from_hf(model_name, None, allow_patterns=["*"]))
+    for file in src.iterdir():
+        if file.name not in ("config.json", "model.safetensors.index.json"):
+            (path / file.name).symlink_to(file)
+    config = json.loads((src / "config.json").read_text())
+    config["text_config"]["mtp_num_hidden_layers"] = 2
+    (path / "config.json").write_text(json.dumps(config))
+
+    index = json.loads((src / "model.safetensors.index.json").read_text())
+    generator = torch.Generator().manual_seed(0)
+    module_1 = {}
+    for name, shard in index["weight_map"].items():
+        if name.startswith("mtp.layers.0."):
+            with safe_open(src / shard, framework="pt") as f:
+                weight = f.get_tensor(name)
+            module_1[name.replace("layers.0.", "layers.1.")] = torch.randn(
+                weight.shape, generator=generator
+            ).to(weight.dtype)
+    save_file(module_1, path / "mtp_module_1.safetensors")
+    index["weight_map"].update(dict.fromkeys(module_1, "mtp_module_1.safetensors"))
+    (path / "model.safetensors.index.json").write_text(json.dumps(index))
+    return path
+
+
+@single_gpu_only
+def test_mtp_draft_steps_use_their_own_module(
+    sampling_config: SamplingParams,
+    tmp_path: Path,
+    vllm_runner,
+):
+    """With two MTP modules, draft step 2 must run module 1, also with the
+    default drafter CUDA graphs. Module 1 has random weights, so its drafts are
+    rejected while module 0's are still accepted."""
+    model = _add_random_mtp_module("Qwen/Qwen3.5-0.8B-Base", tmp_path)
+    with vllm_runner(
+        str(model),
+        block_size=None,
+        enable_chunked_prefill=None,
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 2,
+            # Also covers get_top_tokens(..., spec_step_idx) on this path.
+            "use_local_argmax_reduction": True,
+        },
+        disable_log_stats=False,
+    ) as runner:
+        runner.llm.chat(get_test_prompts(mm_enabled=False), sampling_config)
+        metrics = runner.llm.get_metrics()
+
+    num_drafts = get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts")
+    accepted_per_pos = next(
+        m.values
+        for m in metrics
+        if isinstance(m, Vector)
+        and m.name == "vllm:spec_decode_num_accepted_tokens_per_pos"
+    )
+    step_1, step_2 = (accepted / num_drafts for accepted in accepted_per_pos)
+    assert step_1 > 0.3, f"module 0 acceptance {step_1:.3f}"
+    assert step_2 < 0.05, f"module 1 acceptance {step_2:.3f}: module 0 was reused"
+
+
+@single_gpu_only
+def test_multi_module_mtp_reused_slot_has_only_current_request_inputs(
+    tmp_path: Path,
+    vllm_runner,
+):
+    """A short request must not re-prefill its slot's previous occupant."""
+    model = _add_random_mtp_module("Qwen/Qwen3.5-0.8B-Base", tmp_path)
+    with vllm_runner(
+        str(model),
+        block_size=None,
+        max_model_len=256,
+        max_num_seqs=1,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        worker_extension_cls=f"{__name__}.MTPInputRecorder",
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 4,
+            "rejection_sample_method": "synthetic",
+            "synthetic_acceptance_rates": [0.0] * 4,
+        },
+    ) as runner:
+        llm = runner.llm
+        llm.generate(
+            [TokensPrompt(prompt_token_ids=list(range(9001, 9007)))],
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                allowed_token_ids=[9007],
+            ),
+        )
+        llm.collective_rpc("start_mtp_input_recording")
+        output = llm.generate(
+            [TokensPrompt(prompt_token_ids=[5000, 5001])],
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                allowed_token_ids=[42],
+            ),
+        )[0]
+        (draft_inputs,) = llm.collective_rpc("read_mtp_inputs")
+        assert [tuple(item) for item in draft_inputs[:2]] == [
+            ([5001, 42], [0, 1]),
+            ([5001, 42, 42], [0, 1, 2]),
+        ]
+        assert list(output.outputs[0].token_ids) == [42] * 8
 
 
 @pytest.mark.parametrize(
@@ -45,15 +211,98 @@ def test_mtp_correctness(
     )
 
 
+@pytest.mark.parametrize(
+    "connector", ["OffloadingConnector", "SimpleCPUOffloadConnector"]
+)
+@single_gpu_only
+def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
+    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner,
+    connector,
+):
+    """Enabling a connector preserves MTP local-cache hits and model outputs."""
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=32,
+        logprobs=5,
+    )
+
+    monkeypatch.setenv("VLLM_MLA_DISABLE", "1")
+    with vllm_runner(
+        model_name="Qwen/Qwen3.5-0.8B-Base",
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        max_model_len=2048,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 1,
+            "max_model_len": 2048,
+        },
+        kv_transfer_config={
+            "kv_connector": connector,
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "cpu_bytes_to_use": 512 << 20,
+            },
+        },
+        limit_mm_per_prompt={"image": 0, "video": 0},
+    ) as runner:
+        llm = runner.get_llm()
+        assert llm.llm_engine.vllm_config.cache_config.prefix_match_unit is None
+        block_size = (
+            llm.llm_engine.vllm_config.cache_config.effective_attention_block_size
+        )
+        assert block_size is not None
+        prompt_len = 2 * block_size + 1
+
+        tokenizer = llm.get_tokenizer()
+        source = (
+            "The following context is intentionally repeated to exercise prefix "
+            "caching. " * 300
+        ) + "Explain why deterministic inference should be reproducible."
+        prompt_token_ids = tokenizer.encode(source)[-prompt_len:]
+        assert len(prompt_token_ids) == prompt_len
+        prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+        cold_output = llm.generate([prompt], sampling_params)[0]
+        warm_output = llm.generate([prompt], sampling_params)[0]
+
+        assert cold_output.num_cached_tokens == 0
+        max_safe_hit = 2 * block_size
+        # The hash lookahead holds back only the last prompt token.
+        assert warm_output.num_cached_tokens == max_safe_hit
+
+        cold_completion = cold_output.outputs[0]
+        warm_completion = warm_output.outputs[0]
+        assert cold_completion.token_ids == warm_completion.token_ids
+        check_logprobs_close(
+            outputs_0_lst=[
+                (
+                    list(cold_completion.token_ids),
+                    cold_completion.text,
+                    cold_completion.logprobs,
+                )
+            ],
+            outputs_1_lst=[
+                (
+                    list(warm_completion.token_ids),
+                    warm_completion.text,
+                    warm_completion.logprobs,
+                )
+            ],
+            name_0="cold_mtp",
+            name_1="warm_mtp",
+            always_check_logprobs=True,
+        )
+
+
 @single_gpu_only
 def test_mtp_draft_lm_head_quantization(
-    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     vllm_runner,
 ):
     """A quantized draft copy of the shared lm_head only changes drafting:
     greedy outputs match stock MTP and acceptance stays within 10%."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     prompts = get_test_prompts(mm_enabled=False)
     results = {}
     # NVFP4 needs a CUDA W4A16 kernel.
@@ -95,14 +344,12 @@ def test_mtp_draft_lm_head_quantization(
     not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
 )
 def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
-    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     vllm_runner,
 ):
     """The quantized draft head is derived from the target head: it must come
     back intact after a level 1 sleep and be re-derived after a target weight
     reload, so outputs and acceptance match the run before."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     prompts = get_test_prompts(mm_enabled=False)
     with vllm_runner(
         "Qwen/Qwen3.5-0.8B-Base",

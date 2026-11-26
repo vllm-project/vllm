@@ -5,7 +5,7 @@
 `_capture_aux_hidden_stream` picks the weights it mixes against from one of
 three places depending on where the tapped layer sits, and returns the plain
 running prefix when the feature is off. The mixture itself is the kernel's
-job and is covered by ``test_attn_res.py``; what is asserted here is the
+job and is covered by `test_attn_res.py`; what is asserted here is the
 selection, which is the part that can silently feed the drafter the wrong
 tensor.
 """

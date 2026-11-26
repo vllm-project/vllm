@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax M3 model — hardware-isolated entry point.
 
-The implementation lives under ``nvidia/`` and ``amd/``; this module picks the
+The implementation lives under `nvidia/` and `amd/`; this module picks the
 right one for the current platform and re-exports the public classes used by
-the model registry. (Mirrors ``vllm.models.deepseek_v4``.)
+the model registry. (Mirrors `vllm.models.deepseek_v4`.)
 """
 
 from typing import TYPE_CHECKING

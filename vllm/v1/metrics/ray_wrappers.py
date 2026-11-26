@@ -11,11 +11,14 @@ from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
     from ray import serve as ray_serve
+except ImportError:
+    ray_serve = None
+
+try:
     from ray.util import metrics as ray_metrics
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
-    ray_serve = None
 import regex as re
 
 
@@ -205,8 +208,3 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _spec_decoding_cls = RaySpecDecodingProm
     _kv_connector_cls = RayKVConnectorProm
     _perf_metrics_cls = RayPerfMetricsProm
-
-    @staticmethod
-    def _unregister_vllm_metrics():
-        # No-op on purpose
-        pass
