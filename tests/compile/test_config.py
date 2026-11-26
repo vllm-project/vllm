@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from contextlib import nullcontext
+from functools import lru_cache
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +10,7 @@ import pytest
 import torch
 from pydantic import ValidationError
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
@@ -29,12 +31,10 @@ from vllm.config.compilation import (
     decode_cudagraph_capture_shapes,
     prefill_cudagraph_capture_grid,
 )
+from vllm.config.utils import replace
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
-    _is_torch_equal_or_newer,
-    is_torch_equal,
-)
+from vllm.utils.torch_utils import _is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
 
@@ -42,6 +42,13 @@ from ..utils import create_new_process_for_each_test
 from . import silly_attention  # noqa: F401
 
 DEVICE_TYPE = current_platform.device_type
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import RocmPlatform as NativePlatform
+elif current_platform.is_xpu():
+    from vllm.platforms.xpu import XPUPlatform as NativePlatform
+else:
+    from vllm.platforms.cuda import CudaPlatform as NativePlatform
 
 
 def test_version():
@@ -51,29 +58,6 @@ def test_version():
     assert _is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
     assert _is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
     assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
-
-
-def test_get_raw_stream_patch():
-    """Test that get_raw_stream patch is applied only for torch 2.9.0 or 2.9.1."""
-    import builtins
-
-    # Check if get_raw_stream exists in builtins
-    has_patch = hasattr(builtins, "get_raw_stream")
-
-    # Import torch to get actual version
-
-    is_torch_2_9 = is_torch_equal("2.9.0") or is_torch_equal("2.9.1")
-
-    if is_torch_2_9:
-        # For torch 2.9.x, the patch should be applied
-        assert has_patch, "get_raw_stream should be patched for torch 2.9.x"
-        # Verify it's callable (it should be the _cuda_getCurrentRawStream function)
-        get_raw_stream = builtins.get_raw_stream  # type: ignore[attr-defined]
-        assert callable(get_raw_stream)
-        # Verify it's the correct function from torch._C
-        from torch._C import _cuda_getCurrentRawStream
-
-        assert get_raw_stream is _cuda_getCurrentRawStream
 
 
 # Inductor can initialize CUDA even for CPU inputs.
@@ -590,6 +574,148 @@ def test_cudagraph_sizes_post_init(
         )
 
 
+@pytest.fixture
+def capture_platform_config(monkeypatch):
+    def resolve(platform, settings=None, *, adaptive=False):
+        monkeypatch.setattr("vllm.platforms.current_platform", platform)
+        monkeypatch.setattr("vllm.config.vllm.current_platform", platform)
+        return EngineArgs(
+            model="facebook/opt-125m",
+            max_model_len=256,
+            max_num_seqs=16,
+            max_num_batched_tokens=256,
+            speculative_config={
+                "method": "draft_model",
+                "model": "facebook/opt-125m",
+                "num_speculative_tokens": 2,
+                "enable_adaptive_verification": adaptive,
+            },
+            compilation_config={
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
+                **(settings or {}),
+            },
+        ).create_engine_config()
+
+    return resolve
+
+
+@pytest.mark.parametrize(
+    "split,settings,prefill,decode,maximum,budget",
+    [
+        (False, {}, [1, 2, 3, 4, 6, 8, 12, 16, 24], [1, 2, 3, 4, 6, 8], 24, None),
+        (True, {}, [1, 5, 17], [1, 3, 7], 21, 21),
+        (
+            True,
+            {"cudagraph_capture_sizes": [1, 6, 12]},
+            [1, 6, 12],
+            [1, 2, 4],
+            16,
+            None,
+        ),
+        (
+            True,
+            {
+                "prefill_cudagraph_capture_token_sizes": [2, 10],
+                "decode_cudagraph_capture_request_sizes": [2, 6],
+            },
+            [2, 10],
+            [2, 6],
+            18,
+            21,
+        ),
+    ],
+    ids=["shared-default", "split-default", "legacy-override", "split-override"],
+)
+def test_platform_capture_policy_preserves_users_and_drafter(
+    capture_platform_config, split, settings, prefill, decode, maximum, budget
+):
+    """Custom policy preserves user overrides and one-token draft coverage."""
+
+    class CapturePlatform(NativePlatform):
+        def get_cudagraph_capture_defaults(self, vllm_config):
+            from vllm.config.compilation import CUDAGraphCaptureDefaults
+
+            if not split:
+                return CUDAGraphCaptureDefaults(legacy_max_tokens=24)
+            return CUDAGraphCaptureDefaults(
+                max_prefill_tokens=17,
+                max_decode_requests=7,
+                max_decode_tokens=21,
+            )
+
+        @classmethod
+        def get_prefill_cudagraph_capture_grid(cls, max_tokens, dense_head=False):
+            sizes = {1, 5, max_tokens}
+            return sorted(s for s in sizes if 1 <= s <= max_tokens)
+
+        @classmethod
+        def get_decode_cudagraph_capture_grid(cls, max_requests):
+            return sorted({s for s in (1, 3, max_requests) if 1 <= s <= max_requests})
+
+    config = capture_platform_config(CapturePlatform(), settings)
+    cc = config.compilation_config
+    assert cc.prefill_cudagraph_capture_token_sizes == prefill
+    assert cc.decode_cudagraph_capture_request_sizes == decode
+    assert cc.max_decode_cudagraph_capture_tokens == budget
+    assert cc.max_cudagraph_capture_size == maximum
+    assert config.get_draft_decode_cudagraph_request_sizes() == [1, 3, 16]
+    assert 16 in cc.cudagraph_capture_sizes
+    resolved = copy.deepcopy({name: getattr(cc, name) for name in _CAPTURE_SIZE_FIELDS})
+    cc = replace(config).compilation_config
+    assert resolved == {name: getattr(cc, name) for name in _CAPTURE_SIZE_FIELDS}
+
+
+def test_platform_adaptive_capture_grid(capture_platform_config):
+    """Adaptive graphs use the platform grid within the decode token budget."""
+
+    class AdaptivePlatform(NativePlatform):
+        @classmethod
+        def get_varlen_decode_cudagraph_capture_grid(cls, max_tokens, dense_head=False):
+            return [1, 7, max_tokens]
+
+    config = capture_platform_config(
+        AdaptivePlatform(),
+        {
+            "max_decode_cudagraph_capture_requests": 4,
+            "max_decode_cudagraph_capture_tokens": 11,
+        },
+        adaptive=True,
+    )
+    assert config.get_varlen_decode_cudagraph_token_sizes(3) == [1, 7, 11]
+    assert 7 in config.compilation_config.cudagraph_capture_sizes
+
+
+def test_platform_capture_grid_cannot_exceed_its_limit(capture_platform_config):
+    """Reject invalid platform sizes before graph buffers are allocated."""
+
+    class InvalidGridPlatform(NativePlatform):
+        @classmethod
+        def get_decode_cudagraph_capture_grid(cls, max_requests):
+            return [max_requests + 1]
+
+    with pytest.raises(ValueError, match="Platform CUDA graph sizes must be integers"):
+        capture_platform_config(InvalidGridPlatform())
+
+
+def test_sm100_capture_defaults_are_cuda_only(capture_platform_config):
+    """Capability 10 on ROCm must not select NVIDIA SM100 capture defaults."""
+    from vllm.platforms.interface import DeviceCapability
+
+    class Capability10Platform(NativePlatform):
+        @classmethod
+        @lru_cache(maxsize=8)
+        def get_device_capability(cls, device_id=0):
+            return DeviceCapability(10, 0)
+
+    cc = capture_platform_config(Capability10Platform()).compilation_config
+    assert cc.max_decode_cudagraph_capture_tokens == (
+        8192 if current_platform.is_cuda() else None
+    )
+    assert cc.max_prefill_cudagraph_capture_tokens == (
+        256 if current_platform.is_cuda() else 96
+    )
+
+
 def _mock_config_for_cudagraph_sizes(
     max_num_seqs: int,
     num_speculative_tokens: int,
@@ -618,13 +744,11 @@ def _mock_config_for_cudagraph_sizes(
     config.diffusion_config = None
     schedule = num_speculative_tokens_per_batch_size
     config.speculative_config = (
-        SimpleNamespace(
+        fake_speculative_config(
             method=method,
             num_speculative_tokens=num_speculative_tokens,
             num_speculative_tokens_per_batch_size=schedule,
             uses_dynamic_speculative_decoding=lambda: schedule is not None,
-            use_multi_module_mtp=lambda: False,
-            use_gemma4_mtp=lambda: False,
             enable_adaptive_verification=False,
         )
         if num_speculative_tokens
@@ -655,6 +779,18 @@ _CAPTURE_SIZE_FIELDS = (
 )
 
 
+def _select_capture_defaults_platform(monkeypatch, sm100):
+    from vllm.platforms.cuda import CudaPlatformBase
+    from vllm.platforms.interface import DeviceCapability
+
+    class CaptureDefaultsPlatform(CudaPlatformBase):
+        @classmethod
+        def get_device_capability(cls, device_id=0):
+            return DeviceCapability(10, 0) if sm100 else DeviceCapability(9, 0)
+
+    monkeypatch.setattr("vllm.config.vllm.current_platform", CaptureDefaultsPlatform())
+
+
 def _resolve_capture_sizes(
     monkeypatch,
     sm100: bool,
@@ -663,11 +799,7 @@ def _resolve_capture_sizes(
 ) -> CompilationConfig:
     """Resolve the capture sizes twice: a resolved config, as
     dataclasses.replace resolves it again, must stay as it is."""
-    monkeypatch.setattr(
-        current_platform,
-        "is_device_capability_family",
-        lambda family, device_id=0: sm100 and family == 100,
-    )
+    _select_capture_defaults_platform(monkeypatch, sm100)
     compilation_config = CompilationConfig(cudagraph_mode=mode, **kwargs)
     config = _mock_config_for_cudagraph_sizes(
         max_num_seqs=1024,
@@ -938,11 +1070,7 @@ def test_adaptive_verification_sees_the_resolved_decode_sizes(
     must reject every config whose resolved decode grid is empty, at config
     time, and accept the rest. Validation runs on the resolved sizes, as in
     `VllmConfig.__post_init__`."""
-    monkeypatch.setattr(
-        current_platform,
-        "is_device_capability_family",
-        lambda family, device_id=0: sm100 and family == 100,
-    )
+    _select_capture_defaults_platform(monkeypatch, sm100)
     compilation_config = CompilationConfig(cudagraph_mode=graph_mode, **kwargs)
     config = _mock_config_for_cudagraph_sizes(
         max_num_seqs=1024,
@@ -1426,7 +1554,7 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
 @pytest.mark.parametrize(
     ("is_blackwell", "expected_max_size"), [(False, 512), (True, 2048)]
 )
-def test_blackwell_cudagraph_default(is_blackwell, expected_max_size):
+def test_blackwell_cudagraph_default(monkeypatch, is_blackwell, expected_max_size):
     # On SM100, prefill graphs reach min(8192, max_num_batched_tokens) tokens.
     vllm_config = VllmConfig()
     vllm_config.model_config = MagicMock(enforce_eager=False)
@@ -1440,12 +1568,8 @@ def test_blackwell_cudagraph_default(is_blackwell, expected_max_size):
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
     )
 
-    with patch.object(
-        current_platform,
-        "is_device_capability_family",
-        return_value=is_blackwell,
-    ):
-        vllm_config._set_cudagraph_sizes()
+    _select_capture_defaults_platform(monkeypatch, is_blackwell)
+    vllm_config._set_cudagraph_sizes()
 
     assert (
         vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
@@ -1533,42 +1657,6 @@ def test_compile_sizes_post_init():
     assert sorted(config.compile_sizes) == [3, 5, 7]
 
 
-def test_inductor_asserts_default_disabled(monkeypatch):
-    """Test that inductor runtime asserts are disabled by default
-    (INFO logging level) on torch < 2.12."""
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
-
-    import importlib
-
-    import vllm.envs
-
-    importlib.reload(vllm.envs)
-
-    config = CompilationConfig()
-    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
-        assert config.inductor_compile_config.get("size_asserts") is False
-        assert config.inductor_compile_config.get("alignment_asserts") is False
-        assert config.inductor_compile_config.get("scalar_asserts") is False
-
-
-def test_inductor_asserts_enabled_in_debug(monkeypatch):
-    """Test that VLLM_LOGGING_LEVEL=DEBUG enables inductor runtime asserts
-    on torch < 2.12."""
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
-
-    import importlib
-
-    import vllm.envs
-
-    importlib.reload(vllm.envs)
-
-    config = CompilationConfig()
-    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
-        assert config.inductor_compile_config.get("size_asserts") is True
-        assert config.inductor_compile_config.get("alignment_asserts") is True
-        assert config.inductor_compile_config.get("scalar_asserts") is True
-
-
 def test_get_inductor_factors_includes_configs():
     """Changing inductor or functorch config must change the cache key factors."""
     from torch._functorch import config as functorch_config
@@ -1585,25 +1673,6 @@ def test_get_inductor_factors_includes_configs():
     with functorch_config.patch("donated_buffer", not functorch_config.donated_buffer):
         patched = get_inductor_factors()
     assert baseline != patched, "functorch config change was not reflected"
-
-
-def test_inductor_asserts_user_override(monkeypatch):
-    """Test that explicit inductor_compile_config overrides the
-    debug-logging default."""
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
-
-    import importlib
-
-    import vllm.envs
-
-    importlib.reload(vllm.envs)
-
-    config = CompilationConfig(
-        inductor_compile_config={"size_asserts": True},
-    )
-    assert config.inductor_compile_config.get("size_asserts") is True
-    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
-        assert config.inductor_compile_config.get("alignment_asserts") is False
 
 
 @pytest.mark.parametrize("deterministic", [False, True])
@@ -1648,14 +1717,8 @@ def test_combo_kernel_explicit_settings_preserved(deterministic, overrides):
         assert config.inductor_compile_config.get(key) == overrides.get(key)
 
 
-@pytest.mark.parametrize("is_cpu,torch_version", [(True, "2.13.0"), (False, "2.8.0")])
-def test_combo_kernel_defaults_require_supported_platform_and_torch(
-    is_cpu, torch_version
-):
-    with (
-        patch("vllm.config.compilation.current_platform.is_cpu", return_value=is_cpu),
-        patch("torch.__version__", torch_version),
-    ):
+def test_combo_kernel_defaults_disabled_on_cpu():
+    with patch("vllm.config.compilation.current_platform.is_cpu", return_value=True):
         config = CompilationConfig()
 
     assert "combo_kernels" not in config.inductor_compile_config

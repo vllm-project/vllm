@@ -552,6 +552,8 @@ class EngineCoreReadyResponse:
     config_hash: str | None = None
     enable_expert_parallel: bool = False
     supports_prompt_logprobs: bool = True
+    allow_missing_mm_embeddings: bool = False
+    max_mm_embeds_per_request: int | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -602,6 +604,8 @@ ready_response = EngineCoreReadyResponse(
     config_hash="0123456789",
     enable_expert_parallel=True,
     supports_prompt_logprobs=False,
+    allow_missing_mm_embeddings=True,
+    max_mm_embeds_per_request=16384,
 )
 
 nixl_stats = {
@@ -614,6 +618,7 @@ nixl_stats = {
     "num_failed_handshakes": [1],
     "num_kv_expired_reqs": [1],
     "num_notifications_after_expiry": [2],
+    "num_declined_expired_reads": [1, 1],
 }
 mooncake_stats = {
     "load_get": [
@@ -624,7 +629,16 @@ mooncake_stats = {
             "status": "ok",
             "num_failed_keys": 0,
         }
-    ]
+    ],
+    "lookup_lease": [
+        {
+            "duration_seconds": 0.002,
+            "num_keys": 3,
+            "num_bytes": 0,
+            "status": "partial_failure",
+            "num_failed_keys": 1,
+        }
+    ],
 }
 mooncake_transfer_stats = {
     "transfer_duration": [0.01, 0.02],
@@ -663,10 +677,30 @@ simple_cpu_offload_stats = {
         "vllm:simple_kv_offload_future_blocks": {(): 7},
     },
 }
-# `OffloadingConnector` stats share the `types`/`data` envelope.
+# `OffloadingConnectorStats.data` as the CPU spec fills it: the `types`/`data`
+# envelope of SimpleCPUOffload, plus the config facts the scheduler sends once,
+# stringified by `set_info`.
 kv_offload_stats = {
-    "types": {"vllm:kv_offload_load_bytes": "counter"},
-    "data": {"vllm:kv_offload_load_bytes": {(): 4096}},
+    "types": {
+        "vllm:kv_offload_load_bytes": "counter",
+        "vllm:kv_offload_load_time": "counter",
+        "vllm:kv_offload_load_size": "histogram",
+        "vllm:kv_offload_cpu_cache_usage_perc": "gauge",
+    },
+    "data": {
+        "vllm:kv_offload_load_bytes": {(): 4096},
+        "vllm:kv_offload_load_time": {(): 0.25},
+        "vllm:kv_offload_load_size": {(): [4096]},
+        "vllm:kv_offload_cpu_cache_usage_perc": {(): 0.5},
+    },
+    "info": [
+        {
+            "cpu_num_chunks": "64",
+            "cpu_blocks_per_chunk": "4",
+            "cpu_kv_cache_size_bytes": "1048576",
+            "cpu_kv_cache_size_tokens": "None",
+        }
+    ],
 }
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
@@ -674,6 +708,7 @@ multi_connector_stats = {
     "MooncakeStoreConnector": mooncake_stats,
     "UMBPStoreConnector": umbp_stats,
     "SimpleCPUOffloadConnector": simple_cpu_offload_stats,
+    "OffloadingConnector": kv_offload_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
 

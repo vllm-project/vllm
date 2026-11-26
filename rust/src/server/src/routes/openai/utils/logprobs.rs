@@ -11,7 +11,7 @@ use vllm_text::{
 use super::types::{
     ChatLogProbs, ChatLogProbsContent, LogProbs, PromptLogprob, PromptLogprobs, TopLogProb,
 };
-use crate::error::{ApiError, server_error};
+use crate::error::{ApiError, bail_server_error, server_error};
 
 /// Convert decoded token-position logprobs into the OpenAI completions
 /// `logprobs` shape.
@@ -101,42 +101,35 @@ pub fn decoded_prompt_logprobs_to_openai(
     })
 }
 
-/// Map decoded prompt logprobs into vLLM-style per-position maps, treating a
-/// missing single-token payload as `[None]`.
-pub fn prompt_logprobs_to_maps(
-    prompt_logprobs: Option<&DecodedPromptLogprobs>,
-    prompt_token_ids: &[u32],
-) -> Result<PromptLogprobs, ApiError> {
-    if let Some(prompt_logprobs) = prompt_logprobs {
-        return Ok(std::iter::once(None)
-            .chain(prompt_logprobs.scored_positions.iter().map(|position| {
-                Some(
-                    position
-                        .entries
-                        .iter()
-                        .map(|entry| {
-                            (
-                                entry.token_id,
-                                PromptLogprob {
-                                    logprob: clamp_logprob(entry.logprob),
-                                    rank: entry.rank,
-                                    decoded_token: entry.token.clone(),
-                                },
-                            )
-                        })
-                        .collect(),
-                )
-            }))
-            .collect());
-    }
-
-    if let [_token_id] = prompt_token_ids {
-        return Ok(vec![None]);
-    }
-
-    Err(server_error!(
-        "prompt_logprobs were requested but generation returned none"
-    ))
+/// Map decoded prompt logprobs into vLLM-style per-position maps.
+///
+/// Like Python's list, which starts with the first token's `None` and gets the
+/// scored positions once prefill completes, this is `[None]` when no prompt
+/// logprobs arrived: a one-token prompt has none to score, and a request that
+/// ended during prefill got none.
+pub fn prompt_logprobs_to_maps(prompt_logprobs: Option<&DecodedPromptLogprobs>) -> PromptLogprobs {
+    let scored_positions =
+        prompt_logprobs.map_or(&[][..], |prompt_logprobs| &prompt_logprobs.scored_positions);
+    std::iter::once(None)
+        .chain(scored_positions.iter().map(|position| {
+            Some(
+                position
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.token_id,
+                            PromptLogprob {
+                                logprob: clamp_logprob(entry.logprob),
+                                rank: entry.rank,
+                                decoded_token: entry.token.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+        }))
+        .collect()
 }
 
 /// Convert decoded token-position logprobs into the OpenAI chat `logprobs`
@@ -185,45 +178,32 @@ pub fn append_openai_logprobs(mut prefix: LogProbs, suffix: LogProbs) -> LogProb
 /// Build the non-stream completions `logprobs` payload from collected text
 /// output.
 ///
-/// When `echoed_prompt` is true, the returned payload matches Python vLLM's
+/// With `echoed_prompt_logprobs`, the returned payload matches Python vLLM's
 /// echoed completions behavior by concatenating prompt and completion logprobs
 /// into one OpenAI `LogProbs` object.
 pub fn collected_logprobs_to_openai(
     collected: &CollectedTextOutput,
-    echoed_prompt: bool,
-    initial_completion_offset: u32,
+    echoed_prompt_logprobs: Option<LogProbs>,
     return_tokens_as_token_ids: bool,
 ) -> Result<LogProbs, ApiError> {
-    if echoed_prompt {
-        let prompt_logprobs = collected.prompt_logprobs.as_ref().ok_or_else(|| {
-            server_error!(
-                "echoed completion logprobs require prompt logprobs but generation returned none"
-            )
-        })?;
-        let prompt_logprobs =
-            decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids)?;
-        let completion_start = text_end_offset(&prompt_logprobs).unwrap_or(0);
-        return match collected.logprobs.as_ref() {
-            Some(completion_logprobs) => Ok(append_openai_logprobs(
-                prompt_logprobs,
-                decoded_logprobs_to_openai(
-                    completion_logprobs,
-                    completion_start,
-                    return_tokens_as_token_ids,
-                )?,
-            )),
-            None => Ok(prompt_logprobs),
-        };
-    }
-
-    let completion_logprobs = collected.logprobs.as_ref().ok_or_else(|| {
-        server_error!("completion response requested logprobs but generation returned none")
-    })?;
-    decoded_logprobs_to_openai(
-        completion_logprobs,
-        initial_completion_offset,
-        return_tokens_as_token_ids,
-    )
+    let completion_start = echoed_prompt_logprobs.as_ref().and_then(text_end_offset).unwrap_or(0);
+    let completion_logprobs = match collected.logprobs.as_ref() {
+        Some(completion_logprobs) => decoded_logprobs_to_openai(
+            completion_logprobs,
+            completion_start,
+            return_tokens_as_token_ids,
+        )?,
+        // A request that generated nothing, such as one aborted during
+        // prefill, has no positions to report.
+        None if collected.token_ids.is_empty() => LogProbs::default(),
+        None => bail_server_error!(
+            "completion response requested logprobs but generation returned none"
+        ),
+    };
+    Ok(match echoed_prompt_logprobs {
+        Some(prompt_logprobs) => append_openai_logprobs(prompt_logprobs, completion_logprobs),
+        None => completion_logprobs,
+    })
 }
 
 /// Format a token entry as either its decoded string or `token_id:{id}`.
@@ -314,9 +294,8 @@ mod tests {
     };
 
     #[test]
-    fn prompt_logprobs_maps_reject_missing_multi_token_payload() {
-        prompt_logprobs_to_maps(None, &[9707, 11])
-            .expect_err("multi-token prompt without payload is an engine failure");
+    fn prompt_logprobs_maps_keep_only_the_first_position_without_payload() {
+        assert_eq!(prompt_logprobs_to_maps(None), vec![None]);
     }
 
     #[test]
@@ -327,7 +306,7 @@ mod tests {
             scored_positions: sample_logprobs().positions,
         };
 
-        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs), &[10, 1]).expect("maps");
+        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs));
         assert_eq!(
             serde_json::to_value(maps).expect("serialize prompt logprobs"),
             serde_json::json!([
@@ -353,7 +332,7 @@ mod tests {
             scored_positions,
         };
 
-        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs), &[10, 3]).unwrap();
+        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs));
         let token_ids = maps[1].as_ref().unwrap().keys().copied().collect::<Vec<_>>();
         assert_eq!(token_ids, [3, 1, 2]);
     }

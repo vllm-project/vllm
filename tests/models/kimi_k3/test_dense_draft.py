@@ -143,7 +143,7 @@ def test_gqa_draft_gets_its_own_group_and_a_fitting_block(
             dtypes=(torch.float32, torch.float32),
             page_size_padded=mla_spec.page_size_bytes,
         ),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     target = {
         f"model.layers.{i}": mla if i % 4 == 3 or i == 92 else kda for i in range(93)

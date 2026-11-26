@@ -19,7 +19,7 @@ from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import round_up
 
 _NUM_LAMPORT_BUFFERS = 3
-_HIDDEN_SIZE = 4608
+_HIDDEN_SIZES = (2304, 4608)
 
 
 def _multicast_memory(size: int, group: dist.ProcessGroup):
@@ -71,7 +71,7 @@ class Inkling2AllReduceWorkspace:
     ) -> "Inkling2AllReduceWorkspace | None":
         if (
             group.size() not in (2, 4, 8)
-            or hidden_size != _HIDDEN_SIZE
+            or hidden_size not in _HIDDEN_SIZES
             or not hasattr(torch.ops._C, "inkling2_allreduce_conv_mix")
             or not has_flashinfer()
         ):
@@ -83,7 +83,7 @@ class Inkling2AllReduceWorkspace:
         )
 
         device = torch.accelerator.current_device_index()
-        supported = torch.cuda.get_device_capability(device)[0] == 10
+        supported = torch.cuda.get_device_capability(device)[0] in (9, 10)
         supported = supported and is_multicast_supported(device)
         if not all_ranks_agree(TorchDistBackend(group=group), supported):
             return None
@@ -161,7 +161,7 @@ def all_reduce_conv_mix(
     stack: torch.Tensor,
     last: torch.Tensor | None,
     queries: torch.Tensor,
-    norm_weight: torch.Tensor,
+    norm_weight: torch.Tensor | None,
     norm_eps: float,
     eps: float = 1e-6,
     two_shot: bool = False,
@@ -172,7 +172,8 @@ def all_reduce_conv_mix(
 
     The partial sum is the bf16 `x`, or `combine = (down, src2dst)`: each
     token's top-k expert rows of `down` summed in order in fp32 and rounded
-    once to bf16. Returns the `(Q, T, D)` bf16 mix outputs.
+    once to bf16. Returns the `(Q, T, D)` bf16 mix outputs, or without
+    `norm_weight` the fp32 mixes before the RMSNorm.
     """
     num_tokens, d = conv_out.shape
     assert num_tokens > 0 and conv_out.is_contiguous()
@@ -190,11 +191,15 @@ def all_reduce_conv_mix(
     assert residual is None or addend is not None
     assert stack.stride(1) == d and stack.stride(2) == 1
     assert queries.dtype == torch.float32 and queries.is_contiguous()
-    assert norm_weight.shape == queries.shape and norm_weight.is_contiguous()
+    if norm_weight is not None:
+        assert norm_weight.shape == queries.shape and norm_weight.is_contiguous()
     assert conv_weight.shape == (d, 4) and conv_weight.is_contiguous()
     assert d == cache.shape[1] * stream_width and cache.stride(3) == 1
     assert positions.dtype == slot_mapping.dtype == torch.int64
-    out = conv_out.new_empty((queries.shape[0], num_tokens, d))
+    out = conv_out.new_empty(
+        (queries.shape[0], num_tokens, d),
+        dtype=torch.float32 if norm_weight is None else conv_out.dtype,
+    )
     torch.ops._C.inkling2_allreduce_conv_mix(
         x,
         None if combine is None else combine[0],

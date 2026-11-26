@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Slow references for the specialized decode tests: plain torch in float64,
-written from the model definitions, never from a vLLM, AITER or Triton kernel.
+"""What the formats a specialized decode uses are defined to do, in float64.
 
-Rounding points a kernel documents are explicit calls here (`bf16_rne`,
-`to_e4m3_rne`, the E8M0 code rules), so a test reproduces them on purpose.
-`tests/models/deepseek_v41/amd/mono/test_primitives.py` proves each rounding
-and code rule bit-exact against the device helpers the kernels use.
+Any model's decode tests can use these: a test names the rule it expects
+(`bf16_rne`, `to_e4m3_rne`, an E8M0 code rule) and compares its kernel against
+it, rather than inheriting whatever rounding some other implementation
+happens to do. `tests/models/deepseek_v41/amd/mono/test_primitives.py` is
+today's only caller, and holds every rule below bit-exact.
 
-This is the formats and rounding half, which is what the primitive tier (T1)
-of #68016 needs. The layer math (RMSNorm, RoPE, MLA, MoE) and the error
-metrics land here next, shared rather than once per model, so that the
-`DecodeNumerics` contract (T2) measures every model the same way."""
+A definition must not be derived from the implementation it checks, nor reach
+for a helper that implementation also reaches for, or a shared bug cancels and
+the test passes. That is about where a definition comes from, not about which
+library writes it down.
+
+Formats, reduction orders, error metrics and the first of the layer math,
+shared across models for the `DecodeNumerics` contract (T2). Error bounds
+are in `bounds.py`."""
 
 import torch
+import torch.nn.functional as F
 
 F64 = torch.float64
 # The smallest positive normal float32, which the E8M0 code rules floor at,
@@ -59,6 +64,18 @@ def dequant_fp8(
     fp8_dtype = torch.float8_e4m3fnuz if fnuz else torch.float8_e4m3fn
     values = quantized.view(torch.uint8).view(fp8_dtype).double()
     return values * _expand(e8m0(scales), block)
+
+
+def dequant_mxfp4(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """fp4x2 bytes [..., K / 2] (the low nibble the lower K) with E8M0 codes
+    [..., K / 32] -> float64 [..., K]."""
+    assert codes.dtype == torch.uint8, f"`codes` holds fp4x2 bytes, got {codes.dtype}"
+    assert not scales.is_floating_point(), (
+        f"`scales` holds E8M0 codes, got {scales.dtype}"
+    )
+    table = E2M1_VALUES.to(codes.device)
+    nibbles = torch.stack([table[(codes & 15).long()], table[(codes >> 4).long()]], -1)
+    return nibbles.flatten(-2) * e8m0(scales).repeat_interleave(32, -1)
 
 
 # ---------------------------------------------------------------- rounding
@@ -123,3 +140,48 @@ def mx_code_vllm(amax: torch.Tensor, fmax: float) -> torch.Tensor:
     / fmax))) + 127, clamped to [0, 254] (0 for an all-zero group)."""
     scaled = f32_rne(amax.double().clamp(min=FLT_MIN) / fmax)
     return (_ceil_log2(scaled) + 127).clamp(0, 254)
+
+
+# ---------------------------------------------------------------- route
+def sqrt_softplus_score(logits: torch.Tensor) -> torch.Tensor:
+    """`sqrt(softplus(logits))`, the DeepSeek-V4.1 router score. Like the
+    kernels, `F.softplus` returns the logit itself above 20."""
+    return torch.sqrt(F.softplus(logits.double()))
+
+
+# ---------------------------------------------------------------- reductions
+# Lanes per wave on CDNA.
+WAVE = 64
+
+
+def wave_butterfly(
+    values: torch.Tensor, offsets: tuple[int, ...], op: str
+) -> torch.Tensor:
+    """Lane-xor butterfly reduction of `values` (float32, whole waves) with
+    `op` ('add' or 'max'): for each offset in order, lane l combines with lane
+    `l ^ offset`. The order matters because float32 addition is not
+    associative."""
+    assert op in ("add", "max"), f"unknown butterfly op {op!r}"
+    assert values.numel() % WAVE == 0, (
+        f"the butterfly folds whole waves, got {values.numel()} values"
+    )
+    combine = torch.maximum if op == "max" else torch.add
+    folded = values.view(-1, WAVE)
+    lane = torch.arange(WAVE, device=values.device)
+    for offset in offsets:
+        folded = combine(folded, folded[:, lane ^ offset])
+    return folded.flatten()
+
+
+# ---------------------------------------------------------------- metrics
+# (mantissa bits, minimum normal exponent) per dtype, as `round_float` takes.
+_FORMATS = {torch.float32: (23, -126)}
+
+
+def ulp(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """The ulp of `dtype` at `|x|` (the denormal spacing below its smallest
+    normal). `x` is usually a float64 reference, hence the explicit `dtype`."""
+    assert dtype in _FORMATS, f"no ulp for {dtype}"
+    mantissa_bits, min_exponent = _FORMATS[dtype]
+    exponent = torch.floor(torch.log2(x.double().abs())).clamp(min=min_exponent)
+    return torch.exp2(exponent - mantissa_bits)

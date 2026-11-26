@@ -221,6 +221,7 @@ _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
 _ON_GFX115X = "gfx115" in _GCN_ARCH
+_ON_GFX117X = any(arch in _GCN_ARCH for arch in ["gfx1170", "gfx1171"])
 _ON_GFX1201 = "gfx1201" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
@@ -325,6 +326,10 @@ def on_gfx1151() -> bool:
 
 def on_gfx115x() -> bool:
     return _ON_GFX115X
+
+
+def on_gfx117x() -> bool:
+    return _ON_GFX117X
 
 
 def on_gfx1201() -> bool:
@@ -749,6 +754,7 @@ class RocmPlatform(Platform):
                 AttentionBackendEnum.ROCM_ATTN,
             )
         is_turboquant_run = _uses_turboquant(vllm_config)
+        is_ultraquant_run = _uses_ultraquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
                 invalid_reasons_i = _get_invalid_reasons(
@@ -756,6 +762,7 @@ class RocmPlatform(Platform):
                     device_capability,
                     attn_selector_config,
                     is_turboquant_run=is_turboquant_run,
+                    is_ultraquant_run=is_ultraquant_run,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -795,7 +802,7 @@ class RocmPlatform(Platform):
             except ImportError:
                 sel_invalid_reasons = ["ImportError"]
             if not sel_invalid_reasons:
-                logger.info_once(
+                logger.debug_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
                 )
@@ -895,7 +902,7 @@ class RocmPlatform(Platform):
                 valid_str,
             )
         else:
-            logger.info_once(
+            logger.debug_once(
                 "Using %s backend out of potential backends: %s.",
                 selected_backend.name,
                 valid_str,
@@ -924,7 +931,7 @@ class RocmPlatform(Platform):
                 f"Backend {backend} is not supported for vit attention. "
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
         from importlib.util import find_spec
@@ -936,7 +943,7 @@ class RocmPlatform(Platform):
             and on_cdna()
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info_once("Using AITER Flash Attention backend for ViT model.")
+            logger.debug_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
         if (
@@ -944,10 +951,10 @@ class RocmPlatform(Platform):
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info_once("Using Flash Attention backend for ViT model.")
+            logger.debug_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        logger.info_once("Using Torch SDPA backend for ViT model.")
+        logger.debug_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
@@ -1108,17 +1115,14 @@ class RocmPlatform(Platform):
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
-        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
-            compilation_config.custom_ops.append("+quant_fp8")
+        if use_aiter_fp8_linear:
+            compilation_config.enable_custom_op_by_default("quant_fp8")
 
         # Only RMSNorm's custom op reaches rms_norm_batch_invariant. Inductor
         # lowers the native one to a reduction whose block size it picks by
         # benchmarking, so the summation order varies with the batch and run.
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and "-rms_norm" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm")
+        if envs.VLLM_BATCH_INVARIANT:
+            compilation_config.enable_custom_op_by_default("rms_norm")
 
         if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
             logger.warning_once(
@@ -1129,26 +1133,17 @@ class RocmPlatform(Platform):
             compilation_config.custom_ops.remove("-grouped_topk")
         # Ensure grouped_topk is always enabled when using AITER if
         # its not disabled by user
-        if (
-            use_aiter_fused_moe
-            and "+grouped_topk" not in compilation_config.custom_ops
-            and "-grouped_topk" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+grouped_topk")
+        if use_aiter_fused_moe:
+            compilation_config.enable_custom_op_by_default("grouped_topk")
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
-        compilation_config.custom_ops.append("+sparse_attn_indexer")
+        compilation_config.enable_custom_op_by_default("sparse_attn_indexer")
 
         # Default the gated RMSNorm custom op on for unquantized models. Quantized
         # is untested in serving.
         model_config = vllm_config.model_config
-        if (
-            model_config is not None
-            and model_config.quantization is None
-            and "+rms_norm_gated" not in compilation_config.custom_ops
-            and "-rms_norm_gated" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm_gated")
+        if model_config is not None and model_config.quantization is None:
+            compilation_config.enable_custom_op_by_default("rms_norm_gated")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
