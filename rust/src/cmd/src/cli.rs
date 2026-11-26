@@ -1483,73 +1483,28 @@ pub struct ServeArgs {
     pub data_parallel_lb: DataParallelLbArgs,
 }
 
-/// Processes and settings for one `vllm-rs serve` invocation.
-pub(super) enum ServeConfig {
-    Frontend(FrontendConfig),
-    ManagedEngine {
-        engine: ManagedEngineConfig,
-        frontend: Option<FrontendConfig>,
-        shutdown_timeout: Duration,
-    },
-}
-
 impl ServeArgs {
-    pub(super) fn resolve_config(&self) -> anyhow::Result<ServeConfig> {
-        if let Some(url) = self.remote_generation_url.as_deref() {
-            let mut server = self.to_server_config();
-            if let Some(value) = self.managed_engine.max_model_len.as_deref() {
-                let Some(limit) = parse_human_readable_int(value)
-                    .and_then(|n| u32::try_from(n).ok())
-                    .and_then(NonZeroU32::new)
-                else {
-                    anyhow::bail!("remote --max-model-len must be a positive token count");
-                };
-                server.max_model_len = Some(limit);
-            }
-            return Ok(ServeConfig::Frontend(FrontendConfig {
-                server,
-                llm_source: LlmSource::RemoteGrpc(url.to_owned()),
-            }));
-        }
-        let topology = self.data_parallel_lb.resolve(&self.managed_engine, self.headless)?;
-        let handshake_port = self.managed_engine.resolve_handshake_port()?;
+    /// Build the frontend configuration when generation runs on a remote gRPC endpoint.
+    pub(super) fn remote_frontend_config(&self) -> anyhow::Result<Option<FrontendConfig>> {
+        let Some(url) = self.remote_generation_url.as_ref() else {
+            return Ok(None);
+        };
 
-        if self.managed_engine.data_parallel_size_local == Some(0) {
-            if self.headless {
-                anyhow::bail!("cannot combine `--headless` with `--data-parallel-size-local 0`");
-            }
-
-            let handshake_address = self.managed_engine.handshake_address(handshake_port);
-            tracing::info!(
-                %handshake_address,
-                engine_count = self.managed_engine.data_parallel_size,
-                "running Rust frontend without a managed local Python engine"
-            );
-            let config = self.to_frontend_config(handshake_address, &topology);
-            return Ok(ServeConfig::Frontend(config));
+        let mut server = self.to_server_config();
+        if let Some(value) = self.managed_engine.max_model_len.as_deref() {
+            let Some(limit) = parse_human_readable_int(value)
+                .and_then(|n| u32::try_from(n).ok())
+                .and_then(NonZeroU32::new)
+            else {
+                anyhow::bail!("remote --max-model-len must be a positive token count");
+            };
+            server.max_model_len = Some(limit);
         }
 
-        // The frontend owning rank 0 hosts the deployment's handshake. In hybrid or
-        // external DP LB, another node's frontend serves only its engines' second
-        // handshake, on a local IPC endpoint.
-        let client_handshake_address = (!self.headless
-            && topology.frontend_engine_start_index() != 0)
-            .then(frontend_ipc_handshake_address);
-        let engine_config = self.to_managed_engine_config(
-            handshake_port,
-            &topology,
-            client_handshake_address.clone(),
-        );
-        let frontend = (!self.headless).then(|| {
-            let address =
-                client_handshake_address.unwrap_or_else(|| engine_config.handshake_address());
-            self.to_frontend_config(address, &topology)
-        });
-        Ok(ServeConfig::ManagedEngine {
-            engine: engine_config,
-            frontend,
-            shutdown_timeout: self.runtime.shutdown_timeout(),
-        })
+        Ok(Some(FrontendConfig {
+            server,
+            llm_source: LlmSource::RemoteGrpc(url.clone()),
+        }))
     }
 
     /// Build the server and engine-core settings for `serve` when the frontend
@@ -1741,7 +1696,7 @@ fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -
 
 /// Allocate a fresh IPC handshake endpoint for a frontend that serves only its
 /// node's engines (hybrid or external DP LB).
-fn frontend_ipc_handshake_address() -> String {
+pub fn frontend_ipc_handshake_address() -> String {
     let preferred_base_path = std::env::var_os("VLLM_RPC_BASE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);

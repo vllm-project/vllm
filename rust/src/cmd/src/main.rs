@@ -8,14 +8,14 @@ use std::ffi::OsStr;
 use std::process::{ExitCode, ExitStatus};
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
 use vllm_tracing::LogLevel;
 
-use crate::cli::{BenchCommand, Cli, Command, ServeConfig};
+use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -165,23 +165,58 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
-            let (engine_config, frontend, shutdown_timeout) = match args.resolve_config()? {
-                ServeConfig::Frontend(config) => {
-                    return config.into_server().serve(shutdown_signal()).await;
+            if let Some(config) = args.remote_frontend_config()? {
+                return config.into_server().serve(shutdown_signal()).await;
+            }
+
+            let topology = args.data_parallel_lb.resolve(&args.managed_engine, args.headless)?;
+            let handshake_port = args.managed_engine.resolve_handshake_port()?;
+
+            if args.managed_engine.data_parallel_size_local == Some(0) {
+                if args.headless {
+                    bail!("cannot combine `--headless` with `--data-parallel-size-local 0`");
                 }
-                ServeConfig::ManagedEngine {
-                    engine,
-                    frontend,
-                    shutdown_timeout,
-                } => (engine, frontend, shutdown_timeout),
-            };
+
+                let handshake_address = args.managed_engine.handshake_address(handshake_port);
+                info!(
+                    %handshake_address,
+                    engine_count = args.managed_engine.data_parallel_size,
+                    "running Rust frontend without a managed local Python engine"
+                );
+                let config = args.to_frontend_config(handshake_address, &topology);
+                return config.into_server().serve(shutdown_signal()).await;
+            }
+
+            let shutdown_timeout = args.runtime.shutdown_timeout();
+            // The frontend owning rank 0 hosts the deployment's handshake. In hybrid or
+            // external DP LB, another node's frontend serves only its engines' second
+            // handshake, on a local IPC endpoint.
+            let client_handshake_address = (!args.headless
+                && topology.frontend_engine_start_index() != 0)
+                .then(frontend_ipc_handshake_address);
+            let engine_config = args.to_managed_engine_config(
+                handshake_port,
+                &topology,
+                client_handshake_address.clone(),
+            );
+            let handshake_address =
+                client_handshake_address.unwrap_or_else(|| engine_config.handshake_address());
+
             let engine = ManagedEngineHandle::spawn(engine_config)
                 .await
                 .context("failed to start managed Python headless engine")?;
 
             let shutdown = shutdown_signal();
 
-            let mut serve_task = if let Some(config) = frontend {
+            let mut serve_task = if args.headless {
+                info!("running managed Python headless engine without Rust frontend");
+                let shutdown = shutdown.clone();
+                tokio::spawn(async move {
+                    shutdown.cancelled().await;
+                    Ok(())
+                })
+            } else {
+                let config = args.to_frontend_config(handshake_address, &topology);
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     let result = config.into_server().serve(shutdown).await;
@@ -189,13 +224,6 @@ async fn async_main(cli: Cli) -> Result<()> {
                         info!("OpenAI server shut down gracefully");
                     }
                     result
-                })
-            } else {
-                info!("running managed Python headless engine without Rust frontend");
-                let shutdown = shutdown.clone();
-                tokio::spawn(async move {
-                    shutdown.cancelled().await;
-                    Ok(())
                 })
             };
 

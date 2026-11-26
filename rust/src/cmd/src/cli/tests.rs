@@ -18,7 +18,7 @@ use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
-    BenchCommand, Cli, Command, DtypeArg, FrontendConfig, LlmSource, LogStatsInterval, ServeConfig,
+    BenchCommand, Cli, Command, DtypeArg, FrontendConfig, LlmSource, LogStatsInterval,
     SharedRuntimeArgs, parse_int_flag, parse_runtime_args_json,
 };
 
@@ -1453,10 +1453,10 @@ fn remote_generation_resolves_frontend_only_config() {
     };
     for (flag, expected) in [(None, None), (Some("1K"), Some(1024))] {
         serve.managed_engine.max_model_len = flag.map(String::from);
-        let ServeConfig::Frontend(FrontendConfig {
+        let FrontendConfig {
             llm_source: LlmSource::RemoteGrpc(url),
             server,
-        }) = serve.resolve_config().unwrap()
+        } = serve.remote_frontend_config().unwrap().unwrap()
         else {
             panic!("expected a frontend with a remote gRPC source");
         };
@@ -1464,7 +1464,7 @@ fn remote_generation_resolves_frontend_only_config() {
         assert_eq!(server.max_model_len.map(|n| n.get()), expected);
     }
     serve.managed_engine.max_model_len = Some("auto".into());
-    assert!(serve.resolve_config().is_err());
+    assert!(serve.remote_frontend_config().is_err());
 
     let error = Cli::try_parse_from(args.into_iter().chain(["--headless"])).unwrap_err();
     assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
@@ -3451,22 +3451,12 @@ fn serve_args_reject_flags_before_model() {
 
 #[test]
 fn serve_args_accept_headless_mode() {
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--headless",
-        "--handshake-port=62100",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--headless"]).unwrap();
 
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert!(matches!(
-        args.resolve_config().unwrap(),
-        ServeConfig::ManagedEngine { frontend: None, .. }
-    ));
+    assert!(args.headless);
 }
 
 #[test]
@@ -3838,17 +3828,11 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let ServeConfig::ManagedEngine {
-        mut engine,
-        frontend: Some(config),
-        ..
-    } = args.resolve_config().unwrap()
-    else {
-        panic!("expected a managed engine with a frontend");
-    };
+    let topology = topology(&args);
 
     // A non-zero rank's frontend serves only its own engines' second handshake,
     // over local IPC, and runs no coordinator.
+    let config = args.to_frontend_config("ipc:///tmp/vllm-rs-h".to_string(), &topology);
     let TransportMode::HandshakeOwner {
         handshake_address,
         engine_start_index,
@@ -3860,11 +3844,7 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
     else {
         panic!("expected handshake-owned transport");
     };
-    assert!(handshake_address.starts_with("ipc://"));
-    assert_eq!(
-        engine.client_handshake_address.as_ref(),
-        Some(handshake_address)
-    );
+    assert_eq!(handshake_address, "ipc:///tmp/vllm-rs-h");
     assert_eq!(
         (*engine_start_index, *engine_count, *data_parallel_size),
         (2, 2, 4)
@@ -3877,8 +3857,8 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
     assert_eq!(config.engine_core().effective_coordinator_mode(true), None);
 
     // The engines dial the rank-0 handshake and this frontend's local one.
-    // Normalize the generated IPC address for the command snapshot.
-    engine.client_handshake_address = Some("ipc:///tmp/vllm-rs-h".to_string());
+    let engine =
+        args.to_managed_engine_config(13345, &topology, Some("ipc:///tmp/vllm-rs-h".to_string()));
     let command = engine.to_command();
     expect![[r#"
         [
@@ -4238,7 +4218,6 @@ fn serve_frontend_config_does_not_manage_engine_without_local_engines() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--handshake-port=29550",
         "--data-parallel-address",
         "10.99.48.128",
         "--data-parallel-size",
@@ -4251,9 +4230,7 @@ fn serve_frontend_config_does_not_manage_engine_without_local_engines() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let ServeConfig::Frontend(config) = args.resolve_config().unwrap() else {
-        panic!("external engines must run only the frontend here");
-    };
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
 
     assert!(!config.engine_core().manages_engine);
 }
