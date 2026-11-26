@@ -248,10 +248,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Cohere2ForCausalLM": _HfExamplesInfo("CohereLabs/c4ai-command-r7b-12-2024"),
     "Cohere2MoeForCausalLM": _HfExamplesInfo("CohereLabs/North-Mini-Code-1.0"),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm"),
-    # FIXME: databricks/dbrx-instruct has been deleted
-    "DbrxForCausalLM": _HfExamplesInfo(
-        "databricks/dbrx-instruct", is_available_online=False
-    ),
     "DeciLMForCausalLM": _HfExamplesInfo(
         "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
         trust_remote_code=True,
