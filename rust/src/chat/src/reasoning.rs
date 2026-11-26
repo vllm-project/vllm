@@ -23,6 +23,14 @@ use serde_json::{Number, Value, json};
 use crate::error::{Result, invalid_reasoning_control};
 use crate::request::ChatRequest;
 
+/// Requested reasoning-history policy for a renderer that supports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningHistory {
+    /// Keep prior reasoning while thinking is enabled; disabled mode ignores it.
+    All,
+}
+
 /// A model-specific reasoning effort, before or after renderer lowering.
 ///
 /// Strings preserve model-specific names; JSON numbers preserve integer and

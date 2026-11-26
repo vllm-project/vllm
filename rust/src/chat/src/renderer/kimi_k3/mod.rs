@@ -69,6 +69,10 @@ impl KimiK3ChatRenderer {
 }
 
 impl ChatRenderer for KimiK3ChatRenderer {
+    fn supports_reasoning_history(&self) -> bool {
+        true
+    }
+
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
         let reasoning =

@@ -94,6 +94,11 @@ pub trait ChatRenderer: Send + Sync {
     fn render_completion_suffix(&self, _prompt: &str, _suffix: &str) -> Option<String> {
         None
     }
+
+    /// Whether this renderer honors an explicit reasoning-history policy.
+    fn supports_reasoning_history(&self) -> bool {
+        false
+    }
 }
 
 /// Shared trait-object form of [`ChatRenderer`].
