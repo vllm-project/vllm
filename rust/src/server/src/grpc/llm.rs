@@ -99,37 +99,13 @@ impl Llm for GrpcLlm {
         let external_request_id = std::mem::take(&mut request.request_id);
         let rpc_request_id = Uuid::new_v4();
         let grpc_request = convert::to_grpc_request(&self.model, rpc_request_id, request)?;
-        let call = Arc::new(InflightRequest {
-            external_request_id,
-            cancel: CancellationToken::new(),
-            response: Mutex::new(None),
-        });
-        self.inflight.lock().unwrap().insert(rpc_request_id, call.clone());
-        let guard = RequestGuard {
-            rpc_request_id,
-            call,
-            inflight: self.inflight.clone(),
-        };
+        let guard = RequestGuard::register(&self.inflight, rpc_request_id, external_request_id);
         let mut client = InferenceClient::new(self.channel.clone());
         let response = tokio::select! {
             _ = guard.call.cancel.cancelled() => return Err(remote_error("request aborted")),
             response = client.generate_stream(grpc_request) => response.map_err(status_to_llm_error)?,
         };
-        {
-            let mut stream = guard.call.response.lock().unwrap();
-            if guard.call.cancel.is_cancelled() {
-                return Err(remote_error("request aborted"));
-            }
-            *stream = Some(response.into_inner());
-        }
-        let external_request_id = guard.call.external_request_id.clone();
-        let frames = futures::stream::try_unfold(guard, |guard| async move {
-            let frame = guard.call.next_response().await?;
-            Ok(frame.map(|frame| (frame, guard)))
-        });
-        Ok(vec![
-            generate_outputs_from_proto(external_request_id, frames).boxed(),
-        ])
+        Ok(vec![guard.into_output_stream(response.into_inner())?])
     }
     async fn abort(&self, external_ids: &[String]) -> Result<()> {
         let calls: Vec<_> = self
@@ -227,6 +203,47 @@ struct RequestGuard {
     call: Arc<InflightRequest>,
     inflight: InflightRequests,
 }
+
+impl RequestGuard {
+    fn register(
+        inflight: &InflightRequests,
+        rpc_request_id: Uuid,
+        external_request_id: String,
+    ) -> Self {
+        let call = Arc::new(InflightRequest {
+            external_request_id,
+            cancel: CancellationToken::new(),
+            response: Mutex::new(None),
+        });
+        inflight.lock().unwrap().insert(rpc_request_id, call.clone());
+        Self {
+            rpc_request_id,
+            call,
+            inflight: inflight.clone(),
+        }
+    }
+
+    fn into_output_stream(
+        self,
+        response: Streaming<pb::GenerateResponse>,
+    ) -> Result<BoxGenerateOutputStream> {
+        {
+            let mut stream = self.call.response.lock().unwrap();
+            // Abort can race with the arrival of the response headers.
+            if self.call.cancel.is_cancelled() {
+                return Err(remote_error("request aborted"));
+            }
+            *stream = Some(response);
+        }
+        let external_request_id = self.call.external_request_id.clone();
+        let frames = futures::stream::try_unfold(self, |guard| async move {
+            let frame = guard.call.next_response().await?;
+            Ok(frame.map(|frame| (frame, guard)))
+        });
+        Ok(generate_outputs_from_proto(external_request_id, frames).boxed())
+    }
+}
+
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.inflight.lock().unwrap().remove(&self.rpc_request_id);
