@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 __all__ = [
@@ -350,10 +349,12 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def is_supported_config(
         cls, moe_config, weight_key, activation_key, activation_format
     ):
-        if not cls._supports_current_device():
-            return False, (
-                f"kernel does not support current device {current_platform.device_name}"
-            )
+        supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not supported:
+            return supported, reason
+
         from vllm.platforms.rocm import on_gfx1250
 
         parallel_config = moe_config.moe_parallel_config
@@ -374,9 +375,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
                 "gfx1250: SILU falls back to the a8w4 kernel there, which "
                 "takes no expert_map"
             )
-        return super().is_supported_config(
-            cls, moe_config, weight_key, activation_key, activation_format
-        )
+        return True, None
 
     @staticmethod
     def _supports_current_device() -> bool:
