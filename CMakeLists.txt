@@ -915,7 +915,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
                      "later if you intend on running FP8 quantized models on "
                      "Blackwell.")
     else()
-      message(STATUS "Not building scaled_mm_c3x_110 as no compatible archs found "
+      message(STATUS "Not building scaled_mm_c3x_sm110 as no compatible archs found "
                      "in CUDA target architectures")
     endif()
   endif()

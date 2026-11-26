@@ -1,16 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
+import copy
+import itertools
 import os
 
 # Disable DeepGEMM for this benchmark to use CUTLASS
 os.environ["VLLM_USE_DEEP_GEMM"] = "0"
 
 import torch
+from weight_shapes import WEIGHT_SHAPES
 
 from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+    TritonFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -71,25 +81,31 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
     weight_group_shape = GroupShape(block_n, block_k)
     act_quant_group_shape = GroupShape(1, block_k)  # Per-token, per-group quantization
 
-    linear_op = init_fp8_linear_kernel(
+    kernel = init_fp8_linear_kernel(
         weight_quant_key=create_fp8_quant_key(
             static=True, group_shape=weight_group_shape
         ),
         activation_quant_key=create_fp8_quant_key(
             static=False, group_shape=act_quant_group_shape
         ),
-        out_dtype=torch.get_default_dtype(),
+        input_dtype=A_ref.dtype,
+        out_dtype=A_ref.dtype,
+        weight_shape=(N, K),
+        force_kernel=(
+            CutlassFp8BlockScaledMMKernel
+            if use_cutlass
+            else TritonFp8BlockScaledMMKernel
+        ),
         module_name="build_w8a8_block_fp8_runner",
     )
 
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(B, requires_grad=False)
+    layer.weight_scale_inv = torch.nn.Parameter(Bs, requires_grad=False)
+    kernel.process_weights_after_loading(layer)
+
     def run():
-        return linear_op.apply(
-            input=A_ref,
-            weight=B,
-            weight_scale=Bs,
-            input_scale=None,
-            bias=None,
-        )
+        return kernel.apply_weights(layer, A_ref)
 
     return run
 
@@ -148,17 +164,40 @@ def benchmark_tflops(batch_size, provider, N, K, block_size=(128, 128)):
     return to_tflops(ms), to_tflops(max_ms), to_tflops(min_ms)
 
 
+def prepare_shapes(args):
+    if not args.models:
+        return [(N, K, "DeepSeek-V3") for N, K in DEEPSEEK_V3_SHAPES]
+    out = []
+    for model, tp_size in itertools.product(args.models, args.tp_sizes):
+        for KN, tp_dim in copy.deepcopy(WEIGHT_SHAPES[model]):
+            KN[tp_dim] //= tp_size
+            K, N = KN
+            out.append((N, K, model))
+    return out
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        type=str,
+        choices=list(WEIGHT_SHAPES.keys()),
+        help="Models from weight_shapes.py (default: DeepSeek-V3 shapes)",
+    )
+    parser.add_argument("--tp-sizes", nargs="+", type=int, default=[1])
+    args = parser.parse_args()
+
     block_size = (128, 128)
 
-    for N, K in DEEPSEEK_V3_SHAPES:
-        print(f"\nBenchmarking DeepSeek-V3, N={N} K={K}")
-
-        print(f"TFLOP/s comparison (block_size={block_size}):")
+    for N, K, model in prepare_shapes(args):
+        print(f"\n{model}, N={N} K={K}, block_size={block_size}, TFLOP/s:")
+        save_path = f"bench_block_fp8_res_n{N}_k{K}"
+        os.makedirs(save_path, exist_ok=True)
         benchmark_tflops.run(
             print_data=True,
-            # show_plots=False,
-            # save_path=f"bench_w8a8_block_fp8_tflops_n{N}_k{K}",
+            show_plots=True,
+            save_path=save_path,
             N=N,
             K=K,
             block_size=block_size,
