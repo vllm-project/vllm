@@ -221,8 +221,8 @@ class ARCCachePolicy(CachePolicy):
             tuple[OffloadKey, ChunkStatus, bool]
         ] = []  # (key, chunk, from_t1)
         virtual_t1_size = len(self.t1)
-        # Keep the scans monotonic: restarting from the LRU end after every
-        # selection makes a batch eviction quadratic in the number of chunks.
+        target_t1_size = int(self.target_t1_size)
+        # Scan each list monotonically within an eviction class.
         t1_iter = iter(self.t1.items())
         t2_iter = iter(self.t2.items())
         selected: set[OffloadKey] = set()
@@ -232,14 +232,21 @@ class ARCCachePolicy(CachePolicy):
         cursors: dict[int, int] = {}
 
         def next_candidate(
-            entries: Iterator[tuple[OffloadKey, ChunkStatus]],
+            entries: Iterator[tuple[OffloadKey, ChunkStatus]], retained: bool
         ) -> tuple[OffloadKey, ChunkStatus] | None:
             for key, chunk in entries:
-                if chunk.ref_cnt == 0 and key not in protected and key not in selected:
+                if (
+                    chunk.ref_cnt == 0
+                    and key not in protected
+                    and key not in selected
+                    and chunk.retained == retained
+                ):
                     return key, chunk
             return None
 
-        def take_tail(state: _RunningT1Keys) -> tuple[OffloadKey, ChunkStatus] | None:
+        def take_tail(
+            state: _RunningT1Keys, retained: bool
+        ) -> tuple[OffloadKey, ChunkStatus] | None:
             idx = cursors.get(id(state), len(state.entries))
             while idx > 0:
                 idx -= 1
@@ -247,21 +254,25 @@ class ARCCachePolicy(CachePolicy):
                 if key in selected:
                     continue
                 chunk = self.t1[key]
-                if chunk.ref_cnt == 0 and key not in protected:
+                if (
+                    chunk.ref_cnt == 0
+                    and key not in protected
+                    and chunk.retained == retained
+                ):
                     cursors[id(state)] = idx
                     selected.add(key)
                     return key, chunk
             cursors[id(state)] = 0
             return None
 
-        def next_t1_candidate() -> tuple[OffloadKey, ChunkStatus] | None:
+        def next_t1_candidate(retained: bool) -> tuple[OffloadKey, ChunkStatus] | None:
             nonlocal draining
             if draining is not None:
-                entry = take_tail(draining)
+                entry = take_tail(draining, retained)
                 if entry is not None:
                     return entry
                 draining = None
-            entry = next_candidate(t1_iter)
+            entry = next_candidate(t1_iter, retained)
             if entry is None:
                 return None
             owner = self._running.get(entry[0])
@@ -272,32 +283,42 @@ class ARCCachePolicy(CachePolicy):
             # request ages as that chunk but gives up its chunks tail first,
             # since evicting its head would strand the rest of its prefix.
             draining = state
-            entry = take_tail(state)
+            entry = take_tail(state, retained)
             assert entry is not None
             return entry
 
-        for _ in range(n):
-            candidate: tuple[OffloadKey, ChunkStatus, bool] | None = None
+        for retained in (False, True):
+            if retained:
+                # Revisit the retained chunks skipped on the first pass.
+                t1_iter = iter(self.t1.items())
+                t2_iter = iter(self.t2.items())
+                draining = None
+                cursors.clear()
 
-            if virtual_t1_size >= int(self.target_t1_size):
-                entry = next_t1_candidate()
-                if entry is not None:
-                    candidate = (*entry, True)
+            while len(candidates) < n:
+                entry = None
+                from_t1 = virtual_t1_size >= target_t1_size
+                if from_t1:
+                    entry = next_t1_candidate(retained)
+                if entry is None:
+                    entry = next_candidate(t2_iter, retained)
+                    from_t1 = False
+                if entry is None:
+                    entry = next_t1_candidate(retained)
+                    from_t1 = True
+                if entry is None:
+                    break
+
+                key, chunk = entry
+                candidates.append((key, chunk, from_t1))
+                if from_t1:
                     virtual_t1_size -= 1
 
-            if candidate is None:
-                entry = next_candidate(t2_iter)
-                if entry is not None:
-                    candidate = (*entry, False)
+            if len(candidates) == n:
+                break
 
-            if candidate is None:
-                entry = next_t1_candidate()
-                if entry is None:
-                    return None
-                candidate = (*entry, True)
-                virtual_t1_size -= 1
-
-            candidates.append(candidate)
+        if len(candidates) < n:
+            return None
 
         # Apply all evictions now that we know n candidates exist.
         result: list[tuple[OffloadKey, ChunkStatus]] = []
