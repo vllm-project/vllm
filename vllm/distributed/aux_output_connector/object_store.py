@@ -59,6 +59,9 @@ def create_aux_object_store(name: str, extra_config: dict[str, Any]) -> AuxObjec
     return resolve_obj_by_qualname(name).create(**extra_config)
 
 
+_NO_AVAILABLE_HANDLE = -200
+
+
 class MooncakeAuxObjectStore:
     """`AuxObjectStore` on a standalone Mooncake store."""
 
@@ -106,10 +109,14 @@ class MooncakeAuxObjectStore:
         return cls(store, replicate_config)
 
     def put_batch(self, keys: Sequence[str], values: Sequence[bytes]) -> None:
-        """Write every object, or raise `BlockObjectStoreError`."""
+        """Write every object; raise `BlockObjectStoreError` if Mooncake has no
+        room for them (`NO_AVAILABLE_HANDLE`), `RuntimeError` on other errors."""
         code = self._store.put_batch(list(keys), list(values), self._replicate_config)
         if code:
-            raise BlockObjectStoreError(
+            error = (
+                BlockObjectStoreError if code == _NO_AVAILABLE_HANDLE else RuntimeError
+            )
+            raise error(
                 f"Mooncake failed to write {len(keys)} auxiliary-output "
                 f"objects from {keys[0]!r}: {code}"
             )
@@ -119,7 +126,10 @@ class MooncakeAuxObjectStore:
         return self._store.get(key) or None
 
     def remove_prefix(self, prefix: str) -> None:
-        self._store.remove_by_regex(f"^{_escape(prefix)}", True)
+        if (code := self._store.remove_by_regex(f"^{_escape(prefix)}", True)) < 0:
+            raise RuntimeError(
+                f"Mooncake failed to remove the objects under {prefix!r}: {code}"
+            )
 
     def close(self) -> None:
         self._store.close()

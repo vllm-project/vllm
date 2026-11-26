@@ -165,6 +165,32 @@ def test_store_is_created_by_name_with_its_extra_config(mooncake):
             create_aux_object_store(name, {})
 
 
+@pytest.mark.parametrize(
+    "code,error",
+    [(-200, BlockObjectStoreError), (-900, RuntimeError), (-600, RuntimeError)],
+    ids=["no-room", "rpc-failed", "invalid-params"],
+)
+def test_store_retries_only_puts_mooncake_has_no_room_for(code, error):
+    client, store = fake_store(code)
+    with pytest.raises(error, match=f"from 'g/0': {code}") as exc_info:
+        store.put_batch(["g/0"], [b"rows"])
+    if error is RuntimeError:
+        assert not isinstance(exc_info.value, BlockObjectStoreError)
+        # The writer drops the batch at once instead of retrying it.
+        writer = AuxObjectWriter(store, timeout_s=60)
+        writer.put(_objects("g/0"))
+        wait_for_writer(writer)
+        assert client.writes == [["g/0"]] * 2 and not client.objects
+        writer.close()
+
+
+def test_store_raises_when_mooncake_fails_to_remove_a_prefix():
+    client, store = fake_store()
+    client.remove_by_regex = lambda pattern, force: -900  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="under 'job/g/': -900"):
+        store.remove_prefix(aux_namespace_prefix("job", "g"))
+
+
 def test_objects_round_trip_through_a_store_other_than_mooncake():
     store = DictObjectStore()
     writer = AuxObjectWriter(store, timeout_s=5)
