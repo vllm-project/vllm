@@ -752,6 +752,9 @@ class Inkling2ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params = dict(self.named_parameters())
         num_layers = self.text_config.num_hidden_layers
