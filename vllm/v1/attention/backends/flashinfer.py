@@ -80,6 +80,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
+    flashinfer_nvfp4_component_shapes,
     get_dcp_local_seq_lens,
     get_flashinfer_kv_cache_layouts,
     get_flashinfer_layout_string,
@@ -665,6 +666,22 @@ def _kernel_block_sizes(
 
 class FlashInferBackend(AttentionBackend):
     supports_kv_cache_update_bypass: bool = True
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: KVCacheSpec,
+        num_blocks: int,
+        layout: KVCacheLayout,
+        kernel_block_size: int | None = None,
+    ) -> tuple[tuple[int, ...], ...]:
+        if not isinstance(spec, AttentionSpec) or not spec.kv_quant_mode.is_nvfp4:
+            return super().get_runtime_shapes(
+                spec, num_blocks, layout, kernel_block_size
+            )
+        return flashinfer_nvfp4_component_shapes(
+            spec, num_blocks, layout, kernel_block_size
+        )
 
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
@@ -2702,9 +2719,7 @@ class FlashInferImpl(AttentionImpl):
                 canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
                 canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
             )
-            nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(
-                kv_cache, self.num_kv_heads
-            )
+            nvfp4_kv_data, nvfp4_kv_block_scales, _ = self._nvfp4_views(kv_cache)
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
@@ -3250,6 +3265,22 @@ class FlashInferImpl(AttentionImpl):
                     output[:num_decode_tokens].copy_(out)
         return output_padded
 
+    def _nvfp4_views(self, cache: torch.Tensor) -> tuple[_KVPair, _KVPair, str]:
+        bound = self.runtime_kv_cache_views
+        if bound is not None:
+            source, layout, views = bound
+            if source is cache and views[0].data_ptr() == cache.data_ptr():
+                k_data, k_scale, v_data, v_scale = views
+                return (
+                    (k_data, v_data),
+                    (
+                        k_scale.view(torch.float8_e4m3fn),
+                        v_scale.view(torch.float8_e4m3fn),
+                    ),
+                    get_flashinfer_layout_string(layout),
+                )
+        return _nvfp4_kv_views(cache, self.num_kv_heads)
+
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
@@ -3267,7 +3298,7 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             if self.nvfp4_fa2:
-                data, scales, kv_layout = _nvfp4_kv_views(kv_cache, self.num_kv_heads)
+                data, scales, kv_layout = self._nvfp4_views(kv_cache)
                 nvfp4_quantize_append_paged_kv_cache_with_slot_mapping(
                     key,
                     value,

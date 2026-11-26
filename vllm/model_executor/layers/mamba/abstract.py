@@ -33,12 +33,15 @@ class MambaBase(AttentionLayerBase):
     _replayssm_ring_start: torch.Tensor
     _replayssm_prev_num_accepted: torch.Tensor
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        """Unpack a raw `[B, 1, 1, C]` int8 page view into per-state views.
+    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
+        """Bind runtime state views or unpack a raw `[B, 1, 1, C]` int8 page.
 
         Each block's `C` bytes hold the layer's states (e.g. conv, ssm)
         packed by dtype/shape with the layer's state alignment.
         """
+        if isinstance(kv_cache, tuple):
+            self.kv_cache = kv_cache
+            return
         pages = kv_cache.squeeze(dim=(1, 2))
         states: list[torch.Tensor] = []
         offset = 0

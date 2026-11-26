@@ -40,6 +40,7 @@ from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayout,
+    KVCacheTensor,
     MambaSpec,
 )
 from vllm.v1.worker.replayssm_utils import (
@@ -1534,6 +1535,145 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     new_pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     assert new_pool is not pool
     hisparse_runtime_module.drop_hisparse_host_pool(worker.vllm_config)
+
+
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+@pytest.mark.parametrize("runner", ["cpu", "gpu"])
+def test_gdn_runtime_states_alias_planned_pages(layout, runner):
+    from tests.v1.attention.utils import CheckpointingMambaLayer
+    from vllm.config import DeviceConfig, VllmConfig
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.worker.cpu import attn_utils as cpu_attn_utils
+    from vllm.v1.worker.gpu import attn_utils as gpu_attn_utils
+    from vllm.v1.worker.utils import AttentionGroup
+
+    spec = MambaSpec(
+        block_size=16,
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        shapes=((3, 2), (2, 2, 2)),
+        dtypes=(torch.bfloat16, torch.float32),
+        state_alignment=16,
+        page_size_padded=64,
+    )
+    num_blocks = 3
+    page_size = spec.page_size_bytes
+    layer_stride, block_stride = (
+        (num_blocks * page_size, page_size)
+        if layout.is_layer_compact
+        else (page_size, 2 * page_size)
+    )
+    tensor = KVCacheTensor(
+        size=16 + 2 * num_blocks * page_size,
+        layers=["a", "b"],
+        offset=16,
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.cache_config.kv_cache_layout = layout.name
+    layer = CheckpointingMambaLayer(None)
+    kv_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[tensor],
+        kv_cache_groups=[new_kv_cache_group(tensor.layers, spec)],
+    )
+    attn_utils = cpu_attn_utils if runner == "cpu" else gpu_attn_utils
+    caches = attn_utils.init_kv_cache(
+        {"b": layer},
+        kv_config,
+        torch.device("cpu"),
+        [],
+        config,
+        attn_groups=[AttentionGroup(GDNAttentionBackend, ["b"], spec, 0)],
+    )
+    raw = torch.empty(0, dtype=torch.int8).set_(caches["b"].untyped_storage())
+    assert caches["b"].data_ptr() == raw.data_ptr() + tensor.offset + layer_stride
+    conv, recurrent = layer.kv_cache
+
+    expected = torch.zeros_like(raw)
+    for state, shape, dtype, offset in zip(
+        (conv, recurrent), spec.shapes, spec.dtypes, (0, 16), strict=True
+    ):
+        assert state.shape == (num_blocks, *shape)
+        assert state.dtype == dtype
+        for block in range(num_blocks):
+            state[block].fill_(block + 1)
+            start = tensor.offset + layer_stride + block * block_stride + offset
+            payload = torch.full(shape, block + 1, dtype=dtype).view(torch.int8)
+            expected[start : start + payload.numel()] = payload.flatten()
+    assert torch.equal(raw, expected)
+
+
+@pytest.mark.parametrize("layout", ["LBHNC", "BLHNC", "LBNHC", "BLNHC"])
+@pytest.mark.parametrize("num_blocks,num_heads", [(1, 1), (3, 2)])
+def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num_heads):
+    from vllm.utils.torch_utils import nvfp4_split_data_scale
+    from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.utils import (
+        flashinfer_nvfp4_component_shapes,
+        get_flashinfer_layout_string,
+    )
+    from vllm.v1.kv_cache_interface import (
+        AttentionSpec,
+        KVCacheRuntimeViews,
+        KVQuantMode,
+        create_kv_cache_views,
+    )
+
+    class PackedBackend(AttentionBackend):
+        @classmethod
+        def get_runtime_shapes(cls, spec, num_blocks, layout, kernel_block_size=None):
+            return flashinfer_nvfp4_component_shapes(
+                spec, num_blocks, layout, kernel_block_size
+            )
+
+    layout = KVCacheLayout[layout]
+    rows, width = 16, 72
+    logical = (2, num_blocks, 2 * num_heads, rows, width)
+    order = layout.stride_order
+    raw = torch.zeros(
+        32 + 16 + 2 * num_blocks * 2 * num_heads * rows * width, dtype=torch.uint8
+    )[32:]
+    layers = raw[16:].view(tuple(logical[i] for i in order))
+    cache = layers.permute(tuple(order.index(i) for i in range(5)))[1]
+    pages = cache.permute(layout.layer_view_order)
+    kv_layout = get_flashinfer_layout_string(layout)
+    spec = AttentionSpec(
+        block_size=rows,
+        num_kv_heads=num_heads,
+        head_size=128,
+        dtype=torch.uint8,
+        state_content_bytes=width,
+        num_head_slots=2 * num_heads,
+        kv_quant_mode=KVQuantMode.NVFP4,
+    )
+    placement = KVCacheTensor(
+        size=raw.numel(),
+        layers=["a", "b"],
+        offset=16,
+        layer_stride=layers.stride(order.index(0)),
+        block_stride=cache.stride(0),
+    )
+    runtime = KVCacheRuntimeViews({"a": AttentionBackend, "b": PackedBackend})
+    first, second = create_kv_cache_views(
+        raw, spec, num_blocks, layout, placement, runtime=runtime
+    )
+    assert first.storage_offset() == raw.storage_offset() + placement.offset
+    assert second.data_ptr() == cache.data_ptr()
+    assert set(runtime.components) == {"b"}
+    assert runtime.components["b"].page is second
+    actual = runtime.components["b"].views
+
+    dims = (num_heads, rows) if kv_layout == "HND" else (rows, num_heads)
+    expected = []
+    for side in pages.view(num_blocks, 2, *dims, width).unbind(1):
+        side = side.as_strided(side.shape, (cache.stride(0), *side.stride()[1:]))
+        expected.extend(nvfp4_split_data_scale(side))
+    for view, reference in zip(actual, expected, strict=True):
+        assert view.shape == reference.shape
+        assert view.stride() == reference.stride()
+        assert view.data_ptr() == reference.data_ptr()
 
 
 class _TestReplaySSMMixer(MambaMixer2):

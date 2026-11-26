@@ -28,7 +28,12 @@ if TYPE_CHECKING:
         KVQuantMode,
     )
 
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, get_kv_quant_mode
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    compute_layer_kv_cache_shape_bytes,
+    get_kv_quant_mode,
+)
 
 
 class AttentionType(StrEnum):
@@ -69,6 +74,24 @@ class AttentionBackend(ABC):
 
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: "KVCacheSpec",
+        num_blocks: int,
+        layout: KVCacheLayout,
+        kernel_block_size: int | None = None,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Describe a layer's kernel views for an allocation of manager blocks.
+
+        The default singleton is the logical `[B, H, N, C_bytes]` cache with
+        strides given by layout. Overrides may describe contiguous components
+        in physical page order, with bytes on each component's last axis.
+        """
+        return (
+            compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size),
+        )
 
     @staticmethod
     def get_supported_kernel_block_sizes(
@@ -784,6 +807,11 @@ class AttentionImplBase(ABC, Generic[T]):
     standard AttentionImpl and MLAAttentionImpl. Does not define a forward
     method - subclasses define their own forward interfaces.
     """
+
+    # Bound byte views for backends that consume both packed pages and components.
+    runtime_kv_cache_views: (
+        tuple[torch.Tensor, KVCacheLayout, tuple[torch.Tensor, ...]] | None
+    ) = None
 
     # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
     # route between the dense-MHA prefill and sparse-MQA paths.

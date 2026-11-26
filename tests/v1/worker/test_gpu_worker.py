@@ -895,7 +895,9 @@ def test_extensible_extend_keeps_layers_sharing_host_resident_kv_bound(
             num_committed_blocks=8,
             physical_bytes=0,
             commit=lambda num_blocks, defragment, shrink: None,
-            committed_views=lambda config, layout, sizes: {"device": new_device},
+            committed_views=lambda config, layout, sizes, *, runtime: {
+                "device": new_device
+            },
         ),
         kv_cache_config=SimpleNamespace(
             num_blocks=4,

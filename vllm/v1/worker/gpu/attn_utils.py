@@ -29,6 +29,7 @@ from vllm.v1.hisparse.binding import (
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayerConfig,
+    KVCacheRuntimeViews,
     KVCacheSpec,
     MambaSpec,
 )
@@ -43,6 +44,7 @@ from vllm.v1.worker.utils import (
     groups_with_metadata_builders,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
+    runtime_views_for_groups,
 )
 
 if TYPE_CHECKING:
@@ -406,6 +408,8 @@ def init_kv_cache(
     attn_groups: Iterable[AttentionGroup] = (),
     allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
+    attn_groups = tuple(attn_groups)
+    runtime = runtime_views_for_groups(attn_groups)
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
         if vllm_config.attention_config.hisparse_config is not None:
@@ -418,6 +422,7 @@ def init_kv_cache(
                 forward_context,
                 block_tables,
                 allocate=allocate,
+                runtime=runtime,
             )
         else:
             kv_caches = allocate_kv_cache(
@@ -426,9 +431,15 @@ def init_kv_cache(
                 vllm_config.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
                 allocate=allocate,
+                runtime=runtime,
             )
     return bind_kv_caches(
-        kv_caches, forward_context, kv_cache_config, vllm_config, attn_groups
+        kv_caches,
+        forward_context,
+        kv_cache_config,
+        vllm_config,
+        attn_groups,
+        runtime,
     )
 
 
@@ -438,15 +449,19 @@ def bind_kv_caches(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     attn_groups: Iterable[AttentionGroup] = (),
+    runtime: KVCacheRuntimeViews | None = None,
 ) -> dict[str, Any]:
     """Bind per-layer KV cache views to the attention layers."""
-    for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
+    shared = get_shared_kv_cache_layers(vllm_config)
+    for layer_name, target in shared.items():
         kv_caches[layer_name] = kv_caches[target]
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
-    bind_kv_cache_to_layers(bindable_caches, forward_context)
+    bind_kv_cache_to_layers(
+        bindable_caches, forward_context, runtime=runtime, shared=shared
+    )
     return kv_caches
 
 

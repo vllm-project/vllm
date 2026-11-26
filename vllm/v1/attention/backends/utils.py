@@ -216,6 +216,29 @@ _FLASHINFER_LAYOUT_NAMES = {
 }
 
 
+def flashinfer_nvfp4_component_shapes(
+    spec: AttentionSpec,
+    num_blocks: int,
+    layout: KVCacheLayout,
+    kernel_block_size: int | None = None,
+) -> tuple[tuple[int, ...], ...]:
+    """FlashInfer packs K data, K scales, V data, V scales within each page."""
+    bs = kernel_block_size or spec.block_size
+    num_blocks *= spec.block_size // bs
+    rows = spec.get_num_kernel_states(bs)
+    num_heads = spec.num_kv_heads
+    full_dim = spec.state_content_size_bytes
+    dims = (
+        (num_heads, rows)
+        if get_flashinfer_layout_string(layout) == "HND"
+        else (rows, num_heads)
+    )
+    data_width = full_dim * 8 // 9
+    data = (num_blocks, *dims, data_width)
+    scales = (num_blocks, *dims, full_dim - data_width)
+    return data, scales, data, scales
+
+
 def get_flashinfer_layout_string(layout: KVCacheLayout) -> str:
     """Return the layout name in FlashInfer's convention (NHD/HND)."""
     assert layout.name in _FLASHINFER_LAYOUT_NAMES, (

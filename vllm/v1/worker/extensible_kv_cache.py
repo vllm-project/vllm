@@ -33,13 +33,18 @@ from vllm.utils.vmm_driver import (
 from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheRuntimeViews,
     KVCacheTensor,
     create_kv_cache_views,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.gpu.attn_utils import bind_kv_caches
 from vllm.v1.worker.gpu.kv_connector import get_kv_connector
-from vllm.v1.worker.utils import layer_kernel_block_size, layer_spec_for_tensor
+from vllm.v1.worker.utils import (
+    layer_kernel_block_size,
+    layer_spec_for_tensor,
+    runtime_views_for_groups,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -226,6 +231,8 @@ class ExtensibleKVCache:
         kv_cache_config: KVCacheConfig,
         layout: KVCacheLayout,
         kernel_block_sizes: list[int] | None = None,
+        *,
+        runtime: KVCacheRuntimeViews | None = None,
     ) -> dict[str, torch.Tensor] | None:
         """Per-layer views whose storage spans exactly the committed blocks.
 
@@ -261,6 +268,7 @@ class ExtensibleKVCache:
                     layout,
                     replace(tensor, layers=[layer_name], offset=offset),
                     kernel_block_size=kernel_block_size,
+                    runtime=runtime,
                 )
                 kv_caches[layer_name] = view
         return kv_caches
@@ -539,10 +547,18 @@ def extend_kv_cache(
         kv_cache.physical_bytes / (1 << 30),
     )
     forward_context = runner.compilation_config.static_forward_context
+    # As in `initialize_kv_cache`, draft groups map their views too.
+    attn_groups = [
+        group
+        for groups in runner.attn_groups + getattr(runner.speculator, "attn_groups", [])
+        for group in groups
+    ]
+    runtime = runtime_views_for_groups(attn_groups)
     committed = kv_cache.committed_views(
         runner.kv_cache_config,
         runner.cache_config.get_resolved_kv_cache_layout(),
         runner.kernel_block_sizes,
+        runtime=runtime,
     )
     if committed is not None:
         if runner.vllm_config.attention_config.hisparse_config is not None:
@@ -551,13 +567,6 @@ def extend_kv_cache(
                 kv_cache_config=runner.kv_cache_config,
                 kv_caches=committed,
             )
-        # As in `initialize_kv_cache`, draft groups map their views too.
-        attn_groups = [
-            group
-            for groups in runner.attn_groups
-            + getattr(runner.speculator, "attn_groups", [])
-            for group in groups
-        ]
         # Host-resident layers do not move: they stay bound as at allocation,
         # and their views resolve the layers sharing their KV.
         host_resident_layers: set[str] = set()
@@ -575,6 +584,7 @@ def extend_kv_cache(
             runner.kv_cache_config,
             runner.vllm_config,
             attn_groups,
+            runtime,
         )
         runner.kv_caches = [
             cache

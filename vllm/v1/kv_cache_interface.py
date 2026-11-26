@@ -22,7 +22,7 @@ from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.attention.backend import MultipleOf
+    from vllm.v1.attention.backend import AttentionBackend, MultipleOf
     from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 
 logger = init_logger(__name__)
@@ -356,6 +356,48 @@ def compute_layout_strides(
     return tuple(strides)
 
 
+class KVCacheLayerComponents(NamedTuple):
+    page: torch.Tensor
+    layout: KVCacheLayout
+    views: tuple[torch.Tensor, ...]
+
+
+@dataclass(slots=True)
+class KVCacheRuntimeViews:
+    """Backends selected for this allocation and their component aliases."""
+
+    backends: dict[str, type[AttentionBackend]]
+    components: dict[str, KVCacheLayerComponents] = field(default_factory=dict)
+
+
+def _create_page_component_views(
+    raw: torch.Tensor,
+    shapes: tuple[tuple[int, ...], ...],
+    spec: KVCacheSpec,
+    num_pages: int,
+    offset: int,
+    block_stride: int,
+    payload_size: int,
+) -> tuple[torch.Tensor, ...]:
+    dtypes = (
+        spec.dtypes if isinstance(spec, MambaSpec) else (torch.uint8,) * len(shapes)
+    )
+    alignment = spec.state_alignment if isinstance(spec, MambaSpec) else 1
+    components = []
+    used = 0
+    for shape, dtype in zip(shapes, dtypes, strict=True):
+        size = prod(shape[1:])
+        if shape[0] != num_pages or used + size > payload_size:
+            raise ValueError(
+                f"Runtime component {shape} exceeds the planned cache page"
+            )
+        inner_strides = tuple(prod(shape[i + 1 :]) for i in range(1, len(shape)))
+        view = raw.as_strided(shape, (block_stride, *inner_strides), offset + used)
+        components.append(view.view(dtype))
+        used += round_up(size, alignment)
+    return tuple(components)
+
+
 def create_kv_cache_views(
     raw: torch.Tensor,
     spec: KVCacheSpec,
@@ -363,18 +405,23 @@ def create_kv_cache_views(
     layout: KVCacheLayout,
     kv_cache_tensor: KVCacheTensor,
     kernel_block_size: int | None = None,
+    *,
+    runtime: KVCacheRuntimeViews | None = None,
 ) -> list[torch.Tensor]:
-    """View a flat int8 buffer as one 4D `[B, H, N, C]` view per layer.
+    """Create connector pages and backend component views from a flat byte buffer.
 
     Block `b` of layer `l` starts at the tensor offset plus its layer and
     block stride contributions.
     """
+    from vllm.v1.attention.backend import AttentionBackend
+
     num_layers = len(kv_cache_tensor.layers)
     layer_stride = kv_cache_tensor.layer_stride
     block_stride = kv_cache_tensor.block_stride
-    shape_bytes = compute_layer_kv_cache_shape_bytes(
-        spec, num_blocks, kernel_block_size
+    default_shapes = AttentionBackend.get_runtime_shapes(
+        spec, num_blocks, layout, kernel_block_size
     )
+    (shape_bytes,) = default_shapes
     ratio = shape_bytes[0] // num_blocks
     if ratio > 1:
         # Distribute page padding evenly among the kernel blocks. Other
@@ -397,7 +444,6 @@ def create_kv_cache_views(
         )
         block_stride //= ratio
 
-    logical_shape = (num_layers, *shape_bytes)
     strides = compute_layout_strides(
         spec,
         num_blocks,
@@ -406,21 +452,40 @@ def create_kv_cache_views(
         kernel_block_size,
         fixed_strides=(layer_stride, block_stride, None, None, None),
     )
-    dtype = getattr(spec, "dtype", None)
-
-    view_5d = torch.as_strided(
-        raw,
-        size=logical_shape,
-        stride=strides,
-        storage_offset=raw.storage_offset() + kv_cache_tensor.offset,
-    )
-
+    dtype = getattr(spec, "dtype", None) or raw.dtype
+    offset = raw.storage_offset() + kv_cache_tensor.offset
     views = []
-    for layer_idx in range(num_layers):
-        cache_logical = view_5d[layer_idx]
-        if dtype is not None:
-            cache_logical = cache_logical.view(dtype)
-        views.append(cache_logical)
+    for name in kv_cache_tensor.layers:
+        backend = runtime.backends.get(name) if runtime else None
+        shapes = (
+            backend.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
+            if backend is not None
+            else default_shapes
+        )
+        # Connectors register one logical page even for a multi-component layer.
+        page = raw.as_strided(shape_bytes, strides[1:], offset).view(dtype)
+        views.append(page)
+        if shapes != default_shapes:
+            assert runtime is not None
+            # A split component requires a contiguous run of bytes within a
+            # page. Layer or block strides outside the page may include gaps.
+            order = layout.layer_view_order
+            physical = page.permute(order)
+            if not physical.select(order.index(0), 0).is_contiguous():
+                raise ValueError(
+                    f"Runtime components require block-compact pages for {name}"
+                )
+            components = _create_page_component_views(
+                raw,
+                shapes,
+                spec,
+                shape_bytes[0],
+                offset,
+                block_stride,
+                prod(shape_bytes[1:]),
+            )
+            runtime.components[name] = KVCacheLayerComponents(page, layout, components)
+        offset += layer_stride
     return views
 
 

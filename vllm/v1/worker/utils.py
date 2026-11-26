@@ -13,6 +13,8 @@ import torch
 from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
@@ -34,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroup,
     KVCacheLayerConfig,
     KVCacheLayout,
+    KVCacheRuntimeViews,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
@@ -467,6 +470,12 @@ def groups_with_metadata_builders(
     return [group for group in groups if group.metadata_builders]
 
 
+def runtime_views_for_groups(groups: Iterable[AttentionGroup]) -> KVCacheRuntimeViews:
+    return KVCacheRuntimeViews(
+        {name: group.backend for group in groups for name in group.layer_names}
+    )
+
+
 def map_kv_caches_to_kernel_blocks(
     kv_caches: dict[str, torch.Tensor], attn_groups: Iterable[AttentionGroup]
 ) -> dict[str, torch.Tensor]:
@@ -599,6 +608,8 @@ def allocate_kv_cache(
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
     allocate: Callable[[int], torch.Tensor] | None = None,
+    *,
+    runtime: KVCacheRuntimeViews | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as `[B, H, N, C]` per layer.
 
@@ -637,6 +648,7 @@ def allocate_kv_cache(
             layout,
             tensor,
             kernel_block_size=layer_kernel_block_size(group_id, kernel_block_sizes),
+            runtime=runtime,
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
@@ -948,15 +960,27 @@ def bind_kv_cache(
 
 def bind_kv_cache_to_layers(
     kv_caches: dict[str, torch.Tensor],
-    forward_context: dict[str, Attention],
+    forward_context: Mapping[str, AttentionLayerBase],
+    *,
+    runtime: KVCacheRuntimeViews | None = None,
+    shared: Mapping[str, str] | None = None,
 ) -> None:
-    """Bind layer cache views."""
-    # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
-    # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
-    # splits conv/ssm), so the kv_caches dict can hold a single tensor per
-    # layer for the KV connector to register.
-    for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].bind_kv_cache(kv_cache)
+    """Bind the prepared aliases; connectors retain the original layer pages."""
+    for name, page in kv_caches.items():
+        layer = forward_context[name]
+        if runtime is not None:
+            owner = shared.get(name, name) if shared else name
+            entry = runtime.components.get(owner)
+            if (
+                entry is not None
+                and entry.page is page
+                and runtime.backends.get(name) is runtime.backends[owner]
+            ):
+                if isinstance(layer, MambaBase):
+                    layer.bind_kv_cache(entry.views)
+                    continue
+                layer.impl.runtime_kv_cache_views = entry
+        layer.bind_kv_cache(page)
 
 
 def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
@@ -978,6 +1002,8 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._k_scale_cache = None
             if hasattr(layer.impl, "_v_scale_cache"):
                 layer.impl._v_scale_cache = None
+            if getattr(layer.impl, "runtime_kv_cache_views", None) is not None:
+                layer.impl.runtime_kv_cache_views = None
             if hasattr(layer.impl, "_kv_view_cache"):
                 layer.impl._kv_view_cache = None
         for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):

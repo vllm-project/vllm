@@ -21,7 +21,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     get_replayssm_align_block_size,
 )
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -35,7 +35,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
@@ -91,6 +91,20 @@ class GDNFlashInferCheckpointPlan:
 
 
 class GDNAttentionBackend(AttentionBackend):
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: KVCacheSpec,
+        num_blocks: int,
+        layout: KVCacheLayout,
+        kernel_block_size: int | None = None,
+    ) -> tuple[tuple[int, ...], ...]:
+        assert isinstance(spec, MambaSpec)
+        return tuple(
+            (num_blocks, *shape[:-1], shape[-1] * get_dtype_size(dtype))
+            for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True)
+        )
+
     @staticmethod
     def get_name() -> str:
         return "GDN_ATTN"

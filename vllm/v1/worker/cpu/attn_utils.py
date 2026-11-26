@@ -33,6 +33,7 @@ from vllm.v1.worker.utils import (
     customize_layer_config,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
+    runtime_views_for_groups,
 )
 
 if TYPE_CHECKING:
@@ -215,6 +216,8 @@ def init_kv_cache(
     *,
     attn_groups: Iterable[AttentionGroup] = (),
 ) -> dict[str, Any]:
+    attn_groups = tuple(attn_groups)
+    runtime = runtime_views_for_groups(attn_groups)
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
         kv_caches = allocate_kv_cache(
@@ -222,15 +225,19 @@ def init_kv_cache(
             device,
             vllm_config.cache_config.get_resolved_kv_cache_layout(),
             kernel_block_sizes,
+            runtime=runtime,
         )
-    for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
+    shared = get_shared_kv_cache_layers(vllm_config)
+    for layer_name, target in shared.items():
         kv_caches[layer_name] = kv_caches[target]
 
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
-    bind_kv_cache_to_layers(bindable_caches, forward_context)
+    bind_kv_cache_to_layers(
+        bindable_caches, forward_context, runtime=runtime, shared=shared
+    )
     return kv_caches
 
 
