@@ -75,9 +75,9 @@ def _sm120_impl(heads: int, topk: int, sinks: torch.Tensor) -> FlashSM120Impl:
     not current_platform.is_device_capability_family(120),
     reason="FlashInfer SM120 sparse MLA kernel",
 )
-@pytest.mark.parametrize("heads", [16, 64, 128])
+@pytest.mark.parametrize("heads", [4, 16, 64, 128])
 @pytest.mark.parametrize("topk", [512, 2048])
-@pytest.mark.parametrize("num_tokens", [1, 32])
+@pytest.mark.parametrize("num_tokens", [1, 32, 128])
 def test_sm120_flash_impl_applies_the_sink_on_gpu(
     dist_init, default_vllm_config, heads: int, topk: int, num_tokens: int
 ) -> None:

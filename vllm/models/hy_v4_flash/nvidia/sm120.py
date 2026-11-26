@@ -18,6 +18,8 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
     FlashInferMLASparseSM120Impl,
 )
 
+_MIN_PREFILL_HEADS = 8
+
 
 class FlashSM120Impl(FlashInferMLASparseSM120Impl):
     """SM120 impl that hands Hy4's per-head learnable sink to the kernel."""
@@ -49,7 +51,14 @@ class FlashSM120Impl(FlashInferMLASparseSM120Impl):
         self.sinks = sinks
 
     def _run_mqa_kernel(self, q, kv_cache, topk_indices_physical):
-        output = q.new_empty((q.shape[0], self.num_heads, self.kv_lora_rank))
+        # FlashInfer's SM120 prefill has no instantiation below 8 heads (TP=8).
+        pad = max(0, _MIN_PREFILL_HEADS - self.num_heads)
+        sinks = self.sinks
+        if pad:
+            q = torch.cat([q, q.new_zeros(q.shape[0], pad, q.shape[2])], dim=1)
+            if sinks is not None:
+                sinks = torch.cat([sinks, sinks.new_zeros(pad)])
+        output = q.new_empty((q.shape[0], q.shape[1], self.kv_lora_rank))
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(q.device)
 
@@ -73,9 +82,10 @@ class FlashSM120Impl(FlashInferMLASparseSM120Impl):
             bmm2_scale=1.0,
             sparse_mla_top_k=capacity,
             kv_scale_format=self.kv_scale_format,
-            sinks=None if self.sinks is None else [self.sinks],
+            sinks=None if sinks is None else [sinks],
         )
-        return out.squeeze(1)
+        out = out.squeeze(1)
+        return out[:, : self.num_heads].contiguous() if pad else out
 
 
 class FlashSM120SparseBackend(FlashInferMLASparseSM120Backend):
