@@ -15,6 +15,25 @@ def _head_dim(config) -> int:
     )
 
 
+def _row_major_bf16(
+    name: str,
+    tensor: torch.Tensor,
+    expected_shape: tuple[int, int],
+    keep: list[torch.Tensor],
+) -> torch.Tensor:
+    if tensor.dtype != torch.bfloat16:
+        raise ValueError(f"{name} dtype {tensor.dtype} is not BF16")
+    if tuple(tensor.shape) != expected_shape:
+        raise ValueError(
+            f"{name} shape {tuple(tensor.shape)} does not match {expected_shape}"
+        )
+    if tensor.is_contiguous():
+        return tensor
+    packed = tensor.contiguous()
+    keep.append(packed)
+    return packed
+
+
 def build_layer_bindings(owner, qk_norm: bool, keep: list[torch.Tensor]):
     model = owner.model
     config = owner.config
@@ -26,17 +45,30 @@ def build_layer_bindings(owner, qk_norm: bool, keep: list[torch.Tensor]):
 
     layers = (_Layer * len(model.layers))()
     for idx, layer in enumerate(model.layers):
-        qkv = layer.self_attn.qkv_proj.weight
-        gate_up = layer.mlp.gate_up_proj.weight
-        for tensor in (
-            qkv,
-            gate_up,
+        qkv = _row_major_bf16(
+            "qkv_proj.weight",
+            layer.self_attn.qkv_proj.weight,
+            (q + 2 * kv, hidden_size),
+            keep,
+        )
+        gate_up = _row_major_bf16(
+            "gate_up_proj.weight",
+            layer.mlp.gate_up_proj.weight,
+            (2 * intermediate_size, hidden_size),
+            keep,
+        )
+        o_proj = _row_major_bf16(
+            "o_proj.weight",
             layer.self_attn.o_proj.weight,
+            (hidden_size, hidden_size),
+            keep,
+        )
+        down_proj = _row_major_bf16(
+            "down_proj.weight",
             layer.mlp.down_proj.weight,
-        ):
-            assert tensor.dtype == torch.bfloat16 and tensor.is_contiguous()
-        assert tuple(qkv.shape) == (q + 2 * kv, hidden_size)
-        assert tuple(gate_up.shape) == (2 * intermediate_size, hidden_size)
+            (hidden_size, intermediate_size),
+            keep,
+        )
         attn_norm = layer.input_layernorm.weight.float().contiguous()
         ffn_norm = layer.post_attention_layernorm.weight.float().contiguous()
         keep.extend([attn_norm, ffn_norm])
@@ -50,10 +82,10 @@ def build_layer_bindings(owner, qk_norm: bool, keep: list[torch.Tensor]):
             base,
             base + q * hidden_size * 2,
             base + (q + kv) * hidden_size * 2,
-            layer.self_attn.o_proj.weight.data_ptr(),
+            o_proj.data_ptr(),
             gate_up.data_ptr(),
             gate_up.data_ptr() + intermediate_size * hidden_size * 2,
-            layer.mlp.down_proj.weight.data_ptr(),
+            down_proj.data_ptr(),
             attn_norm.data_ptr(),
             ffn_norm.data_ptr(),
             q_norm.data_ptr() if q_norm is not None else None,

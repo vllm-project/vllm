@@ -94,6 +94,15 @@ def default_unquantized_gemm(
     return torch.nn.functional.linear(x, weight, bias)
 
 
+def _has_rocm_custom_op(name: str) -> bool:
+    if not hasattr(torch.ops, "_rocm_C"):
+        return False
+    try:
+        return hasattr(torch.ops._rocm_C, name)
+    except Exception:
+        return False
+
+
 _FlashInferBf16RuntimeCheck = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor | None], bool
 ]
@@ -496,6 +505,10 @@ def rocm_unquantized_gemm_impl(
     cu_count = num_compute_units()
 
     _, fits_wvsplitkrc = wvsplitkrc_dispatch(n, k, m, cu_count)
+    has_wvsplitkrc = _has_rocm_custom_op("wvSplitKrc")
+    has_swmmac_gemm = _has_rocm_custom_op("swmmac_gemm")
+    has_wvsplitk = _has_rocm_custom_op("wvSplitK")
+    has_llmm1 = _has_rocm_custom_op("LLMM1")
 
     skinny_operands_compatible = weight.is_contiguous() and (
         bias is None or bias.is_contiguous()
@@ -510,6 +523,7 @@ def rocm_unquantized_gemm_impl(
 
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and has_wvsplitkrc
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
         and x.dim() == 2
@@ -534,6 +548,7 @@ def rocm_unquantized_gemm_impl(
 
     use_skinny_n5to8 = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and has_swmmac_gemm
         and on_rdna4()
         and x.dtype in [torch.float16, torch.bfloat16]
         and x.dtype == weight.dtype
@@ -565,6 +580,7 @@ def rocm_unquantized_gemm_impl(
 
     use_wvsplitk = (
         skinny_gemm_enabled
+        and has_wvsplitk
         and weight_ok_for_wvsplitk
         and (bias is None or bias.is_contiguous())
         and (m == 1 or m > 8)
@@ -574,6 +590,7 @@ def rocm_unquantized_gemm_impl(
 
     use_llmm1 = (
         skinny_gemm_enabled
+        and has_llmm1
         and weight.is_contiguous()
         and bias is None
         and m % 4 == 0

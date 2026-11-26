@@ -13,6 +13,9 @@ from vllm.model_executor.models.qwen3_amd.specialized_decode.config import (
 from vllm.model_executor.models.qwen3_amd.specialized_decode.planning import (
     decide_step,
 )
+from vllm.model_executor.models.qwen3_amd.specialized_decode.weights import (
+    _row_major_bf16,
+)
 
 
 def _make_vllm_config(
@@ -119,3 +122,62 @@ def test_decide_step_rejects_bad_block_table():
     )
     assert not decision.use_specialized
     assert decision.reason == "block_table_invalid"
+
+
+def test_decide_step_accepts_runtime_line_rocm_metadata():
+    metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        max_query_len=1,
+        block_table=torch.zeros((1, 8), dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([5], dtype=torch.int32),
+        slot_mapping=torch.tensor([20], dtype=torch.int64),
+    )
+    decision = decide_step(
+        input_ids=torch.zeros((1,), dtype=torch.int32),
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        metadata=metadata,
+        layer_name=None,
+    )
+    assert decision.use_specialized
+    assert decision.block_table is metadata.block_table
+
+
+def test_decide_step_rejects_runtime_line_prefill_metadata():
+    metadata = SimpleNamespace(
+        num_actual_tokens=8,
+        max_query_len=8,
+        block_table=torch.zeros((1, 8), dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 8], dtype=torch.int32),
+    )
+    decision = decide_step(
+        input_ids=torch.zeros((1,), dtype=torch.int32),
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        metadata=metadata,
+        layer_name=None,
+    )
+    assert not decision.use_specialized
+    assert decision.reason == "num_decodes=0"
+
+
+def test_row_major_bf16_packs_padded_weight():
+    base = torch.arange(16, dtype=torch.bfloat16).view(2, 8)
+    padded = torch.nn.functional.pad(base, (0, 2))[..., :-2]
+    assert tuple(padded.shape) == (2, 8)
+    assert not padded.is_contiguous()
+
+    keep: list[torch.Tensor] = []
+    packed = _row_major_bf16("weight", padded, (2, 8), keep)
+
+    assert packed.is_contiguous()
+    assert torch.equal(packed, base)
+    assert keep == [packed]
+
+
+def test_row_major_bf16_rejects_wrong_shape():
+    keep: list[torch.Tensor] = []
+    tensor = torch.zeros((2, 8), dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="does not match"):
+        _row_major_bf16("weight", tensor, (4, 8), keep)

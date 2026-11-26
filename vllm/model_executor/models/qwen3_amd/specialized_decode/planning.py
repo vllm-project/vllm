@@ -20,10 +20,33 @@ def layer_attn_metadata(attn_metadata: Any, layer_name: str | None) -> Any:
     return attn_metadata
 
 
-def metadata_num_decodes(attn_metadata: Any, layer_name: str | None = None) -> int | None:
+def metadata_num_decodes(
+    attn_metadata: Any,
+    layer_name: str | None = None,
+) -> int | None:
     metadata = layer_attn_metadata(attn_metadata, layer_name)
     num_decodes = getattr(metadata, "num_decodes", None)
-    return int(num_decodes) if num_decodes is not None else None
+    if num_decodes is not None:
+        return int(num_decodes)
+
+    # Older ROCm attention metadata does not expose num_decodes/num_prefills.
+    # For PR1 we only need to identify the narrow "single decode token for one
+    # request" case that the dense backend handles.
+    num_actual_tokens = getattr(metadata, "num_actual_tokens", None)
+    max_query_len = getattr(metadata, "max_query_len", None)
+    block_table = getattr(metadata, "block_table", None)
+    if (
+        num_actual_tokens is None
+        or max_query_len is None
+        or not isinstance(block_table, torch.Tensor)
+        or block_table.dim() != 2
+    ):
+        return None
+    if int(max_query_len) != 1:
+        return 0
+    if int(num_actual_tokens) == block_table.shape[0]:
+        return int(block_table.shape[0])
+    return None
 
 
 @dataclass(frozen=True, slots=True)

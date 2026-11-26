@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import torch
@@ -2666,17 +2667,45 @@ def reshape_and_cache(
     v_scale: torch.Tensor,
     interleaved_v: bool = False,
 ) -> None:
-    torch.ops._C_cache_ops.reshape_and_cache(
-        key,
-        value,
-        key_cache,
-        value_cache,
-        slot_mapping,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-        interleaved_v,
-    )
+    if _reshape_and_cache_accepts_interleaved_v():
+        torch.ops._C_cache_ops.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+            interleaved_v,
+        )
+    else:
+        torch.ops._C_cache_ops.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+
+
+@lru_cache(maxsize=1)
+def _reshape_and_cache_accepts_interleaved_v() -> bool:
+    try:
+        schemas = torch._C._jit_get_schemas_for_operator(
+            "_C_cache_ops::reshape_and_cache"
+        )
+    except Exception:
+        return True
+    if not schemas:
+        return True
+    try:
+        return len(schemas[0].arguments) >= 9
+    except Exception:
+        return True
 
 
 def reshape_and_cache_flash(

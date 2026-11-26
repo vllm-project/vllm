@@ -64,7 +64,10 @@ class Qwen3DenseSpecializedDecode:
                 f"rms_norm_eps={self.config.rms_norm_eps}, got "
                 f"{model_config.rms_norm_eps}"
             )
-        if self.owner.vllm_config.model_config.max_model_len > self.lib.mk_vllm_dense_max_ctx():
+        if (
+            self.owner.vllm_config.model_config.max_model_len
+            > self.lib.mk_vllm_dense_max_ctx()
+        ):
             raise ValueError(
                 "Qwen3 RDNA dense specialized decode max_model_len exceeds "
                 "kernel library support"
@@ -77,9 +80,12 @@ class Qwen3DenseSpecializedDecode:
         norm = final_norm(self.owner, self._keep)
         rope = rope_cache(self.owner, self._keep)
         embed = model.embed_tokens.weight
-        if embed.dtype != torch.bfloat16 or not embed.is_contiguous():
-            self._off_reason = "embed_weight_layout"
+        if embed.dtype != torch.bfloat16:
+            self._off_reason = "embed_weight_dtype"
             return False
+        if not embed.is_contiguous():
+            embed = embed.contiguous()
+            self._keep.append(embed)
         err = ctypes.create_string_buffer(512)
         handle = self.lib.mk_vllm_dense_create(
             len(model.layers),
@@ -98,7 +104,10 @@ class Qwen3DenseSpecializedDecode:
         self._out = torch.empty(
             1, config.hidden_size, dtype=torch.bfloat16, device=embed.device
         )
-        log.info("Qwen3 RDNA dense specialized decode backend ready (%s)", backend.arch())
+        log.info(
+            "Qwen3 RDNA dense specialized decode backend ready (%s)",
+            backend.arch(),
+        )
         return True
 
     def _bind(self, kv0: torch.Tensor) -> bool:
@@ -185,8 +194,7 @@ class Qwen3DenseSpecializedDecode:
             raise RuntimeError("Qwen3 RDNA dense specialized decode launch failed")
         if self._steps == 0:
             log.info(
-                "Qwen3 RDNA dense specialized decode engaged "
-                "(graph capture: %s)",
+                "Qwen3 RDNA dense specialized decode engaged (graph capture: %s)",
                 torch.cuda.is_current_stream_capturing(),
             )
         self._steps += 1

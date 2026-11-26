@@ -65,6 +65,10 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
+from .qwen3_amd.specialized_decode import (
+    Qwen3DenseSpecializedDecode,
+    specialized_decode_config,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -73,10 +77,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
     spec_decode_needs_target_embed,
-)
-from .qwen3_amd.specialized_decode import (
-    Qwen3DenseSpecializedDecode,
-    specialized_decode_config,
 )
 
 logger = init_logger(__name__)
