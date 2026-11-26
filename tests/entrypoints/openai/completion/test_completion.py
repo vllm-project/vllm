@@ -165,7 +165,7 @@ async def test_echo_unicode_offsets_with_added_eos(
     [
         (
             model,
-            {"VLLM_USE_RUST_FRONTEND": "0"},
+            {"VLLM_USE_RUST_FRONTEND": "0", "VLLM_BATCH_INVARIANT": "1"},
             [
                 *UNICODE_SERVER_ARGS,
                 "--tokenizer-mode",
