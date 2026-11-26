@@ -10,14 +10,12 @@ import torch
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.models.qwen4_exp.common import qsa_indexer as qsa_common
-from vllm.models.qwen4_exp.common.qsa_indexer import (
-    QSAIndexerMetadataBuilder,
-    qsa_kv_cache_dtype,
-)
+from vllm.models.qwen4_exp.common.qsa_indexer import qsa_kv_cache_dtype
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.nvidia import qsa_indexer
+from vllm.models.qwen4_exp.nvidia import qsa_indexer_metadata as qsa_nvidia
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8 as qsa_fp8_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
@@ -28,6 +26,24 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import clear_layer_kv_caches
 
 from ...utils import create_new_process_for_each_test
+
+# ROCm keeps the common builder; NVIDIA has its own copy with the DeepGEMM
+# prefill plan.
+QSA_INDEXER_BUILDERS = pytest.mark.parametrize(
+    "builder_cls",
+    [qsa_common.QSAIndexerMetadataBuilder, qsa_nvidia.QSAIndexerMetadataBuilder],
+)
+
+
+def _builder_without_init(
+    builder_cls: type[qsa_common.QSAIndexerMetadataBuilder]
+    | type[qsa_nvidia.QSAIndexerMetadataBuilder],
+) -> qsa_common.QSAIndexerMetadataBuilder | qsa_nvidia.QSAIndexerMetadataBuilder:
+    builder = builder_cls.__new__(builder_cls)
+    if isinstance(builder, qsa_nvidia.QSAIndexerMetadataBuilder):
+        builder.use_deepgemm_prefill = False
+    return builder
+
 
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
@@ -390,9 +406,13 @@ def _qsa_sparse_paged_attention_reference(
 
 
 @requires_qsa_metadata_kernels
-def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
+@QSA_INDEXER_BUILDERS
+def test_qsa_indexer_metadata_marks_cudagraph_padding_inert(
+    builder_cls: type[qsa_common.QSAIndexerMetadataBuilder]
+    | type[qsa_nvidia.QSAIndexerMetadataBuilder],
+) -> None:
     device = torch.device("cuda")
-    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
+    builder = _builder_without_init(builder_cls)
     builder.compress_ratio = 1
     builder.reorder_batch_threshold = 4
     builder.is_circular_buffer = False
@@ -442,9 +462,13 @@ def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
 
 
 @requires_qsa_metadata_kernels
-def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
+@QSA_INDEXER_BUILDERS
+def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix(
+    builder_cls: type[qsa_common.QSAIndexerMetadataBuilder]
+    | type[qsa_nvidia.QSAIndexerMetadataBuilder],
+) -> None:
     device = torch.device("cuda")
-    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
+    builder = _builder_without_init(builder_cls)
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = True
@@ -610,9 +634,13 @@ def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
 
 
 @requires_qsa_metadata_kernels
-def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
+@QSA_INDEXER_BUILDERS
+def test_qsa_compressed_metadata_keeps_dummy_slots_inert(
+    builder_cls: type[qsa_common.QSAIndexerMetadataBuilder]
+    | type[qsa_nvidia.QSAIndexerMetadataBuilder],
+) -> None:
     device = torch.device("cuda")
-    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
+    builder = _builder_without_init(builder_cls)
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = False
@@ -1013,6 +1041,30 @@ def test_qsa_decode_selection_correctness(
     torch.testing.assert_close(actual.sort().values, expected.sort().values)
 
 
+def test_qsa_deepgemm_prefill_plan() -> None:
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_prefill_deepgemm import (
+        plan_prefill_chunks,
+    )
+
+    # Keys may take half the budget, 800 keys here: the third request starts
+    # a new group.
+    assert plan_prefill_chunks([10, 10, 10], [400, 400, 400], 1600 * 128) == [
+        (0, 2, 0, 20),
+        (2, 3, 0, 10),
+    ]
+    # A 1000-key logits row has a 1280-float pitch, so beside 1000 keys this
+    # budget holds 128 rows; 130 rows split into two even chunks, the second
+    # reusing the gathered keys.
+    assert plan_prefill_chunks([130], [1000], 1000 * 128 + 128 * 1280 * 4) == [
+        (0, 1, 0, 96),
+        (0, 1, 96, 130),
+    ]
+    # Below one Q tile of logits, chunks still take one tile.
+    assert plan_prefill_chunks([40], [1000], 0) == [(0, 1, 0, 32), (0, 1, 32, 40)]
+    # An empty padded request gets no chunk.
+    assert plan_prefill_chunks([3, 0], [1280, 0], 0) == [(0, 1, 0, 3)]
+
+
 @requires_qsa_kernels
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
@@ -1077,6 +1129,59 @@ def test_qsa_prefill_selection_correctness(
         sequence_lengths.index_select(0, token_to_req.long()) // compress_ratio,
     )
 
+    from vllm.models.qwen4_exp.nvidia.ops import qsa_prefill_deepgemm
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_prefill_deepgemm import (
+        can_use_deepgemm_prefill,
+        prepare_deepgemm_prefill,
+        reserve_deepgemm_prefill,
+    )
+
+    if dtype == torch.float8_e4m3fn and current_platform.is_device_capability_family(
+        100
+    ):
+        # Fail rather than silently test the Triton fallback on SM100.
+        assert can_use_deepgemm_prefill(q, cache)
+    deepgemm_prefill = None
+    if can_use_deepgemm_prefill(q, cache):
+        # The constants are reserved once per process; size them per case.
+        monkeypatch.setattr(qsa_prefill_deepgemm, "_constants", None)
+        reserve_deepgemm_prefill(
+            q.device, max(sequence_lens) + seq_len_slack, compress_ratio, rows
+        )
+        metadata = qsa_nvidia.QSAIndexerMetadata(
+            block_table=page_table,
+            slot_mapping=torch.full((rows,), -1, device="cuda", dtype=torch.int64),
+            seq_lens=sequence_lengths,
+            query_start_loc=query_start_loc,
+            token_to_req=token_to_req,
+            logical_positions=query_positions,
+            visible_blocks=visible_blocks,
+            k_work_metadata=torch.empty((0, 2), device="cuda", dtype=torch.int32),
+            num_actual_tokens=rows,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_prefills=len(query_lens),
+            num_prefill_tokens=rows,
+            max_query_len=max(query_lens),
+            decode_query_len=0,
+            max_seq_len=sequence_lengths.max().item() + seq_len_slack,
+            storage_block_size=cache.shape[1],
+            compress_ratio=compress_ratio,
+        )
+        # seq_len_slack makes the host lengths an over-estimate, as under
+        # async spec decode.
+        deepgemm_prefill = prepare_deepgemm_prefill(
+            metadata, query_start_loc.cpu(), sequence_lengths.cpu() + seq_len_slack
+        )
+        if force_chunk and query_lens == [3, 33]:
+            # With no budget, each request is its own group, so the second
+            # one's keys are packed from a nonzero offset; the 33-row request
+            # splits at one Q tile and reuses its gathered keys.
+            assert [
+                (c.req_start, c.row_start, c.row_end, c.gather)
+                for c in deepgemm_prefill.chunks
+            ] == [(0, 0, 3, True), (1, 3, 35, True), (1, 35, 36, False)]
+
     actual = torch.empty(
         (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
     )
@@ -1092,6 +1197,7 @@ def test_qsa_prefill_selection_correctness(
         max(query_lens),
         actual,
         max_seq_len=sequence_lengths.max().item() + seq_len_slack,
+        deepgemm_prefill=deepgemm_prefill,
     )
     expected = _qsa_select_paged_reference(
         q,
@@ -1825,7 +1931,8 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
                 num_blocks, 1, spec.num_states, 128, device="cuda", dtype=spec.dtype
             )
         )
-        all_metadata[side_cache.prefix] = QSAIndexerMetadataBuilder(
+        builder_cls = side_cache.get_attn_backend().get_builder_cls()
+        all_metadata[side_cache.prefix] = builder_cls(
             spec, [side_cache.prefix], vllm_config, torch.device("cuda")
         ).build(0, replace(common, block_table_tensor=table.cuda()))
     cache = owner.hisparse_cache
