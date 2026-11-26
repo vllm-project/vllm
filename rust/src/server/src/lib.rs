@@ -510,7 +510,7 @@ async fn serve(
                 None => MaybeTlsListener::plain(grpc_listener),
             };
             let server = health_monitor.serve(shutdown, force_shutdown.cancelled(), |stop| {
-                let server = svc.serve_with_incoming_shutdown(incoming, stop);
+                let server = svc.serve_with_incoming_shutdown(incoming.into_incoming(), stop);
                 async move {
                     let result = server.await.context("gRPC server failed");
                     server_shutdown.cancel();

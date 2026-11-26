@@ -518,7 +518,7 @@ async fn start_grpc_test_server(
                     .add_service(health_service)
                     .add_service(control_service)
                     .add_service(inference_service)
-                    .serve_with_incoming_shutdown(incoming, stop);
+                    .serve_with_incoming_shutdown(incoming.into_incoming(), stop);
                 async move {
                     let result = server.await;
                     server_shutdown.cancel();
@@ -560,7 +560,7 @@ async fn grpc_tls_test_server(
         TonicServer::builder()
             .add_service(control_service)
             .add_service(inference_service)
-            .serve_with_incoming(incoming)
+            .serve_with_incoming(incoming.into_incoming())
             .await
             .expect("grpc tls server");
     });
@@ -657,7 +657,7 @@ async fn grpc_server_with_keepalive(
         builder
             .add_service(control_service)
             .add_service(inference_service)
-            .serve_with_incoming(incoming)
+            .serve_with_incoming(incoming.into_incoming())
             .await
             .expect("grpc server");
     });

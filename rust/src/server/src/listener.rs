@@ -204,6 +204,14 @@ impl MaybeTlsListener {
                 .listen(listener),
         )
     }
+
+    /// Convert the listener into tonic's incoming stream shape.
+    pub fn into_incoming(self) -> impl futures::Stream<Item = Result<MaybeTlsStream>> {
+        futures::stream::unfold(self, |mut listener| async move {
+            let (io, _) = axum::serve::Listener::accept(&mut listener).await;
+            Some((Ok(io), listener))
+        })
+    }
 }
 
 /// Listener I/O type that may be either a plain TCP/UDS stream or a TLS stream over it.
@@ -248,27 +256,6 @@ impl Connected for MaybeTlsStream {
         match self {
             Self::Plain(stream) => stream.connect_info(),
             Self::Tls(stream) => stream.get_ref().connect_info(),
-        }
-    }
-}
-
-/// Allow the maybe-TLS listener to be adaptable to tonic's incoming stream shape.
-impl futures::Stream for MaybeTlsListener {
-    type Item = std::io::Result<MaybeTlsStream>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.get_mut() {
-            Self::Plain(listener) => {
-                let listener = Pin::new(listener);
-                let (io, _) = ready!(listener.poll_accept(cx))?;
-                Poll::Ready(Some(Ok(MaybeTlsStream::Plain(io))))
-            }
-            Self::Tls(tls_listener) => {
-                let tls_listener = Pin::new(tls_listener);
-                let (io, _) =
-                    ready!(tls_listener.poll_accept(cx)).map_err(std::io::Error::other)?;
-                Poll::Ready(Some(Ok(MaybeTlsStream::Tls(io))))
-            }
         }
     }
 }
