@@ -52,8 +52,10 @@ class _ObjectRun:
     """Rows a namespace request computed since it was last scheduled, by KV
     block, and the objects still to write from them. A block a step computes
     whole is a view of that step's rows; a block computed over several steps
-    is filled in place in its own buffer. Runs start on a block boundary and
-    every object starts at one; a tail object may span blocks."""
+    is filled in place in its own buffer. Positions computed again, after a
+    failed KV load, go to copies of their blocks: the writer may still read
+    objects taken from them. Runs start on a block boundary and every object
+    starts at one; a tail object may span blocks."""
 
     block_size: int
     end: int = -1
@@ -66,6 +68,10 @@ class _ObjectRun:
             # ones rejected: its rows follow those kept.
             token_start = self.end
         size = self.block_size
+        if token_start < self.end:
+            for block in range(token_start // size, cdiv(self.end, size)):
+                if (buffer := self.blocks.get(block)) is not None:
+                    self.blocks[block] = buffer.copy()
         self.end = token_start + len(rows)
         while len(rows):
             block, offset = divmod(token_start, size)

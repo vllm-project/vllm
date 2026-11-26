@@ -1612,6 +1612,17 @@ def test_object_run_writes_the_bytes_of_the_rows_in_position_order():
     assert list(run.blocks) == [2]
 
 
+def test_object_run_recompute_leaves_taken_objects_unchanged():
+    # A failed load computes again positions of a block already taken.
+    run = _ObjectRun(_BLOCK)
+    run.add(32, np.ones((16, 3, 2), dtype=np.uint8))
+    run.writes = [("b2", 32, 48)]
+    [(_, fields)] = run.take_ready()
+    run.add(16, np.full((24, 3, 2), 2, dtype=np.uint8))
+    assert (fields["routed_experts"] == 1).all()
+    assert (run.blocks[2][:8] == 2).all() and (run.blocks[2][8:] == 1).all()
+
+
 @pytest.mark.parametrize("rows_first", [False, True], ids=["on-output", "on-step"])
 def test_worker_puts_the_objects_of_a_step_at_once(rows_first):
     # Two namespace requests complete a block each in one step: the worker
