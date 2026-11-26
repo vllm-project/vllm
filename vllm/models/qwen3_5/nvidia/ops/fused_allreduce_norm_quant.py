@@ -6,7 +6,9 @@ Calls FlashInfer's `kARResidualRMSNormOut{FP8,FP4}Quant` patterns directly
 (no torch.compile custom op). The kernel writes the bf16 normed activation
 (GDN's `in_proj_ba` reads it) next to the static FP8 / NVFP4 codes; its
 outputs are bitwise identical to FlashInfer AR+norm followed by
-`scaled_fp8_quant` / `scaled_fp4_quant`.
+`scaled_fp8_quant` / `scaled_fp4_quant`. Dynamic per-token FP8 has no pattern
+on vLLM's FlashInfer backends: it runs FlashInfer AR+norm, then
+`scaled_fp8_quant` as the linear would.
 
 Returns None when the fused kernel does not apply (FlashInfer or a supported
 workspace unavailable, or a batch above the workspace budget); the caller
@@ -15,6 +17,7 @@ then runs an explicit all-reduce and the Triton norm-quant.
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators import flashinfer_all_reduce as fi_ar
 from vllm.distributed.parallel_state import (
@@ -26,6 +29,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTokenSym,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
@@ -97,16 +101,17 @@ def fused_allreduce_gemma_rms_norm_quant(
     residual: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
-    scale: torch.Tensor,
+    scale: torch.Tensor | None,
     key: QuantKey,
 ) -> tuple[QuantizedActivation, torch.Tensor, torch.Tensor] | None:
     """Fused `gemma_rms_norm(all_reduce(hidden_states) + residual)` + quant.
 
     `hidden_states` is the per-rank partial of a row-parallel linear;
     `scale` is the consumer's static FP8 input scale or NVFP4 global scale
-    inverse. Returns the quantized normed activation, the normed activation in
-    `hidden_states`' dtype, and the new residual (written into the
-    `hidden_states` buffer), or None when the fused kernel does not apply.
+    inverse, or None for dynamic per-token FP8. Returns the quantized normed
+    activation, the normed activation in `hidden_states`' dtype, and the new
+    residual (written into the `hidden_states` buffer), or None when the
+    fused kernel does not apply.
     """
     tp_size = get_tensor_model_parallel_world_size()
     workspace = _get_workspace(hidden_states, tp_size)
@@ -131,6 +136,10 @@ def fused_allreduce_gemma_rms_norm_quant(
             dtype=torch.int32,
             device=hidden_states.device,
         ).view(current_platform.fp8_dtype())
+    elif key == kFp8DynamicTokenSym:
+        # Quantized after the AR+norm below.
+        pattern = patterns.kARResidualRMSNorm
+        quant_out = scale_out = None
     else:
         pattern = patterns.kARResidualRMSNormOutFP8Quant
         quant_out = torch.empty_like(hidden_states, dtype=current_platform.fp8_dtype())
@@ -157,9 +166,13 @@ def fused_allreduce_gemma_rms_norm_quant(
         fp32_acc=True,
         weight_bias=_GEMMA_WEIGHT_BIAS,
     )
+    if key == kFp8DynamicTokenSym:
+        quant_out, scale_out = ops.scaled_fp8_quant(
+            norm_out, use_per_token_if_dynamic=True
+        )
     qa = QuantizedActivation(
         data=quant_out,
-        scale=scale_out if nvfp4 else scale,
+        scale=scale if scale_out is None else scale_out,
         orig_dtype=hidden_states.dtype,
         orig_shape=hidden_states.shape,
         quant_key=key,

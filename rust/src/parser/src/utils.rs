@@ -59,9 +59,10 @@ pub fn partial_prefix_len(buffer: &str, token: &str) -> usize {
 
 /// Where the next marker may be, in the coordinate system of
 /// [`MarkerStream::offset`].
-enum Scan {
-    /// A complete marker starts at this offset.
-    Found(usize),
+pub(crate) enum Scan {
+    /// A complete marker starts at `at`; `index` is its position in the
+    /// scanned marker list.
+    Found { at: usize, index: usize },
     /// A marker may start at this offset but needs more input to decide; text
     /// from here on must be held back.
     Pending(usize),
@@ -77,7 +78,10 @@ enum Scan {
 /// on a cloned cursor, so the scanner and the consuming `alt` branch can never
 /// disagree; a rejected candidate (an ordinary lookalike) is skipped and the
 /// scan continues.
-fn scan_markers<'i, I: MarkerStream<'i>, M: MarkerLike>(
+///
+/// Prefer [`safe_text_len_mul`] or [`take_until_marker`]; use this directly
+/// only for scans that must tell which marker comes first.
+pub(crate) fn scan_markers<'i, I: MarkerStream<'i>, M: MarkerLike>(
     input: &I,
     markers: &[M],
     from: usize,
@@ -85,11 +89,11 @@ fn scan_markers<'i, I: MarkerStream<'i>, M: MarkerLike>(
     let start = input.offset();
     let mut from = from.max(start);
     while let Some(at) = input.next_candidate(markers, from) {
-        for marker in markers {
+        for (index, marker) in markers.iter().enumerate() {
             let mut probe = input.clone();
             probe.next_slice(at - start);
             match marker.as_marker().parse_next(&mut probe) {
-                Ok(_) => return Ok(Scan::Found(at)),
+                Ok(_) => return Ok(Scan::Found { at, index }),
                 Err(ErrMode::Backtrack(_)) => {}
                 Err(ErrMode::Incomplete(_)) => return Ok(Scan::Pending(at)),
                 Err(error @ ErrMode::Cut(_)) => return Err(error),
@@ -132,7 +136,7 @@ pub fn safe_text_len_mul<'i, I: MarkerStream<'i>, M: MarkerLike>(
 
     let start = input.offset();
     let (stop, found) = match scan_markers(input, markers, start)? {
-        Scan::Found(at) => (at, true),
+        Scan::Found { at, .. } => (at, true),
         Scan::Pending(at) | Scan::Clear(at) => (at, false),
     };
     let emit_len = stop - start;
@@ -179,27 +183,33 @@ pub fn take_until_marker<'i, 'a, I: MarkerStream<'i>, M: MarkerLike + 'a>(
     marker: M,
     state: &'a mut MarkerScanState,
 ) -> impl Parser<I, &'i str, ErrMode<ContextError>> + 'a {
-    move |input: &mut I| take_until_marker_(input, &marker, state)
+    move |input: &mut I| take_until_marker_(input, std::slice::from_ref(&marker), state)
+}
+
+/// Parse text until the earliest of `markers`, resuming from the last safe
+/// scan checkpoint.
+/// This is the multi-marker variant of [`take_until_marker`].
+pub fn take_until_marker_mul<'i, 'a, I: MarkerStream<'i>, M: MarkerLike + 'a>(
+    markers: &'a [M],
+    state: &'a mut MarkerScanState,
+) -> impl Parser<I, &'i str, ErrMode<ContextError>> + 'a {
+    move |input: &mut I| take_until_marker_(input, markers, state)
 }
 
 fn take_until_marker_<'i, I: MarkerStream<'i>, M: MarkerLike>(
     input: &mut I,
-    marker: &M,
+    markers: &[M],
     state: &mut MarkerScanState,
 ) -> ModalResult<&'i str> {
-    debug_assert!(!marker.as_marker().as_str().is_empty());
+    debug_assert!(markers.iter().all(|marker| !marker.as_marker().as_str().is_empty()));
 
     if input.eof_offset() == 0 {
         return incomplete();
     }
 
     let start = input.offset();
-    match scan_markers(
-        input,
-        std::slice::from_ref(marker),
-        start + state.scan_start,
-    )? {
-        Scan::Found(at) => {
+    match scan_markers(input, markers, start + state.scan_start)? {
+        Scan::Found { at, .. } => {
             state.reset();
             Ok(input.next_slice(at - start))
         }
@@ -480,7 +490,7 @@ mod tests {
     use super::{
         JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str, parse_buffered_event,
         partial_prefix_len, safe_text_len, safe_text_len_mul, take_json_object, take_json_string,
-        take_until_marker,
+        take_until_marker, take_until_marker_mul,
     };
 
     #[test]
@@ -627,6 +637,18 @@ mod tests {
         assert_eq!(body, "body");
         assert_eq!(*input, "</tool_call>tail");
         assert_eq!(state, MarkerScanState::default());
+    }
+
+    #[test]
+    fn take_until_marker_mul_stops_before_earliest_marker() {
+        let mut state = MarkerScanState::default();
+        let markers = ["</b>", "</a>"];
+        let mut input = Partial::new("body</a></b>");
+
+        let body = take_until_marker_mul(&markers, &mut state).parse_next(&mut input).unwrap();
+
+        assert_eq!(body, "body");
+        assert_eq!(*input, "</a></b>");
     }
 
     #[test]

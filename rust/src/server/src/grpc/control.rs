@@ -176,9 +176,7 @@ fn unload_lora_status(error: UnloadLoraError) -> Status {
     let code = match &error {
         UnloadLoraError::Disabled(_) => Code::FailedPrecondition,
         UnloadLoraError::NotFound { .. } => Code::NotFound,
-        UnloadLoraError::IntIdMismatch { .. }
-        | UnloadLoraError::Engine { .. }
-        | UnloadLoraError::NotRemoved { .. } => Code::Internal,
+        UnloadLoraError::IntIdMismatch { .. } | UnloadLoraError::Engine { .. } => Code::Internal,
     };
     Status::new(code, error.to_report_string())
 }

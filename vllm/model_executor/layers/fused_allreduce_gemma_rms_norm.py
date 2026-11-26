@@ -16,6 +16,7 @@ numerically identical to the unfused model path.
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -24,6 +25,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.platforms import current_platform
+from vllm.v1.worker.ubatching import dbo_enabled
 
 MiB = 1024 * 1024
 
@@ -67,6 +69,8 @@ def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | 
 
 def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool, int]:
     """Whether the flashinfer fused path applies; returns (ok, max_token_num)."""
+    if envs.VLLM_BATCH_INVARIANT:
+        return False, 0
     if (
         flashinfer_trtllm_fused_allreduce_norm is None
         or get_fi_ar_workspace is None
@@ -174,7 +178,10 @@ def fused_allreduce_gemma_rms_norm(
         )
         return norm_out, hidden_states
 
-    if _can_use_aiter_fused_ar_rms(hidden_states):
+    # all-reduce-overlap: the fused all-reduce bypasses the microbatch hand-off.
+    if not dbo_enabled("all-reduce-overlap") and _can_use_aiter_fused_ar_rms(
+        hidden_states
+    ):
         from vllm._aiter_ops import rocm_aiter_ops
 
         return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(

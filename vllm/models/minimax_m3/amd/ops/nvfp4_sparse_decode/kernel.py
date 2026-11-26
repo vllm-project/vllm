@@ -61,6 +61,11 @@ from vllm.models.minimax_m3.amd.ops.nvfp4_prefill.kernel import (
 )
 
 PART_F = 36  # fp32 per (split, row, lane) partial: O (NDT x 4), max, sum, pad
+# Row placements of the XCD-aware grid (`xcds` > 0).
+PLACE_REQ = 0  # request r on XCD r % xcds
+# whole groups of xcds requests as PLACE_REQ, the remaining rows in equal
+# contiguous runs (every XCD within one row of the others)
+PLACE_BAL = 1
 SIGN4 = 0x80808080 - (1 << 32)
 MAG4 = 0x07070707
 
@@ -168,7 +173,11 @@ def _global_atomic_add(addr_i64, value):
 
 
 def compile_nvfp4_sparse_decode(
-    splits: int = 1, topk: int = 16, xcds: int = 0, fp8_out: bool = False
+    splits: int = 1,
+    topk: int = 16,
+    xcds: int = 0,
+    fp8_out: bool = False,
+    place: int = PLACE_REQ,
 ):
     """Build the decode kernel.
 
@@ -176,19 +185,25 @@ def compile_nvfp4_sparse_decode(
         splits: workgroups per (row, KV head), each over a contiguous share of
             the row's blocks.
         topk: top-k width (one lane per slot).
-        xcds: if > 0, workgroup w runs on XCD w % xcds and a request's rows and
-            a row's splits are placed on one XCD.
+        xcds: if > 0, workgroup w runs on XCD w % xcds and a row's splits are
+            placed on one XCD.
         fp8_out: store the output as MXFP8 values + E8M0 scales (`arg_oq`,
             `arg_os`) instead of bf16 (`arg_out`, unused then).
+        place: with `xcds`, the rows' XCDs: `PLACE_REQ` puts request r on
+            XCD r % xcds; `PLACE_BAL` does that for whole groups of xcds
+            requests and spreads the remaining rows over the XCDs in
+            contiguous runs. Only moves rows between workgroups.
 
     """
     assert 1 <= topk <= 64 and splits >= 1
-    SPLITS, TOPK, XCDS, FP8_OUT = splits, topk, xcds, fp8_out
+    assert place in (PLACE_REQ, PLACE_BAL) and (place == PLACE_REQ or xcds > 0)
+    SPLITS, TOPK, XCDS, FP8_OUT, PLACE = splits, topk, xcds, fp8_out, place
     # Split partials need sc1 unless all splits of a row run on one XCD.
     PART_SCOPE = 0 if XCDS else SC1
     name = (
         f"m3_nvfp4_sparse_decode_k{TOPK}_s{SPLITS}"
         + (f"_x{XCDS}" if XCDS else "")
+        + ("b" if PLACE == PLACE_BAL else "")
         + ("_q8" if fp8_out else "")
     )
 
@@ -243,11 +258,25 @@ def compile_nvfp4_sparse_decode(
         smem.lut.ptr[tx] = fx.Int32(lut_g[tx])
         smem.lut.ptr[tx + 256] = fx.Int32(lut_g[tx + 256])
 
-        if const_expr(XCDS > 0):
+        if const_expr(XCDS > 0 and PLACE == PLACE_REQ):
             # grid.x is padded to XCDS x ql so a request's rows share an XCD.
             xcd = bx % XCDS
             slot = bx // XCDS
             row = ((slot // i32_ql) * XCDS + xcd) * i32_ql + slot % i32_ql
+        elif const_expr(XCDS > 0):
+            # The first (reqs // XCDS) x XCDS requests as above (sf slots an
+            # XCD); XCD x then takes the next sr rows from rows_full + x sr on.
+            # grid.x = (sf + sr) x XCDS; a slot past the rows is a padding row,
+            # and the map is a bijection onto [0, grid.x).
+            xcd = bx % XCDS
+            slot = bx // XCDS
+            sf = (i32_rows // i32_ql // XCDS) * i32_ql
+            rows_full = sf * XCDS
+            sr = (i32_rows - rows_full + (XCDS - 1)) // XCDS
+            row = (slot < sf).select(
+                ((slot // i32_ql) * XCDS + xcd) * i32_ql + slot % i32_ql,
+                rows_full + xcd * sr + (slot - sf),
+            )
         else:
             row = bx
         row_ok = row < i32_rows

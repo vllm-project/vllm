@@ -159,7 +159,7 @@ def _load_q_and_rope(
 class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
     tb_size = 128
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_dim: int
         rope_dim: int
@@ -318,7 +318,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         cos_sin_dtype: type[cutlass.Numeric],
@@ -444,7 +444,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
 class IndexerQFp8Kernel(VllmCuTeDSLJitKernel["IndexerQFp8Kernel.CompileKey"]):
     tb_size = 128
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_dim: int
         rope_dim: int
@@ -604,7 +604,7 @@ class IndexerQFp8Kernel(VllmCuTeDSLJitKernel["IndexerQFp8Kernel.CompileKey"]):
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         cos_sin_dtype: type[cutlass.Numeric],

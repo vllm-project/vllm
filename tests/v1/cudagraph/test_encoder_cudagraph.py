@@ -7,7 +7,9 @@ Test organization:
     - TestFindBudgetGraph      — greedy budget selection logic
     - TestGetCumulativeStats   — hit/miss rate statistics
     - TestGetInputModality     — modality routing from mm_kwargs keys
+    - TestSupportsBatch        — precomputed embeddings skip the graph
     - TestDefaultBudgetTable   — subdivided default budgets, user overrides
+    - TestQwen2VLEncoderCudaGraphMixin — shared Qwen2-VL-style select/capture logic
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
@@ -23,6 +25,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.model_executor.models.encoder_cudagraph_utils import (
+    Qwen2VLEncoderCudaGraphMixin,
+)
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import (
@@ -151,7 +156,7 @@ class _MockModel(SupportsEncoderCudaGraph):
         return EncoderCudaGraphReplayBuffers(values={})
 
     def encoder_cudagraph_forward(
-        self, inputs: dict[str, torch.Tensor], path: str = "default"
+        self, values: dict[str, torch.Tensor], path: str = "default"
     ) -> torch.Tensor:
         return torch.zeros(0)
 
@@ -258,6 +263,43 @@ def test_item_multiple_budgets_fit_fixed_size_items():
     assert all(b % 81 == 0 for b in budgets)
     assert budgets[:16] == [81 * n for n in range(1, 17)]
     assert budgets[-1] == 81 * (2560 // 81)
+
+
+# ---------------------------------------------------------------------------
+# _replay_exceeds_capture
+# ---------------------------------------------------------------------------
+
+
+class TestReplayExceedsCapture:
+    """Replay tensors must fit the fixed capture-buffer leading dimension."""
+
+    def test_fits_when_src_shorter_or_equal(self):
+        input_buffers = {"cu_seqlens": torch.zeros(33, dtype=torch.int32)}
+        replay_values = {"cu_seqlens": torch.arange(33, dtype=torch.int32)}
+        assert not EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+    def test_exceeds_when_src_longer(self):
+        input_buffers = {"cu_seqlens": torch.zeros(33, dtype=torch.int32)}
+        replay_values = {"cu_seqlens": torch.arange(67, dtype=torch.int32)}
+        assert EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+    def test_ignores_missing_and_scalar_buffers(self):
+        input_buffers = {
+            "cu_seqlens": torch.zeros(33, dtype=torch.int32),
+            "max_seqlen": torch.tensor(16),
+        }
+        replay_values = {
+            "cu_seqlens": None,
+            "max_seqlen": torch.tensor(8),
+            "other": torch.arange(100, dtype=torch.int32),
+        }
+        assert not EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +800,40 @@ class TestEncoderCudaGraphCaptureReplay:
         assert result[0].shape == (81, _HIDDEN)
         assert self.mgr.graph_misses == 1
 
+    def test_eager_fallback_when_replay_buffer_exceeds_capture(self):
+        # Capture-sized inputs replay normally; force an oversized leading
+        # dimension on a captured buffer so replay must fall back to eager
+        # instead of raising in the padded copy.
+        grid_thw = [[1, 4, 4]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        real_prepare = self.model.prepare_encoder_cudagraph_replay_buffers
+
+        def oversized_prepare(*args, **kwargs):
+            replay = real_prepare(*args, **kwargs)
+            captured = next(iter(self.mgr.budget_graphs["default"].values()))
+            key = "pixel_values"
+            overflow = captured.input_buffers[key].shape[0] + 8
+            replay.values[key] = torch.randn(
+                overflow,
+                _FLAT,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            return replay
+
+        with patch.object(
+            self.model,
+            "prepare_encoder_cudagraph_replay_buffers",
+            side_effect=oversized_prepare,
+        ):
+            result = self.mgr.execute(mm_kwargs)
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].shape == (4, _HIDDEN)
+        assert self.mgr.graph_hits == 0
+        assert self.mgr.graph_misses == 1
+
     # --- counters ---
 
     def test_hit_counter_increments_by_num_images(self):
@@ -1067,6 +1143,142 @@ class TestGetInputModality:
             "video_grid_thw": [[2, 4, 4]],
         }
         assert model.get_input_modality(mm_kwargs) == "video"
+
+
+# ---------------------------------------------------------------------------
+# No-GPU tests — precomputed embeddings never take the graph path
+# ---------------------------------------------------------------------------
+
+
+class TestSupportsBatch:
+    """supports_batch keeps graph replay to batches that run the encoder."""
+
+    @pytest.mark.parametrize(
+        "modality,keys,expected",
+        [
+            ("image", ["pixel_values", "image_grid_thw"], True),
+            ("image", ["pixel_values_flat", "image_num_patches"], True),
+            ("video", ["pixel_values_videos", "video_grid_thw"], True),
+            # Phi-4MM's pixel input: match the exact key, not a suffix.
+            ("image", ["input_image_embeds", "image_sizes"], True),
+            ("image", ["image_embeds"], False),
+            ("video", ["video_embeds"], False),
+            ("image", ["image_embeds", "image_grid_thw"], False),
+            ("video", ["video_embeds", "video_grid_thw"], False),
+            ("audio", ["input_features"], False),
+        ],
+    )
+    def test_supports_batch(self, modality, keys, expected):
+        mgr = _make_manager_with_budgets([16])
+        mgr.config = EncoderCudaGraphConfig(
+            modalities=["image", "video"], buffer_keys=[], out_hidden_size=32
+        )
+        mm_kwargs = {key: torch.zeros(1) for key in keys}
+        assert mgr.supports_batch(modality, mm_kwargs) is expected
+
+
+# ---------------------------------------------------------------------------
+# No-GPU tests — Qwen2VLEncoderCudaGraphMixin
+# ---------------------------------------------------------------------------
+
+
+class _StubQwen2VLVisual:
+    spatial_merge_size = 2
+    patch_embed = SimpleNamespace(
+        proj=SimpleNamespace(in_channels=3), patch_size=2, temporal_patch_size=1
+    )
+    input_norm = SimpleNamespace(input_dtype=None)
+
+    def __init__(self):
+        self.metadata_calls: list[tuple[list[list[int]], dict[str, Any]]] = []
+
+    def prepare_encoder_metadata(self, grid_thw, **kwargs):
+        self.metadata_calls.append((grid_thw, kwargs))
+        return {"cu_seqlens": torch.zeros(len(grid_thw) + 1, dtype=torch.int32)}
+
+
+class _Qwen2VLHost(Qwen2VLEncoderCudaGraphMixin):
+    def __init__(self):
+        self.visual = _StubQwen2VLVisual()
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            buffer_keys=["pixel_values", "cu_seqlens"],
+            out_hidden_size=12,
+            max_frames_per_video=self.get_max_frames_per_video(),
+        )
+
+    def get_max_frames_per_video(self) -> int:
+        return 3
+
+
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "max_model_len"), [(8192, 4096), (2048, 32768)]
+)
+def test_default_budget_range(max_num_batched_tokens, max_model_len):
+    """Models without their own override budget from 64 up to the smaller of
+    max_num_batched_tokens and max_model_len."""
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens),
+        model_config=SimpleNamespace(max_model_len=max_model_len),
+    )
+    budget_range = SupportsEncoderCudaGraph.get_encoder_cudagraph_budget_range(
+        cast(Any, None), cast(Any, vllm_config)
+    )
+    assert budget_range == (64, min(max_num_batched_tokens, max_model_len))
+
+
+class TestQwen2VLEncoderCudaGraphMixin:
+    """Shared logic used by models with a Qwen2-VL-style vision tower."""
+
+    def test_select_slices_items_by_patch_count(self):
+        host = _Qwen2VLHost()
+        grid = [[2, 2, 4], [1, 2, 2], [1, 4, 2]]
+        pixel_values = torch.arange(28).unsqueeze(1)
+        mm_kwargs = {"pixel_values_videos": pixel_values, "video_grid_thw": grid}
+
+        specs = host.get_encoder_cudagraph_item_specs(mm_kwargs)
+        assert [s.output_tokens for s in specs] == [4, 1, 2]
+
+        selected = host.select_encoder_cudagraph_items(mm_kwargs, [2, 0])
+        assert selected["video_grid_thw"] == [[1, 4, 2], [2, 2, 4]]
+        expected = torch.cat([pixel_values[20:], pixel_values[:16]])
+        assert torch.equal(selected["pixel_values_videos"], expected)
+
+        empty = host.select_encoder_cudagraph_items(mm_kwargs, [])
+        assert empty["video_grid_thw"] == []
+        assert empty["pixel_values_videos"].shape == (0, 1)
+
+    @pytest.mark.parametrize(
+        ("token_budget", "max_batch_size", "max_frames_per_batch", "grid_row"),
+        [
+            # ceil(10 / 2) = 5 tokens per item, spread over 3 frames of 2 tokens.
+            (10, 2, 6, [3, 2, 4]),
+            # Image layout; 324 / 8 does not divide, so items round up to 41.
+            (324, 8, 0, [1, 2, 82]),
+        ],
+    )
+    def test_capture_buffers_cover_budget(
+        self, token_budget, max_batch_size, max_frames_per_batch, grid_row
+    ):
+        host = _Qwen2VLHost()
+        values = host.prepare_encoder_cudagraph_capture_inputs(
+            token_budget=token_budget,
+            max_batch_size=max_batch_size,
+            max_frames_per_batch=max_frames_per_batch,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        ).values
+
+        ((grid, kwargs),) = host.visual.metadata_calls
+        assert grid == [grid_row] * max_batch_size
+        t, h, w = grid_row
+        # The captured buffers must fit one item that uses the full budget.
+        assert t * (h // 2) * (w // 2) * max_batch_size >= token_budget
+        assert kwargs["max_seqlen_override"] == token_budget * 4
+        assert values["pixel_values"].shape == (max_batch_size * t * h * w, 12)
+        assert list(values) == ["cu_seqlens", "pixel_values"]
 
 
 # ---------------------------------------------------------------------------
@@ -1632,7 +1844,16 @@ class TestFlashInferCuSeqlensPadding:
         )
 
     @staticmethod
-    def _qwen3_vl_padding_fn(flashinfer: bool):
+    def _padding_fn(model: str, flashinfer: bool):
+        from vllm.model_executor.models.glm4_1v import (
+            Glm4vForConditionalGeneration,
+        )
+        from vllm.model_executor.models.kimi_k25 import (
+            KimiK25ForConditionalGeneration,
+        )
+        from vllm.model_executor.models.qwen2_vl import (
+            Qwen2VLForConditionalGeneration,
+        )
         from vllm.model_executor.models.qwen3_vl import (
             Qwen3VLForConditionalGeneration,
         )
@@ -1643,18 +1864,28 @@ class TestFlashInferCuSeqlensPadding:
             if flashinfer
             else AttentionBackendEnum.FLASH_ATTN
         )
-        model = SimpleNamespace(
-            is_multimodal_pruning_enabled=False,
-            get_max_frames_per_video=lambda: 16,
-            visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
-        )
-        config = Qwen3VLForConditionalGeneration.get_encoder_cudagraph_config(
-            cast(Any, model)
-        )
+        if model == "kimi_k25":
+            cls = KimiK25ForConditionalGeneration
+            attn = SimpleNamespace(attn_backend=backend)
+            encoder = SimpleNamespace(blocks=[SimpleNamespace(attn=attn)])
+            stub = SimpleNamespace(
+                vision_tower=SimpleNamespace(encoder=encoder),
+                config=SimpleNamespace(text_config=SimpleNamespace(hidden_size=8)),
+            )
+        else:
+            cls = {
+                "qwen2_vl": Qwen2VLForConditionalGeneration,
+                "qwen3_vl": Qwen3VLForConditionalGeneration,
+                "glm4v": Glm4vForConditionalGeneration,
+            }[model]
+            stub = SimpleNamespace(
+                is_multimodal_pruning_enabled=False,
+                get_max_frames_per_video=lambda: 16,
+                visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
+            )
+        config = cls.get_encoder_cudagraph_config(cast(Any, stub))
         # Same lookup as EncoderCudaGraphManager replay.
-        return config.padding_logics.get(
-            "cu_seqlens", EncoderCudaGraphManager._copy_padded_buffer
-        )
+        return EncoderCudaGraphManager._get_padding_logic(config, "cu_seqlens")
 
     # (seq_lens, replay batch size, capture batch size). The FlashInfer batch
     # buckets are 8, 16, 32 and 64.
@@ -1663,12 +1894,24 @@ class TestFlashInferCuSeqlensPadding:
         ([49, 196], 2, 16),
         ([64] * 9, 9, 32),  # bucket 16 replayed into bucket 32
         ([49] * 3, 3, 8),  # same bucket
+        ([49], 1, 9),  # Kimi-K2.5: unpadded replay into max_batch_size + 1
     ]
 
-    @pytest.mark.parametrize("flashinfer", [True, False])
+    @pytest.mark.parametrize(
+        ("model", "flashinfer"),
+        [
+            *(
+                (m, fi)
+                for m in ("qwen3_vl", "glm4v", "kimi_k25")
+                for fi in (True, False)
+            ),
+            ("qwen2_vl", False),  # no FlashInfer ViT path
+        ],
+    )
     @pytest.mark.parametrize(("seq_lens", "replay_batch", "capture_batch"), CASES)
     def test_replay_padding_matches_capture_size_metadata(
         self,
+        model: str,
         flashinfer: bool,
         seq_lens: list[int],
         replay_batch: int,
@@ -1680,8 +1923,25 @@ class TestFlashInferCuSeqlensPadding:
         assert want.shape == capture.shape
 
         buf = torch.full_like(capture, -1)
-        self._qwen3_vl_padding_fn(flashinfer)(buf, replay)
+        self._padding_fn(model, flashinfer)(buf, replay)
         assert torch.equal(buf, want)
+
+    def test_oot_attention_owns_padding(self, monkeypatch):
+        from vllm.model_executor.custom_op import op_registry_oot
+        from vllm.model_executor.layers.attention import MMEncoderAttention
+
+        def oot_padding(dst: torch.Tensor, src: torch.Tensor) -> None:
+            pass
+
+        class OOTMMEncoderAttention(MMEncoderAttention):
+            @classmethod
+            def get_cu_seqlens_padding_logics(cls, attn_backend, *keys):
+                return dict.fromkeys(keys, oot_padding)
+
+        monkeypatch.setitem(
+            op_registry_oot, MMEncoderAttention.__name__, OOTMMEncoderAttention
+        )
+        assert self._padding_fn("qwen3_vl", flashinfer=False) is oot_padding
 
 
 # ---------------------------------------------------------------------------
@@ -1930,3 +2190,239 @@ def test_step3_vl_postprocess_clones_global_only_item():
     )
     assert torch.equal(dest[0], global_out)
     assert dest[0].data_ptr() != global_out.data_ptr()
+
+
+class TestKimiVLCaptureMaxSeqlen:
+    """Kimi-VL bakes max_seqlen into the graph at capture. MoonViT attention
+    runs on pre-merge patches, so it must cover the patches of one image that
+    uses the whole token budget."""
+
+    @staticmethod
+    def _captured_max_seqlen(token_budget: int, max_batch_size: int) -> int:
+        from vllm.model_executor.models.kimi_vl import (
+            KimiVLForConditionalGeneration as KimiVL,
+        )
+
+        def prepare_encoder_metadata(grid_hws_list, *, max_seqlen_override, **_):
+            return {"max_seqlen": torch.tensor(max_seqlen_override)}
+
+        fake = SimpleNamespace(
+            config=SimpleNamespace(
+                vision_config=SimpleNamespace(merge_kernel_size=(2, 2), patch_size=14)
+            ),
+            vision_tower=SimpleNamespace(
+                encoder=SimpleNamespace(
+                    rope_2d=SimpleNamespace(max_height=512, max_width=512)
+                ),
+                prepare_encoder_metadata=prepare_encoder_metadata,
+            ),
+        )
+        inputs = KimiVL.prepare_encoder_cudagraph_capture_inputs(
+            cast(Any, fake),
+            token_budget,
+            max_batch_size,
+            0,
+            torch.device("cpu"),
+            torch.float32,
+        )
+        return int(inputs.values["max_seqlen"])
+
+    @pytest.mark.parametrize("token_budget", [64, 256, 1024])
+    def test_covers_one_image_using_the_whole_budget(self, token_budget):
+        # One image of token_budget merged tokens has token_budget * 2 * 2 patches.
+        full_budget_image_patches = token_budget * 2 * 2
+        assert self._captured_max_seqlen(token_budget, 4) >= full_budget_image_patches
+
+
+# ---------------------------------------------------------------------------
+# Qwen3-Omni audio encoder
+# ---------------------------------------------------------------------------
+
+
+def _make_qwen3_omni_audio_host(device: torch.device, dtype: torch.dtype):
+    from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+        Qwen3OmniMoeAudioEncoderConfig,
+        Qwen3OmniMoeThinkerConfig,
+    )
+
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeAudioEncoder,
+        Qwen3OmniMoeAudioEncoderCudaGraphMixin,
+        Qwen3OmniMoeConditionalGenerationMixin,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    class _Qwen3OmniAudioHost(
+        Qwen3OmniMoeAudioEncoderCudaGraphMixin,
+        Qwen3OmniMoeConditionalGenerationMixin,
+    ):
+        def __init__(self, audio_tower, config):
+            self.audio_tower = audio_tower
+            self.config = config
+
+    # Real defaults for the chunk/window sizes; small widths and depth.
+    audio_config = Qwen3OmniMoeAudioEncoderConfig(
+        d_model=128,
+        encoder_layers=2,
+        encoder_attention_heads=2,
+        encoder_ffn_dim=256,
+        downsample_hidden_size=32,
+        output_dim=96,
+    )
+    torch.manual_seed(0)
+    with set_default_torch_dtype(dtype), torch.device(device):
+        audio_tower = Qwen3OmniMoeAudioEncoder(audio_config)
+    audio_tower.requires_grad_(False)
+    for param in audio_tower.parameters():
+        param.normal_(0.0, 0.05)
+    config = Qwen3OmniMoeThinkerConfig(audio_config=audio_config.to_dict())
+    return _Qwen3OmniAudioHost(audio_tower.eval(), config)
+
+
+def _make_audio_mm_kwargs(
+    feature_lens: list[int], device: torch.device, dtype: torch.dtype
+) -> dict[str, Any]:
+    return {
+        "input_audio_features": torch.randn(
+            128, sum(feature_lens), device=device, dtype=dtype
+        ),
+        "audio_feature_lengths": torch.tensor(feature_lens),
+        "feature_attention_mask": (
+            torch.arange(max(feature_lens))[None, :]
+            < torch.tensor(feature_lens)[:, None]
+        ),
+    }
+
+
+class TestQwen3OmniAudioEncoderCudaGraphMixin:
+    """Host-side logic of the Qwen3-Omni audio tower integration."""
+
+    @pytest.fixture(autouse=True)
+    def _host(self, dist_init):
+        self.host = _make_qwen3_omni_audio_host(torch.device("cpu"), torch.float32)
+        self.tower = self.host.audio_tower
+
+    def test_window_is_n_window_infer_frames(self):
+        # n_window=50 -> 100-frame chunks of 13 tokens; 800 frames per window.
+        assert self.tower.window_aftercnn == 13 * 8
+
+    def test_metadata_splits_items_into_windows(self):
+        metadata = self.tower.prepare_encoder_metadata([250, 13, 104])
+        assert metadata["cu_seqlens"].tolist() == [0, 104, 208, 250, 263, 367]
+
+    def test_metadata_pads_with_empty_windows(self):
+        metadata = self.tower.prepare_encoder_metadata(
+            [250], max_num_windows=6, max_seqlen_override=104
+        )
+        assert metadata["cu_seqlens"].tolist() == [0, 104, 208, 250, 250, 250, 250]
+
+    def test_item_specs_match_encoder_output_lengths(self):
+        from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+            _get_feat_extract_output_lengths,
+        )
+
+        feature_lens = [1000, 250, 37]
+        mm_kwargs = _make_audio_mm_kwargs(
+            feature_lens, torch.device("cpu"), torch.float32
+        )
+        specs = self.host.get_encoder_cudagraph_item_specs(mm_kwargs)
+        expected = _get_feat_extract_output_lengths(torch.tensor(feature_lens))
+        assert [s.input_size for s in specs] == feature_lens
+        assert [s.output_tokens for s in specs] == expected.tolist()
+
+    def test_select_items_slices_features_per_item(self):
+        feature_lens = [1000, 250, 37]
+        mm_kwargs = _make_audio_mm_kwargs(
+            feature_lens, torch.device("cpu"), torch.float32
+        )
+        features = mm_kwargs["input_audio_features"]
+        selected = self.host.select_encoder_cudagraph_items(mm_kwargs, [2, 0])
+        assert selected["audio_feature_lengths"].tolist() == [37, 1000]
+        assert selected["feature_attention_mask"].sum(-1).tolist() == [37, 1000]
+        torch.testing.assert_close(
+            selected["input_audio_features"],
+            torch.cat([features[:, 1250:1287], features[:, :1000]], dim=-1),
+            rtol=0,
+            atol=0,
+        )
+
+    @pytest.mark.parametrize("token_budget", [104, 1000, 5120])
+    def test_capture_windows_cover_any_replay(self, token_budget):
+        max_batch_size = 8
+        capture = self.host.prepare_encoder_cudagraph_capture_inputs(
+            token_budget, max_batch_size, 0, torch.device("cpu"), torch.float32
+        )
+        capture_windows = capture.values["cu_seqlens"].numel()
+        assert capture.values["hidden_states"].shape == (token_budget, 128)
+        # Worst case: every item has one partial window.
+        lens = [1] * (max_batch_size - 1) + [token_budget - max_batch_size + 1]
+        replay = self.tower.prepare_encoder_metadata(lens)
+        assert replay["cu_seqlens"].numel() <= capture_windows
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
+class TestQwen3OmniAudioEncoderCudaGraphReplay:
+    """Graph replay matches the eager audio tower on the same inputs."""
+
+    @pytest.fixture(autouse=True)
+    def _host(self, dist_init, workspace_init):
+        self.device = torch.device("cuda", 0)
+        self.dtype = torch.bfloat16
+        self.host = _make_qwen3_omni_audio_host(self.device, self.dtype)
+        self.mgr = _make_manager_for_gpu(
+            cast(Any, self.host), [104, 512, 1024], 8, self.device, self.dtype
+        )
+        self.mgr.capture(graph_pool=current_platform.graph_pool_handle())
+
+    def _eager(self, mm_kwargs: dict[str, Any]) -> list[torch.Tensor]:
+        lens = [
+            s.output_tokens
+            for s in self.host.get_encoder_cudagraph_item_specs(mm_kwargs)
+        ]
+        return list(self.host.encoder_eager_forward(mm_kwargs).split(lens))
+
+    def test_audio_modality_is_graphed(self):
+        assert self.mgr.config.modalities == ["audio"]
+        assert self.mgr.supports_batch(
+            "audio", _make_audio_mm_kwargs([100], self.device, self.dtype)
+        )
+
+    @pytest.mark.parametrize(
+        "feature_lens",
+        [[100], [37], [3000, 250, 37], [1600, 1600, 801, 100, 99, 1, 2, 3]],
+    )
+    def test_replay_matches_eager(self, feature_lens):
+        mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
+        expected = self._eager(mm_kwargs)
+        misses = self.mgr.graph_misses
+        result = self.mgr.execute(mm_kwargs)
+        assert self.mgr.graph_misses == misses
+        assert result is not None and len(result) == len(expected)
+        for out, ref in zip(result, expected):
+            torch.testing.assert_close(out, ref)
+
+    def test_replay_does_not_read_stale_rows(self):
+        # A large batch leaves its rows in the shared buffers; a smaller
+        # replay through the same graph must not attend to them.
+        big = _make_audio_mm_kwargs([3000, 3000], self.device, self.dtype)
+        small = _make_audio_mm_kwargs([900], self.device, self.dtype)
+        self.mgr.execute(big)
+        result = self.mgr.execute(small)
+        assert result is not None
+        torch.testing.assert_close(result[0], self._eager(small)[0])
+
+    @pytest.mark.parametrize(
+        "feature_lens", [[10000], [100, 10000, 250], [100, 250] * 5]
+    )
+    def test_oversized_batch_falls_back_to_eager(self, feature_lens):
+        """Overflow preserves clip order, independent storage, and output lifetime."""
+        mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
+        expected = self._eager(mm_kwargs)
+        misses = self.mgr.graph_misses
+        result = self.mgr.execute(mm_kwargs)
+        assert self.mgr.graph_misses == misses + len(feature_lens)
+        assert result is not None and len(result) == len(expected)
+        self.mgr.execute(_make_audio_mm_kwargs([100], self.device, self.dtype))
+        for out, ref in zip(result, expected):
+            torch.testing.assert_close(out, ref, rtol=0, atol=0)
+            assert out.untyped_storage().nbytes() == out.numel() * out.element_size()

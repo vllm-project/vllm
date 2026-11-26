@@ -130,10 +130,6 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         return weight_key is None and activation_key is None
 
-    def supports_chunking(self) -> bool:
-        # NvS is static and segments must stay whole.
-        return False
-
     def supports_expert_map(self) -> bool:
         # MoonEP addresses global expert rows directly.
         return False

@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 
 
-@dataclass
+@dataclass(slots=True)
 class MemoryAllocation:
     """Describe a tensor view carved from the Consumer receive slab."""
 
@@ -37,16 +37,17 @@ class MemoryAllocation:
     tensor: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class _ResidentEntry(Generic[_T]):
     """Store one resident value and its ownership accounting."""
 
     value: _T
     pinned: bool = True
     leases: int = 0
+    invalidated: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class ResidentLease(Generic[_T]):
     """Represent a borrow of one resident entry."""
 
@@ -57,6 +58,10 @@ class ResidentLease(Generic[_T]):
     @property
     def value(self) -> _T:
         return self._entry.value
+
+    @property
+    def invalidated(self) -> bool:
+        return self._entry.invalidated
 
 
 class ContiguousAllocator:
@@ -139,7 +144,21 @@ class ResidentPool(Generic[_T]):
     def referenced(self) -> list[str]:
         return [key for key, entry in self._entries.items() if entry.pinned]
 
+    def keys(self) -> list[str]:
+        return list(self._entries)
+
     def get(self, key: str) -> _T | None:
+        entry = self._entries.get(key)
+        if entry is None or entry.invalidated:
+            return None
+        return entry.value
+
+    def peek(self, key: str) -> _T | None:
+        """Return the current value even when invalidated.
+
+        Replacement bookkeeping must see invalidated entries; lookups
+        serving new work must not.
+        """
         entry = self._entries.get(key)
         return entry.value if entry is not None else None
 
@@ -167,7 +186,7 @@ class ResidentPool(Generic[_T]):
 
     def acquire(self, key: str) -> ResidentLease[_T] | None:
         entry = self._entries.get(key)
-        if entry is None:
+        if entry is None or entry.invalidated:
             return None
         entry.leases += 1
         self._evictable.pop(key, None)
@@ -184,12 +203,22 @@ class ResidentPool(Generic[_T]):
             if entry.leases == 0:
                 return entry.value
             return None
+        if entry.leases == 0 and entry.invalidated:
+            # An invalidated resident is reclaimed at final release rather
+            # than parked in the LRU.
+            self._evictable.pop(lease.key, None)
+            del self._entries[lease.key]
+            return entry.value
         if not entry.pinned and entry.leases == 0:
             self._evictable[lease.key] = None
         return None
 
     def consume(self, lease: ResidentLease[_T]) -> tuple[_T, _T | None]:
-        current = self._entries[lease.key]
+        current = self._entries.get(lease.key)
+        if lease.invalidated or current is None or current.invalidated:
+            # Invalidation follows the lease, not just the entry: a
+            # reset-era lease is refused even if its entry was replaced.
+            raise RuntimeError("Stale resident lease")
         current.pinned = True
         self._evictable.pop(lease.key, None)
         released = self.release(lease)
@@ -202,6 +231,28 @@ class ResidentPool(Generic[_T]):
         entry.pinned = False
         if entry.leases == 0:
             self._evictable[key] = None
+
+    def mark_invalidated(self, key: str) -> None:
+        """Flag one leased resident for eviction at final lease release."""
+        entry = self._entries.get(key)
+        if entry is not None:
+            entry.invalidated = True
+
+    def evict_unleased(self, key: str, evict: Callable[[str, _T], bool]) -> bool:
+        """Remove one resident that has no active leases.
+
+        Unlike `retire`, this drops the entry so later lookups miss.
+        Entries with leases stay in the pool. `evict` decides whether
+        to accept the value and is responsible for releasing it.
+        """
+        entry = self._entries.get(key)
+        if entry is None or entry.leases > 0:
+            return False
+        if not evict(key, entry.value):
+            return False
+        self._evictable.pop(key, None)
+        del self._entries[key]
+        return True
 
     def evict_lru(self, evict: Callable[[str, _T], bool]) -> str | None:
         for key in list(self._evictable):
@@ -218,7 +269,7 @@ class ResidentPool(Generic[_T]):
         self._evictable.clear()
 
 
-@dataclass
+@dataclass(slots=True)
 class StagedSources:
     """Own Producer tensor views and their staging-slab regions."""
 
@@ -433,8 +484,18 @@ class ConsumerMemoryPool:
     def release_cached(self, lease: ResidentLease[MemoryAllocation]) -> None:
         with self.lock:
             released = self._residents.release(lease)
-            if released is not None:
-                self._defer_or_free(released, self._record_release_event())
+            if released is None:
+                return
+            event = self._record_release_event()
+            if lease.invalidated and self._residents.peek(lease.key) is None:
+                # Final release of an invalidated resident: its retire event
+                # gates the deferred free. Not reported via `drain_reclaimed`;
+                # the Scheduler already expired this hash at reset and a late
+                # notice could clobber a re-established resident.
+                retired = self._retire_events.pop(lease.key, None)
+                if retired is not None:
+                    event = retired
+            self._defer_or_free(released, event)
 
     def publish(
         self,
@@ -451,12 +512,14 @@ class ConsumerMemoryPool:
                 if released is not None:
                     self._defer_or_free(released, self._record_release_event())
                 return canonical
-            previous = self._residents.get(mm_hash)
+            previous = self._residents.peek(mm_hash)
             displaced = self._residents.insert(mm_hash, allocation)
             if not pin:
                 self._residents.retire(mm_hash)
             event = None
             if previous is not None and previous is not allocation:
+                # The replaced entry owned this event; take it now so the
+                # new resident cannot inherit it.
                 event = self._retire_events.pop(mm_hash, None)
             if displaced is None or displaced is allocation:
                 return allocation
@@ -464,6 +527,36 @@ class ConsumerMemoryPool:
                 event = self._record_release_event()
             self._defer_or_free(displaced, event)
             return allocation
+
+    def invalidate_published(self) -> None:
+        """Invalidate every published resident after a cache reset.
+
+        Unleased residents are evicted at once. Leased residents are
+        marked invalidated: lookups miss immediately, and the entry is
+        evicted when its final lease is released. Evictions are not
+        reported via `drain_reclaimed` -- the Scheduler already expired
+        its own records at reset, and a late notice could clobber a
+        re-established resident of the same hash. Reclaim notices
+        accumulated before the reset are dropped for the same reason.
+        This is a no-op before the receive slab is prepared.
+        """
+        if self.tensor is None:
+            return
+        with self.lock:
+
+            def evict(mm_hash: str, allocation: MemoryAllocation) -> bool:
+                event = self._retire_events.pop(mm_hash, None)
+                if event is None:
+                    event = self._record_release_event()
+                self._defer_or_free(allocation, event)
+                return True
+
+            published = self._residents.keys()
+            for mm_hash in published:
+                if not self._residents.evict_unleased(mm_hash, evict):
+                    self._residents.mark_invalidated(mm_hash)
+            self._reclaimed.clear()
+            self._poll_frees_locked()
 
     def retire_stale(
         self,

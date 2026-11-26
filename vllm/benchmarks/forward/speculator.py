@@ -7,15 +7,15 @@ import torch
 
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
-from vllm.v1.worker.workspace import use_workspace_lane
 
 
 class DraftBench:
     def __init__(self, runner):
         self.runner = runner
         self.speculator = runner.speculator
-        self.method = runner.vllm_config.speculative_config.method
-        if self.method not in ("mtp", "eagle", "eagle3", "dspark", "dflash"):
+        speculative_config = runner.vllm_config.speculative_config
+        self.method = speculative_config.method
+        if not speculative_config.uses_target_hidden_states:
             raise ValueError(
                 f"Drafter timing does not support {self.method!r}; "
                 "use --exclude-drafter for target-only timing."
@@ -62,7 +62,7 @@ class DraftBench:
         draft_hidden = get_drafter_hidden_states(runner.model, hidden)
         if runner.pcp_manager is not None and aux is not None:
             aux = [runner.pcp_manager.restore_hidden_states(states) for states in aux]
-        with use_workspace_lane(runner._draft_workspace_lane):
+        with runner.draft_context():
             self.tokens = self.speculator.propose(
                 self.batch,
                 self.context.attn_metadata,

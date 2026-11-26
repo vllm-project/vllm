@@ -48,7 +48,7 @@ class FSLoadStoreSpec(LoadStoreSpec):
 DEFAULT_MAX_THREADS = 400
 
 
-@dataclass
+@dataclass(slots=True)
 class _Transfer:
     job_id: int
     completions: list[IOCompletion]

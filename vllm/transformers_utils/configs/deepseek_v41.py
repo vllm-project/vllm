@@ -26,22 +26,16 @@ class DeepseekV41Config(PreTrainedConfig):
         text_config = dict(text_config or {})
         vision_config = dict(vision_config or {})
 
-        # ``rope_scaling`` is a property in Transformers v5 (backed by
-        # ``rope_parameters``); capture it here and restore after
-        # super().__init__, which re-standardizes rope params.
-        rope_scaling = text_config.pop("rope_scaling", None)
-
         for key, value in text_config.items():
             if key == "model_type":
                 continue
-            # Don't clobber PreTrainedConfig properties (e.g. is_encoder_decoder).
-            if isinstance(getattr(type(self), key, None), property):
+            # Skip read-only properties (e.g. is_encoder_decoder)
+            attr = getattr(type(self), key, None)
+            if isinstance(attr, property) and attr.fset is None:
                 continue
             setattr(self, key, value)
 
         super().__init__(**kwargs)
-        if rope_scaling is not None:
-            self.rope_parameters = rope_scaling
 
         # The v4.1 quantization_config carries the expert dtype; the model
         # code reads it from the top-level hf_config.
