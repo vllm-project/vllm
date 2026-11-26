@@ -5528,7 +5528,7 @@ def test_flashmla_hisparse_fp8_prefill_uses_actual_heads_for_padded_output(
         lambda: SimpleNamespace(wait_event=lambda event: None),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.gather_fp8_prefill = lambda *args, **kwargs: object()
+    index_group.gather_fp8_prefill = lambda *args, **kwargs: object()  # type: ignore[method-assign]
 
     chunk = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk(
         tokens_slice=slice(0, num_tokens),
@@ -5660,7 +5660,7 @@ def test_fp8_separate_prefill_route_uses_is_shardq_local(is_shardq_local, monkey
     )
 
     index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.gather_fp8_prefill = lambda *args, **kwargs: object()
+    index_group.gather_fp8_prefill = lambda *args, **kwargs: object()  # type: ignore[method-assign]
 
     chunk = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk(
         tokens_slice=slice(0, num_tokens),
@@ -5790,9 +5790,7 @@ def test_bf16_flash_mla_kernel_limits_non_shardq_head_width(workspace_init):
             dtype=torch.bfloat16,
             device=device,
         )
-        output, lse = impl._bf16_flash_mla_kernel(
-            q, kv, indices, lengths, out=out
-        )
+        output, lse = impl._bf16_flash_mla_kernel(q, kv, indices, lengths, out=out)
         assert output.shape == (num_tokens, local_heads, head_dim)
         assert lse.shape == (num_tokens, local_heads)
         return output.clone(), lse.clone()
@@ -6291,7 +6289,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
         ensure_offsets.append(num_decodes)
         return original_ensure(plan, num_decodes)
 
-    cache.ensure_prefill_gpu_sources = record_ensure
+    cache.ensure_prefill_gpu_sources = record_ensure  # type: ignore[method-assign]
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
     source = torch.empty((1, 1, 8))
@@ -6355,7 +6353,7 @@ def test_hisparse_prefill_metadata_without_shardq_num_decodes():
         ensure_offsets.append(num_decodes)
         return original_ensure(plan, num_decodes)
 
-    cache.ensure_prefill_gpu_sources = record_ensure
+    cache.ensure_prefill_gpu_sources = record_ensure  # type: ignore[method-assign]
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
     source = torch.empty((1, 1, 8))
@@ -6509,7 +6507,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         ensure_offsets.append(num_decodes)
         return original_ensure(plan, num_decodes)
 
-    cache.ensure_prefill_gpu_sources = record_ensure
+    cache.ensure_prefill_gpu_sources = record_ensure  # type: ignore[method-assign]
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
     index_group.prefill_stream = prefill_stream

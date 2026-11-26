@@ -403,7 +403,7 @@ def _localize_prefill_chunks(
     """Map a ShardQ rank's prefill tokens onto the full batch's chunks.
 
     Returns this rank's per-token prefill request id and, for every full chunk
-    that owns at least one local token, ``(chunk index, start, stop)`` in the
+    that owns at least one local token, `(chunk index, start, stop)` in the
     rank's token order. Request ranges, staged block tables and workspace
     offsets stay those of the full batch.
     """
@@ -1692,9 +1692,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if out is not None:
             # out is scratch copied into compact_out; pack it so the kernel
             # receives a contiguous view even when the workspace is wider.
-            out = out.view(-1)[
-                : num_tokens * kernel_num_heads * out.shape[-1]
-            ].view(num_tokens, kernel_num_heads, out.shape[-1])
+            out = out.view(-1)[: num_tokens * kernel_num_heads * out.shape[-1]].view(
+                num_tokens, kernel_num_heads, out.shape[-1]
+            )
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
         output, _, lse = flash_mla_sparse_fwd(

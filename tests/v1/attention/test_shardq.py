@@ -314,7 +314,10 @@ def test_indexer_build_survives_next_build(monkeypatch):
 def _check_builder_shardq_route(rank, world, port, hisparse=False):
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.model_executor.layers.linear import ColumnParallelLinear
-    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        FlashMLASparseBackend,
+        FlashMLASparseMetadata,
+    )
     from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
@@ -409,13 +412,20 @@ def _check_builder_shardq_route(rank, world, port, hisparse=False):
                     arange_block_indices=True,
                 )
                 mixed_metadata = builder.build(0, mixed)
+                assert isinstance(mixed_metadata, FlashMLASparseMetadata)
                 assert mixed_metadata.num_decodes == 1
                 assert mixed_metadata.num_decode_tokens == 1
                 assert mixed_metadata.shardq is not None
                 assert mixed_metadata.shardq.num_decode_tokens == 1
-                assert mixed_metadata.fp8_extra_metadata.is_shardq_local is False
+                fp8_metadata = mixed_metadata.fp8_extra_metadata
+                assert isinstance(
+                    fp8_metadata,
+                    FlashMLASparseMetadata.FP8SeparatePrefillDecode,
+                )
+                assert fp8_metadata.is_shardq_local is False
 
                 local = mixed_metadata.shardq.attn_metadata
+                assert isinstance(local, FlashMLASparseMetadata)
                 assert local.num_decodes == 0
                 assert local.num_decode_tokens == 0
                 assert local.shardq_num_decodes == 1
@@ -432,6 +442,10 @@ def _check_builder_shardq_route(rank, world, port, hisparse=False):
                 )
 
                 local_fp8 = local.fp8_extra_metadata
+                assert isinstance(
+                    local_fp8,
+                    FlashMLASparseMetadata.FP8SeparatePrefillDecode,
+                )
                 assert local_fp8.is_shardq_local is True
                 assert local_fp8.prefill is not None
                 torch.testing.assert_close(
@@ -441,7 +455,8 @@ def _check_builder_shardq_route(rank, world, port, hisparse=False):
                     rtol=0,
                 )
 
-                full_chunks = mixed_metadata.fp8_extra_metadata.prefill.chunks
+                assert fp8_metadata.prefill is not None
+                full_chunks = fp8_metadata.prefill.chunks
                 full_by_start = {chunk.req_start_idx: chunk for chunk in full_chunks}
                 covered = 0
                 for chunk in local_fp8.prefill.chunks:

@@ -202,8 +202,8 @@ token-sharded prefill. Each TP rank prefills its token shard with all heads;
 `SparseMLACommonImpl.use_shardq` stays enabled when the backend reports
 `supports_shardq_with_hisparse`. HiSparse stages host rows against the full-batch
 chunks, and `shardq_num_decodes` keeps the full-batch decode offsets aligned.
-Model-level residual sequence parallelism stays disabled under HiSparse (see
-#68074); this path enables only attention-level ShardQ. The HY V4 sink-aware
+Model-level residual sequence parallelism stays disabled under HiSparse
+(see #68074); this path enables only attention-level ShardQ. The HY V4 sink-aware
 implementation keeps ordinary ShardQ support but does not enable this HiSparse
 combination. DCP and PCP are not supported. Mixed speculative-verification
 steps whose HiSparse decode boundary disagrees with the ShardQ boundary skip
