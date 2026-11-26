@@ -13,6 +13,7 @@ use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
+use vllm_server::{LlmSource, Server};
 use vllm_tracing::LogLevel;
 
 use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
@@ -165,6 +166,8 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
+            let server_config = args.to_server_config();
+
             let topology = args.data_parallel_lb.resolve(&args.managed_engine, args.headless)?;
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
@@ -179,8 +182,10 @@ async fn async_main(cli: Cli) -> Result<()> {
                     engine_count = args.managed_engine.data_parallel_size,
                     "running Rust frontend without a managed local Python engine"
                 );
-                let config = args.to_frontend_config(handshake_address, &topology);
-                return config.into_server().serve(shutdown_signal()).await;
+                let engine_core = args.to_engine_core_config(handshake_address, &topology);
+                return Server::new(server_config, LlmSource::EngineCore(engine_core))
+                    .serve(shutdown_signal())
+                    .await;
             }
 
             let shutdown_timeout = args.runtime.shutdown_timeout();
@@ -212,10 +217,12 @@ async fn async_main(cli: Cli) -> Result<()> {
                     Ok(())
                 })
             } else {
-                let config = args.to_frontend_config(handshake_address, &topology);
+                let engine_core = args.to_engine_core_config(handshake_address, &topology);
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let result = config.into_server().serve(shutdown).await;
+                    let result = Server::new(server_config, LlmSource::EngineCore(engine_core))
+                        .serve(shutdown)
+                        .await;
                     if result.is_ok() {
                         info!("OpenAI server shut down gracefully");
                     }
