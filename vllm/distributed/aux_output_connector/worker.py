@@ -72,11 +72,13 @@ class _ObjectRun:
             for block in range(token_start // size, cdiv(self.end, size)):
                 if (buffer := self.blocks.get(block)) is not None:
                     self.blocks[block] = buffer.copy()
-        self.end = token_start + len(rows)
-        while len(rows):
-            block, offset = divmod(token_start, size)
-            part, rows = rows[: size - offset], rows[size - offset :]
-            token_start += len(part)
+        position = token_start
+        self.end = end = token_start + len(rows)
+        while position < end:
+            block, offset = divmod(position, size)
+            stop = min(end, position - offset + size)
+            part = rows[position - token_start : stop - token_start]
+            position = stop
             if len(part) == size:
                 self.blocks[block] = part
                 continue
@@ -89,6 +91,8 @@ class _ObjectRun:
     def take_ready(self) -> AuxObjects:
         """Objects whose rows are all here. Later writes start at or after
         the start of the last one, so earlier blocks are dropped."""
+        if not self.writes:
+            return []
         ready = [write for write in self.writes if write[2] <= self.end]
         if not ready:
             return []
@@ -299,13 +303,14 @@ class AuxOutputWorkerConnector:
         objects: AuxObjects = []
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
+        query_start_loc = pending.query_start_loc.tolist()
         for request_id, token_start, start, end, sampled, rejected in zip(
             pending.request_ids,
-            pending.token_starts,
-            pending.query_start_loc[:-1],
-            pending.query_start_loc[1:],
-            num_sampled,
-            num_rejected,
+            pending.token_starts.tolist(),
+            query_start_loc[:-1],
+            query_start_loc[1:],
+            num_sampled.tolist(),
+            num_rejected.tolist(),
             strict=True,
         ):
             if (state := self._requests.get(request_id)) is None:
@@ -317,13 +322,12 @@ class AuxOutputWorkerConnector:
 
             # Capture precedes speculative acceptance, so discard the rejected
             # suffix. Batch boundaries still span the full executed range.
-            rejected = int(rejected)
             assert 0 <= rejected <= request_num_tokens, (
                 "auxiliary output rejected-token count is invalid"
             )
             rows = routed_experts[start : end - rejected]
             if (run := pending.runs.get(request_id)) is not None:
-                run.add(int(token_start), rows)
+                run.add(token_start, rows)
                 objects.extend(run.take_ready())
                 continue
 

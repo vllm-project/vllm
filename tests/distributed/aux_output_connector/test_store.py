@@ -1046,7 +1046,7 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
         prompt,
         logical[:8],
         ["first", "second"],
-        np.zeros(2),
+        np.zeros(2, dtype=np.int32),
         np.zeros(2, dtype=np.int32),
     )
 
@@ -1060,7 +1060,7 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
         first_decode,
         logical[8:28],
         ["first"],
-        np.zeros(1),
+        np.zeros(1, dtype=np.int32),
         np.zeros(1, dtype=np.int32),
     )
     assert len(worker._requests["first"].pending_blocks) == 5
@@ -1077,7 +1077,7 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
         second_decode,
         logical[28:48],
         ["second"],
-        np.zeros(1),
+        np.zeros(1, dtype=np.int32),
         np.zeros(1, dtype=np.int32),
     )
 
