@@ -1955,6 +1955,15 @@ class VllmConfig:
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
+        if (
+            self.parallel_config.sp_config.enable
+            and self.compilation_config.mode != CompilationMode.NONE
+        ):
+            logger.warning_once(
+                "Eager sequence parallel does not support torch.compile; disabling it."
+            )
+            self.parallel_config.sp_config.enable = False
+
         # By default, enable torch wrapping only when using custom Inductor lowering
         if self.compilation_config.ir_enable_torch_wrap is None:
             self.compilation_config.ir_enable_torch_wrap = (

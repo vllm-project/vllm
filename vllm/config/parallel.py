@@ -251,8 +251,8 @@ class SequenceParallelConfig:
     enable: bool = False
     """Enable model-level sequence parallelism: keeps the residual at
     local-chunk size `[N/tp, H]` via explicit all_gather/reduce_scatter
-    around attention and dense MLP blocks, instead of all_reduce. Does
-    not require torch.compile."""
+    around attention and dense MLP blocks, instead of all_reduce. Eager
+    only: disabled when torch.compile is enabled."""
     threshold: int = Field(default=256, ge=0)
     """Minimum token count of a forward call (full batch size, before
     per-rank sharding) to activate sequence parallelism for that call.

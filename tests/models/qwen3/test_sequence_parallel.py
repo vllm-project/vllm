@@ -21,7 +21,13 @@ from tests.correctness_e2e.sequence_parallel_test_utils import (
 )
 from tests.models.registry import _HfExamplesInfo
 from tests.utils import create_new_process_for_each_test
-from vllm.config import ParallelConfig, SequenceParallelConfig, VllmConfig
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    ParallelConfig,
+    SequenceParallelConfig,
+    VllmConfig,
+)
 from vllm.models.qwen3.nvidia import model as qwen3_model
 from vllm.models.qwen3.xpu import model as qwen3_xpu_model
 
@@ -66,7 +72,10 @@ def _make_model(
         lambda: SimpleNamespace(world_size=pp_world_size, is_last_rank=True),
     )
 
-    vllm_config = VllmConfig(parallel_config=parallel_config)
+    vllm_config = VllmConfig(
+        parallel_config=parallel_config,
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
+    )
     model = qwen3_model.Qwen3Model(vllm_config=vllm_config)
     return model, layers
 
@@ -119,6 +128,19 @@ def test_rejects_sequence_parallel_with_pipeline_parallelism(
     )
     with pytest.raises(AssertionError, match="pipeline parallelism"):
         _make_model(monkeypatch, parallel_config, pp_world_size=2)
+
+
+@pytest.mark.parametrize(
+    "mode, expected",
+    [(CompilationMode.NONE, True), (CompilationMode.VLLM_COMPILE, False)],
+)
+def test_sequence_parallel_disabled_under_torch_compile(mode, expected):
+    """SP is eager-only, so torch.compile turns it off."""
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(sp_config=SequenceParallelConfig(enable=True)),
+        compilation_config=CompilationConfig(mode=mode),
+    )
+    assert vllm_config.parallel_config.sp_config.enable is expected
 
 
 def test_forward_skips_shard_gather_when_sp_inactive(monkeypatch: pytest.MonkeyPatch):
