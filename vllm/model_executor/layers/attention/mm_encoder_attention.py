@@ -461,7 +461,7 @@ class MMEncoderAttention(CustomOp):
             if not current_platform.is_rocm():
                 raise ValueError("AITER FP8 ViT attention requires ROCm.")
 
-            from vllm.platforms.rocm import on_gfx950, on_mi3xx
+            from vllm.platforms.rocm import on_mi3xx
 
             if not on_mi3xx():
                 raise ValueError(
@@ -482,7 +482,8 @@ class MMEncoderAttention(CustomOp):
             # smaller head_dims (e.g. 80) to 128 and passes (1,) descales.
             # Scores are unchanged (zero columns, softmax scale kept) and the
             # padded output columns are sliced off. Opt-in: it is validated
-            # only on gfx950 with head_dim 80; gfx942 and other head_dims
+            # only on gfx950 with head_dim 80. gfx942 also gets AITER's
+            # head_dim-128 asm kernel but is unmeasured, and other head_dims
             # (padding 64 or 72 to 128 nearly doubles the work) are not.
             # It loses on small images (break-even about 5k patches per pass)
             # and goes away once AITER has a native head_dim-80 asm kernel.
@@ -490,7 +491,8 @@ class MMEncoderAttention(CustomOp):
                 if self.head_size <= 128:
                     self._fp8_pad_to = 128
                     self._fp8_aiter_asm = True
-                    arch = "gfx950" if on_gfx950() else "gfx942"
+                    props = torch.cuda.get_device_properties("cuda")
+                    arch = props.gcnArchName.split(":")[0]
                     logger.info_once(
                         "FP8 ViT attention: head_dim %d padded to %d for the "
                         "AITER asm kernel on %s.",

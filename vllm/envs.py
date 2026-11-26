@@ -1545,8 +1545,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # FP8 ViT attention on ROCm with the AITER backend
     # (--mm-encoder-attn-dtype fp8). 128 zero-pads Q/K/V head_dims below 128
     # to 128 and runs AITER's asm FP8 head_dim-128 kernel instead of its CK-tile
-    # kernel (validated on MI355X with head_dim 80). 16 (default; empty or 0
-    # also mean 16) pads only to a multiple of 16. Other values are rejected.
+    # kernel (validated on gfx950 with head_dim 80 only; gfx942 is unmeasured).
+    # 16 (default; empty or 0 also mean 16) pads only to a multiple of 16.
+    # Other values are rejected.
     # Opt-in: it only pays off for large images (break-even about 5k patches
     # per single-image pass; 768x1024 is 0.86x vs BF16 on MI350X, 2048x1600
     # 1.72x). Remove it once AITER has a native head_dim-80 asm FP8 kernel.
