@@ -100,7 +100,6 @@ impl Llm for TestLlm {
 fn server_config(model_dir: &Path, socket: &Path) -> ServerConfig {
     ServerConfig {
         model: model_dir.to_str().expect("utf-8 path").to_string(),
-        max_model_len: None,
         revision: None,
         tokenizer: None,
         hf_config: None,

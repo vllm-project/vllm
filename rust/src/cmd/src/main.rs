@@ -166,9 +166,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
-            let server_config = args.to_server_config()?;
+            let server_config = args.to_server_config();
             if let Some(url) = &args.remote_generation_url {
-                return Server::new(server_config, LlmSource::RemoteGrpc { url: url.clone() })
+                let remote = args.to_remote_grpc_config(url)?;
+                return Server::new(server_config, LlmSource::RemoteGrpc(remote))
                     .serve(shutdown_signal())
                     .await;
             }

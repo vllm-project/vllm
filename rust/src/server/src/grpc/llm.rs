@@ -12,10 +12,7 @@ use thiserror_ext::AsReport as _;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
-use tonic::{
-    Code, Request, Status, Streaming,
-    transport::{Channel, Endpoint},
-};
+use tonic::{Code, Request, Status, Streaming, transport::Channel};
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::{
@@ -38,13 +35,15 @@ pub(crate) struct GrpcLlm {
 }
 
 impl GrpcLlm {
-    /// Connect lazily to a worker using model information supplied by the caller.
-    pub(crate) fn new(url: &str, model: String, info: LlmInfo) -> anyhow::Result<Self> {
-        let channel = Endpoint::from_shared(url.to_owned())?.connect_lazy();
-        Ok(Self::from_channel(channel, model, info))
-    }
-
-    pub(super) fn from_channel(channel: Channel, model: String, info: LlmInfo) -> Self {
+    pub(crate) fn new(channel: Channel, model: String, max_model_len: u32) -> Self {
+        let info = LlmInfo {
+            max_model_len,
+            model_dtype: None,
+            supports_lora: false,
+            allow_missing_mm_embeddings: false,
+            vllm_version: "unknown".to_owned(),
+            fingerprint: None,
+        };
         let (ready, readiness) = watch::channel(false);
         let mut health = tonic_health::pb::health_client::HealthClient::new(channel.clone());
         let readiness_task = tokio::spawn(async move {

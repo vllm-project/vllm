@@ -37,7 +37,7 @@ pub use config::{
     AccessLogConfig, ApiServerOptions, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
     DecisionsReadStrategy, DefaultMmLoras, EngineCoreConfig, HttpListenerMode, LoraModulePath,
-    OutputLogConfig, OutputLogging, ServerConfig, TlsConfig,
+    OutputLogConfig, OutputLogging, RemoteGrpcConfig, ServerConfig, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -61,10 +61,11 @@ pub use vllm_chat::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 pub use vllm_llm::AdmissionLimits;
-use vllm_llm::{EngineCoreLlm, Llm, LlmInfo};
+use vllm_llm::{EngineCoreLlm, Llm};
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
+use vllm_text::backend::TextBackend;
 
 use crate::grpc::llm::GrpcLlm;
 use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
@@ -167,24 +168,9 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
             .await?;
             (Box::new(llm), Some((engine_core, server_info)))
         }
-        LlmSource::RemoteGrpc { url } => {
-            let max_model_len = if let Some(limit) = config.max_model_len {
-                limit.get()
-            } else {
-                let limit = text_backend
-                    .max_model_len()?
-                    .context("config.json has no context length; pass --max-model-len")?;
-                anyhow::ensure!(
-                    limit > 0,
-                    "invalid context length in config.json: expected a positive token count"
-                );
-                limit
-            };
-            let llm = GrpcLlm::new(
-                &url,
-                metrics_model_name.clone(),
-                remote_llm_info(max_model_len),
-            )?;
+        LlmSource::RemoteGrpc(remote) => {
+            let llm =
+                connect_remote_grpc(remote, metrics_model_name.clone(), text_backend.as_ref())?;
             (Box::new(llm), None)
         }
         LlmSource::Provided(llm) => (llm, None),
@@ -282,19 +268,32 @@ async fn connect_engine_core(
     Ok((llm, server_info))
 }
 
+fn connect_remote_grpc(
+    remote: RemoteGrpcConfig,
+    model: String,
+    text_backend: &dyn TextBackend,
+) -> Result<GrpcLlm> {
+    let max_model_len = if let Some(limit) = remote.max_model_len {
+        limit.get()
+    } else {
+        let limit = text_backend
+            .max_model_len()?
+            .context("config.json has no context length; pass --max-model-len")?;
+        anyhow::ensure!(
+            limit > 0,
+            "invalid context length in config.json: expected a positive token count"
+        );
+        limit
+    };
+    Ok(GrpcLlm::new(
+        remote.endpoint.connect_lazy(),
+        model,
+        max_model_len,
+    ))
+}
+
 /// Extra routes merged into the finalized vLLM router.
 type RouterExtension = Box<dyn FnOnce(Router) -> Router + Send>;
-
-fn remote_llm_info(max_model_len: u32) -> LlmInfo {
-    LlmInfo {
-        max_model_len,
-        model_dtype: None,
-        supports_lora: false,
-        allow_missing_mm_embeddings: false,
-        vllm_version: "unknown".to_owned(),
-        fingerprint: None,
-    }
-}
 
 /// Where the server's [`Llm`] comes from.
 #[allow(
@@ -306,7 +305,7 @@ pub enum LlmSource {
     /// [`EngineCoreLlm`].
     EngineCore(EngineCoreConfig),
     /// Connect to the worker's vLLM gRPC endpoint.
-    RemoteGrpc { url: String },
+    RemoteGrpc(RemoteGrpcConfig),
     /// A caller-built `Llm`, such as a router over several engines or a client
     /// for a remote one. The server treats it as opaque, even when it is an
     /// [`EngineCoreLlm`]: routes and gRPC services that drive the engine-core

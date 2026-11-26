@@ -75,7 +75,6 @@ use super::{
 };
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::model_names::ServedModelNames;
-use crate::remote_llm_info;
 use crate::render::RenderState;
 use crate::state::AppState;
 use crate::tls;
@@ -907,7 +906,7 @@ async fn grpc_llm_round_trips_through_inference_to_engine_core() {
     .await;
     let (channel, server_task) =
         start_grpc_test_server(inference, control, health, Default::default()).await;
-    let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
+    let llm = GrpcLlm::new(channel, "test-model".into(), 512);
     let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(
@@ -2253,7 +2252,7 @@ async fn grpc_llm_cancels_unpolled_streams_on_abort_and_drop() {
         .await;
         let (channel, server_task) =
             start_grpc_test_server(inference, control, health, Default::default()).await;
-        let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
+        let llm = GrpcLlm::new(channel, "test-model".into(), 512);
         let request = grpc_llm_request();
         let request_id = request.request_id.clone();
         let stream = llm.generate(request).await.unwrap();

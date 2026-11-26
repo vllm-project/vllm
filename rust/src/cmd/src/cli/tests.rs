@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use expect_test::expect;
+use thiserror_ext::AsReport as _;
 use vllm_chat::multimodal::MmModality;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -30,7 +31,7 @@ impl ServeArgs {
         topology: &DataParallelTopology,
     ) -> FrontendConfig {
         FrontendConfig {
-            server: self.to_server_config().unwrap(),
+            server: self.to_server_config(),
             engine_core: self.to_engine_core_config(handshake_address, topology),
         }
     }
@@ -1484,7 +1485,7 @@ fn int_flag_parses_like_python_bool_int() {
 }
 
 #[test]
-fn serve_parses_remote_generation_and_model_limit() {
+fn serve_rejects_auto_max_model_len_for_remote_generation() {
     let url = "http://127.0.0.1:50051";
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1492,15 +1493,20 @@ fn serve_parses_remote_generation_and_model_limit() {
         "Qwen/Qwen3-0.6B",
         "--remote-generation-url",
         url,
-        "--max-model-len=1K",
+        "--max-model-len=auto",
     ])
     .unwrap();
     let Command::Serve(serve) = cli.command else {
         panic!("expected serve args");
     };
     assert_eq!(serve.remote_generation_url.as_deref(), Some(url));
-    let config = serve.to_server_config().unwrap();
-    assert_eq!(config.max_model_len.map(|n| n.get()), Some(1024));
+    let Err(error) = serve.to_remote_grpc_config(url) else {
+        panic!("expected an invalid remote context limit");
+    };
+    assert_eq!(
+        error.to_report_string(),
+        "remote --max-model-len must be a positive token count"
+    );
 }
 
 #[test]
@@ -2998,7 +3004,6 @@ fn serve_args_forward_auto_max_model_len_to_managed_engine() {
         panic!("expected serve args");
     };
     assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("auto"));
-    assert_eq!(args.to_server_config().unwrap().max_model_len, None);
 
     let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
@@ -3969,7 +3974,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         FrontendConfig {
             server: ServerConfig {
                 model: "Qwen/Qwen3-0.6B",
-                max_model_len: None,
                 revision: None,
                 tokenizer: None,
                 hf_config: None,
@@ -4124,7 +4128,6 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
         FrontendConfig {
             server: ServerConfig {
                 model: "Qwen/Qwen3-0.6B",
-                max_model_len: None,
                 revision: None,
                 tokenizer: None,
                 hf_config: None,
@@ -4386,7 +4389,6 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
         FrontendConfig {
             server: ServerConfig {
                 model: "Qwen/Qwen3-0.6B",
-                max_model_len: None,
                 revision: None,
                 tokenizer: None,
                 hf_config: None,
