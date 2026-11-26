@@ -9,8 +9,9 @@ clients must report for each. The Rust side runs the same file in
 Each case is fed to the client one fixture chunk per read, so a case that splits
 JSON, a separator or a UTF-8 character across chunks tests exactly that split.
 The same case also goes through aiohttp and a local socket, unless the client's
-result depends on how the stream is split: TCP may merge the writes, so that
-run could not be relied on.
+result changes when the whole stream arrives in one read or one byte per read:
+TCP keeps neither the fixture's split nor any other, so that run could not be
+relied on.
 
 A case lists a client under `known_gap` while that client does not meet it yet.
 `got` records what the client reports instead, for the fields that differ; every
@@ -195,9 +196,11 @@ def test_stream_case(case: dict[str, Any]):
 
 @pytest.mark.parametrize("case", CASES, ids=[case["name"] for case in CASES])
 def test_stream_case_over_socket(case: dict[str, Any]):
-    chunks = _chunks(case)
-    split = _observed(_direct(case, chunks))
-    if split != _observed(_direct(case, [b"".join(chunks)])):
+    joined = b"".join(_chunks(case))
+    split = _observed(_direct(case, _chunks(case)))
+    whole = _observed(_direct(case, [joined]))
+    bytewise = _observed(_direct(case, [joined[i : i + 1] for i in range(len(joined))]))
+    if not split == whole == bytewise:
         pytest.skip("the result depends on the split, which TCP does not keep")
     failures = _check(case, _observed(asyncio.run(_loopback(case))))
     assert not failures, "; ".join(failures)

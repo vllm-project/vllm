@@ -367,8 +367,8 @@ mod tests {
     const STREAM_CASES: &str = include_str!("../../../../../tests/benchmarks/stream_cases.json");
 
     /// Serve the chunks as one HTTP chunk each, all in a single write, then
-    /// close. The client gets one read per HTTP chunk however TCP delivers
-    /// the bytes, so a case's split points are exactly the fixture's.
+    /// close. Hyper never reads past the end of an HTTP chunk but can split
+    /// one into several reads, so the reads need not match the fixture's.
     fn spawn_case_server(chunks: Vec<Vec<u8>>) -> std::net::SocketAddr {
         use std::io::{BufRead, BufReader, Read, Write};
 
@@ -482,6 +482,38 @@ mod tests {
         merged.into()
     }
 
+    fn case_input(api_url: String) -> RequestFuncInput {
+        RequestFuncInput {
+            prompt: Arc::from("hello"),
+            api_url,
+            model: "test-model".to_string(),
+            // The client-side estimate; a case expects another value only
+            // when the stream reports usage.
+            prompt_len: 100,
+            output_len: 3,
+            ..Default::default()
+        }
+    }
+
+    /// Hand the chunks to the backend's stream reader, one `add_chunk` call
+    /// per chunk, without a socket.
+    async fn feed_case(backend: &str, chunks: Vec<Vec<u8>>) -> serde_json::Value {
+        let input = case_input(String::new());
+        let body = futures::stream::iter(chunks.into_iter().map(Ok::<_, std::convert::Infallible>));
+        let st = std::time::Instant::now();
+        let mut output = RequestFuncOutput {
+            prompt_len: input.prompt_len,
+            ..Default::default()
+        };
+        match backend {
+            "openai" => openai_completions::read_stream(body, &mut output, st).await,
+            "openai-chat" => openai_chat::read_stream(body, &mut output, st).await,
+            "openai-responses" => output = openai_responses::read_stream(body, &input, st).await,
+            other => panic!("unknown backend {other}"),
+        }
+        case_observed(&output)
+    }
+
     #[tokio::test]
     async fn test_stream_cases() {
         let cases: Vec<serde_json::Value> = serde_json::from_str(STREAM_CASES).unwrap();
@@ -490,24 +522,34 @@ mod tests {
 
         for case in &cases {
             let name = case["name"].as_str().unwrap();
-            let (kind, path) = match case["backend"].as_str().unwrap() {
+            let backend = case["backend"].as_str().unwrap();
+            let (kind, path) = match backend {
                 "openai" => (BackendKind::Openai, "/v1/completions"),
                 "openai-chat" => (BackendKind::OpenaiChat, "/v1/chat/completions"),
                 "openai-responses" => (BackendKind::OpenaiResponses, "/v1/responses"),
                 other => panic!("{name}: unknown backend {other}"),
             };
-            let input = RequestFuncInput {
-                prompt: Arc::from("hello"),
-                api_url: format!("http://{}{path}", spawn_case_server(case_chunks(case))),
-                model: "test-model".to_string(),
-                // The client-side estimate; a case expects another value only
-                // when the stream reports usage.
-                prompt_len: 100,
-                output_len: 3,
-                ..Default::default()
-            };
-            let output = get_backend(kind).unwrap().send_request(&input, &client).await.unwrap();
-            let got = case_observed(&output);
+            let chunks = case_chunks(case);
+            let got = feed_case(backend, chunks.clone()).await;
+
+            // The same case through reqwest and a local socket, unless the
+            // result changes when the whole stream arrives in one read or one
+            // byte per read: the socket does not keep the fixture's split.
+            let joined = chunks.concat();
+            let whole = feed_case(backend, vec![joined.clone()]).await;
+            let bytewise = feed_case(backend, joined.iter().map(|b| vec![*b]).collect()).await;
+            if whole == got && bytewise == got {
+                let input = case_input(format!("http://{}{path}", spawn_case_server(chunks)));
+                let output =
+                    get_backend(kind).unwrap().send_request(&input, &client).await.unwrap();
+                let over_socket = case_observed(&output);
+                if over_socket != got {
+                    failures.push(format!(
+                        "{name}: over a socket got {over_socket}, fed directly {got}"
+                    ));
+                }
+            }
+
             let bad = case_mismatches(&case["expect"], &got);
 
             match case["known_gap"].get("rust") {

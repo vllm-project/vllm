@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::time::Instant;
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 
 use super::streaming::StreamedResponseHandler;
 use super::{RequestFuncInput, RequestFuncOutput, build_headers};
@@ -68,22 +68,43 @@ impl OpenAIResponsesBackend {
             }));
         }
 
-        let mut stream = ResponsesStream::new(input, st);
-        let mut handler = StreamedResponseHandler::new();
-        let mut body = response.bytes_stream();
-        while let Some(chunk_result) = body.next().await {
-            let chunk_bytes = match chunk_result {
-                Ok(b) => b,
-                Err(e) => return Ok(failed(format!("Stream error: {e}"))),
-            };
-            // Unlike the other backends, chunks are not trimmed: a chunk can end
-            // between an event's `event:` and `data:` lines.
-            for message in handler.add_chunk(&chunk_bytes) {
-                stream.handle_message(message, Instant::now());
-            }
-        }
-        Ok(stream.finish())
+        Ok(read_stream(response.bytes_stream(), input, st).await)
     }
+}
+
+/// Read a Responses SSE body into an output, one `add_chunk` call per stream
+/// item. `send_request` passes the response body; tests pass recorded chunks
+/// directly.
+pub(super) async fn read_stream<S, B, E>(
+    mut body: S,
+    input: &RequestFuncInput,
+    st: Instant,
+) -> RequestFuncOutput
+where
+    S: Stream<Item = std::result::Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let mut stream = ResponsesStream::new(input, st);
+    let mut handler = StreamedResponseHandler::new();
+    while let Some(chunk_result) = body.next().await {
+        let chunk_bytes = match chunk_result {
+            Ok(b) => b,
+            Err(e) => {
+                return RequestFuncOutput {
+                    prompt_len: input.prompt_len,
+                    error: format!("Stream error: {e}"),
+                    ..Default::default()
+                };
+            }
+        };
+        // Unlike the other backends, chunks are not trimmed: a chunk can end
+        // between an event's `event:` and `data:` lines.
+        for message in handler.add_chunk(chunk_bytes.as_ref()) {
+            stream.handle_message(message, Instant::now());
+        }
+    }
+    stream.finish()
 }
 
 fn build_payload(input: &RequestFuncInput) -> serde_json::Value {
