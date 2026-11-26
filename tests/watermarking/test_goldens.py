@@ -51,8 +51,9 @@ def test_golden_fixture_guards(goldens: dict[str, dict]):
 
 
 def test_resolved_records_every_watermark_config_field():
+    # Each candidate records its key; key_file only says where a key is read from.
     assert {field.name for field in dataclasses.fields(WatermarkConfig)} == (
-        set(WATERMARK_CONFIG_FIELDS) | {"key"}
+        set(WATERMARK_CONFIG_FIELDS) | {"key", "key_file"}
     )
 
 

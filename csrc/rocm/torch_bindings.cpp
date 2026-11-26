@@ -52,6 +52,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
+
+  rocm_ops.def(
+      "swmmacGEMM(Tensor in_a, Tensor in_b, "
+      "Tensor? in_bias, int logical_M, int CuCount) -> Tensor");
+  rocm_ops.impl("swmmacGEMM", torch::kCUDA, &swmmacGEMM);
 #endif  // VLLM_SKIP_SKINNY_GEMMS
 
 #ifdef VLLM_ROCM_GFX1100
@@ -80,6 +85,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int top_k, int block_size_m, bool mul_topk_weight, "
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
+#endif
+
+#ifdef VLLM_ROCM_GFX11
+  // Fused int4 x int8 (W4A8) MoE decode for RDNA3/RDNA3.5 (gfx11).
+  rocm_ops.def(
+      "moe_w4a8_decode_rdna3(Tensor! out, Tensor x, Tensor topk_ids, "
+      "Tensor topk_weights, Tensor? expert_map, Tensor! workspace, "
+      "Tensor w13, Tensor w13_scale, Tensor? w13_zp, Tensor w2, "
+      "Tensor w2_scale, Tensor? w2_zp) -> ()");
+  rocm_ops.impl("moe_w4a8_decode_rdna3", torch::kCUDA, &moe_w4a8_decode_rdna3);
 #endif
 
 #ifdef VLLM_ROCM_RDNA_ATTN

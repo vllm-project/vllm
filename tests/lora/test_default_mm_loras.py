@@ -12,6 +12,7 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
 from ..conftest import AudioTestAssets, VllmRunner
+from ..models.utils import check_logprobs_close
 from ..utils import create_new_process_for_each_test
 
 MODEL_PATH = hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
@@ -24,10 +25,11 @@ AUDIO_PROMPT = "<|user|><|audio_1|>Can you transcribe this audio?<|end|><|assist
 # the generated text. If the lora is inactive, this model
 # generates commentary on the transcription.
 RESPONSE_SUFFIX_WITH_LORA = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
-RESPONSE_SUFFIX_WITHOUT_LORA = "Certainly! Here is the transcription of the audio you provided:\n\nThe first words I spoke in the original phonograph record: A little piece of practical poetry. Mary had a little lamb; its fleece was white as snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
+NUM_LOGPROBS = 5
 
 VLLM_RUNNER_BASE_KWARGS = {
     "model_name": MODEL_PATH,
+    "trust_remote_code": True,
     "dtype": "half",
     "enable_lora": "True",
     "max_num_seqs": 2,
@@ -41,8 +43,13 @@ VLLM_RUNNER_BASE_KWARGS = {
 
 
 def run_test(
-    vllm_runner, audio_assets, monkeypatch, lora_request, expected_suffix, **kwargs
-):
+    vllm_runner,
+    audio_assets,
+    monkeypatch,
+    lora_request,
+    expected_suffix: str,
+    **kwargs,
+) -> None:
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     inputs = [([AUDIO_PROMPT], [audio_assets[0].audio_and_sample_rate[0]])]
@@ -51,7 +58,7 @@ def run_test(
     vllm_runner_kwargs = {**VLLM_RUNNER_BASE_KWARGS, **kwargs}
 
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
-        vllm_outputs_with_default_lora = [
+        outputs = [
             vllm_model.generate_greedy(
                 prompts,
                 max_tokens=128,
@@ -60,8 +67,23 @@ def run_test(
             )
             for prompts, audios in inputs
         ]
+        output = outputs[-1][-1][-1]
 
-        assert vllm_outputs_with_default_lora[-1][-1][-1].endswith(expected_suffix)
+    assert output.endswith(expected_suffix)
+
+
+def run_greedy_logprobs(vllm_runner, audio_assets, monkeypatch, **kwargs):
+    """Greedy-decode the audio prompt, returning tokens, text and top-k
+    logprobs so that two runs can be compared with check_logprobs_close."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    vllm_runner_kwargs = {**VLLM_RUNNER_BASE_KWARGS, **kwargs}
+    with vllm_runner(**vllm_runner_kwargs) as vllm_model:
+        return vllm_model.generate_greedy_logprobs(
+            [AUDIO_PROMPT],
+            max_tokens=128,
+            num_logprobs=NUM_LOGPROBS,
+            audios=[audio_assets[0].audio_and_sample_rate[0]],
+        )
 
 
 @create_new_process_for_each_test()
@@ -91,14 +113,26 @@ def test_inactive_default_mm_lora(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Ensure that modalities are filtered properly."""
-    # Default image lora won't be active since we only pass audio
-    run_test(
+    # An image-only default LoRA must not change audio-only generation.
+    # The two runs use separate engine instances, and vLLM only guarantees
+    # bitwise-identical outputs across runs in batch-invariant mode; on XPU
+    # a near-tie token (e.g. "lamb," vs "lamb;") can flip between otherwise
+    # identical runs. So compare greedy outputs via top-k logprobs: a
+    # wrongly applied LoRA diverges to a token outside the other run's top-k.
+    outputs_without_default_lora = run_greedy_logprobs(
+        vllm_runner, audio_assets, monkeypatch
+    )
+    outputs_with_inactive_default_lora = run_greedy_logprobs(
         vllm_runner,
         audio_assets,
         monkeypatch,
-        lora_request=None,
         default_mm_loras={"image": IMAGE_LORA_PATH},
-        expected_suffix=RESPONSE_SUFFIX_WITHOUT_LORA,
+    )
+    check_logprobs_close(
+        outputs_0_lst=outputs_without_default_lora,
+        outputs_1_lst=outputs_with_inactive_default_lora,
+        name_0="no_default_lora",
+        name_1="inactive_image_default_lora",
     )
 
 

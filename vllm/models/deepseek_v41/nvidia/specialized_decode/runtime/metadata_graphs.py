@@ -17,6 +17,7 @@ FlashMLA and indexer builders they keep (`DeepseekV41MetadataGraphModelState`).
 """
 
 from collections.abc import Callable, Sequence
+from functools import cache
 from typing import Any
 
 import torch
@@ -43,30 +44,38 @@ from vllm.v1.attention.backends.mla.sparse_indexer import (
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
-from ..ampere.attention import AmpereSWAMetadataBuilder
-from ..ampere.indexer_metadata import AmpereIndexerMetadataBuilder
-from ..hopper.attention import HopperSWAMetadataBuilder
-from ..hopper.indexer_metadata import HopperIndexerMetadataBuilder
-
 logger = init_logger(__name__)
 
-# Builders whose build() of a uniform decode batch launches only capture-safe
-# work (no device-to-host reads, no pageable host-to-device copies) into
-# persistent buffers, with host arguments set by the batch shape.
-_RECORDABLE_BUILDERS = frozenset(
-    {
-        AmpereIndexerMetadataBuilder,
-        AmpereSWAMetadataBuilder,
-        CompressorMetadataBuilder,
-        DeepseekSparseSWAFlashInferMetadataBuilder,
-        DeepseekV32IndexerMetadataBuilder,
-        DeepseekV41SparseIndexerMetadataBuilder,
-        DeepseekV4FlashInferSparseMLAMetadataBuilder,
-        DeepseekV4FlashMLAMetadataBuilder,
-        HopperIndexerMetadataBuilder,
-        HopperSWAMetadataBuilder,
-    }
-)
+
+@cache
+def _recordable_builders() -> frozenset[type]:
+    """Builders whose build() of a uniform decode batch launches only
+    capture-safe work (no device-to-host reads, no pageable host-to-device
+    copies) into persistent buffers, with host arguments set by the batch shape.
+
+    The SM80 and SM90 builders are imported here, not at module load: their
+    modules load CuTe DSL kernels, which need `cuda.bindings` and `cutlass`.
+    """
+    from ..ampere.attention import AmpereSWAMetadataBuilder
+    from ..ampere.indexer_metadata import AmpereIndexerMetadataBuilder
+    from ..hopper.attention import HopperSWAMetadataBuilder
+    from ..hopper.indexer_metadata import HopperIndexerMetadataBuilder
+
+    return frozenset(
+        {
+            AmpereIndexerMetadataBuilder,
+            AmpereSWAMetadataBuilder,
+            CompressorMetadataBuilder,
+            DeepseekSparseSWAFlashInferMetadataBuilder,
+            DeepseekV32IndexerMetadataBuilder,
+            DeepseekV41SparseIndexerMetadataBuilder,
+            DeepseekV4FlashInferSparseMLAMetadataBuilder,
+            DeepseekV4FlashMLAMetadataBuilder,
+            HopperIndexerMetadataBuilder,
+            HopperSWAMetadataBuilder,
+        }
+    )
+
 
 # Recordable builders that only read their block table: on a table that other
 # builders clamp in place, they build on branches of their own once those have.
@@ -157,7 +166,7 @@ class AttnMetadataCudaGraphs:
         """Whether every metadata builder of `attn_groups` is recordable."""
         if self._recordable is None:
             self._recordable = all(
-                type(group.get_metadata_builder()) in _RECORDABLE_BUILDERS
+                type(group.get_metadata_builder()) in _recordable_builders()
                 for groups in attn_groups
                 for group in groups
             )

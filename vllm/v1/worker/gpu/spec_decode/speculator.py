@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.compilation.wrapper import remove_bytecode_hooks
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config import replace as replace_config
 from vllm.config.compilation import CUDAGraphMode
@@ -18,6 +19,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -43,7 +45,11 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    clear_layer_kv_caches,
+    groups_with_metadata_builders,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -127,9 +133,9 @@ class BaseSpeculator(ABC):
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
 
-    def add_request(self, req_index: int) -> None:
-        """A new request was assigned request-state slot `req_index`, e.g. to
-        reset per-slot state. No-op by default."""
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        """A new or resumed request was assigned request-state slot
+        `req_index`, e.g. to reset per-slot state. No-op by default."""
         return
 
     def on_requests_finished(self, finished_req_ids: set[str]) -> None:
@@ -146,6 +152,14 @@ class BaseSpeculator(ABC):
         """Apply a reduced max_model_len. Auto-fit can call this after capture,
         when CUDA graphs no longer see Python values. No-op by default."""
         return
+
+    def shutdown(self) -> None:
+        """Called when the model runner shuts down. Detaches a draft `model`'s
+        layer KV caches and bytecode hooks, since the model object can outlive
+        the runner. Overrides must call super().shutdown()."""
+        if model := getattr(self, "model", None):
+            clear_layer_kv_caches(model.modules())
+            remove_bytecode_hooks(model)
 
 
 class DraftModelSpeculator(BaseSpeculator):

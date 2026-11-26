@@ -19,7 +19,7 @@ MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 @config
 class HiSparseConfig:
-    """Configuration for HiSparse sparse-MLA KV offloading."""
+    """Configuration for HiSparse DSA and QSA KV offloading."""
 
     device_buffer_size: int | None = Field(default=None, gt=0)
     """Total per-request GPU hot-buffer rows, including the newest-token slot.
@@ -120,18 +120,14 @@ class AttentionConfig:
     concurrent decodes at 128K context and grows with batch and context."""
 
     indexer_sparse_logits: bool | None = None
-    """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
-    DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
-    the whole context and masking them. Requires an SM100-class GPU (FP8 or
-    MXFP4 indexer cache), DeepGEMM >= 2.8 and the DeepSelect top-k extension
-    (the top-k runs on the kernels' bf16 logits), and no decode/prefill context
-    parallelism. The sparse path costs O(candidate blocks) per query regardless
-    of context length. None (default) enables it wherever these requirements
-    hold; True forces it (and errors where they do not); False disables it.
-    On ROCm gfx950 it runs aiter's paged MXFP4 MQA-logits kernel over the
-    candidate pool instead, with fp32 logits, and keeps the masked dense walk
-    for steps whose contexts are too short for the pool to pay; it is not
-    enabled by default there."""
+    """Score only candidate blocks in the DeepSeek V4.1 two-level indexer.
+    None (default) enables it on SM90 and supported SM100 configurations;
+    True forces it; False uses dense scoring. Requires no context parallelism.
+    SM90 uses CuTe DSL with FP8 cache and dense fallback for short prefills.
+    Unsupported cache, model geometry or microbatching raises at initialization,
+    including with the default None.
+    SM100 requires DeepGEMM >= 2.8 and DeepSelect (FP8/MXFP4 cache).
+    ROCm gfx950 uses aiter with MXFP4 cache and remains opt-in."""
 
     indexer_logits_dtype: Literal["auto", "float32", "bfloat16"] = "auto"
     """Output dtype of DeepGEMM's dense MQA-logits kernels in the DeepSeek
@@ -141,12 +137,8 @@ class AttentionConfig:
     top-k as is. "bfloat16" halves the logits memory; on SM100 it also reduces
     in BF16 with BF16 head weights and lets the DeepSelect top-k rank the
     logits directly, while other top-k kernels read an FP32 copy. The sparse
-    MQA-logits path (`indexer_sparse_logits`) always emits BF16."""
-
-    indexer_tp_shard_min_rows: int | None = None
-    """Deprecated and has no effect: TP row sharding of the sparse-attention
-    indexer was replaced by `sparse_mla_shard_q`. It will be removed in
-    v0.34.0."""
+    MQA-logits path (`indexer_sparse_logits`) emits BF16 on SM100 and FP32
+    on SM90 and ROCm, independently of this setting."""
 
     sparse_mla_shard_q: bool = True
     """Under tensor parallelism, shard sparse-MLA (DSA) prefill by token
@@ -155,8 +147,15 @@ class AttentionConfig:
     the query and the attention output between the layouts. Applies to steps
     with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
     FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
-    KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
-    sharded by head."""
+    KV cache, without PCP or HiSparse. Under DCP (on FlashInfer and SM100, with
+    the DCP group equal to the TP group), each rank attends a gathered copy of
+    its tokens' context instead of the DCP-local cache. A mixed step's decode
+    tokens stay sharded by head (on the DCP path under DCP). On ROCm, models
+    that opt in (currently HY4) shard on `ROCM_AITER_MLA_SPARSE` with an
+    `fp8_ds_mla` KV cache or `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`, and
+    only with fewer than 16 local heads (e.g. HY4 at TP8). DeepSeek-V4.1 on
+    ROCm shards only its indexer prefill this way and all-gathers the top-k
+    back, with its attention sharded by head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most
@@ -175,7 +174,7 @@ class AttentionConfig:
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
-    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
+    Model Runner V2-only HiSparse DSA and QSA decode hot-buffering. It is inferred
     with defaults when HiSparseConnector is configured (directly or via
     MultiConnector); set it explicitly only to tune its fields."""
 
@@ -209,23 +208,16 @@ class AttentionConfig:
     flex_attn_q_block_size: int | None = None
     """Logical Q block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_m.
-    If None, uses 16 for paged KV attention on PyTorch >= 2.9, and 128
-    for encoder-only attention or older PyTorch versions."""
+    If None, uses 16 for paged KV attention and 128 for encoder-only
+    attention."""
 
     flex_attn_kv_block_size: int | None = None
     """Logical KV block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_n.
-    If None, uses the KV cache block size for paged KV attention on
-    PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
-    versions."""
+    If None, uses the KV cache block size for paged KV attention and 128
+    for encoder-only attention."""
 
     def __post_init__(self) -> None:
-        if self.indexer_tp_shard_min_rows is not None:
-            logger.warning(
-                "indexer_tp_shard_min_rows is deprecated and has no effect "
-                "since sparse_mla_shard_q replaced indexer TP row sharding. "
-                "It will be removed in v0.34.0."
-            )
         msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {
             AttentionBackendEnum.CUTLASS_MSA: "cutlass",
             AttentionBackendEnum.TRITON_MSA: "triton",

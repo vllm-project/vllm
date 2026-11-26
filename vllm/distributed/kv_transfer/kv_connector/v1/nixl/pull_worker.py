@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
+import math
 import time
 from typing import TYPE_CHECKING
 
@@ -13,7 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     _RegionPairs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HB_NOTIF_PREFIX,
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -28,10 +31,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
-
-# Slack (seconds) subtracted from D's exported block-expiry deadline on the turn-2
-# readback, absorbing clock-offset error and read latency.
-_KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
@@ -51,6 +50,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        # Heartbeats keep P's blocks alive while requests wait on D. Sent first so
+        # replicated-PCP ranks > 0 (which return early) and this step's reads see
+        # this round's renewals.
+        self._send_heartbeats(metadata)
+
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
@@ -121,20 +125,46 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
                 self._reqs_to_send[req_id] = expiration_time
 
-        # Send heartbeats to P-side engines to keep KV blocks alive while
-        # requests sit in the D scheduler WAITING queue.
-        self._send_heartbeats(metadata)
-
-    def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
-        """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
-        assert meta.remote is not None
-        blocks_expiry_time = meta.remote.blocks_expiry_time
-        # Deadline may be absent (router may not forward it) -> read as usual.
-        if blocks_expiry_time is None or not meta.local_physical_block_ids:
+    def _is_remote_read_expired(self, meta: ReqMeta) -> bool:
+        """Whether the remote's lease on the blocks has (nearly) run out, after
+        which they may hold other requests' KV. Uses the exported deadline, rebased
+        by the clock offset and extended by our heartbeats' renewals."""
+        remote = meta.remote
+        assert remote is not None
+        clock_offset = self._engine_clock_offset.get(remote.engine_id)
+        # No read for a full local hit; no deadline (older peer): read as before.
+        if (
+            not meta.local_physical_block_ids
+            or remote.blocks_expiry_time is None
+            or clock_offset is None
+        ):
             return False
-        clock_offset = self._engine_clock_offset[meta.remote.engine_id]
-        deadline = blocks_expiry_time - clock_offset
-        return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
+        deadline = max(
+            remote.blocks_expiry_time - clock_offset,
+            self._remote_leases.get((remote.engine_id, remote.request_id), -math.inf),
+        )
+        return time.perf_counter() + self._lease_safety_margin >= deadline
+
+    def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
+        """Completed reads that may have overlapped the remote's lease expiry,
+        so the blocks could have been recycled while being read."""
+        lapsed: set[ReqId] = set()
+        for req_id in done_recving:
+            meta = self._recving_metadata.get(req_id)
+            if meta is None or meta.remote is None:
+                continue
+            # Completion is observed no earlier than it happened: conservative.
+            if self._is_remote_read_expired(meta):
+                logger.debug(
+                    "Lease of %s (remote %s on engine %s) may have run out "
+                    "before its read completed",
+                    req_id,
+                    meta.remote.request_id,
+                    meta.remote.engine_id,
+                )
+                self.xfer_stats.record_declined_expired_read()
+                lapsed.add(req_id)
+        return lapsed
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
@@ -154,23 +184,32 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)
             return
-        # Update last activity from this remote. Mind that cleanup is done on main
-        # thread (this one), so we don't race on this structure.
-        self._engine_last_active[engine_id] = time.perf_counter()
-
-        if self._bidirectional_kv_xfer_enabled and self._is_turn2_read_expired(meta):
-            logger.warning(
-                "Declining expired remote read for %s from engine %s.",
-                req_id,
+        if self._is_remote_read_expired(meta):
+            # Warn once per engine; each decline is counted and debug-logged.
+            logger.warning_once(
+                "Declining remote KV reads from engine %s whose lease ran out "
+                "before the read (router held the request longer than "
+                "kv_lease_duration?); kv_load_failure_policy applies. Counted "
+                "in vllm:nixl_num_declined_expired_reads.",
                 engine_id,
             )
-            self.xfer_stats.record_kv_expired_req()
-            # KV expiry is reported separately from transport failures, so only
-            # the state cleanup side of _handle_failed_transfer runs here.
+            logger.debug(
+                "Declined expired remote read for %s (remote %s on engine %s)",
+                req_id,
+                meta.remote.request_id,
+                engine_id,
+            )
+            self.xfer_stats.record_declined_expired_read()
+            # Reported separately from transport failures, so only the state
+            # cleanup side of _handle_failed_transfer runs here.
             self._handle_failed_transfer(
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
+
+        # Update last activity from this remote. Mind that cleanup is done on main
+        # thread (this one), so we don't race on this structure.
+        self._engine_last_active[engine_id] = time.perf_counter()
 
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
@@ -662,7 +701,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_rank=remote_rank,
             )
             if not self._handle_failed_transfer(
-                request_id, handle, self._recv_failures
+                request_id, handle, self._recv_failures, error=e
             ):
                 assert handle is not None
                 self._recving_transfers[request_id].append(handle)
@@ -688,8 +727,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         is_dram = desc_is_dram[local_ids]
 
         if self._skip_dram_xfer:
-            # TP rank 0 reads the DRAM (shared host pool) part for every
-            # local rank; keep only the device part. Register the request
+            # The node's host leader reads the DRAM (shared host pool) part for
+            # every local rank; keep only the device part. Register the request
             # even if nothing is left, so it still completes and notifies.
             keep = ~is_dram
             local_ids = local_ids[keep]
@@ -738,7 +777,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         are reading from the same producer (heterogeneous TP or DCP
         scenario), wait for all consumers to be done pulling.
 
-        Also handles heartbeat notifications ("HB:req1,req2,...") by
+        Also handles heartbeat notifications (HB_NOTIF_PREFIX + "req1,req2") by
         extending the lease on the referenced requests.
         """
         assert self.transfer_topo is not None
@@ -748,8 +787,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 msg = notif.decode("utf-8")
 
                 # Handle heartbeat messages from D-side.
-                if msg.startswith("HB:"):
-                    self._handle_heartbeat(msg[3:])
+                if msg.startswith(HB_NOTIF_PREFIX):
+                    self._handle_heartbeat(msg[len(HB_NOTIF_PREFIX) :])
                     continue
 
                 req_id, expected_consumers = msg.rsplit(":", 1)
