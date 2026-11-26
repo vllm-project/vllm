@@ -5,7 +5,7 @@ use std::slice;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use vllm_chat::{AllowedToolsMode, ChatTool, InputAudioFormat};
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
@@ -101,7 +101,31 @@ impl StringOrArray {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatMessage, ImageDetail, ImageUrl};
+    use serde_json::{Value, json};
+    use vllm_chat::ChatTool;
+
+    use super::{ChatMessage, Function, ImageDetail, ImageUrl};
+
+    /// An omitted or `null` schema means none, and is echoed back as `null`.
+    #[test]
+    fn function_parameters_accept_object_null_and_omitted() {
+        for (function, parameters) in [
+            (json!({"name": "f"}), Value::Null),
+            (json!({"name": "f", "parameters": null}), Value::Null),
+            (json!({"name": "f", "parameters": {}}), json!({})),
+            (
+                json!({"name": "f", "parameters": {"type": "object"}}),
+                json!({"type": "object"}),
+            ),
+        ] {
+            let function: Function = serde_json::from_value(function).unwrap();
+            assert_eq!(
+                serde_json::to_value(&function).unwrap().get("parameters"),
+                Some(&parameters)
+            );
+            assert_eq!(ChatTool::from(function).parameters, parameters);
+        }
+    }
 
     /// OpenAI accepts `"detail": null` as omitted, and `original` as its own value.
     #[test]
@@ -331,8 +355,10 @@ fn default_function_tool_type() -> String {
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
-    #[serde(default)]
-    pub parameters: Value,
+    /// The JSON Schema of the arguments. Python and OpenAI accept only an
+    /// object here, or `null` and omitted for no schema.
+    #[serialize_always]
+    pub parameters: Option<Map<String, Value>>,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
     /// Whether the schema is loaded on demand via tool search (vLLM extension,
@@ -352,7 +378,7 @@ impl From<Function> for ChatTool {
         Self {
             name,
             description,
-            parameters,
+            parameters: parameters.map_or(Value::Null, Value::Object),
             strict,
             defer_loading,
         }

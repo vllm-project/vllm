@@ -167,10 +167,12 @@ pub(crate) fn validate_vocab_range(
         if token_ids.is_empty() {
             return Err(TokenIdsError::EmptyAllowedTokenIds);
         }
+        // The engine writes these IDs as columns of a logits mask sized by the
+        // model vocabulary, like `stop_token_ids` and `logit_bias`.
         validate_param(
             "allowed_token_ids",
             token_ids.iter().copied(),
-            limits.tokenizer_vocab_size,
+            limits.model_vocab_size,
         )?;
     }
 
