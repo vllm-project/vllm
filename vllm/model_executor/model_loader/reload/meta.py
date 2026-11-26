@@ -9,7 +9,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
 from .types import LayerReloadingInfo, LayerTensors
-from .utils import get_layer_params_buffers, get_layer_tensors
+from .utils import get_layer_params_buffers, get_layer_tensors, get_tensor_load_numel
 
 __all__ = [
     "to_meta_tensor",
@@ -47,16 +47,16 @@ def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Materialize a meta tensor into an actual tensor on the current device.
+    """Materialize a meta tensor into an actual tensor on the current device.
     Should be called within the torch device context for the given rank.
     """
+    # Zeroed: loaders only write checkpoint regions, so MoE padding would keep garbage.
     tensor = torch.empty_strided(
         size=tuple(meta_tensor.size()),
         stride=tuple(meta_tensor.stride()),
         dtype=meta_tensor.dtype,
         requires_grad=False,
-    )
+    ).zero_()
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = meta_tensor.__dict__.copy()
     return tensor
@@ -96,7 +96,9 @@ def _parameter_storage_ptrs(layer: torch.nn.Module) -> set[int]:
 
 
 def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
-    if layer.__class__.__name__ in SKIP_MODULES:
+    if layer.__class__.__name__ in SKIP_MODULES or getattr(
+        layer, "_skip_layerwise_reload", False
+    ):
         return ({}, {})
 
     params, buffers = get_layer_params_buffers(layer)
@@ -119,8 +121,10 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
 
 
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
-    """Restore a layer to model format with tensors on the meta device"""
-    if layer.__class__.__name__ in SKIP_MODULES:
+    """Restore a layer to model format with tensors on the meta device."""
+    if layer.__class__.__name__ in SKIP_MODULES or getattr(
+        layer, "_skip_layerwise_reload", False
+    ):
         return
 
     non_persistent = set(layer._non_persistent_buffers_set)
@@ -145,18 +149,19 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Materialize all meta tensors in a layer to actual tensors."""
-    if layer.__class__.__name__ in SKIP_MODULES:
+    if layer.__class__.__name__ in SKIP_MODULES or getattr(
+        layer, "_skip_layerwise_reload", False
+    ):
         return
 
-    with info.restore_device:
+    with torch.device("cpu") if info.stage_on_cpu else info.restore_device:
         for name, tensor in get_layer_tensors(layer).items():
             if name not in SKIP_TENSORS and tensor.is_meta:
                 setattr(layer, name, materialize_meta_tensor(tensor))
 
 
 class CopyCounter(TorchDispatchMode):
-    """
-    Tracks total number of elements modified with `copy_`.
+    """Tracks total number of elements modified with `copy_`.
 
     Useful for keeping track of weight loading where underlying weights can be
     arbitrarily transformed (such as with `narrow`) before calling copy.
@@ -182,8 +187,7 @@ class CopyCounter(TorchDispatchMode):
 def get_numel_loaded(
     weight_loader: Callable, args: inspect.BoundArguments
 ) -> tuple[int, object]:
-    """
-    Determine how many elements would be loaded by a weight loader call.
+    """Determine how many elements would be loaded by a weight loader call.
 
     Args:
         weight_loader: used to load weights
@@ -192,6 +196,7 @@ def get_numel_loaded(
     Returns:
         number of elements loaded by the weight loader, the return value of the
         weight loader
+
     """
     with CopyCounter() as counter:
         return_value = weight_loader(*args.args, **args.kwargs)
@@ -208,5 +213,5 @@ def get_numel_loaded(
     numel = counter.copied_numel
     param = args.arguments.get("param", None)
     if isinstance(param, torch.Tensor):
-        numel = min(numel, param.numel())
+        numel = min(numel, get_tensor_load_numel(param))
     return numel, return_value

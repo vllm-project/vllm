@@ -35,8 +35,11 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         return "TOKENSPEED_MLA"
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
-        return device_capability.major == 10
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
+        return device_capability is not None and device_capability.major == 10
 
     _INSTALL_HINT = (
         "tokenspeed_mla package is not installed. "
@@ -110,10 +113,9 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         # Kernel signature requires `seq_lens` but the implementation never reads
         # it (per-batch lengths are derived from `cum_seq_lens` diffs); compute
         # for parity with trtllm_ragged. cuda-graph padding in
-        # `query_start_loc` is saturated to `total_num_tokens`
-        # (gpu_model_runner.py:1905), so trailing diffs are 0 and padded batches
-        # are kernel no-ops — same reason trtllm passes the padded length as
-        # batch_size directly.
+        # `query_start_loc` is saturated to `total_num_tokens`, so trailing diffs
+        # are 0 and padded batches are kernel no-ops — same reason trtllm passes
+        # the padded length as batch_size directly.
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )

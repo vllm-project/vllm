@@ -8,7 +8,8 @@ GPU copy plumbing. An ec_both instance reuses encoder outputs it has already
 offloaded to CPU instead of recomputing them.
 """
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -65,6 +66,17 @@ class ECCPUConnector(ECConnectorBase):
         return ECCPUScheduler(vllm_config)
 
     # Worker-side forwarders.
+    def start_save_caches(
+        self, encoder_cache: dict[str, torch.Tensor] | None = None, **kwargs
+    ) -> None:
+        if encoder_cache is None:
+            return
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, ECCPUConnectorMetadata)
+        for mm_hash in metadata.saves:
+            if mm_hash in encoder_cache:
+                self.save_caches(encoder_cache, mm_hash)
+
     def start_load_caches(
         self, encoder_cache: dict[str, torch.Tensor], **kwargs
     ) -> None:
@@ -86,17 +98,37 @@ class ECCPUConnector(ECConnectorBase):
         )
 
     # Scheduler-side forwarders.
+    def bind_encoder_cache_query(
+        self, query: Callable[["Request", int], int | None]
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_encoder_cache_query(query)
+
     def has_cache_item(self, identifier: str) -> bool:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.has_cache_item(identifier)
 
     def ensure_cache_available(
-        self, request: "Request", num_computed_tokens: int
+        self,
+        request: "Request",
+        num_computed_tokens: int,
     ) -> bool:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.ensure_cache_available(
             request, num_computed_tokens
         )
+
+    def requires_encoder_cache_readmission(
+        self, request: "Request", input_id: int
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.requires_encoder_cache_readmission(
+            request, input_id
+        )
+
+    def take_unavailable_requests(self) -> set[str]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.take_unavailable_requests()
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         assert self.connector_scheduler is not None
@@ -107,6 +139,12 @@ class ECCPUConnector(ECConnectorBase):
     ) -> ECCPUConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def request_finished(
+        self, request: "Request"
+    ) -> tuple[bool, "dict[str, Any] | None"]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request)
 
     def get_finished(
         self, finished_req_ids: set[str]

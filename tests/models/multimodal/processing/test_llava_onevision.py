@@ -4,13 +4,17 @@
 import itertools
 from functools import partial
 
+import numpy as np
 import pytest
+import torch
 from PIL import Image
 from pqdm.threads import pqdm
 
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.platforms import current_platform
 from vllm.tokenizers.hf import maybe_make_thread_pool
 
 from ...utils import build_model_context
@@ -122,8 +126,7 @@ def _test_image_prompt_replacements(
     num_imgs: int,
     image_sizes: list[ImageSize],
 ) -> None:
-    """
-    Ensure LlavaOnevisionMultiModalProcessor
+    """Ensure LlavaOnevisionMultiModalProcessor
     handles prompt replacement properly for input images.
     """
     failed_size_excs = list[tuple[ImageSize, Exception]]()
@@ -210,3 +213,39 @@ def test_processor_prompt_replacements_all(model_id, num_imgs):
         num_imgs=num_imgs,
         image_sizes=image_sizes,
     )
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
+def test_mm_device_do_normalize(model_id):
+    """Raw pixels normalised on device must match the CPU processor output."""
+    device = current_platform.device_type
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1, "video": 1})
+    assert ctx.model_config.multimodal_config.mm_device_do_normalize
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    rng = np.random.RandomState(0)
+    mm_data = {
+        "image": [Image.fromarray(rng.randint(0, 256, (470, 310, 3), dtype=np.uint8))],
+        "video": [rng.randint(0, 256, (4, 112, 168, 3), dtype=np.uint8)],
+    }
+
+    def run(device_normalize: bool) -> dict[str, torch.Tensor]:
+        ctx.model_config.multimodal_config.mm_device_do_normalize = device_normalize
+        out = processor(
+            "<image><video>", mm_items=processor.info.parse_mm_data(mm_data)
+        )
+        return out["mm_kwargs"].get_data()
+
+    normalized = run(False)
+    raw = run(True)
+    input_norm = build_mm_input_norm(ctx.model_config, layout="bchw").to(device)
+
+    for key in ("pixel_values", "pixel_values_videos"):
+        assert raw[key].dtype == torch.uint8
+        torch.testing.assert_close(
+            input_norm(raw[key].flatten(0, 1).to(device), normalized[key].dtype),
+            normalized[key].flatten(0, 1).to(device),
+            rtol=1e-5,
+            atol=1e-6,
+        )

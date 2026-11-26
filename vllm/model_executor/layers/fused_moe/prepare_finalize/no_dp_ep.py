@@ -31,6 +31,7 @@ def _quantize_input(
         per_act_token_quant=quant_config.per_act_token_quant,
         block_shape=quant_config.block_shape,
         is_scale_swizzled=quant_config.is_scale_swizzled,
+        is_scale_transposed=quant_config.is_scale_transposed,
         mx_alignment=quant_config.mx_alignment,
     )
 
@@ -38,6 +39,11 @@ def _quantize_input(
 
 
 class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
+    def supports_deferred_moe_finalize(self) -> bool:
+        # finalize() here is the top-k weight-and-reduce and nothing else,
+        # which is exactly the work a deferring consumer takes over.
+        return True
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -123,7 +129,12 @@ class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolit
         router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        a1_scale: torch.Tensor | None = None,
     ) -> mk.PrepareMonolithicResultType:
+        if a1_scale is not None:
+            # Already quantized by the caller, before the PCP all-gather.
+            assert not defer_input_quant, "a quantized input cannot defer its quant"
+            return a1, a1_scale, router_logits
         a1q, a1q_scale = _quantize_input(a1, quant_config, defer_input_quant)
         return a1q, a1q_scale, router_logits
 

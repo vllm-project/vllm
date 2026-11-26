@@ -28,8 +28,7 @@ def _run_eagle_correctness(
     attn_backend: str,
     vllm_runner,
 ):
-    """
-    Compare the outputs of an original LLM and a speculative LLM
+    """Compare the outputs of an original LLM and a speculative LLM
     which should be the same when using eagle speculative decoding.
     """
     method, model_name, spec_model_name, tp_size = model_setup
@@ -78,7 +77,6 @@ def _run_eagle_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=False,
             max_model_len=max_model_len,
             tensor_parallel_size=tp_size,
             attention_config=attention_config,
@@ -95,7 +93,6 @@ def _run_eagle_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=True,
             tensor_parallel_size=tp_size,
             speculative_config={
                 "method": method,

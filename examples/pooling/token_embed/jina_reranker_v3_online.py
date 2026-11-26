@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 
-"""
-Example online usage of the Jina Reranker v3 score and rerank APIs with a task
+"""Example online usage of the Jina Reranker v3 score and rerank APIs with a task
 instruction.
 
 Run `vllm serve jinaai/jina-reranker-v3 --runner pooling` to start up the

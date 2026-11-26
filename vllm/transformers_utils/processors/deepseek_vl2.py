@@ -30,7 +30,14 @@ import torch
 import torchvision.transforms as T
 from PIL import Image, ImageOps
 from transformers import BatchFeature, LlamaTokenizerFast
+from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessorMixin
+
+from vllm.transformers_utils.processors.image_budget import (
+    get_image_width_height,
+    validate_image_tensor_budget,
+)
+from vllm.utils.math_utils import cdiv
 
 
 class ImageTransform:
@@ -186,9 +193,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         inference_mode: bool = True,
         **kwargs: Any,
     ):
-        """
-
-        Args:
+        """Args:
             prompt (str): the formatted prompt;
             images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
@@ -201,8 +206,8 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - pixel_values (torch.FloatTensor): [n_patches, 3, H, W]
                 - image_id (int): the id of the image token
                 - num_image_tokens (list[int]): the number of image tokens
-        """
 
+        """
         if prompt is None or images is None:
             raise ValueError("prompt and images must be used at the same time.")
 
@@ -276,9 +281,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         inference_mode: bool = True,
         **kwargs: Any,
     ):
-        """
-
-        Args:
+        """Args:
             text (str): the formatted prompt;
             images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
@@ -290,8 +293,8 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - images (torch.FloatTensor): [n_images, 3, H, W]
                 - image_id (int): the id of the image token
                 - num_image_tokens (list[int]): the number of image tokens
-        """
 
+        """
         prepare = self.process_one(
             prompt=text,
             images=images,
@@ -316,21 +319,34 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 f"({num_image_tags}) does not match number of images "
                 f"({len(images)})."
             )
+        if cropping:
+            resolutions = [
+                self.select_best_resolution(get_image_width_height(image))
+                for image in images
+            ]
+        else:
+            resolutions = [(self.image_size, self.image_size)] * len(images)
+        # Each image contributes a global view and a grid of local tiles.
+        validate_image_tensor_budget(
+            images,
+            (
+                self.image_size**2
+                * (1 + cdiv(width, self.image_size) * cdiv(height, self.image_size))
+                for width, height in resolutions
+            ),
+        )
+
         text_splits = conversation.split(self.image_token)
         images_list, images_seq_mask, images_spatial_crop = [], [], []
         num_image_tokens = []
         tokenized_str = []
-        for text_sep, image in zip(text_splits, images):
+        for text_sep, image, (best_width, best_height) in zip(
+            text_splits, map(to_pil_image, images), resolutions
+        ):
             """encode text_sep"""
             tokenized_sep = self.encode(text_sep, bos=False, eos=False)
             tokenized_str += tokenized_sep
             images_seq_mask += [False] * len(tokenized_sep)
-
-            """select best resolution for anyres"""
-            if cropping:
-                best_width, best_height = self.select_best_resolution(image.size)
-            else:
-                best_width, best_height = self.image_size, self.image_size
 
             """process the global view"""
             global_view = ImageOps.pad(

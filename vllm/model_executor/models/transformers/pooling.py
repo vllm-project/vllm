@@ -19,6 +19,7 @@
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn as nn
 from transformers import AutoModelForSequenceClassification
 
 from vllm.config.utils import getattr_iter
@@ -26,11 +27,27 @@ from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
+from .base import Base
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
-class EmbeddingMixin(VllmModelForPooling):
+class ClassifierWithReshape(nn.Module):
+    """Token extraction has already been applied in `pooler.pooling`.
+
+    Add dim to match expected input shape of `classifier.forward`, and remove it
+    again if the classifier is applied at every position (e.g. LayoutLMv3's).
+    """
+
+    def forward(self, *args, **kwargs):
+        if len(args) > 0:
+            args = (args[0].unsqueeze(1), *args[1:])
+        output = super().forward(*args, **kwargs)
+        return output.squeeze(1) if output.dim() == 3 else output
+
+
+class EmbeddingMixin(VllmModelForPooling, Base):
     default_seq_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
@@ -45,7 +62,7 @@ class EmbeddingMixin(VllmModelForPooling):
         self.pooler = DispatchPooler.for_embedding(pooler_config)
 
 
-class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
+class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Base):
     default_seq_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
@@ -83,18 +100,15 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
             )
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
-        class ClassifierWithReshape(self.classifier.__class__):
-            """
-            Token extraction has already been applied in `pooler.pooling`.
-            Add dim to match expected input shape of `classifier.forward`.
-            """
-
-            def forward(self, *args, **kwargs):
-                if len(args) > 0:
-                    args = (args[0].unsqueeze(1), *args[1:])
-                return super().forward(*args, **kwargs)
-
-        self.classifier.__class__ = ClassifierWithReshape
+        # `nn.Linear` heads need no reshape. For other heads, order
+        # `ClassifierWithReshape` ahead of the classifier's own class so that
+        # its `super().forward(...)` reaches the original implementation.
+        if not isinstance(self.classifier, nn.Linear):
+            self.classifier.__class__ = type(
+                "ClassifierWithReshape",
+                (ClassifierWithReshape, type(self.classifier)),
+                {},
+            )
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,

@@ -94,7 +94,7 @@ LLM(model, enforce_eager=True)
 ```
 
 To turn off just torch.compile, pass `mode = NONE` to the compilation config.
-(`-cc` is short for `--compilation_config`):
+(`-cc` is short for `--compilation-config`):
 
 ```sh
 # Online
@@ -250,6 +250,18 @@ TorchInductor takes a captured graph and then compiles it down to some Python co
 that may call 1+ triton kernels. On rare (but unfortunate) occasions, it may
 produce an incorrect triton kernel. This may manifest as silent incorrectness,
 CUDA illegal memory accesses, or loud errors.
+
+### Deterministic compilation
+
+When vLLM selects combo-kernel defaults, it disables combo-kernel benchmarking
+if Inductor's `deterministic` setting is enabled. A `deterministic` value in
+`inductor_compile_config` takes precedence over the global Inductor setting.
+On torch 2.13, `TORCHINDUCTOR_DETERMINISTIC=1` alone is reset by the first
+compiled frame ([pytorch#198563](https://github.com/pytorch/pytorch/issues/198563)),
+so set `deterministic` in `inductor_compile_config` instead.
+Explicit `combo_kernels` or `benchmark_combo_kernel` settings are preserved.
+This avoids conflicting compilation defaults; it does not guarantee reproducible
+model outputs.
 
 ### Inductor runtime assertions
 

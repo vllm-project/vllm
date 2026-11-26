@@ -38,6 +38,7 @@ When per-request metrics are enabled, the response includes a `metrics` object:
   },
   "metrics": {
     "time_to_first_token_ms": 85.2,
+    "time_to_first_content_token_ms": null,
     "generation_time_ms": 1240.5,
     "queue_time_ms": 12.3,
     "mean_itl_ms": 9.1,
@@ -49,6 +50,7 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 | Field | Description |
 | --- | --- |
 | `time_to_first_token_ms` | Time from when the request was scheduled until the first output token was generated (TTFT). |
+| `time_to_first_content_token_ms` | Streaming only: time from request scheduling to the engine output batch that first produces non-empty text content, excluding reasoning and tool-call output. It equals `time_to_first_token_ms` when the first output batch produces text. Non-streaming requests return `null`; otherwise, the value is unset when no text content is produced. |
 | `generation_time_ms` | Decode time: time from the first output token to the last output token. Excludes both queue wait and prefill/TTFT. |
 | `queue_time_ms` | Time the request spent waiting in the scheduler queue before processing began. |
 | `mean_itl_ms` | Mean inter-token latency (average time between successive output tokens) during the decode phase. `null` for single-token responses. |
@@ -56,6 +58,37 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 
 All fields are `null` if the underlying timing data is not available for that
 request.
+
+### Reasoning Models
+
+For streaming requests with a response parser, the first generated token may be
+reasoning output rather than text content. In that case,
+`time_to_first_content_token_ms` can be greater than
+`time_to_first_token_ms`.
+
+For example, start Qwen3 with its reasoning parser:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --reasoning-parser qwen3 \
+  --enable-per-request-metrics
+```
+
+With `stream=True` and `stream_options={"include_usage": True}`, the final usage
+chunk's metrics may look like:
+
+```json
+{
+  "metrics": {
+    "time_to_first_token_ms": 108.2,
+    "time_to_first_content_token_ms": 268.2
+  }
+}
+```
+
+Here, the model began generating output after 108.2 ms, while text content
+started after 268.2 ms. This measures the first text content, not the final
+answer across a multi-turn tool workflow.
 
 !!! note
     Timing metrics describe a single generation stream, so they are only
@@ -119,6 +152,19 @@ Per-request metrics are also available on the `/v1/completions` endpoint using
 the same `metrics` response field. As with `n > 1`, metrics are omitted for
 requests with multiple prompts, because the timing data cannot be attributed to
 a single prompt's generation.
+
+## Responses API
+
+Per-request metrics are available on the `/v1/responses` endpoint using the
+common `metrics` object described above. Non-streaming responses include it at
+the top level. Streaming responses include it in the final response carried by
+the `response.completed` or `response.incomplete` event; intermediate events do
+not include metrics.
+
+Metrics are omitted for Responses requests that perform multiple
+model-generation turns, such as built-in tool-call workflows, because the
+response retains timing data for only one generation turn while token usage is
+accumulated across all turns.
 
 ## Relationship to Prometheus Metrics
 

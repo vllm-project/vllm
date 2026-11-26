@@ -86,7 +86,8 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        inputs_embeds[positions[0] == 0] = 0
+        token_positions = positions[0] if positions.ndim == 2 else positions
+        inputs_embeds.masked_fill_((token_positions == 0).unsqueeze(-1), 0)
 
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
@@ -98,8 +99,12 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        hidden_states = residual + hidden_states
-        return hidden_states
+        # Apply the final norm once (fused add+norm) and recycle the
+        # post-final-norm hidden into the next draft step; compute_logits uses
+        # it directly. Matches the GLM MTP recycle contract from #47448 and
+        # vllm/models/glm5next/common/mtp.py.
+        hidden_states, _ = self.shared_head.norm(hidden_states, residual=residual)
+        return hidden_states, hidden_states
 
 
 class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor):
@@ -245,8 +250,7 @@ class GlmOcrMTP(nn.Module, SupportsPP):
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """

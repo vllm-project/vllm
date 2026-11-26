@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EAGLE3 Acceptance Length Regression Tests.
+"""EAGLE3 Acceptance Length Regression Tests.
 
 These tests verify that acceptance lengths for EAGLE3 speculative decoding
 do not regress across vLLM commits. Each test runs inference on the MT-Bench
@@ -26,7 +25,7 @@ from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
 
-@dataclass
+@dataclass(slots=True)
 class Eagle3ModelConfig:
     verifier: str
     drafter: str

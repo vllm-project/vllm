@@ -39,11 +39,13 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -106,12 +108,10 @@ class MixtralMoE(nn.Module):
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         # Gate always runs at half / full precision for now.
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             hidden_size,
             num_experts,
-            bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -288,7 +288,14 @@ class MixtralModel(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        orig_to_new_substr={
+            # W8A8 compressed-tensors checkpoints name experts gate/up/down;
+            # map to the w1/w3/w2 the FusedMoE loader expects (no-op if native).
+            ".gate_proj.": ".w1.",
+            ".up_proj.": ".w3.",
+            ".down_proj.": ".w2.",
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

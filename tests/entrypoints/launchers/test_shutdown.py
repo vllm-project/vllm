@@ -14,11 +14,12 @@ import httpx
 import openai
 import psutil
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.network_utils import get_open_port
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 # GPU initialization might take take longer
 _SERVER_STARTUP_TIMEOUT = 120
@@ -66,7 +67,16 @@ async def _assert_children_cleaned_up(
     )
 
 
-@dataclass
+def _wait_for_server_exit(proc: subprocess.Popen, timeout: float) -> None:
+    """Children such as multiprocessing's resource_tracker only exit after the
+    server process does, so wait for it before checking them."""
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"Server did not exit within {timeout}s")
+
+
+@dataclass(slots=True)
 class ShutdownState:
     got_503: bool = False
     got_500: bool = False
@@ -127,6 +137,40 @@ async def _concurrent_request_loop(
                 t.cancel()
 
 
+def _num_running_requests(metrics_text: str) -> float:
+    """Sum `vllm:num_requests_running` across the server's label sets."""
+    total = 0.0
+    for family in text_string_to_metric_families(metrics_text):
+        if family.name == "vllm:num_requests_running":
+            for sample in family.samples:
+                if sample.name == "vllm:num_requests_running":
+                    total += sample.value
+    return total
+
+
+async def _wait_for_running_request(
+    metrics_url: str,
+    timeout: float = _INFLIGHT_REQUEST_START_TIMEOUT,
+) -> float:
+    """Wait until the server reports a running request, returning the delay.
+
+    `ShutdownState.inflight_requests` is incremented before the HTTP call is
+    awaited, so it only shows that a client coroutine started. Draining can
+    only complete work the engine has already admitted, so synchronize on the
+    server's own scheduler gauge instead.
+    """
+    start = time.monotonic()
+    deadline = start + timeout
+    async with httpx.AsyncClient() as metrics_client:
+        while time.monotonic() < deadline:
+            response = await metrics_client.get(metrics_url)
+            response.raise_for_status()
+            if _num_running_requests(response.text) > 0:
+                return time.monotonic() - start
+            await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
+    raise AssertionError(f"No request reached the running state within {timeout}s")
+
+
 @pytest.mark.asyncio
 async def test_shutdown_on_engine_failure(tmp_path: Path):
     """Verify that API returns connection error when server process is killed.
@@ -134,7 +178,6 @@ async def test_shutdown_on_engine_failure(tmp_path: Path):
     Starts a vLLM server, kills it to simulate a crash, then verifies that
     subsequent API calls fail appropriately.
     """
-
     port = get_open_port()
 
     # Redirect server output to a file rather than a pipe: nothing drains the
@@ -215,6 +258,7 @@ async def test_shutdown_on_engine_failure(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_wait_timeout_completes_requests():
     """Verify wait timeout: new requests rejected, in-flight requests complete."""
+    shutdown_timeout = 30
     server_args = [
         "--dtype",
         "bfloat16",
@@ -226,7 +270,7 @@ async def test_wait_timeout_completes_requests():
         "--max-num-seqs",
         "4",
         "--shutdown-timeout",
-        "30",
+        str(shutdown_timeout),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
@@ -241,13 +285,17 @@ async def test_wait_timeout_completes_requests():
             _concurrent_request_loop(client, state, sigterm_sent, concurrency=10)
         )
 
-        await asyncio.sleep(0.5)
-        proc.send_signal(signal.SIGTERM)
-        sigterm_sent.set()
-
         try:
+            # Drain can only complete requests the engine already admitted, so
+            # wait for the server to report one instead of guessing with a sleep.
+            admission_delay = await _wait_for_running_request(
+                remote_server.url_for("metrics")
+            )
+            proc.send_signal(signal.SIGTERM)
+            sigterm_sent.set()
+
             await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             state.stop_requesting = True
@@ -258,6 +306,7 @@ async def test_wait_timeout_completes_requests():
         # wait timeout should complete in-flight requests
         assert state.requests_after_sigterm > 0, (
             f"Wait timeout should complete in-flight requests. "
+            f"admission_delay: {admission_delay:.3f}s, "
             f"503: {state.got_503}, 500: {state.got_500}, "
             f"conn_errors: {state.connection_errors}, errors: {state.errors}"
         )
@@ -267,6 +316,7 @@ async def test_wait_timeout_completes_requests():
             f"completed: {state.requests_after_sigterm}, errors: {state.errors}"
         )
 
+        _wait_for_server_exit(proc, shutdown_timeout)
         await _assert_children_cleaned_up(child_pids)
 
 
@@ -424,7 +474,7 @@ async def test_abort_timeout_fails_inflight_requests():
 
         try:
             await asyncio.wait_for(request_task, timeout=5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             state.stop_requesting = True
@@ -463,6 +513,7 @@ async def test_abort_timeout_fails_inflight_requests():
 @pytest.mark.asyncio
 async def test_request_rejection_during_shutdown():
     """Verify new requests are rejected with error during shutdown."""
+    shutdown_timeout = 30
     server_args = [
         "--dtype",
         "bfloat16",
@@ -474,7 +525,7 @@ async def test_request_rejection_during_shutdown():
         "--max-num-seqs",
         "4",
         "--shutdown-timeout",
-        "30",
+        str(shutdown_timeout),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
@@ -506,6 +557,7 @@ async def test_request_rejection_during_shutdown():
             f"but {rejected_count} were rejected out of 10"
         )
 
+        _wait_for_server_exit(proc, shutdown_timeout)
         await _assert_children_cleaned_up(child_pids)
 
 
@@ -553,7 +605,7 @@ async def test_multi_api_server_shutdown():
 
         try:
             await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             state.stop_requesting = True

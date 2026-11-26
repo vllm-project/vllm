@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -17,9 +18,11 @@ use futures::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    HttpListenerMode, ParserSelection, RendererSelection, serve,
+    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, CoordinatorMode,
+    CorsConfig, EngineCoreConfig, HttpListenerMode, LlmSource, ParserSelection, RendererSelection,
+    Server, ServerConfig,
 };
 
 #[derive(Debug, Parser)]
@@ -49,40 +52,69 @@ async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     let port = unique_local_port()?;
-    let config = Config {
-        transport_mode: TransportMode::HandshakeOwner {
-            handshake_address: args.handshake_address,
-            advertised_host: args.host,
-            engine_count: args.engine_count,
-            ready_timeout: Duration::from_secs(args.ready_timeout_secs),
-            local_input_address: None,
-            local_output_address: None,
-        },
-        coordinator_mode: CoordinatorMode::MaybeInProc,
+    let config = ServerConfig {
         model: args.model,
+        revision: None,
+        tokenizer: None,
+        hf_config: None,
+        skip_tokenizer_init: false,
+        hf_token: None,
+        hf_overrides: Default::default(),
         generation_config: Default::default(),
+        override_generation_config: Default::default(),
         served_model_name: vec![],
         listener_mode: HttpListenerMode::BindTcp {
             host: "127.0.0.1".to_string(),
             port,
         },
+        grpc_listener_mode: None,
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
+        tool_strict_level: None,
+        structured_outputs_backend: StructuredOutputBackend::default(),
         renderer: RendererSelection::Auto,
         language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
+        reasoning_effort_map: HashMap::new(),
+        trust_request_chat_template: false,
+        exclude_tools_when_tool_choice_none: false,
         limit_mm_per_prompt: HashMap::new(),
+        mm_processor_kwargs: HashMap::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
         api_server_options: ApiServerOptions::default(),
+        fingerprint_mode: Default::default(),
         cors: CorsConfig::default(),
+        access_log: AccessLogConfig::default(),
         tls: None,
+        root_path: None,
         api_keys: Vec::new(),
-        disable_log_stats: false,
-        grpc_port: None,
         shutdown_timeout: Duration::ZERO,
+        keep_alive_on_engine_death: false,
         keep_alive_timeout: Duration::from_secs(5),
+    };
+    let engine_core = EngineCoreConfig {
+        transport_mode: TransportMode::HandshakeOwner {
+            handshake_address: args.handshake_address,
+            advertised_host: args.host,
+            engine_start_index: 0,
+            engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
+            ready_timeout: Duration::from_secs(args.ready_timeout_secs),
+            local_input_address: None,
+            local_output_address: None,
+        },
+        coordinator_mode: CoordinatorMode::MaybeInProc,
+        lora_modules: Vec::new(),
+        default_mm_loras: Default::default(),
+        stream_interval: NonZeroU32::MIN,
+        admission_limits: Default::default(),
+        disable_log_stats: false,
+        log_stats_interval: Some(Duration::from_secs(10)),
+        custom_histogram_buckets: Default::default(),
+        disable_request_id_randomization: false,
+        manages_engine: false,
         profiler: None,
     };
 
@@ -90,7 +122,11 @@ async fn main() -> Result<()> {
     let shutdown = CancellationToken::new();
     let server_config = config.clone();
     let server_shutdown = shutdown.clone();
-    let server_task = tokio::spawn(async move { serve(server_config, server_shutdown).await });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_config, LlmSource::EngineCore(engine_core))
+            .serve(server_shutdown)
+            .await
+    });
 
     let client = Client::with_config(
         OpenAIConfig::new()

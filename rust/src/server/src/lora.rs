@@ -1,43 +1,173 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::io;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use anyhow::Context as _;
 use indexmap::IndexMap;
+use itertools::Itertools as _;
 use thiserror::Error;
+use thiserror_ext::Macro;
 use tokio::sync::{Mutex, RwLock};
+use tracing::info;
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::lora::{LoraRequest, LoraRequestError};
+use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
+
+use crate::config::{DefaultMmLoras, LoraModulePath};
+use crate::model_names::ServedModelNames;
+use crate::state::AppState;
+
+const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
+
+#[derive(Debug, Error, Macro)]
+pub(crate) enum LoraPathAccessError {
+    #[error("No adapter found for {lora_path}")]
+    NotFound { lora_path: String },
+    #[error("{message}")]
+    InvalidPath { message: String },
+    #[error("{message}")]
+    InvalidConfiguration { message: String },
+}
+
+fn runtime_lora_allowed_path_prefixes() -> Option<Vec<PathBuf>> {
+    let prefixes = std::env::var_os(RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV)?;
+    let prefixes: Vec<_> = std::env::split_paths(&prefixes)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect();
+    (!prefixes.is_empty()).then_some(prefixes)
+}
+
+fn looks_like_local_lora_path(lora_path: &str) -> bool {
+    let path = Path::new(lora_path);
+    path.is_absolute()
+        || lora_path.starts_with('~')
+        || lora_path.starts_with('.')
+        || path.components().any(|component| matches!(component, Component::ParentDir))
+}
+
+fn validate_lora_path_access(
+    lora_path: &str,
+    allowed_prefixes: Option<&[PathBuf]>,
+) -> Result<Option<String>, LoraPathAccessError> {
+    let path = Path::new(lora_path);
+    if !looks_like_local_lora_path(lora_path) && !path.exists() {
+        return Ok(None);
+    }
+
+    let Some(allowed_prefixes) = allowed_prefixes else {
+        return Err(invalid_path!(
+            "Local LoRA adapter paths require {RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV} to be configured."
+        ));
+    };
+
+    if !path.is_absolute() {
+        return Err(invalid_path!(
+            "Local LoRA adapter paths must be absolute and under one of the prefixes configured by {RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV}."
+        ));
+    }
+
+    let canonical_path = path.canonicalize().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => LoraPathAccessError::NotFound {
+            lora_path: lora_path.to_string(),
+        },
+        _ => invalid_path!("Local LoRA adapter path must exist and be accessible."),
+    })?;
+    let canonical_prefixes = allowed_prefixes
+        .iter()
+        .map(|prefix| {
+            prefix.canonicalize().map_err(|_| {
+                invalid_configuration!(
+                    "configured {RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV} path prefix must exist and be accessible"
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if !canonical_prefixes.iter().any(|prefix| canonical_path.starts_with(prefix)) {
+        return Err(invalid_path!(
+            "Local LoRA adapter path is outside the configured allowed prefixes."
+        ));
+    }
+
+    Ok(Some(canonical_path.to_string_lossy().into_owned()))
+}
+
+/// A LoRA adapter registered under a public model name.
+///
+/// Holds what identifies the loaded adapter, not the request that loaded it:
+/// per-load options such as `load_inplace` stay on that load, so the engine
+/// requests built from the registry never carry them.
+#[derive(Debug, Clone)]
+pub(crate) struct LoadedLora {
+    pub lora_name: String,
+    pub lora_int_id: u64,
+    pub lora_path: String,
+    pub base_model_name: Option<String>,
+    pub is_3d_lora_weight: bool,
+}
+
+impl LoadedLora {
+    /// The engine request that selects this adapter.
+    fn to_request(&self) -> LoraRequest {
+        LoraRequest {
+            lora_name: self.lora_name.clone(),
+            lora_int_id: self.lora_int_id,
+            lora_path: self.lora_path.clone(),
+            base_model_name: self.base_model_name.clone(),
+            load_inplace: false,
+            is_3d_lora_weight: self.is_3d_lora_weight,
+        }
+    }
+}
 
 /// Snapshot of the currently served model names plus the requested LoRA, if
 /// the model name resolves to a dynamic adapter.
 #[derive(Debug, Clone)]
 pub(crate) struct LoraModelResolution {
-    pub model_names: Vec<String>,
+    pub model_names: ServedModelNames,
     pub lora_request: Option<LoraRequest>,
+}
+
+impl LoraModelResolution {
+    /// The `model` reported in responses: the LoRA adapter name when the
+    /// request resolved to one, otherwise the first served model name.
+    pub fn response_model(&self) -> String {
+        self.lora_request
+            .as_ref()
+            .map(|request| request.lora_name.clone())
+            .unwrap_or_else(|| self.model_names.primary().to_string())
+    }
 }
 
 /// Runtime registry for dynamically loaded LoRA adapters.
 pub(crate) struct LoraManager {
     /// Dynamically loaded LoRA adapters keyed by public model name, in load order.
-    requests: RwLock<IndexMap<String, LoraRequest>>,
+    adapters: RwLock<IndexMap<String, LoadedLora>>,
     /// Monotonic adapter id allocator. LoRA ids are one-indexed.
     id_counter: AtomicU64,
     /// Serialize dynamic LoRA registry updates around engine utility calls.
     update_lock: Mutex<()>,
+    /// Modalities whose `--default-mm-loras` adapter, registered under the
+    /// modality's name, serves chat requests that name no adapter.
+    default_mm_modalities: Vec<MmModality>,
 }
 
 #[derive(Debug, Error)]
 #[error("engine was not started with LoRA enabled")]
 pub(crate) struct LoraDisabledError;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Macro)]
 pub(crate) enum LoadLoraError {
     #[error(transparent)]
     Disabled(#[from] LoraDisabledError),
+    #[error("{message}")]
+    InvalidAdapter { message: String },
     #[error(transparent)]
-    InvalidRequest(#[from] LoraRequestError),
-    #[error("LoRA adapter `{lora_name}` is already loaded")]
+    PathAccess(#[from] LoraPathAccessError),
+    #[error("LoRA adapter `{lora_name}` has already been loaded")]
     AlreadyLoaded { lora_name: String },
     #[error("LoRA adapter `{lora_name}` conflicts with a served base model")]
     BaseModelName { lora_name: String },
@@ -71,35 +201,124 @@ pub(crate) enum UnloadLoraError {
         #[source]
         source: vllm_engine_core_client::Error,
     },
-    #[error("engine rejected removal of LoRA adapter `{lora_name}` with id {lora_int_id}")]
-    NotRemoved { lora_name: String, lora_int_id: u64 },
+}
+
+/// Check an adapter's name and path, and that its name does not shadow a
+/// served base model.
+pub(crate) fn check_lora_module(
+    base_model_names: &[String],
+    module: &LoraModulePath,
+) -> Result<(), LoadLoraError> {
+    if module.name.trim().is_empty() {
+        bail_invalid_adapter!("lora_name must not be empty");
+    }
+    if module.path.trim().is_empty() {
+        bail_invalid_adapter!("lora_path must not be empty");
+    }
+    if base_model_names.contains(&module.name) {
+        return Err(LoadLoraError::BaseModelName {
+            lora_name: module.name.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Load the operator-configured static LoRA adapters before serving, failing
+/// startup on any error like Python's `init_static_loras` does. Like Python's
+/// `process_lora_modules`, each `--default-mm-loras` adapter is served under
+/// its modality's name after the `--lora-modules` adapters.
+pub(crate) async fn load_static_loras(
+    state: &AppState,
+    lora_modules: &[LoraModulePath],
+    default_mm_loras: &DefaultMmLoras,
+) -> anyhow::Result<()> {
+    load_lora_modules(state, lora_modules, "--lora-modules").await?;
+    let default_mm_loras = (default_mm_loras.iter())
+        .map(|(modality, path)| LoraModulePath {
+            name: modality.as_str().to_string(),
+            path: path.clone(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        })
+        .collect::<Vec<_>>();
+    load_lora_modules(state, &default_mm_loras, "--default-mm-loras").await
+}
+
+async fn load_lora_modules(
+    state: &AppState,
+    modules: &[LoraModulePath],
+    source_arg: &str,
+) -> anyhow::Result<()> {
+    for module in modules {
+        let request = state.load_static_lora(module).await.with_context(|| {
+            format!(
+                "failed to load LoRA adapter `{}` from {source_arg}",
+                module.name
+            )
+        })?;
+        info!(
+            lora_name = %request.lora_name,
+            lora_int_id = request.lora_int_id,
+            lora_path = %request.lora_path,
+            "loaded static LoRA adapter"
+        );
+    }
+    Ok(())
 }
 
 impl LoraManager {
     pub fn new() -> Self {
         Self {
-            requests: RwLock::new(IndexMap::new()),
+            adapters: RwLock::new(IndexMap::new()),
             id_counter: AtomicU64::new(0),
             update_lock: Mutex::new(()),
+            default_mm_modalities: Vec::new(),
         }
     }
 
-    /// Snapshot loaded LoRA adapters in load order.
-    pub async fn served_lora_requests(&self) -> Vec<LoraRequest> {
-        self.requests.read().await.values().cloned().collect()
+    /// Set the modalities whose `--default-mm-loras` adapter serves chat
+    /// requests that name no adapter.
+    pub fn with_default_mm_modalities(mut self, modalities: Vec<MmModality>) -> Self {
+        self.default_mm_modalities = modalities;
+        self
     }
 
-    /// Resolve the requested model against one consistent LoRA registry
-    /// snapshot.
+    /// Snapshot loaded LoRA adapters in load order.
+    pub async fn served_loras(&self) -> Vec<LoadedLora> {
+        self.adapters.read().await.values().cloned().collect()
+    }
+
+    /// Resolve `model_name` to an adapter against one consistent LoRA registry
+    /// snapshot; a request that names none falls back to the default adapter
+    /// of the media modality it carries.
+    ///
+    /// Like Python, the fallback applies only when exactly one configured
+    /// modality matches, since a request runs at most one adapter.
     pub async fn resolve_model(
         &self,
-        base_model_names: &[String],
+        base_model_names: ServedModelNames,
         model_name: Option<&str>,
+        media_modalities: impl IntoIterator<Item = MmModality>,
     ) -> LoraModelResolution {
-        let requests = self.requests.read().await;
-        let mut model_names = base_model_names.to_vec();
-        model_names.extend(requests.keys().cloned());
-        let lora_request = model_name.and_then(|name| requests.get(name).cloned());
+        let adapters = self.adapters.read().await;
+        let model_names = base_model_names.with_adapter_names(adapters.keys().cloned());
+        let lora_request = model_name
+            .and_then(|name| adapters.get(name))
+            .or_else(|| {
+                // `media_modalities` may walk the whole request, so leave it
+                // untouched unless a default is configured.
+                if self.default_mm_modalities.is_empty() {
+                    return None;
+                }
+                media_modalities
+                    .into_iter()
+                    .filter(|modality| self.default_mm_modalities.contains(modality))
+                    .unique()
+                    .filter_map(|modality| adapters.get(modality.as_str()))
+                    .exactly_one()
+                    .ok()
+            })
+            .map(LoadedLora::to_request);
 
         LoraModelResolution {
             model_names,
@@ -112,33 +331,66 @@ impl LoraManager {
         &self,
         engine_core_client: &EngineCoreClient,
         base_model_names: &[String],
-        lora_name: String,
-        lora_path: String,
+        mut module: LoraModulePath,
         load_inplace: bool,
-        is_3d_lora_weight: bool,
-    ) -> Result<LoraRequest, LoadLoraError> {
-        let _guard = self.update_lock.lock().await;
-        if base_model_names.iter().any(|name| name == &lora_name) {
-            return Err(LoadLoraError::BaseModelName { lora_name });
+    ) -> Result<LoadedLora, LoadLoraError> {
+        let allowed_prefixes = runtime_lora_allowed_path_prefixes();
+        if let Some(canonical_path) =
+            validate_lora_path_access(&module.path, allowed_prefixes.as_deref())?
+        {
+            module.path = canonical_path;
         }
-        let requests = self.requests.read().await;
-        let existing_lora_int_id = requests.get(&lora_name).map(|request| request.lora_int_id);
+        self.register(engine_core_client, base_model_names, module, load_inplace).await
+    }
+
+    /// Load an operator-configured adapter (`--lora-modules`). Unlike the
+    /// runtime endpoint, the path is trusted as given: no allowed-prefix
+    /// check applies.
+    pub async fn load_static_lora(
+        &self,
+        engine_core_client: &EngineCoreClient,
+        base_model_names: &[String],
+        module: &LoraModulePath,
+    ) -> Result<LoadedLora, LoadLoraError> {
+        self.register(engine_core_client, base_model_names, module.clone(), false).await
+    }
+
+    async fn register(
+        &self,
+        engine_core_client: &EngineCoreClient,
+        base_model_names: &[String],
+        module: LoraModulePath,
+        load_inplace: bool,
+    ) -> Result<LoadedLora, LoadLoraError> {
+        check_lora_module(base_model_names, &module)?;
+        let LoraModulePath {
+            name: lora_name,
+            path: lora_path,
+            base_model_name,
+            is_3d_lora_weight,
+        } = module;
+        let _guard = self.update_lock.lock().await;
+        let adapters = self.adapters.read().await;
+        let existing_lora_int_id = adapters.get(&lora_name).map(|adapter| adapter.lora_int_id);
         if !load_inplace && existing_lora_int_id.is_some() {
             return Err(LoadLoraError::AlreadyLoaded { lora_name });
         }
 
         let lora_int_id = existing_lora_int_id
             .unwrap_or_else(|| self.id_counter.fetch_add(1, Ordering::Relaxed) + 1);
-        let lora_request = LoraRequest::new(
-            lora_name.clone(),
+        let adapter = LoadedLora {
+            lora_name: lora_name.clone(),
             lora_int_id,
             lora_path,
-            load_inplace,
+            base_model_name,
             is_3d_lora_weight,
-        )
-        .map_err(LoadLoraError::InvalidRequest)?;
-        drop(requests);
+        };
+        drop(adapters);
 
+        let lora_request = LoraRequest {
+            load_inplace,
+            ..adapter.to_request()
+        };
         let loaded = engine_core_client.add_lora(&lora_request).await.map_err(|source| {
             LoadLoraError::Engine {
                 lora_name: lora_name.clone(),
@@ -148,8 +400,8 @@ impl LoraManager {
         if !loaded {
             return Err(LoadLoraError::NotLoaded { lora_name });
         }
-        self.requests.write().await.insert(lora_name, lora_request.clone());
-        Ok(lora_request)
+        self.adapters.write().await.insert(lora_name, adapter.clone());
+        Ok(adapter)
     }
 
     /// Remove one dynamic LoRA adapter from the engine and public model
@@ -159,39 +411,227 @@ impl LoraManager {
         engine_core_client: &EngineCoreClient,
         lora_name: &str,
         requested_lora_int_id: Option<u64>,
-    ) -> Result<LoraRequest, UnloadLoraError> {
+    ) -> Result<LoadedLora, UnloadLoraError> {
         let _guard = self.update_lock.lock().await;
-        let lora_request = self.requests.read().await.get(lora_name).cloned().ok_or_else(|| {
+        let adapter = self.adapters.read().await.get(lora_name).cloned().ok_or_else(|| {
             UnloadLoraError::NotFound {
                 lora_name: lora_name.to_string(),
             }
         })?;
 
         if let Some(actual) = requested_lora_int_id
-            && actual != lora_request.lora_int_id
+            && actual != adapter.lora_int_id
         {
             return Err(UnloadLoraError::IntIdMismatch {
                 lora_name: lora_name.to_string(),
-                expected: lora_request.lora_int_id,
+                expected: adapter.lora_int_id,
                 actual,
             });
         }
 
-        let removed =
-            engine_core_client
-                .remove_lora(lora_request.lora_int_id)
-                .await
-                .map_err(|source| UnloadLoraError::Engine {
-                    lora_name: lora_request.lora_name.clone(),
-                    source,
-                })?;
-        if !removed {
-            return Err(UnloadLoraError::NotRemoved {
-                lora_name: lora_request.lora_name,
-                lora_int_id: lora_request.lora_int_id,
-            });
-        }
+        // Engines only cache adapters: a generate request carries the adapter path, and an
+        // engine loads it on demand. `false` means an engine no longer has it cached (e.g. its
+        // LRU cache evicted it), which is the state unloading wants, so only errors fail here.
+        engine_core_client.remove_lora(adapter.lora_int_id).await.map_err(|source| {
+            UnloadLoraError::Engine {
+                lora_name: adapter.lora_name.clone(),
+                source,
+            }
+        })?;
 
-        Ok(self.requests.write().await.shift_remove(lora_name).unwrap_or(lora_request))
+        Ok(self.adapters.write().await.shift_remove(lora_name).unwrap_or(adapter))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use vllm_engine_core_client::protocol::multimodal::MmModality;
+
+    use super::{LoadedLora, LoraManager, LoraPathAccessError, validate_lora_path_access};
+    use crate::model_names::ServedModelNames;
+
+    fn temp_lora_dir(test_name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "vllm-lora-{test_name}-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temp lora dir");
+        path
+    }
+
+    #[tokio::test]
+    async fn resolve_model_selects_adapter_when_any_model_name_is_accepted() {
+        let manager = LoraManager::new();
+        manager.adapters.write().await.insert(
+            "adapter-a".to_string(),
+            LoadedLora {
+                lora_name: "adapter-a".to_string(),
+                lora_int_id: 1,
+                lora_path: "org/adapter-a".to_string(),
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            },
+        );
+        let base = ServedModelNames::new(vec!["base".to_string()]).with_accept_any(true);
+
+        let resolution = manager.resolve_model(base.clone(), Some("adapter-a"), []).await;
+        assert_eq!(
+            resolution.lora_request.expect("adapter selected").lora_name,
+            "adapter-a"
+        );
+
+        let resolution = manager.resolve_model(base, Some("unknown"), []).await;
+        assert!(resolution.lora_request.is_none());
+        assert!(resolution.model_names.accepts(Some("unknown")));
+        assert_eq!(resolution.model_names.primary(), "base");
+    }
+
+    /// A request that names no adapter takes the default adapter of its one
+    /// configured media modality; a named adapter wins, and two matching
+    /// defaults leave the base model.
+    #[tokio::test]
+    async fn resolve_model_falls_back_to_the_one_matching_default_mm_lora() {
+        let manager = LoraManager::new()
+            .with_default_mm_modalities(vec![MmModality::Audio, MmModality::Image]);
+        for (lora_int_id, lora_name) in (1..).zip(["audio", "image", "video", "adapter-a"]) {
+            manager.adapters.write().await.insert(
+                lora_name.to_string(),
+                LoadedLora {
+                    lora_name: lora_name.to_string(),
+                    lora_int_id,
+                    lora_path: format!("org/{lora_name}"),
+                    base_model_name: None,
+                    is_3d_lora_weight: false,
+                },
+            );
+        }
+        let resolve = |model: &'static str, modalities: &'static [MmModality]| {
+            let manager = &manager;
+            async move {
+                let base = ServedModelNames::new(vec!["base".to_string()]);
+                let resolution =
+                    manager.resolve_model(base, Some(model), modalities.iter().copied()).await;
+                resolution.lora_request.map(|request| request.lora_name)
+            }
+        };
+
+        assert_eq!(
+            resolve("base", &[MmModality::Audio]).await.as_deref(),
+            Some("audio")
+        );
+        // `video` is loaded but is not a configured default.
+        assert_eq!(
+            resolve("base", &[MmModality::Image, MmModality::Video]).await.as_deref(),
+            Some("image")
+        );
+        assert_eq!(
+            resolve("base", &[MmModality::Audio, MmModality::Image]).await,
+            None
+        );
+        assert_eq!(resolve("base", &[]).await, None);
+        assert_eq!(
+            resolve("adapter-a", &[MmModality::Audio]).await.as_deref(),
+            Some("adapter-a")
+        );
+    }
+
+    #[test]
+    fn lora_path_allows_hf_repo_ids_without_prefixes() {
+        assert_eq!(
+            validate_lora_path_access("org/adapter-a", None).expect("hf repo id should be allowed"),
+            None
+        );
+    }
+
+    #[test]
+    fn lora_path_rejects_local_paths_without_prefixes() {
+        assert!(validate_lora_path_access("/tmp/adapter-a", None).is_err());
+        assert!(validate_lora_path_access("./adapter-a", None).is_err());
+        assert!(validate_lora_path_access("~/adapter-a", None).is_err());
+        assert!(validate_lora_path_access("subdir/../../../etc/sensitive", None).is_err());
+    }
+
+    #[test]
+    fn lora_path_rejects_existing_bare_relative_paths_without_prefixes() {
+        let root =
+            PathBuf::from("target").join(format!("vllm-lora-relative-{}", std::process::id()));
+        let adapter = root.join("adapter-a");
+        fs::create_dir_all(&adapter).expect("create relative adapter dir");
+
+        assert!(
+            validate_lora_path_access(adapter.to_str().expect("utf-8 temp path"), None).is_err()
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn lora_path_allows_absolute_paths_under_configured_prefixes() {
+        let root = temp_lora_dir("allowed-prefix");
+        let allowed = root.join("allowed");
+        let adapter = allowed.join("adapter-a");
+        fs::create_dir_all(&adapter).expect("create adapter dir");
+
+        let prefixes = [allowed];
+        let resolved =
+            validate_lora_path_access(adapter.to_str().expect("utf-8 temp path"), Some(&prefixes))
+                .expect("path under configured prefix should be allowed");
+        assert_eq!(
+            resolved.as_deref(),
+            Some(
+                adapter
+                    .canonicalize()
+                    .expect("canonical adapter")
+                    .to_str()
+                    .expect("utf-8 temp path")
+            )
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Python answers a missing adapter with 404 `NotFoundError`, so the
+    /// guard reports a missing path apart from an inaccessible one.
+    #[test]
+    fn lora_path_reports_missing_paths_as_not_found() {
+        let root = temp_lora_dir("missing-path");
+        let missing = root.join("missing-adapter");
+
+        let prefixes = [root.clone()];
+        let error =
+            validate_lora_path_access(missing.to_str().expect("utf-8 temp path"), Some(&prefixes))
+                .expect_err("missing adapter path should be rejected");
+        assert!(
+            matches!(&error, LoraPathAccessError::NotFound { lora_path } if *lora_path == missing.to_str().unwrap()),
+            "{error:?}"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn lora_path_rejects_parent_escape_from_configured_prefixes() {
+        let root = temp_lora_dir("parent-escape");
+        let allowed = root.join("allowed");
+        let private_adapter = root.join("private").join("adapter-a");
+        fs::create_dir_all(&allowed).expect("create allowed dir");
+        fs::create_dir_all(&private_adapter).expect("create private adapter dir");
+
+        let escaped = allowed.join("../private/adapter-a");
+        let prefixes = [allowed];
+        assert!(
+            validate_lora_path_access(escaped.to_str().expect("utf-8 temp path"), Some(&prefixes))
+                .is_err()
+        );
+
+        fs::remove_dir_all(root).ok();
     }
 }

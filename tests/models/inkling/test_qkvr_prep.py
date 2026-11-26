@@ -1,14 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
+from torch import nn
 
-import vllm.models.inkling.nvidia.ops.sconv as sconv
-from vllm.models.inkling.nvidia.ops import qkvr_prep
+from vllm.models.inkling.amd import sconv_swa_attn as amd_sconv_swa_attn
+from vllm.models.inkling.amd import short_conv as amd_short_conv
+from vllm.models.inkling.amd.ops import qkvr_prep as amd_qkvr_prep
+from vllm.models.inkling.amd.ops import sconv as amd_sconv
+from vllm.models.inkling.nvidia import sconv_swa_attn as nvidia_sconv_swa_attn
+from vllm.models.inkling.nvidia import short_conv as nvidia_short_conv
+from vllm.models.inkling.nvidia.ops import qkvr_prep as nvidia_qkvr_prep
+from vllm.models.inkling.nvidia.ops import sconv as nvidia_sconv
 from vllm.platforms import current_platform
+from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import AttentionSpec
 
-_cap = current_platform.get_device_capability() if current_platform.is_cuda() else None
+_is_rocm = current_platform.is_rocm()
+qkvr_prep = amd_qkvr_prep if _is_rocm else nvidia_qkvr_prep
+sconv = amd_sconv if _is_rocm else nvidia_sconv
+sconv_swa_attn = amd_sconv_swa_attn if _is_rocm else nvidia_sconv_swa_attn
+short_conv = amd_short_conv if _is_rocm else nvidia_short_conv
+
+_cap = (
+    current_platform.get_device_capability()
+    if current_platform.is_cuda_alike()
+    else None
+)
 
 
 def _make_inputs(*, is_local: bool, tokens: int = 33, tp_size: int = 4):
@@ -154,7 +176,7 @@ def _reference(args):
 
 @pytest.mark.skipif(
     _cap is None,
-    reason="Inkling QKVR prep kernels require CUDA",
+    reason="Inkling QKVR prep kernels require CUDA or ROCm",
 )
 @pytest.mark.parametrize(
     ("is_local", "tokens", "tp_size"),
@@ -183,7 +205,7 @@ def test_qkvr_prep_matches_reference(is_local, tokens, tp_size):
 
 @pytest.mark.skipif(
     _cap is None,
-    reason="Inkling QKVR prep kernels require CUDA",
+    reason="Inkling QKVR prep kernels require CUDA or ROCm",
 )
 @pytest.mark.parametrize("tokens", [9, 128])
 @torch.inference_mode()
@@ -204,7 +226,7 @@ def test_qkvr_log_scaling_preserves_bf16_norm_output(tokens):
 
 @pytest.mark.skipif(
     _cap is None,
-    reason="Inkling QKVR prep kernels require CUDA",
+    reason="Inkling QKVR prep kernels require CUDA or ROCm",
 )
 @pytest.mark.parametrize("tokens", [9, 128])
 @torch.inference_mode()
@@ -245,6 +267,120 @@ def test_fused_sconv_negative_slots_skip_cache_writes():
     )
 
     torch.testing.assert_close(args[11], cache, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    _cap is None,
+    reason="Inkling sconv kernels require CUDA or ROCm",
+)
+@torch.inference_mode()
+def test_short_conv_indexes_planner_enlarged_conv_blocks(monkeypatch):
+    """Index the conv cache with the planner's block size, not the window W.
+
+    The conv owner reports W-token blocks. When an attention page is larger,
+    `unify_kv_cache_spec_page_size` scales the conv block until the pages match,
+    and slot mappings are built with that size. Indexing with W instead lands
+    conv-state reads and writes in the wrong blocks (garbage output) and, with
+    a large cache, past its end (illegal memory access).
+    """
+    kernel_size, kv_heads, head_dim = 4, 4, 128
+    owner = sconv_swa_attn.InklingConvState.__new__(sconv_swa_attn.InklingConvState)
+    nn.Module.__init__(owner)
+    owner.prefix = "model.layers.0.conv_state"
+    owner.num_kv_heads = kv_heads
+    owner.head_size = 1024
+    owner.sliding_window = owner.block_size = kernel_size
+    owner._dtype = torch.bfloat16
+    owner.stream_ranges = ((0, head_dim),)
+    owner.kv_cache = torch.tensor([])
+
+    attn_config = FullAttentionManager.layer_config(
+        AttentionSpec(
+            block_size=64,
+            num_kv_heads=kv_heads,
+            head_size=head_dim,
+            dtype=torch.bfloat16,
+        )
+    )
+    unified = unify_kv_cache_spec_page_size(
+        {"conv": owner.get_kv_cache_config(None), "attn": attn_config}
+    )
+    block_size = unified["conv"].spec.block_size
+    assert block_size == 4 * kernel_size
+
+    torch.manual_seed(0)
+    device = "cuda"
+    # Out-of-order physical blocks; sized so that indices divided by W instead
+    # of block_size stay in bounds and show up as mismatches, not faults.
+    block_table = torch.tensor([[5, 2]], device=device, dtype=torch.int32)
+    num_blocks = (int(block_table.max()) + 1) * block_size // kernel_size
+    cache = torch.zeros(
+        num_blocks,
+        kv_heads,
+        block_size,
+        owner.head_size,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    ref_cache = cache.clone()
+    owner.kv_cache = cache
+
+    layer = short_conv.InklingShortConv.__new__(short_conv.InklingShortConv)
+    nn.Module.__init__(layer)
+    layer.dim = kv_heads * head_dim
+    layer.kernel_size = kernel_size
+    layer.owner = owner
+    layer.stream_idx = 0
+    layer.weight = torch.randn(
+        layer.dim, 1, kernel_size, device=device, dtype=torch.bfloat16
+    )
+
+    # Prefill 21 tokens across both blocks, then decode one token whose window
+    # is read back from the cache.
+    for start, num_tokens in ((0, 21), (21, 1)):
+        positions = torch.arange(
+            start, start + num_tokens, device=device, dtype=torch.int64
+        )
+        slots = (
+            block_table[0, positions // block_size].to(torch.int64) * block_size
+            + positions % block_size
+        )
+        seq_idx = torch.zeros(num_tokens, device=device, dtype=torch.int32)
+        query_start = torch.zeros_like(seq_idx)
+        metadata = sconv_swa_attn.InklingSconvMetadata(
+            block_table=block_table,
+            slot_mapping=slots,
+            seq_idx=seq_idx,
+            query_start=query_start,
+        )
+        monkeypatch.setattr(
+            short_conv,
+            "get_forward_context",
+            lambda metadata=metadata: SimpleNamespace(
+                attn_metadata={owner.prefix: metadata}
+            ),
+        )
+        x = torch.randn(num_tokens, layer.dim, device=device, dtype=torch.bfloat16)
+
+        out = layer(x, positions)
+        ref = sconv.fused_sconv(
+            x,
+            layer.weight.squeeze(1),
+            ref_cache,
+            positions,
+            block_table,
+            seq_idx,
+            slots,
+            query_start,
+            0,
+            head_dim,
+            block_size,
+            activation=None,
+            use_residual=True,
+        )
+
+        torch.testing.assert_close(out, ref, rtol=0, atol=0)
+        torch.testing.assert_close(cache, ref_cache, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

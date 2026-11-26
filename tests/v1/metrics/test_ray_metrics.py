@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 import pytest
 import ray
 
+from tests.utils import wait_for_memory_to_settle
+from vllm.config import CacheConfig
 from vllm.config.model import ModelDType
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -46,36 +48,49 @@ def test_engine_log_metrics_ray(
 ) -> None:
     """Simple smoke test, verifying this can be used without exceptions.
     Need to start a Ray cluster in order to verify outputs."""
+    engine_args = AsyncEngineArgs(
+        model=model, dtype=dtype, disable_log_stats=False, enforce_eager=True
+    )
 
     @ray.remote(num_gpus=1)
     class EngineTestActor:
         async def run(self):
-            engine_args = AsyncEngineArgs(
-                model=model, dtype=dtype, disable_log_stats=False, enforce_eager=True
-            )
-
             engine = AsyncLLM.from_engine_args(
                 engine_args, stat_loggers=[RayPrometheusStatLogger]
             )
 
-            for i, prompt in enumerate(example_prompts):
-                results = engine.generate(
-                    request_id=f"request-id-{i}",
-                    prompt=prompt,
-                    sampling_params=SamplingParams(max_tokens=max_tokens),
-                )
+            try:
+                for i, prompt in enumerate(example_prompts):
+                    results = engine.generate(
+                        request_id=f"request-id-{i}",
+                        prompt=prompt,
+                        sampling_params=SamplingParams(max_tokens=max_tokens),
+                    )
 
-                async for _ in results:
-                    pass
+                    async for _ in results:
+                        pass
+            finally:
+                engine.shutdown()
 
     # Create the actor and call the async method
-    actor = EngineTestActor.remote()  # type: ignore[attr-defined]
-    ray.get(actor.run.remote())
+    try:
+        actor = EngineTestActor.remote()  # type: ignore[attr-defined]
+        ray.get(actor.run.remote())
+    finally:
+        ray.shutdown()
+        # Unset resolves to 1.0 under the extensible KV cache, which does not
+        # need that memory free up front; wait for the standard fraction.
+        wait_for_memory_to_settle(
+            threshold_ratio=1.0
+            - (
+                engine_args.gpu_memory_utilization
+                or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+            )
+        )
 
 
 def test_sanitized_opentelemetry_name():
     """Test the metric name sanitization logic for Ray."""
-
     # Only a-z, A-Z, 0-9, _, test valid characters are preserved
     valid_name = "valid_metric_123_abcDEF"
     assert (
@@ -119,7 +134,7 @@ def test_sanitized_opentelemetry_name():
 
 def _install_mock_metric(wrapper: RayPrometheusMetric) -> MagicMock:
     """Swap the wrapper's underlying Ray metric for a MagicMock while
-    preserving the real metric's ``_tag_keys`` (labels() reads them to
+    preserving the real metric's `_tag_keys` (labels() reads them to
     validate arity)."""
     real_metric = wrapper.metric
     mock = MagicMock()
@@ -213,7 +228,7 @@ def test_ray_histogram_labels_returns_independent_children_and_forwards_tags():
 
 
 def test_ray_counter_labels_accepts_non_string_label_values():
-    """RayPrometheusStatLogger passes ``str(idx)`` for engine indexes; this
+    """RayPrometheusStatLogger passes `str(idx)` for engine indexes; this
     covers the coercion path for any caller that passes a non-string label
     value positionally."""
     wrapper = RayCounterWrapper(

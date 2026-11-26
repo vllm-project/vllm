@@ -1,30 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use serde_json::Value;
+
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 
-/// Enforce the minimal compatibility contract for the Rust OpenAI server.
-pub(super) fn validate_request_compat(
-    request: &CompletionRequest,
-    served_model_names: &[String],
-) -> Result<(), ApiError> {
-    // This path is intentionally scoped to the minimum surface needed by
-    // `vllm-bench` random workload compatibility, so unsupported legacy
-    // completions features fail early here.
-    if !served_model_names.iter().any(|n| n == &request.model) {
-        return Err(ApiError::model_not_found(request.model.clone()));
-    }
-
-    if request.stream_options.is_some() && !request.stream {
+/// Validate OpenAI completions protocol invariants and reject unimplemented
+/// request fields.
+///
+/// Cross-route domain rules (sampling bounds, `max_tokens`, logprobs, token
+/// IDs, `cache_salt`, prompt length/truncation) belong in `vllm-text`, not
+/// here.
+pub(super) fn validate_request(request: &CompletionRequest) -> Result<(), ApiError> {
+    if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
+    {
         bail_invalid_request!(
             param = "stream_options",
             "stream_options are only supported when stream=true."
         );
-    }
-
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
     if request.max_tokens == Some(0) && !request.echo {
@@ -34,33 +28,43 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.suffix.is_some() {
-        bail_invalid_request!(param = "suffix", "suffix is not supported.");
-    }
-
-    if let Some(logprobs) = request.logprobs
-        && logprobs > i32::MAX as u32
-    {
+    if request.stream && request.prompt_logprobs.is_some_and(|n| n > 0 || n == -1) {
         bail_invalid_request!(
-            param = "logprobs",
-            "`logprobs` must fit within a signed 32-bit integer."
+            param = "prompt_logprobs",
+            "`prompt_logprobs` are not available when `stream=true`."
         );
     }
 
-    if let Some(prompt_logprobs) = request.prompt_logprobs {
-        if request.stream && (prompt_logprobs > 0 || prompt_logprobs == -1) {
+    if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        if request.logprobs.is_none() {
             bail_invalid_request!(
-                param = "prompt_logprobs",
-                "`prompt_logprobs` are not available when `stream=true`."
+                param = "logprob_token_ids",
+                "when using `logprob_token_ids`, `logprobs` must be set."
             );
         }
+        if request.echo && request.max_tokens == Some(0) {
+            bail_invalid_request!(
+                param = "logprob_token_ids",
+                "`logprob_token_ids` is not supported when `echo=True` and \
+                 `max_tokens=0` because no output tokens are generated."
+            );
+        }
+    }
 
-        if prompt_logprobs < 0 && prompt_logprobs != -1 {
-            bail_invalid_request!(
-                param = "prompt_logprobs",
-                "`prompt_logprobs` must be a non-negative value or -1."
-            );
-        }
+    reject_unsupported_fields(request)?;
+
+    Ok(())
+}
+
+/// Reject request fields that are accepted for deserialization but not yet
+/// implemented in the Rust frontend.
+fn reject_unsupported_fields(request: &CompletionRequest) -> Result<(), ApiError> {
+    // Python's prompt-presence validator treats an empty `prompt_embeds` list
+    // like an absent one; lowering ignores it.
+    if (request.prompt_embeds.as_ref())
+        .is_some_and(|embeds| !matches!(embeds, Value::Array(embeds) if embeds.is_empty()))
+    {
+        bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
     }
 
     if request.use_beam_search {
@@ -70,23 +74,9 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    // ---- Reject parameters that are accepted for deserialization but not yet
-    // implemented ----
-
-    if request.length_penalty.is_some() {
+    // Python's default is 1.0, which SDKs may send explicitly.
+    if request.length_penalty.is_some_and(|penalty| penalty != 1.0) {
         bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
-    }
-    if !request.spaces_between_special_tokens {
-        bail_invalid_request!(
-            param = "spaces_between_special_tokens",
-            "spaces_between_special_tokens is not supported."
-        );
-    }
-    if request.truncate_prompt_tokens.is_some() {
-        bail_invalid_request!(
-            param = "truncate_prompt_tokens",
-            "truncate_prompt_tokens is not supported."
-        );
     }
 
     Ok(())
@@ -96,7 +86,7 @@ pub(super) fn validate_request_compat(
 mod tests {
     use serde_json::json;
 
-    use super::validate_request_compat;
+    use super::validate_request;
     use crate::routes::openai::completions::types::CompletionRequest;
 
     fn base_request() -> CompletionRequest {
@@ -108,77 +98,132 @@ mod tests {
         .expect("parse request")
     }
 
-    fn served_names(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn non_streaming_request(stream_options: serde_json::Value) -> CompletionRequest {
+        serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "stream_options": stream_options,
+        }))
+        .expect("parse request")
     }
 
     #[test]
-    fn validate_request_compat_accepts_logprobs() {
+    fn validate_request_accepts_empty_stream_options_without_streaming() {
+        let request = non_streaming_request(json!({}));
+        validate_request(&request).expect("empty stream_options sets nothing");
+    }
+
+    #[test]
+    fn validate_request_rejects_stream_options_without_streaming() {
+        let cases = [
+            json!({"include_usage": false}),
+            json!({"continuous_usage_stats": true}),
+        ];
+        for stream_options in cases {
+            let request = non_streaming_request(stream_options.clone());
+            assert!(validate_request(&request).is_err(), "{stream_options}");
+        }
+    }
+
+    #[test]
+    fn validate_request_accepts_spaces_between_special_tokens_false() {
+        let request = CompletionRequest {
+            spaces_between_special_tokens: false,
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_request_accepts_logprobs() {
         let request = CompletionRequest {
             logprobs: Some(1),
             ..base_request()
         };
-        assert!(
-            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
-        );
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
-    fn validate_request_compat_accepts_any_served_name() {
-        let request = base_request();
-        assert!(
-            validate_request_compat(
-                &request,
-                &served_names(&["other-alias", "Qwen/Qwen1.5-0.5B-Chat"])
-            )
-            .is_ok()
-        );
+    fn validate_request_accepts_full_vocab_logprobs() {
+        let request = CompletionRequest {
+            logprobs: Some(-1),
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
-    fn validate_request_compat_rejects_unknown_model() {
-        let request = base_request();
-        assert!(validate_request_compat(&request, &served_names(&["other-model"])).is_err());
+    fn validate_request_rejects_only_non_default_length_penalty() {
+        let request = CompletionRequest {
+            length_penalty: Some(1.0),
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_ok());
+
+        let request = CompletionRequest {
+            length_penalty: Some(2.0),
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_err());
     }
 
     #[test]
-    fn validate_request_compat_rejects_streaming_prompt_logprobs() {
+    fn validate_request_rejects_prompt_embeds() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "prompt": "hello",
+            "prompt_embeds": "AAAA",
+        }))
+        .expect("parse request");
+        assert!(validate_request(&request).is_err());
+
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "prompt": "hello",
+            "prompt_embeds": null,
+        }))
+        .expect("parse request");
+        assert!(validate_request(&request).is_ok());
+
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "prompt": "hello",
+            "prompt_embeds": [],
+        }))
+        .expect("parse request");
+        assert!(validate_request(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_request_rejects_streaming_prompt_logprobs() {
         let request = CompletionRequest {
             prompt_logprobs: Some(1),
             ..base_request()
         };
-        assert!(
-            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
-        );
+        assert!(validate_request(&request).is_err());
     }
 
     #[test]
-    fn validate_request_compat_accepts_non_stream_prompt_logprobs() {
+    fn validate_request_accepts_non_stream_prompt_logprobs() {
         let request = CompletionRequest {
             stream: false,
             prompt_logprobs: Some(-1),
             ..base_request()
         };
-        assert!(
-            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
-        );
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
-    fn validate_request_compat_accepts_prompt_only_echo() {
+    fn validate_request_accepts_prompt_only_echo() {
         let request = CompletionRequest {
             stream: false,
             echo: true,
             max_tokens: Some(0),
             ..base_request()
         };
-        assert!(
-            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
-        );
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
-    fn validate_request_compat_accepts_token_id_prompt_echo() {
+    fn validate_request_accepts_token_id_prompt_echo() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "prompt": [104, 101, 108, 108, 111],
@@ -187,21 +232,17 @@ mod tests {
         }))
         .expect("parse request");
 
-        assert!(
-            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
-        );
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
-    fn validate_request_compat_rejects_prompt_only_without_echo() {
+    fn validate_request_rejects_prompt_only_without_echo() {
         let request = CompletionRequest {
             stream: false,
             echo: false,
             max_tokens: Some(0),
             ..base_request()
         };
-        assert!(
-            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
-        );
+        assert!(validate_request(&request).is_err());
     }
 }

@@ -13,7 +13,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParserManager
 
 
-@dataclass
+@dataclass(slots=True)
 class ToolParserTestConfig:
     """Configuration for a tool parser's common tests.
 
@@ -49,6 +49,7 @@ class ToolParserTestConfig:
         Special flags:
         allow_empty_or_json_empty_args: True if "" or "{}" both valid for empty args
         supports_typed_arguments: True if the parser supports typed function arguments
+
     """
 
     # Parser identification
@@ -110,6 +111,7 @@ class ToolParserTests:
             def test_mistral_specific_feature(self, tool_parser):
                 # Custom test logic
                 pass
+
     """
 
     @pytest.fixture

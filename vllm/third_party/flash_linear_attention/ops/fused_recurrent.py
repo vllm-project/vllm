@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .op import exp, log
@@ -326,7 +327,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     x = a_val + dt_bias_val
     softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
     g_val = -tl.exp(A_log_val) * softplus_x
-    beta_val = tl.sigmoid(b_val).to(b.dtype.element_ty).to(tl.float32)
+    beta_val = tl.sigmoid(b_val)
 
     b_h *= exp(g_val)
     b_v -= tl.sum(b_h * b_k[None, :], 1)
@@ -340,18 +341,17 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-def fused_recurrent_gated_delta_rule_packed_decode(
+def validate_packed_decode_inputs(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor,
-    scale: float,
     initial_state: torch.Tensor,
     out: torch.Tensor,
     ssm_state_indices: torch.Tensor,
-    use_qk_l2norm_in_kernel: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[int, int, int, int, int]:
+    """Validate the packed decode inputs and return `(B, H, HV, K, V)`."""
     if mixed_qkv.ndim != 2:
         raise ValueError(
             f"`mixed_qkv` must be a 2D tensor (got ndim={mixed_qkv.ndim})."
@@ -432,6 +432,25 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError(
             f"Invalid head config inferred from mixed_qkv: H={H}, HV={HV}."
         )
+    return B, H, HV, K, V
+
+
+def fused_recurrent_gated_delta_rule_packed_decode(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    out: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    B, H, HV, K, V = validate_packed_decode_inputs(
+        mixed_qkv, a, b, A_log, dt_bias, initial_state, out, ssm_state_indices
+    )
+    dev = mixed_qkv.device
 
     BK = triton.next_power_of_2(K)
     if triton.cdiv(K, BK) != 1:
@@ -439,6 +458,26 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
     BV = min(triton.next_power_of_2(V), 32)
+    if (
+        K == V == 128
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100, device_id=dev.index)
+    ):
+        # Tuned on GB300; validated on GB200 and with 148 SMs.
+        # MRv2 decode warmup/graph capture compiles the reachable BV variants.
+        if B * HV <= 64:
+            BV = 4
+        elif initial_state.dtype == torch.float32:
+            BV = 8
+    elif (
+        K == V == 128
+        and initial_state.dtype == torch.float32
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(90, device_id=dev.index)
+    ):
+        # Tuned on H200: with an FP32 state BV=4 is fastest at every measured shape.
+        # No BF16-state tile wins everywhere on SM90, so BF16 keeps 32.
+        BV = 4
     num_stages = 3
     num_warps = 1
 
