@@ -167,12 +167,9 @@ class _RemoteStage:
     byte_ranges: list[dict[int, list[tuple[int, int, int]]]] = field(
         default_factory=list
     )
-    # Per remote TP rank and cache group, the local and remote first desc id
-    # of each range moved at the group's blocks: block `b` of a range is desc
-    # `start + b`. int32, as NIXL takes the ids. A desc list holds one desc
-    # per block of each byte range, back to back. E.g. FA group 0 over 2
-    # layers of 1000 blocks, then SSM group 1 over 1 layer's conv and ssm
-    # views (each a range of its own) of 100 state blocks:
+    # Per remote TP rank and cache group, the local and remote first desc id of each
+    # range moved at the group's blocks: e.g. FA group 0 over 2 layers of 1000 blocks
+    # + SSM group 1 over 1 layer's conv and ssm views of 100 state blocks:
     #   descs: | L0 0..999 | L1 0..999 | conv 0..99 | ssm 0..99 |
     #   desc_starts[rank] = {0: [0, 1000], 1: [2000, 2100]}
     # so a request's block_ids [[7, 8], [4]] read descs
@@ -224,7 +221,6 @@ class NixlBaseConnectorWorker:
         """The layout of the blocks that transfer: the host buffer's, if any."""
         if self.use_host_buffer:
             return self.host_buffer_kv_cache_layout
-        # TODO this method should be kv_cache_layout
         return self.kv_cache_layout
 
     def _transfer_block(
