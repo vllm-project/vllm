@@ -615,6 +615,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             )
             self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
             self.replayssm_buffer_len = kda_replayssm.WINDOW
+            self.replayssm_materializer = kda_replayssm.replayssm_materializer
             # Per-slot cursors, bound by initialize_replayssm_ring_trackers().
             self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
             self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
