@@ -35,6 +35,9 @@ class FakeMooncake:
             del self.objects[key]
         return len(removed)
 
+    def remove(self, key, force):
+        return 0 if self.objects.pop(key, None) is not None else -704
+
     def get(self, key):
         return self.objects.get(key, b"")
 
@@ -66,6 +69,10 @@ class DictObjectStore:
     def remove_prefix(self, prefix):
         for key in [key for key in self.objects if key.startswith(prefix)]:
             del self.objects[key]
+
+    def remove(self, keys):
+        for key in keys:
+            self.objects.pop(key, None)
 
     def close(self):
         pass

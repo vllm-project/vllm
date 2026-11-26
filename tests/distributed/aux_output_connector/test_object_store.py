@@ -23,6 +23,7 @@ from tests.distributed.aux_output_connector.utils import (
 from vllm.distributed.aux_output_connector import object_store
 from vllm.distributed.aux_output_connector.object_store import (
     AuxObjectWriter,
+    AuxSampleReleaser,
     MooncakeAuxObjectStore,
     aux_namespace_prefix,
     aux_prefix,
@@ -244,6 +245,136 @@ def test_namespace_prefix_covers_the_namespaces_nested_in_it(namespace, released
     assert _released(aux_namespace_prefix("p", namespace), keys) == [
         keys[i] for i in released
     ]
+
+
+_A, _B = ("p/g/a", 0, 16), ("p/g/b", 16, 32)
+_S0, _S1, _S2 = ("p/g/s0", 32, 48), ("p/g/s1", 32, 48), ("p/g/s2", 32, 48)
+_KEYS = [
+    "p/g/a",
+    "p/g/b",
+    "p/g/s0",
+    "p/g/s1",
+    "p/g/s2",
+    "p/g/tail/t",
+    "p/g/x/k",
+    "p/f/y",
+    "p/h/z",
+]
+
+
+@pytest.mark.parametrize(
+    "shared,steps,removed",
+    [
+        (
+            32,
+            [
+                ("add", 0, [_A, _B, _S0]),
+                ("add", 1, [_A, _B, _S1]),
+                ("release", 0, None),
+            ],
+            ["p/g/s0"],
+        ),
+        (
+            40,
+            [
+                ("add", 0, [_A, _B, _S0, ("p/g/tail/t", 48, 50)]),
+                ("release", 0, None),
+            ],
+            ["p/g/tail/t"],
+        ),
+        (
+            32,
+            [
+                ("add", 0, [_A, _B, _S0]),
+                ("add", 1, [_A]),
+                ("add", 2, [_A, _B, _S2]),
+                ("release", 0, None),
+                ("release", 2, None),
+            ],
+            ["p/g/s0", "p/g/s2"],
+        ),
+        (
+            32,
+            [
+                ("add", 0, [_S0]),
+                ("add", 0, [_S0, ("p/g/tail/t", 48, 50)]),
+                ("add", 1, [_S0]),
+                ("release", 0, None),
+                ("release", 0, None),
+            ],
+            ["p/g/tail/t"],
+        ),
+        (
+            32,
+            [
+                ("add", 0, [_S0]),
+                ("add", 0, [_S0]),
+                ("add", 1, [_S1]),
+                ("release", 0, None),
+                ("add", 0, [_S2]),
+                ("release", 0, None),
+            ],
+            ["p/g/s0"],
+        ),
+        (
+            32,
+            [
+                ("add", 0, None),
+                ("add", 0, [_A, _S0, ("p/g/gone", 48, 64)]),
+                ("release", 0, None),
+            ],
+            ["p/g/s0"],
+        ),
+        (
+            32,
+            [
+                ("add", 1, [_A, _B, _S1]),
+                ("release", 2, None),
+                ("release", 1, None),
+                ("release", 0, None),
+            ],
+            [key for key in _KEYS if key.startswith("p/g/")],
+        ),
+    ],
+    ids=[
+        "own-objects-removed-prompt-kept",
+        "block-across-the-shared-prefix-kept",
+        "prompt-kept-for-a-partial-listing",
+        "listed-by-another-sample-kept",
+        "turns-count-once-late-add-ignored",
+        "no-listing-and-missing-key",
+        "last-release-removes-namespace",
+    ],
+)
+@pytest.mark.parametrize("kind", ["mooncake", "dict"])
+def test_sample_releaser_removes_objects_no_sample_lists(shared, steps, removed, kind):
+    if kind == "dict":
+        store = client = DictObjectStore()
+    else:
+        client, store = fake_store()
+    store.put_batch(_KEYS, [b"rows"] * len(_KEYS))
+    releaser = AuxSampleReleaser(
+        store, "p", "g", num_samples=3, num_shared_tokens=shared
+    )
+    for op, sample, objects in steps:
+        if op == "add":
+            releaser.add(sample, objects)
+        else:
+            releaser.release(sample)
+    assert sorted(client.objects) == sorted(set(_KEYS) - set(removed))
+
+
+def test_sample_releaser_retries_a_failed_namespace_removal():
+    client, store = fake_store()
+    store.put_batch(_KEYS, [b"rows"] * len(_KEYS))
+    releaser = AuxSampleReleaser(store, "p", "g", num_samples=1, num_shared_tokens=0)
+    remove_prefix = store.remove_prefix
+    store.remove_prefix = Mock(side_effect=RuntimeError("down"))
+    with pytest.raises(RuntimeError):
+        releaser.release(0)
+    store.remove_prefix = remove_prefix
+    releaser.release(0)
+    assert sorted(client.objects) == ["p/f/y", "p/h/z"]
 
 
 def _objects(*keys):

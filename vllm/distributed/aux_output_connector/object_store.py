@@ -43,6 +43,9 @@ class AuxObjectStore(Protocol):
         """Remove the objects whose keys start with `prefix`, as built by
         `aux_prefix` or `aux_namespace_prefix`."""
 
+    def remove(self, keys: Sequence[str]) -> None:
+        """Remove the objects `keys`; keys that do not exist are skipped."""
+
     def close(self) -> None: ...
 
 
@@ -121,6 +124,10 @@ class MooncakeAuxObjectStore:
     def remove_prefix(self, prefix: str) -> None:
         self._store.remove_by_regex(f"^{_escape(prefix)}", True)
 
+    def remove(self, keys: Sequence[str]) -> None:
+        for key in keys:
+            self._store.remove(key, True)
+
     def close(self) -> None:
         self._store.close()
 
@@ -170,6 +177,70 @@ def read_aux_rows(
             time.sleep(0.05)
         parts.append(load(data)[field])
     return np.concatenate(parts) if parts else np.empty(0)
+
+
+class AuxSampleReleaser:
+    """Release the objects of a namespace shared by `num_samples` samples one
+    sample at a time. The samples share the namespace's KV, so the objects of
+    the positions below `num_shared_tokens`, the longest token prefix requests
+    of different samples can have in common, stay until the last sample is
+    released: a sample still running can list them at any time, also in a
+    retry after a partial listing.
+
+    `add` registers the `aux_objects` of a sample's response as it arrives,
+    every response of a multi-turn sample, and ignores a released sample;
+    `release` releases the sample, also one that was never added (dropped
+    before it returned), and removes its other objects that no unreleased
+    sample has registered. The last of `num_samples` distinct releases removes
+    the namespace's prefix, the namespaces under it and the objects no
+    response listed included; calling it
+    again after the store raised retries the removal. Send no request of the
+    namespace after its first release other than the turns of its unreleased
+    samples, a retry keeping its sample.
+    """
+
+    def __init__(
+        self,
+        store: AuxObjectStore,
+        key_prefix: str,
+        namespace: str,
+        num_samples: int,
+        num_shared_tokens: int,
+    ) -> None:
+        self._store = store
+        self._prefix = aux_namespace_prefix(key_prefix, namespace)
+        self._num_samples = num_samples
+        self._num_shared_tokens = num_shared_tokens
+        self._lock = threading.Lock()
+        self._keys: dict[Any, set[str]] = {}
+        self._counts: dict[str, int] = {}
+        self._released: set[Any] = set()
+
+    def add(self, sample: Any, objects: Sequence[Sequence[Any]] | None) -> None:
+        """Register the `[key, start, end]` entries of a response of `sample`."""
+        with self._lock:
+            if sample in self._released:
+                return
+            own = self._keys.setdefault(sample, set())
+            for key, start, _ in objects or ():
+                if start >= self._num_shared_tokens and key not in own:
+                    own.add(key)
+                    self._counts[key] = self._counts.get(key, 0) + 1
+
+    def release(self, sample: Any) -> None:
+        """Release `sample` and remove its objects no other sample registered."""
+        with self._lock:
+            self._released.add(sample)
+            unlisted = []
+            for key in self._keys.pop(sample, ()):
+                self._counts[key] -= 1
+                if not self._counts[key]:
+                    del self._counts[key]
+                    unlisted.append(key)
+            if len(self._released) >= self._num_samples:
+                self._store.remove_prefix(self._prefix)
+            elif unlisted:
+                self._store.remove(unlisted)
 
 
 _RETRY_INTERVAL_S = 0.2
