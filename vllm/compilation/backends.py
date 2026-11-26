@@ -822,6 +822,38 @@ def set_model_tag(tag: str, is_encoder: bool = False) -> Generator[None, None, N
         model_is_encoder = old_is_encoder
 
 
+def disable_benchmarks_for_oversized_inputs(
+    inductor_config: dict[str, Any], example_inputs: Sequence[Any]
+) -> None:
+    """Turn off Inductor's compile-time kernel benchmarking when it cannot fit.
+
+    Combo-kernel benchmarking and compile-time autotuning run each candidate
+    kernel on random copies of its inputs, so an input larger than the free
+    device memory (e.g. Gemma-4's per-layer embedding table on a 16 GB GPU)
+    makes compilation fail with OOM.
+    """
+    device_inputs = [
+        t
+        for t in example_inputs
+        if isinstance(t, torch.Tensor) and t.device.type != "cpu"
+    ]
+    if not device_inputs:
+        return
+    largest = max(device_inputs, key=lambda t: t.nbytes)
+    free = current_platform.free_device_memory(largest.device)
+    if largest.nbytes < free:
+        return
+    logger.warning_once(
+        "A %.2f GiB graph input exceeds the %.2f GiB of free device memory; "
+        "disabling Inductor's combo-kernel benchmarking and compile-time "
+        "autotuning, which copy kernel inputs.",
+        largest.nbytes / (1 << 30),
+        free / (1 << 30),
+    )
+    inductor_config["benchmark_combo_kernel"] = False
+    inductor_config["triton.autotune_at_compile_time"] = False
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
     It is used for compilation mode of `CompilationMode.VLLM_COMPILE`,
@@ -1175,6 +1207,7 @@ class VllmBackend:
 
         self.graph = graph
         self.configure_post_pass()
+        disable_benchmarks_for_oversized_inputs(self.inductor_config, example_inputs)
 
         if self.compilation_config.use_inductor_graph_partition:
             # Let Inductor decide partitioning; avoid FX-level pre-splitting.
