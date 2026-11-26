@@ -209,6 +209,11 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
+    if HAS_TRITON and not current_platform.is_cpu():
+        return apply_top_k_top_p_triton(
+            logits, k, p, has_topp_only_rows=has_topp_only_rows
+        )
+
     if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
         CpuArchEnum.X86,
         CpuArchEnum.ARM,
@@ -216,11 +221,6 @@ def apply_top_k_top_p(
         CpuArchEnum.S390X,
     ):
         return apply_top_k_top_p_cpu(logits, k, p)
-
-    if HAS_TRITON:
-        return apply_top_k_top_p_triton(
-            logits, k, p, has_topp_only_rows=has_topp_only_rows
-        )
 
     is_cpu = current_platform.is_cpu()
     return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)
