@@ -146,7 +146,7 @@ class InputBatch:
         num_reqs_after_padding = num_reqs
         num_tokens_after_padding = num_tokens
         if uniform_token_count is not None:
-            # A varlen graph's request capacity is not a new batch partition.
+            # Keep the uniform rows; any remaining graph capacity is padding.
             num_reqs = min(num_reqs, num_tokens // uniform_token_count)
             assert num_reqs > 0
             num_tokens = num_reqs * uniform_token_count

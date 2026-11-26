@@ -309,7 +309,7 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
 )
 async def test_moe_mtp_dp_survives_idle_transitions(expert_parallel: bool):
     """An idle DP replica must preserve the target's MTP query-length agreement."""
-    model = os.environ.get("VLLM_TEST_MOE_MTP_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8")
+    model = "Qwen/Qwen3.6-35B-A3B-FP8"
     args = [
         "--served-model-name",
         "moe-mtp-dp",
@@ -369,7 +369,6 @@ async def test_moe_mtp_dp_survives_idle_transitions(expert_parallel: bool):
         model,
         args,
         env_dict={
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "VLLM_USE_FLASHINFER_SAMPLER": "0",
             "VLLM_USE_DEEP_GEMM": "0",
             "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN": "512",
