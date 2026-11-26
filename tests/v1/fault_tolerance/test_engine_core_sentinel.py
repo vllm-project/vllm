@@ -78,3 +78,13 @@ def test_drain_batch_queue_clears_deferred_step():
     sentinel._drain_batch_queue()
 
     assert sentinel.engine.deferred_step is None
+
+
+def test_drain_batch_queue_clears_idle_step():
+    """An idle step pending before the fault would block all further scheduling."""
+    sentinel, scheduler = _make_sentinel(deque())
+    scheduler._idle_step = SchedulerOutput.make_empty()
+
+    sentinel._drain_batch_queue()
+
+    assert scheduler._idle_step is None
