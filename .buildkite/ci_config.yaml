@@ -3,6 +3,9 @@ job_dirs:
   - ".buildkite/image_build"
   - ".buildkite/test_areas"
   - ".buildkite/hardware_tests"
+# Every step whose test commands are plain pytest is split into shards from
+# recorded test timings. A step opts out with `automatic_shard: false`.
+automatic_shard_default: true
 run_all_patterns:
   - "docker/Dockerfile"
   - "requirements/common.txt"
