@@ -1003,12 +1003,13 @@ class ResponsesRequest(OpenAIBaseModel):
         # call_ids that tool_search_outputs give explicitly, and the other
         # tool_search_calls not answered yet, oldest first, for outputs that
         # have no call_id.
-        answered_search_calls = {
-            item.get("call_id")
+        answered_search_calls: set[str] = {
+            item["call_id"]
             for item in input_data
             if isinstance(item, dict)
             and item.get("type") == "tool_search_output"
-            and item.get("call_id")
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"]
         }
         pending_search_calls: list[str] = []
         for item in input_data:

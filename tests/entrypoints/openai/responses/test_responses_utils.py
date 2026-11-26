@@ -1073,7 +1073,8 @@ class TestToolSearch:
             ToolSearchTool(type="tool_search", execution="client"),
             FunctionTool.model_validate(self.JIRA),
         ]
-        names = [t["function"]["name"] for t in construct_tool_dicts(tools, "auto")]
+        tool_dicts = construct_tool_dicts(tools, "auto") or []
+        names = [t["function"]["name"] for t in tool_dicts]
         assert names == ["tool_search", "jira_search"]
 
     def test_client_tool_search_keeps_its_own_schema(self):
@@ -1084,7 +1085,7 @@ class TestToolSearch:
             description="Find tools",
             parameters=parameters,
         )
-        [shown] = construct_tool_dicts([tool], "auto")
+        [shown] = construct_tool_dicts([tool], "auto") or []
         assert shown["function"]["description"] == "Find tools"
         assert shown["function"]["parameters"] == parameters
 
@@ -1093,7 +1094,8 @@ class TestToolSearch:
             ToolSearchTool(type="tool_search"),
             FunctionTool.model_validate(self.JIRA),
         ]
-        names = [t["function"]["name"] for t in construct_tool_dicts(tools, "auto")]
+        tool_dicts = construct_tool_dicts(tools, "auto") or []
+        names = [t["function"]["name"] for t in tool_dicts]
         assert names == ["jira_search"]
 
     def test_tool_search_call_output_item(self):
@@ -1169,7 +1171,9 @@ class TestToolSearch:
         }
         assert messages[2]["role"] == "tool"
         assert messages[2]["tool_call_id"] == "call_1"
-        loaded = [json.loads(line) for line in messages[2]["content"].splitlines()]
+        content = messages[2]["content"]
+        assert isinstance(content, str)
+        loaded = [json.loads(line) for line in content.splitlines()]
         assert [tool["name"] for tool in loaded] == ["jira_search", "github__open_pr"]
         assert loaded[0]["parameters"] == self.JIRA["parameters"]
         assert "defer_loading" not in loaded[0]
