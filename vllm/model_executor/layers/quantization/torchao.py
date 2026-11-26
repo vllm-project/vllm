@@ -142,6 +142,11 @@ class TorchAOConfig(QuantizationConfig):
         is_checkpoint_torchao_serialized: bool = False,
     ) -> None:
         super().__init__()
+        logger.warning_once(
+            "The TorchAO quantization backend is deprecated and will be removed "
+            "in v0.37. See https://github.com/vllm-project/vllm/issues/69030 "
+            "for alternatives."
+        )
         self.torchao_config = torchao_config
         self.skip_modules = skip_modules or []
         self.is_checkpoint_torchao_serialized = is_checkpoint_torchao_serialized

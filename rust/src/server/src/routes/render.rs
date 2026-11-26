@@ -9,24 +9,23 @@ use axum::Json;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
-use thiserror_ext::AsReport as _;
+use vllm_chat::ChatRequest;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
-use crate::error::{ApiError, text_submit_error};
-use crate::model_names::ServedModelNames;
+use crate::error::{ApiError, chat_submit_error, text_submit_error};
 use crate::render::{RenderContext, RenderState};
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, MmPayload, MultiModalFeatures,
-    validate_request_compat as validate_generate_request,
+    validate_request as validate_generate_request,
 };
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validate_max_output_tokens;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
 };
@@ -84,7 +83,6 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
 
 fn lower_render_request(
     state: &impl RenderContext,
-    model_names: &ServedModelNames,
     text_request: TextRequest,
     model: String,
     n: Option<u32>,
@@ -138,7 +136,7 @@ fn lower_render_request(
         .then_some(text_request.reasoning_parser_kwargs),
         other: Default::default(),
     };
-    validate_generate_request(&request, model_names)?;
+    validate_generate_request(&request)?;
     Ok(request)
 }
 
@@ -166,16 +164,43 @@ fn hoist_transfer_params(
     Some(params)
 }
 
+pub(crate) struct LoweredChatRender {
+    pub(crate) chat_request: ChatRequest,
+    pub(crate) model: String,
+}
+
+pub(crate) async fn lower_chat_render_request<S: RenderContext>(
+    state: &S,
+    body: ChatCompletionRequest,
+    headers: &HeaderMap,
+) -> Result<LoweredChatRender, ApiError> {
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model(requested_model).await;
+    let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
+
+    let request_context = resolve_request_context(headers, body.request_id.as_deref())?;
+
+    let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
+    validate_max_output_tokens(
+        "max_completion_tokens",
+        chat_request.sampling_params.max_tokens,
+        state.text_processor().max_model_len(),
+    )?;
+
+    Ok(LoweredChatRender {
+        chat_request,
+        model,
+    })
+}
+
 /// `/v1/chat/completions/render` on both the render-only server and, with
 /// `--enable-scale-out`, the engine-backed server.
 pub(crate) async fn render_chat<S: RenderContext>(
     State(state): State<Arc<S>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    body: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
-    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
-    let lora_resolution = state.resolve_model(requested_model).await;
-    let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
+    let Json(body) = body?;
     let n = body.n;
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
@@ -184,24 +209,20 @@ pub(crate) async fn render_chat<S: RenderContext>(
         Some(false) => MmPayload::None,
         _ => MmPayload::Tensors,
     });
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
-    let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
-    validate_max_output_tokens(
-        "max_completion_tokens",
-        chat_request.sampling_params.max_tokens,
-        state.text_processor().max_model_len(),
-    )?;
+    let LoweredChatRender {
+        chat_request,
+        model,
+    } = lower_chat_render_request(state.as_ref(), body, &headers).await?;
     let text_request = state
         .chat_processor()
         // The parallel samples of `n` are the generate request's to fan out;
         // its output grammar is the same for every sample.
         .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?
+        .map_err(|error| chat_submit_error("failed to prepare render chat request", error))?
         .text_request;
     Ok(Json(lower_render_request(
         state.as_ref(),
-        &lora_resolution.model_names,
         text_request,
         model,
         n,
@@ -217,8 +238,9 @@ pub(crate) async fn render_chat<S: RenderContext>(
 pub(crate) async fn render_completion<S: RenderContext>(
     State(state): State<Arc<S>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
+    body: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
+    let Json(body) = body?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model(requested_model).await;
     let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
@@ -227,12 +249,8 @@ pub(crate) async fn render_completion<S: RenderContext>(
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
-    let text_requests = lower_completion_request(
-        body,
-        &lora_resolution,
-        request_context,
-        state.text_processor(),
-    )?;
+    let text_requests =
+        lower_completion_request(body, &lora_resolution, request_context, state.as_ref())?;
     for text_request in &text_requests {
         validate_max_output_tokens(
             "max_tokens",
@@ -246,7 +264,6 @@ pub(crate) async fn render_completion<S: RenderContext>(
         .map(|text_request| {
             lower_render_request(
                 state.as_ref(),
-                &lora_resolution.model_names,
                 text_request,
                 model.clone(),
                 n,

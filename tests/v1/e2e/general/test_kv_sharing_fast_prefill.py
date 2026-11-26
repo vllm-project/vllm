@@ -74,9 +74,6 @@ def test_kv_sharing_fast_prefill(
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
-        # This allows vLLM compilation backend to handle allocating and
-        # managing buffers for cudagraph
-        cudagraph_copy_inputs=True,
         mode=CompilationMode.VLLM_COMPILE
         if not enforce_eager
         else CompilationMode.NONE,
