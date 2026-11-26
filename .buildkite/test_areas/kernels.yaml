@@ -694,10 +694,10 @@ steps:
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
   mirror:
     amd:
-      label: ":amd: (MI300) MoE Kernels"
+      label: ":amd: (MI300 DPX) MoE Kernels"
       automatic_shard: true
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 55
       source_file_dependencies:
       - csrc/quantization/w8a8/cutlass/moe/
