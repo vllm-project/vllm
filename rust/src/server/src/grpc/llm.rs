@@ -26,36 +26,6 @@ use vllm_llm::{
 use super::pb::inference_client::InferenceClient;
 use super::{convert, pb};
 
-struct InflightRequest {
-    external_request_id: String,
-    cancel: CancellationToken,
-    response: Mutex<Option<Streaming<pb::GenerateResponse>>>,
-}
-
-impl InflightRequest {
-    fn abort(&self) {
-        self.cancel.cancel();
-        self.response.lock().unwrap().take();
-    }
-
-    async fn next_response(&self) -> Result<Option<pb::GenerateResponse>> {
-        let message = futures::future::poll_fn(|cx| {
-            let mut response = self.response.lock().unwrap();
-            match response.as_mut() {
-                Some(stream) => stream.poll_next_unpin(cx),
-                None => std::task::Poll::Ready(None),
-            }
-        });
-        tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => Err(remote_error("request aborted")),
-            result = message => result.transpose().map_err(status_to_llm_error),
-        }
-    }
-}
-
-type InflightRequests = Arc<Mutex<HashMap<Uuid, Arc<InflightRequest>>>>;
-
 /// Token-only client for a vllm.Inference endpoint.
 pub(crate) struct GrpcLlm {
     readiness: watch::Receiver<bool>,
@@ -103,92 +73,120 @@ impl GrpcLlm {
     }
 }
 
-fn remote_error(message: impl Into<String>) -> Error {
-    Error::Remote {
-        message: message.into(),
+#[tonic::async_trait]
+impl Llm for GrpcLlm {
+    fn info(&self) -> &LlmInfo {
+        &self.info
     }
-}
-
-fn status_to_llm_error(status: Status) -> Error {
-    let message = status.to_report_string();
-    match status.code() {
-        Code::InvalidArgument | Code::OutOfRange | Code::FailedPrecondition => {
-            Error::RemoteInvalidRequest { message }
+    fn subscribe_health(&self) -> watch::Receiver<bool> {
+        self.health.subscribe()
+    }
+    fn subscribe_readiness(&self) -> watch::Receiver<bool> {
+        self.readiness.clone()
+    }
+    async fn generate_n(
+        &self,
+        mut request: GenerateRequest,
+        n: NonZeroU32,
+    ) -> Result<Vec<BoxGenerateOutputStream>> {
+        if n.get() != 1 {
+            return Err(Error::Unsupported { field: "n > 1" });
         }
-        Code::Unavailable | Code::ResourceExhausted => Error::Unavailable { message },
-        _ => remote_error(message),
+        let external_request_id = std::mem::take(&mut request.request_id);
+        let rpc_request_id = Uuid::new_v4();
+        let grpc_request = to_grpc_request(&self.model, rpc_request_id, request)?;
+        let call = Arc::new(InflightRequest {
+            external_request_id,
+            cancel: CancellationToken::new(),
+            response: Mutex::new(None),
+        });
+        self.inflight.lock().unwrap().insert(rpc_request_id, call.clone());
+        let guard = RequestGuard {
+            rpc_request_id,
+            call,
+            inflight: self.inflight.clone(),
+        };
+        let mut client = InferenceClient::new(self.channel.clone());
+        let response = tokio::select! {
+            _ = guard.call.cancel.cancelled() => return Err(remote_error("request aborted")),
+            response = client.generate_stream(grpc_request) => response.map_err(status_to_llm_error)?,
+        };
+        {
+            let mut stream = guard.call.response.lock().unwrap();
+            if guard.call.cancel.is_cancelled() {
+                return Err(remote_error("request aborted"));
+            }
+            *stream = Some(response.into_inner());
+        }
+        let external_request_id = guard.call.external_request_id.clone();
+        let frames = futures::stream::try_unfold(guard, |guard| async move {
+            let frame = guard.call.next_response().await?;
+            Ok(frame.map(|frame| (frame, guard)))
+        });
+        Ok(vec![
+            generate_outputs_from_proto(external_request_id, frames).boxed(),
+        ])
+    }
+    async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        let calls: Vec<_> = self
+            .inflight
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|call| {
+                external_ids.is_empty() || external_ids.contains(&call.external_request_id)
+            })
+            .cloned()
+            .collect();
+        for call in calls {
+            call.abort();
+        }
+        Ok(())
+    }
+    async fn shutdown(self: Box<Self>) -> Result<()> {
+        self.abort(&[]).await
     }
 }
 
-fn numbers_fit_protobuf_struct(value: &Value) -> bool {
-    match value {
-        // Struct stores numbers as f64. Compare integer values in i128 so even
-        // a u64::MAX rounded up to 2^64 is detected.
-        Value::Number(n) => n.as_i128().is_none_or(|i| i as f64 as i128 == i),
-        Value::Array(items) => items.iter().all(numbers_fit_protobuf_struct),
-        Value::Object(fields) => fields.values().all(numbers_fit_protobuf_struct),
-        _ => true,
+struct InflightRequest {
+    external_request_id: String,
+    cancel: CancellationToken,
+    response: Mutex<Option<Streaming<pb::GenerateResponse>>>,
+}
+
+impl InflightRequest {
+    fn abort(&self) {
+        self.cancel.cancel();
+        self.response.lock().unwrap().take();
+    }
+
+    async fn next_response(&self) -> Result<Option<pb::GenerateResponse>> {
+        let message = futures::future::poll_fn(|cx| {
+            let mut response = self.response.lock().unwrap();
+            match response.as_mut() {
+                Some(stream) => stream.poll_next_unpin(cx),
+                None => std::task::Poll::Ready(None),
+            }
+        });
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(remote_error("request aborted")),
+            result = message => result.transpose().map_err(status_to_llm_error),
+        }
     }
 }
 
-fn reject_unsupported_fields(request: &GenerateRequest) -> Result<()> {
-    if request.mm_features.is_some() {
-        return Err(Error::Unsupported {
-            field: "multimodal inputs",
-        });
-    }
-    if request.lora_request.is_some() {
-        return Err(Error::Unsupported {
-            field: "lora_request",
-        });
-    }
-    if request.kv_hints.is_some() {
-        return Err(Error::Unsupported { field: "kv_hints" });
-    }
-    if request.data_parallel_rank.is_some() {
-        return Err(Error::Unsupported {
-            field: "data_parallel_rank",
-        });
-    }
+type InflightRequests = Arc<Mutex<HashMap<Uuid, Arc<InflightRequest>>>>;
 
-    let sampling_params = &request.sampling_params;
-    if sampling_params.extra_args.is_some() {
-        return Err(Error::Unsupported {
-            field: "extra_args",
-        });
+struct RequestGuard {
+    rpc_request_id: Uuid,
+    call: Arc<InflightRequest>,
+    inflight: InflightRequests,
+}
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.inflight.lock().unwrap().remove(&self.rpc_request_id);
     }
-    if sampling_params.structured_outputs.is_some() {
-        return Err(Error::Unsupported {
-            field: "structured_outputs",
-        });
-    }
-    if sampling_params.logprobs.is_some() || sampling_params.logprob_token_ids.is_some() {
-        return Err(Error::Unsupported { field: "logprobs" });
-    }
-    if sampling_params.prompt_logprobs.is_some()
-        || sampling_params.prompt_logprob_token_ids.is_some()
-    {
-        return Err(Error::Unsupported {
-            field: "prompt_logprobs",
-        });
-    }
-    if sampling_params.repetition_detection.is_some() {
-        return Err(Error::Unsupported {
-            field: "repetition_detection",
-        });
-    }
-    if sampling_params.stream_interval.is_some() {
-        return Err(Error::Unsupported {
-            field: "stream_interval",
-        });
-    }
-    if sampling_params.routed_experts_prompt_start != 0 {
-        return Err(Error::Unsupported {
-            field: "routed_experts_prompt_start",
-        });
-    }
-
-    Ok(())
 }
 
 fn to_grpc_request(
@@ -290,28 +288,74 @@ fn to_grpc_request(
     Ok(grpc_request)
 }
 
-struct RequestGuard {
-    rpc_request_id: Uuid,
-    call: Arc<InflightRequest>,
-    inflight: InflightRequests,
-}
-impl Drop for RequestGuard {
-    fn drop(&mut self) {
-        self.inflight.lock().unwrap().remove(&self.rpc_request_id);
+fn reject_unsupported_fields(request: &GenerateRequest) -> Result<()> {
+    if request.mm_features.is_some() {
+        return Err(Error::Unsupported {
+            field: "multimodal inputs",
+        });
     }
+    if request.lora_request.is_some() {
+        return Err(Error::Unsupported {
+            field: "lora_request",
+        });
+    }
+    if request.kv_hints.is_some() {
+        return Err(Error::Unsupported { field: "kv_hints" });
+    }
+    if request.data_parallel_rank.is_some() {
+        return Err(Error::Unsupported {
+            field: "data_parallel_rank",
+        });
+    }
+
+    let sampling_params = &request.sampling_params;
+    if sampling_params.extra_args.is_some() {
+        return Err(Error::Unsupported {
+            field: "extra_args",
+        });
+    }
+    if sampling_params.structured_outputs.is_some() {
+        return Err(Error::Unsupported {
+            field: "structured_outputs",
+        });
+    }
+    if sampling_params.logprobs.is_some() || sampling_params.logprob_token_ids.is_some() {
+        return Err(Error::Unsupported { field: "logprobs" });
+    }
+    if sampling_params.prompt_logprobs.is_some()
+        || sampling_params.prompt_logprob_token_ids.is_some()
+    {
+        return Err(Error::Unsupported {
+            field: "prompt_logprobs",
+        });
+    }
+    if sampling_params.repetition_detection.is_some() {
+        return Err(Error::Unsupported {
+            field: "repetition_detection",
+        });
+    }
+    if sampling_params.stream_interval.is_some() {
+        return Err(Error::Unsupported {
+            field: "stream_interval",
+        });
+    }
+    if sampling_params.routed_experts_prompt_start != 0 {
+        return Err(Error::Unsupported {
+            field: "routed_experts_prompt_start",
+        });
+    }
+
+    Ok(())
 }
 
-fn finish_reason_from_proto(info: &pb::FinishInfo) -> Result<FinishReason> {
-    use pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
-    match PbFinishReason::try_from(info.finish_reason) {
-        Ok(PbFinishReason::Length) => Ok(FinishReason::Length),
-        Ok(PbFinishReason::Aborted) => Ok(FinishReason::Abort),
-        Ok(PbFinishReason::Stop) => Ok(FinishReason::Stop(match &info.stop_reason {
-            Some(PbStopReason::StopTokenId(id)) => Some(StopReason::TokenId(*id)),
-            Some(PbStopReason::StopString(s)) => Some(StopReason::Text(s.clone())),
-            _ => None,
-        })),
-        _ => Err(remote_error("invalid worker finish reason")),
+fn numbers_fit_protobuf_struct(value: &Value) -> bool {
+    match value {
+        // Struct stores numbers as f64. Compare integer values in i128 so even
+        // a u64::MAX rounded up to 2^64 is detected.
+        Value::Number(n) => n.as_i128().is_none_or(|i| i as f64 as i128 == i),
+        Value::Array(items) => items.iter().all(numbers_fit_protobuf_struct),
+        Value::Object(fields) => fields.values().all(numbers_fit_protobuf_struct),
+        _ => true,
     }
 }
 
@@ -383,78 +427,34 @@ async fn generate_outputs_from_proto(
     Err(remote_error("generation ended without finish info"))
 }
 
-#[tonic::async_trait]
-impl Llm for GrpcLlm {
-    fn info(&self) -> &LlmInfo {
-        &self.info
+fn finish_reason_from_proto(info: &pb::FinishInfo) -> Result<FinishReason> {
+    use pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
+    match PbFinishReason::try_from(info.finish_reason) {
+        Ok(PbFinishReason::Length) => Ok(FinishReason::Length),
+        Ok(PbFinishReason::Aborted) => Ok(FinishReason::Abort),
+        Ok(PbFinishReason::Stop) => Ok(FinishReason::Stop(match &info.stop_reason {
+            Some(PbStopReason::StopTokenId(id)) => Some(StopReason::TokenId(*id)),
+            Some(PbStopReason::StopString(s)) => Some(StopReason::Text(s.clone())),
+            _ => None,
+        })),
+        _ => Err(remote_error("invalid worker finish reason")),
     }
-    fn subscribe_health(&self) -> watch::Receiver<bool> {
-        self.health.subscribe()
+}
+
+fn remote_error(message: impl Into<String>) -> Error {
+    Error::Remote {
+        message: message.into(),
     }
-    fn subscribe_readiness(&self) -> watch::Receiver<bool> {
-        self.readiness.clone()
-    }
-    async fn generate_n(
-        &self,
-        mut request: GenerateRequest,
-        n: NonZeroU32,
-    ) -> Result<Vec<BoxGenerateOutputStream>> {
-        if n.get() != 1 {
-            return Err(Error::Unsupported { field: "n > 1" });
+}
+
+fn status_to_llm_error(status: Status) -> Error {
+    let message = status.to_report_string();
+    match status.code() {
+        Code::InvalidArgument | Code::OutOfRange | Code::FailedPrecondition => {
+            Error::RemoteInvalidRequest { message }
         }
-        let external_request_id = std::mem::take(&mut request.request_id);
-        let rpc_request_id = Uuid::new_v4();
-        let grpc_request = to_grpc_request(&self.model, rpc_request_id, request)?;
-        let call = Arc::new(InflightRequest {
-            external_request_id,
-            cancel: CancellationToken::new(),
-            response: Mutex::new(None),
-        });
-        self.inflight.lock().unwrap().insert(rpc_request_id, call.clone());
-        let guard = RequestGuard {
-            rpc_request_id,
-            call,
-            inflight: self.inflight.clone(),
-        };
-        let mut client = InferenceClient::new(self.channel.clone());
-        let response = tokio::select! {
-            _ = guard.call.cancel.cancelled() => return Err(remote_error("request aborted")),
-            response = client.generate_stream(grpc_request) => response.map_err(status_to_llm_error)?,
-        };
-        {
-            let mut stream = guard.call.response.lock().unwrap();
-            if guard.call.cancel.is_cancelled() {
-                return Err(remote_error("request aborted"));
-            }
-            *stream = Some(response.into_inner());
-        }
-        let external_request_id = guard.call.external_request_id.clone();
-        let frames = futures::stream::try_unfold(guard, |guard| async move {
-            let frame = guard.call.next_response().await?;
-            Ok(frame.map(|frame| (frame, guard)))
-        });
-        Ok(vec![
-            generate_outputs_from_proto(external_request_id, frames).boxed(),
-        ])
-    }
-    async fn abort(&self, external_ids: &[String]) -> Result<()> {
-        let calls: Vec<_> = self
-            .inflight
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|call| {
-                external_ids.is_empty() || external_ids.contains(&call.external_request_id)
-            })
-            .cloned()
-            .collect();
-        for call in calls {
-            call.abort();
-        }
-        Ok(())
-    }
-    async fn shutdown(self: Box<Self>) -> Result<()> {
-        self.abort(&[]).await
+        Code::Unavailable | Code::ResourceExhausted => Error::Unavailable { message },
+        _ => remote_error(message),
     }
 }
 
