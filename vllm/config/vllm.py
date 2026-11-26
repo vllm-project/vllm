@@ -1444,6 +1444,10 @@ class VllmConfig:
                 )
             return False
         if self.speculative_config is not None:
+            if watermark_config.algorithm == "synthid_text":
+                raise ValueError(
+                    "SynthID-Text watermarking does not support speculative decoding."
+                )
             speculative_config = self.speculative_config
             if speculative_config.draft_sample_method != "probabilistic":
                 raise ValueError(
