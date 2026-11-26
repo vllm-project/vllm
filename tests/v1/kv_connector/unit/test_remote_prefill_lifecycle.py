@@ -1194,3 +1194,115 @@ def test_deferred_lookup_does_not_block_parked_load():
         scheduler_output = scheduler.schedule()
         assert req_a.status == RequestStatus.RUNNING
         assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+@pytest.mark.parametrize("num_tokens", range(128 + 1, 128 + 3 * 16 + 1))
+def test_recomputed_token_window_survives_remote_prefill(num_tokens: int):
+    """Verify that after remote prefill KV load for sliding-window models,
+    the recomputed last prompt token's sliding window never attends to
+    the null block (Issue #65550).
+    """
+    block_size = 16
+    window = 128
+    vllm_config = create_vllm_config(block_size=block_size, max_num_batched_tokens=512)
+    kv_cache_config = make_kv_cache_config(block_size, swa_enabled=True, sw_size=window)
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=num_tokens,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+
+    # Step 1: Blocks NIXL writes are allocated; request waits for remote KV transfer.
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # Step 2: The load finishes.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_recving={request.request_id}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Step 3: Decoder recomputes the last prompt token (N - 1)
+    # to sample the first token.
+    scheduler_output = scheduler.schedule()
+    (new_request,) = scheduler_output.scheduled_new_reqs
+    assert new_request.num_computed_tokens == num_tokens - 1
+
+    # Its sliding window reads positions num_tokens - window to num_tokens - 1.
+    sliding_window_table = new_request.block_ids[1]
+    null_block = scheduler.kv_cache_manager.block_pool.null_block.block_id
+    oldest = num_tokens - window
+    msg = (
+        f"N={num_tokens}: recomputed token at {num_tokens - 1} reads {oldest},"
+        f" in block {oldest // block_size} of {sliding_window_table}"
+    )
+    assert sliding_window_table[oldest // block_size] != null_block, msg
+
+
+@pytest.mark.parametrize("num_tokens", range(128 + 1, 128 + 3 * 16 + 1))
+def test_reverse_pull_recomputed_token_window_survives_sliding_window(num_tokens: int):
+    """Verify that bidirectional reverse pull (D -> P) on the prefill node
+    also caps the async load at prompt_len - 1 for sliding-window models so
+    the recomputed token's window never reads the null block.
+    """
+    block_size = 16
+    window = 128
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=512,
+        kv_connector_extra_config={
+            "bidirectional_kv_xfer": True,
+            "kv_recompute_threshold": 0,
+        },
+    )
+    kv_cache_config = make_kv_cache_config(block_size, swa_enabled=True, sw_size=window)
+    kv_cache_config.hash_block_size = block_size
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+
+    num_remote_blocks = num_tokens // block_size + 2
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=num_tokens,
+        do_remote_decode=True,
+    )
+    request.kv_transfer_params.update(
+        remote_block_ids=[list(range(num_remote_blocks))],
+        remote_num_tokens=num_remote_blocks * block_size,
+        remote_engine_id="decode-engine",
+        remote_request_id="decode-1",
+        remote_host="decode-host",
+        remote_port=5678,
+    )
+    scheduler.add_request(request)
+
+    # Step 1: P-side reverse pull allocates blocks and waits for remote KV.
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # Step 2: Reverse pull completes.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_recving={request.request_id}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Step 3: P-side executes the remaining token; its sliding window must be intact.
+    scheduler_output = scheduler.schedule()
+    (new_request,) = scheduler_output.scheduled_new_reqs
+    pos = new_request.num_computed_tokens
+    sliding_window_table = new_request.block_ids[1]
+    null_block = scheduler.kv_cache_manager.block_pool.null_block.block_id
+    oldest = pos - window + 1
+    msg = (
+        f"N={num_tokens} prompt={request.num_prompt_tokens} recomputes {pos},"
+        f" reads {oldest}, table {sliding_window_table}"
+    )
+    assert sliding_window_table[oldest // block_size] != null_block, msg

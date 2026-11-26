@@ -86,9 +86,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # The tokens will be loaded if not already present
             # in the prefill node local cache
             remote_num_tokens = params.get("remote_num_tokens") or 0
-            count = (
-                min(remote_num_tokens, request.num_prompt_tokens) - num_computed_tokens
+            # Keep at least 1 trailing prompt token off the async load for
+            # sliding-window models so _update_waiting_for_remote_kv's 1-token
+            # rewind cannot make the recomputed token read a freed null block.
+            max_tokens = request.num_prompt_tokens - (
+                1 if self._has_sliding_window else 0
             )
+            count = min(remote_num_tokens, max_tokens) - num_computed_tokens
             if count > 0:
                 # Check kv_recompute_threshold: skip pull if
                 # remote tokens are below the threshold.

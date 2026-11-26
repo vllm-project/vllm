@@ -1057,6 +1057,10 @@ class MooncakeConnectorScheduler:
         self._bounded_replay = any(
             g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
+        self._has_sliding_window = any(
+            isinstance(g.manager_config.params, SlidingWindowManager.Params)
+            for g in kv_cache_config.kv_cache_groups
+        )
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -1108,10 +1112,12 @@ class MooncakeConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1), and for
-        DSV41 SWA bounded replay, whose window is not replayed after a P/D load
-        and must be laid out for that token."""
-        if (self._has_mamba or self._bounded_replay) and num_prompt_tokens > 1:
+        always recomputes the last token and must start from h(N-1), for
+        sliding-window attention models whose window must be laid out for
+        the recomputed token (#65550), and for DSV41 SWA bounded replay."""
+        if (
+            self._has_mamba or self._bounded_replay or self._has_sliding_window
+        ) and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
 
@@ -1153,7 +1159,7 @@ class MooncakeConnectorScheduler:
         if (
             params is not None
             and params.get("do_remote_decode")
-            and (self._has_mamba or self._bounded_replay)
+            and (self._has_mamba or self._bounded_replay or self._has_sliding_window)
         ):
             self._truncate_mamba_request_for_prefill(request)
 
