@@ -93,7 +93,7 @@ def _make_request(
 def _make_serving_for_build_input() -> tuple[
     ServingTokens, MagicMock, MagicMock, MagicMock
 ]:
-    serving = ServingTokens.__new__(ServingTokens)
+    serving = cast(Any, ServingTokens.__new__(ServingTokens))
     serving.model_config = MagicMock()
     validate_cache_handles = MagicMock(return_value=None)
     serving._validate_mm_cache_handles = validate_cache_handles
