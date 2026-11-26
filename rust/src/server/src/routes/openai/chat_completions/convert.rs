@@ -497,7 +497,6 @@ mod tests {
 
     use axum::http::{HeaderMap, StatusCode};
     use expect_test::expect;
-    use llm_multimodal::ImageDetail;
     use serde_json::{Value, json};
     use thiserror_ext::AsReport as _;
     use vllm_chat::{
