@@ -146,7 +146,7 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
                     .prefix_cache
                     .external_hits
                     .get_or_create_owned(&el),
-                num_preemptions: m.request.num_preemptions.get_or_create_owned(&el),
+                num_preemptions: m.scheduler.state.num_preemptions.get_or_create_owned(&el),
                 request_success: RequestSuccessCounters::resolve(model_name, engine),
                 spec_decode_num_drafts: m.scheduler.spec_decode.num_drafts.get_or_create_owned(&el),
                 spec_decode_num_draft_tokens: m
