@@ -265,8 +265,19 @@ def test_eplb_skips_dspark_registration_with_dummy_weights(
             ),
             marks=large_gpu_mark(min_gb=80),
         ),
+        pytest.param(
+            (
+                "mtp",
+                "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+                None,
+                4,
+                0.93,
+                3,
+            ),
+            marks=large_gpu_mark(min_gb=80),
+        ),
     ],
-    ids=["qwen3_next_mtp", "llama4_eagle", "dsv4_dspark"],
+    ids=["qwen3_next_mtp", "llama4_eagle", "dsv4_dspark", "nemotron_h_mtp"],
 )
 def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
@@ -286,6 +297,9 @@ def test_eplb_spec_decode(
     ) = model_setup
     if method == "dspark" and not current_platform.is_device_capability_family(100):
         pytest.skip("DSV4 DSpark EPLB requires SM100 for MegaMoE")
+    is_nvfp4 = model_name.endswith("-NVFP4")
+    if is_nvfp4 and not current_platform.is_device_capability_family(100):
+        pytest.skip("NVFP4 checkpoints require SM100")
 
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
