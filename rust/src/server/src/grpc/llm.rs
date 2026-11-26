@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context as _;
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{Stream, StreamExt, TryStreamExt};
 use serde_json::Value;
@@ -12,13 +13,17 @@ use thiserror_ext::AsReport as _;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
-use tonic::{Code, Request, Status, Streaming, transport::Channel};
+use tonic::{
+    Code, Request, Status, Streaming,
+    transport::{Channel, Endpoint},
+};
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::{
     BoxGenerateOutputStream, Error, FinishReason, GenerateOutput, GeneratePromptInfo,
     GenerateRequest, Llm, LlmInfo, PromptCacheUsage, Result, WeightVersions,
 };
+use vllm_text::backend::TextBackend;
 
 use super::pb::inference_client::InferenceClient;
 use super::{convert, pb};
@@ -144,6 +149,46 @@ impl Llm for GrpcLlm {
     }
     async fn shutdown(self: Box<Self>) -> Result<()> {
         self.abort(&[]).await
+    }
+}
+
+/// Settings for serving generation through a remote vLLM gRPC endpoint.
+pub struct RemoteGrpcConfig {
+    endpoint: Endpoint,
+    max_model_len: Option<NonZeroU32>,
+}
+
+impl RemoteGrpcConfig {
+    /// Parse the worker URL and record an optional context limit override.
+    pub fn new(url: String, max_model_len: Option<NonZeroU32>) -> anyhow::Result<Self> {
+        Ok(Self {
+            endpoint: Endpoint::from_shared(url)?,
+            max_model_len,
+        })
+    }
+
+    pub(crate) fn connect(
+        self,
+        model: String,
+        text_backend: &dyn TextBackend,
+    ) -> anyhow::Result<GrpcLlm> {
+        let max_model_len = if let Some(limit) = self.max_model_len {
+            limit.get()
+        } else {
+            let limit = text_backend
+                .max_model_len()?
+                .context("config.json has no context length; pass --max-model-len")?;
+            anyhow::ensure!(
+                limit > 0,
+                "invalid context length in config.json: expected a positive token count"
+            );
+            limit
+        };
+        Ok(GrpcLlm::new(
+            self.endpoint.connect_lazy(),
+            model,
+            max_model_len,
+        ))
     }
 }
 

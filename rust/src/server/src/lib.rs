@@ -37,9 +37,10 @@ pub use config::{
     AccessLogConfig, ApiServerOptions, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
     DecisionsReadStrategy, DefaultMmLoras, EngineCoreConfig, HttpListenerMode, LoraModulePath,
-    OutputLogConfig, OutputLogging, RemoteGrpcConfig, ServerConfig, TlsConfig,
+    OutputLogConfig, OutputLogging, ServerConfig, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
+pub use grpc::llm::RemoteGrpcConfig;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -65,9 +66,7 @@ use vllm_llm::{EngineCoreLlm, Llm};
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
-use vllm_text::backend::TextBackend;
 
-use crate::grpc::llm::GrpcLlm;
 use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::routes::decisions::NextTokenReads;
@@ -169,8 +168,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
             (Box::new(llm), Some((engine_core, server_info)))
         }
         LlmSource::RemoteGrpc(remote) => {
-            let llm =
-                connect_remote_grpc(remote, metrics_model_name.clone(), text_backend.as_ref())?;
+            let llm = remote.connect(metrics_model_name.clone(), text_backend.as_ref())?;
             (Box::new(llm), None)
         }
         LlmSource::Provided(llm) => (llm, None),
@@ -266,30 +264,6 @@ async fn connect_engine_core(
         .with_stream_interval(engine_core.stream_interval)
         .with_admission_limits(engine_core.admission_limits);
     Ok((llm, server_info))
-}
-
-fn connect_remote_grpc(
-    remote: RemoteGrpcConfig,
-    model: String,
-    text_backend: &dyn TextBackend,
-) -> Result<GrpcLlm> {
-    let max_model_len = if let Some(limit) = remote.max_model_len {
-        limit.get()
-    } else {
-        let limit = text_backend
-            .max_model_len()?
-            .context("config.json has no context length; pass --max-model-len")?;
-        anyhow::ensure!(
-            limit > 0,
-            "invalid context length in config.json: expected a positive token count"
-        );
-        limit
-    };
-    Ok(GrpcLlm::new(
-        remote.endpoint.connect_lazy(),
-        model,
-        max_model_len,
-    ))
 }
 
 /// Extra routes merged into the finalized vLLM router.

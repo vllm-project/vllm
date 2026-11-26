@@ -13,7 +13,6 @@ use educe::Educe;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tonic::transport::Endpoint;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
@@ -344,7 +343,7 @@ pub type DefaultMmLoras = IndexMap<MmModality, String>;
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
 pub struct ServerConfig {
-    /// Model identifier or local checkpoint path.
+    /// Backend model identifier used for engine-core loading.
     pub model: String,
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
@@ -486,22 +485,6 @@ pub struct EngineCoreConfig {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
-}
-
-/// Settings for serving generation through a remote vLLM gRPC endpoint.
-pub struct RemoteGrpcConfig {
-    pub(super) endpoint: Endpoint,
-    pub(super) max_model_len: Option<NonZeroU32>,
-}
-
-impl RemoteGrpcConfig {
-    /// Parse the worker URL and record an optional context limit override.
-    pub fn new(url: String, max_model_len: Option<NonZeroU32>) -> Result<Self> {
-        Ok(Self {
-            endpoint: Endpoint::from_shared(url)?,
-            max_model_len,
-        })
-    }
 }
 
 impl ServerConfig {
