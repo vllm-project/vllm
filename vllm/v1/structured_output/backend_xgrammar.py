@@ -287,8 +287,10 @@ class XgrammarGrammar(StructuredOutputGrammar):
             else:
                 break
         if len(accepted_tokens) > 0:
-            # Rollback the FSM to the initial state
-            self.matcher.rollback(len(accepted_tokens))
+            if self.num_processed_tokens == 0:
+                self.matcher.reset()
+            else:
+                self.matcher.rollback(len(accepted_tokens))
         return accepted_tokens
 
     def rollback(self, num_tokens: int) -> None:

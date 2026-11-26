@@ -37,7 +37,7 @@ from vllm.tool_parsers.utils import (
     find_tool_name,
     find_tool_properties,
 )
-from vllm.v1.token_buffer import rfind_tokens
+from vllm.v1.token_buffer import rfind_token_sequences, rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -50,11 +50,25 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class ReasoningEnd(NamedTuple):
-    """Where reasoning ends in a token sequence."""
+class _ReasoningEndTuple(NamedTuple):
+    offset: int  # index of the token completing the end, or the sequence length
+    implicit: bool  # whether the end marker is also content, e.g. a tool-call start
 
-    offset: int  # index of the first end token, or the sequence length
-    implicit: bool  # the end token is also content, e.g. a tool-call start
+
+class ReasoningEnd(_ReasoningEndTuple):
+    """Where reasoning ends in a token sequence.
+
+    Behaves as a 2-tuple `(offset, implicit)` for unpacking and equality, while
+    `token_len` records the marker length (>= 1) when an implicit reasoning end
+    is a multi-token sequence ending at `offset`.
+    """
+
+    token_len: int
+
+    def __new__(cls, offset: int, implicit: bool, token_len: int = 1):
+        self = super().__new__(cls, offset, implicit)
+        self.token_len = token_len
+        return self
 
 
 class ToolCallSlot:
@@ -222,8 +236,14 @@ class ParserEngine(Parser):
             for token in parser_engine_config.turn_boundary_tokens
             if (token_id := vocab.get(token)) is not None
         )
-        self._reasoning_end_token_ids: frozenset[int] = (
-            self._derive_reasoning_end_token_ids(parser_engine_config, vocab)
+        (
+            self._reasoning_end_token_ids,
+            self._implicit_reasoning_end_sequences,
+        ) = self._derive_reasoning_end_markers(
+            parser_engine_config, vocab, self.model_tokenizer
+        )
+        self._implicit_end_last_tokens: frozenset[int] = frozenset(
+            seq[-1] for seq in self._implicit_reasoning_end_sequences
         )
         # The tokens is_reasoning_end looks for, newest first.
         self._reasoning_boundary_token_ids: frozenset[int | None] = frozenset(
@@ -721,9 +741,44 @@ class ParserEngine(Parser):
     # ── Reasoning state queries ───────────────────────────────────────
 
     @staticmethod
-    def _derive_reasoning_end_token_ids(
-        config: ParserEngineConfig, vocab: dict[str, int]
-    ) -> frozenset[int]:
+    def _encode_multi_token_literal(
+        tokenizer: TokenizerLike | None, literal: str
+    ) -> tuple[int, ...] | None:
+        if tokenizer is None or not literal:
+            return None
+        try:
+            encoded = tokenizer.encode(literal, add_special_tokens=False)
+        except TypeError:
+            try:
+                encoded = tokenizer.encode(literal)
+            except Exception:
+                return None
+        except Exception:
+            return None
+        if not isinstance(encoded, Sequence) or len(encoded) <= 1:
+            return None
+        try:
+            seq = tuple(int(t) for t in encoded)
+        except (TypeError, ValueError):
+            return None
+        try:
+            decoded = tokenizer.decode(list(seq), skip_special_tokens=False)
+        except TypeError:
+            try:
+                decoded = tokenizer.decode(list(seq))
+            except Exception:
+                return None
+        except Exception:
+            return None
+        return seq if decoded == literal else None
+
+    @classmethod
+    def _derive_reasoning_end_markers(
+        cls,
+        config: ParserEngineConfig,
+        vocab: dict[str, int],
+        tokenizer: TokenizerLike | None = None,
+    ) -> tuple[frozenset[int], tuple[tuple[int, ...], ...]]:
         end_terminals: dict[str, ParserState] = {}
         for (state, terminal), transition in config.transitions.items():
             if state != ParserState.REASONING:
@@ -731,17 +786,50 @@ class ParserEngine(Parser):
             if EventType.REASONING_END in transition.events:
                 end_terminals.setdefault(terminal, transition.next_state)
             elif transition.next_state != ParserState.REASONING:
-                return frozenset()
+                return frozenset(), ()
 
         token_ids: set[int] = set()
+        implicit_seqs: list[tuple[int, ...]] = []
         for terminal, next_state in end_terminals.items():
-            text = config.token_id_terminals.get(terminal)
-            token_id = vocab.get(text) if text is not None else None
-            if token_id is not None:
-                token_ids.add(token_id)
-            elif next_state == ParserState.CONTENT:
-                return frozenset()
-        return frozenset(token_ids)
+            id_text = config.token_id_terminals.get(terminal)
+            if id_text is None:
+                if next_state == ParserState.CONTENT:
+                    return frozenset(), ()
+                continue
+            raw_terminals = config.terminals.get(terminal, id_text)
+            literals = (
+                (raw_terminals,)
+                if isinstance(raw_terminals, str)
+                else tuple(raw_terminals)
+            )
+            if id_text not in literals:
+                literals = (id_text, *literals)
+
+            resolved_any = False
+            for lit in literals:
+                token_id = vocab.get(lit)
+                if token_id is not None:
+                    token_ids.add(token_id)
+                    resolved_any = True
+                elif terminal != "THINK_END":
+                    seq = cls._encode_multi_token_literal(tokenizer, lit)
+                    if seq is not None:
+                        if seq not in implicit_seqs:
+                            implicit_seqs.append(seq)
+                        resolved_any = True
+            if not resolved_any and next_state == ParserState.CONTENT:
+                return frozenset(), ()
+        return frozenset(token_ids), tuple(implicit_seqs)
+
+    @classmethod
+    def _derive_reasoning_end_token_ids(
+        cls,
+        config: ParserEngineConfig,
+        vocab: dict[str, int],
+        tokenizer: TokenizerLike | None = None,
+    ) -> frozenset[int]:
+        token_ids, _ = cls._derive_reasoning_end_markers(config, vocab, tokenizer)
+        return token_ids
 
     @property
     def reasoning_end_token_ids(self) -> frozenset[int]:
@@ -752,14 +840,57 @@ class ParserEngine(Parser):
         """Reasoning-end tokens that are also content, e.g. a tool-call start."""
         return self._reasoning_end_token_ids - {self._reasoning_end_token_id}
 
-    def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
-        """First reasoning end in `token_ids`, and if its token is content."""
+    @property
+    def implicit_reasoning_end_sequences(self) -> tuple[tuple[int, ...], ...]:
+        """Multi-token sequences that implicitly end reasoning as content."""
+        return self._implicit_reasoning_end_sequences
+
+    @staticmethod
+    def _preceding_matches_prefix(
+        prefix_token_ids: Sequence[int],
+        token_ids: Sequence[int],
+        offset: int,
+        seq_prefix: tuple[int, ...],
+    ) -> bool:
+        need_total = len(seq_prefix)
+        if need_total == 0:
+            return True
+        need_from_prefix = max(0, need_total - offset)
+        if need_from_prefix > len(prefix_token_ids):
+            return False
+        if need_from_prefix > 0:
+            p_start = len(prefix_token_ids) - need_from_prefix
+            for idx, expected in enumerate(seq_prefix[:need_from_prefix]):
+                if prefix_token_ids[p_start + idx] != expected:
+                    return False
+        t_start = max(0, offset - need_total)
+        for idx, expected in enumerate(seq_prefix[need_from_prefix:]):
+            if token_ids[t_start + idx] != expected:
+                return False
+        return True
+
+    def find_reasoning_end(
+        self,
+        token_ids: Sequence[int],
+        prefix_token_ids: Sequence[int] = (),
+    ) -> ReasoningEnd | None:
+        """First reasoning end in `token_ids`, and if its marker is content."""
         end_ids = self._reasoning_end_token_ids
-        if not end_ids:
+        end_seqs = self._implicit_reasoning_end_sequences
+        if not end_ids and not end_seqs:
             return None
+        last_tokens = self._implicit_end_last_tokens
         for offset, token_id in enumerate(token_ids):
+            if token_id < 0:
+                continue
             if token_id in end_ids:
                 return ReasoningEnd(offset, token_id != self._reasoning_end_token_id)
+            if end_seqs and token_id in last_tokens:
+                for seq in end_seqs:
+                    if token_id == seq[-1] and self._preceding_matches_prefix(
+                        prefix_token_ids, token_ids, offset, seq[:-1]
+                    ):
+                        return ReasoningEnd(offset, True, len(seq))
         return ReasoningEnd(len(token_ids), False)
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
@@ -775,6 +906,14 @@ class ParserEngine(Parser):
         # The newest end, start or turn-boundary token decides; a start that
         # doesn't open reasoning, or a boundary, leaves the default.
         i = rfind_tokens(input_ids, self._reasoning_boundary_token_ids)
+        if self._implicit_reasoning_end_sequences:
+            hit_start, _ = rfind_token_sequences(
+                input_ids,
+                self._implicit_reasoning_end_sequences,
+                start=max(0, i + 1),
+            )
+            if hit_start >= 0:
+                return True
         if i >= 0:
             token_id = input_ids[i]
             if token_id in self._reasoning_end_token_ids:
@@ -798,16 +937,28 @@ class ParserEngine(Parser):
                     return input_ids[i + 1 :]
 
         end_ids = self._reasoning_end_token_ids
-        if end_ids:
+        end_seqs = self._implicit_reasoning_end_sequences
+        if end_ids or end_seqs:
             turn_start = 0
             boundary_ids = self._turn_boundary_token_ids
             for i in range(len(input_ids) - 1, -1, -1):
                 if input_ids[i] in boundary_ids:
                     turn_start = i + 1
                     break
+            last_tokens = self._implicit_end_last_tokens
             for i in range(turn_start, len(input_ids)):
-                if input_ids[i] in end_ids:
+                tok = input_ids[i]
+                if tok in end_ids:
                     return input_ids[i:]
+                if end_seqs and tok in last_tokens:
+                    for seq in end_seqs:
+                        seq_len = len(seq)
+                        start = i - seq_len + 1
+                        if (
+                            start >= turn_start
+                            and tuple(input_ids[start : i + 1]) == seq
+                        ):
+                            return input_ids[start:]
         return input_ids
 
     def get_streaming_fallback_content(

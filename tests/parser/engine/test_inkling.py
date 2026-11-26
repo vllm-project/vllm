@@ -1168,6 +1168,26 @@ class TestInkling2:
         assert parser.is_reasoning_end(
             self.PROMPT + [_TML_VOCAB[MSG_MODEL], _TML_VOCAB[TEXT_START], ord("x")]
         )
+        assert parser.is_reasoning_end(
+            self.PROMPT
+            + [
+                _TML_VOCAB[MSG_MODEL],
+                _TML_VOCAB[THINK_START],
+                ord("x"),
+                _TML_VOCAB[END_MESSAGE],
+                _TML_VOCAB[MSG_MODEL],
+                _TML_VOCAB[TOOL_JSON],
+            ]
+        )
+        assert parser.is_reasoning_end(
+            self.PROMPT
+            + [
+                _TML_VOCAB[MSG_MODEL],
+                _TML_VOCAB[THINK_START],
+                ord("x"),
+                _TML_VOCAB[TOOL_JSON],
+            ]
+        )
 
     def test_non_streaming(self, mock_tokenizer, mock_request):
         tools = [_function_tool("f"), _function_tool("g")]
@@ -1307,3 +1327,26 @@ def test_inkling_json_response_format_is_unframed(parser):
     request = TestInkling2._json_request()
     response_format = request.response_format
     assert parser.adjust_request(request).response_format == response_format
+
+
+def test_inkling_tool_opener_ends_reasoning(mock_tokenizer):
+    reasoner = InklingParserReasoningAdapter(mock_tokenizer)
+    assert _TML_VOCAB[TOOL_JSON] in reasoner.implicit_reasoning_end_token_ids
+
+    closed_thinking_header = [
+        _TML_VOCAB[THINK_START],
+        ord("x"),
+        _TML_VOCAB[END_MESSAGE],
+        _TML_VOCAB[MSG_MODEL],
+    ]
+    assert not reasoner.is_reasoning_end(closed_thinking_header)
+    assert reasoner.is_reasoning_end(closed_thinking_header + [_TML_VOCAB[TEXT_START]])
+    assert reasoner.is_reasoning_end(closed_thinking_header + [_TML_VOCAB[TOOL_JSON]])
+    assert reasoner.is_reasoning_end_streaming(
+        closed_thinking_header + [_TML_VOCAB[TOOL_JSON]],
+        [_TML_VOCAB[TOOL_JSON]],
+    )
+    # Defensive unclosed thinking interrupted directly by tool opener.
+    unclosed = [_TML_VOCAB[THINK_START], ord("x"), _TML_VOCAB[TOOL_JSON]]
+    assert reasoner.is_reasoning_end(unclosed)
+    assert reasoner.is_reasoning_end_streaming(unclosed, [_TML_VOCAB[TOOL_JSON]])

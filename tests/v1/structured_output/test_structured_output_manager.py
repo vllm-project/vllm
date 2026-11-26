@@ -91,11 +91,70 @@ class MockEngineReasoner(ParserEngineReasoningAdapter):
     def implicit_reasoning_end_token_ids(self):
         return frozenset({self.marker})
 
-    def find_reasoning_end(self, token_ids):
+    def find_reasoning_end(self, token_ids, prefix_token_ids=()):
         for offset, token in enumerate(token_ids):
             if token in self.reasoning_end_token_ids:
                 return ReasoningEnd(offset, token == self.marker)
         return ReasoningEnd(len(token_ids), False)
+
+
+class MockMultiTokenEngineReasoner(ParserEngineReasoningAdapter):
+    """Ends reasoning explicitly on `end_marker` or implicitly on multi-token `seq`."""
+
+    def __init__(self, tokenizer, seq: tuple[int, ...], end_marker: int):
+        self.seq = tuple(seq)
+        self.end_marker = end_marker
+
+    @property
+    def reasoning_end_token_ids(self):
+        return frozenset({self.end_marker})
+
+    @property
+    def implicit_reasoning_end_token_ids(self):
+        return frozenset()
+
+    @property
+    def implicit_reasoning_end_sequences(self):
+        return (self.seq,)
+
+    def find_reasoning_end(self, token_ids, prefix_token_ids=()):
+        seq_len = len(self.seq)
+        prefix_len = seq_len - 1
+        for offset, token in enumerate(token_ids):
+            if token < 0:
+                continue
+            if token == self.end_marker:
+                return ReasoningEnd(offset, False)
+            if token == self.seq[-1]:
+                need_hist = max(0, prefix_len - offset)
+                if need_hist <= len(prefix_token_ids):
+                    hist_part = list(
+                        prefix_token_ids[len(prefix_token_ids) - need_hist :]
+                    )
+                    spec_part = list(token_ids[max(0, offset - prefix_len) : offset])
+                    if tuple(hist_part + spec_part) == self.seq[:-1]:
+                        return ReasoningEnd(offset, True, seq_len)
+        return ReasoningEnd(len(token_ids), False)
+
+
+class MockStreamingImplicitReasoner(ReasoningParser):
+    """Streaming-fallback reasoner (empty reasoning_end_token_ids, like Inkling)
+    with a single-token content-bearing implicit end."""
+
+    def __init__(self, tokenizer, implicit_marker: int, explicit_marker: int):
+        super().__init__(tokenizer)
+        self.implicit_marker = implicit_marker
+        self.explicit_marker = explicit_marker
+
+    @property
+    def implicit_reasoning_end_token_ids(self):
+        return frozenset({self.implicit_marker})
+
+    def is_reasoning_end(self, input_ids):
+        return any(t in (self.implicit_marker, self.explicit_marker) for t in input_ids)
+
+    def extract_reasoning(self, model_output: str, request):
+        return model_output, None
 
 
 def _single_token(tokenizer, text: str) -> int:
@@ -602,6 +661,130 @@ def test_parallel_fill_masks_grammar_invalid_implicit_end(
         request.append_output_token_ids([end])
         assert manager.accept_tokens(request, [end])
         assert row_pattern() == "C"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_multi_token_implicit_end_conditional_masking_in_json(
+    tokenizer, backend: StructuredOutputsBackend
+):
+    """A multi-token tool opener rejected by JSON leaves '<' unmasked during
+    reasoning and masks only the closing '>' right after the opener prefix."""
+    seq = tuple(_to_token_ids(tokenizer, ("<", "tool", ">")))
+    end = _single_token(tokenizer, THINK_END)
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={"seq": seq, "end_marker": end},
+        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA),
+    )
+    manager.reasoner_cls = MockMultiTokenEngineReasoner
+
+    # Drafts: (" ", "<", "tool", ">", "{") -> rows 0, 1, 2 allow '<' ("U"),
+    # row 3 (right after "<tool") masks '>' ("R"), row 4+ after rejected '>' is "U".
+    drafts = _to_token_ids(tokenizer, (" ", "<", "tool", ">", "{"))
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: drafts},
+    )
+    assert bitmask is not None
+    assert _row_pattern(bitmask[: len(drafts) + 1], [seq[-1]]) == "UUURUU"
+    assert manager.trim_spec_tokens(request, drafts) == drafts[:4]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_multi_token_implicit_end_accepted_across_step_boundary(
+    tokenizer, backend: StructuredOutputsBackend
+):
+    """A multi-token implicit opener split across committed history and
+    speculative drafts activates and advances the grammar cleanly."""
+    seq = tuple(_to_token_ids(tokenizer, ("<", "tool", ">")))
+    end = _single_token(tokenizer, THINK_END)
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={"seq": seq, "end_marker": end},
+        structured_outputs=StructuredOutputsParams(regex="<tool>[0-9]+"),
+    )
+    manager.reasoner_cls = MockMultiTokenEngineReasoner
+
+    # Step 1 commits (" ", "<", "tool") — still reasoning!
+    step1 = _to_token_ids(tokenizer, (" ", "<", "tool"))
+    request.append_output_token_ids(step1)
+    assert manager.accept_tokens(request, step1)
+    assert request.structured_output_request is not None
+    assert request.structured_output_request.reasoning_ended is False
+
+    # Step 2 proposes (">", "4", "z"): '>' closes the 3-token opener using the
+    # 2-token prefix in history, '4' is valid, 'z' is invalid and kept as the
+    # single resampled slot.
+    step2_drafts = _to_token_ids(tokenizer, (">", "4", "z", "9"))
+    trimmed = manager.trim_spec_tokens(request, step2_drafts)
+    assert trimmed == step2_drafts[:3]
+
+    _run_real_flow(
+        manager,
+        request,
+        raw_drafts=trimmed,
+        expected_validated=step2_drafts[:2],
+        expected_row_pattern="UCCU",
+        expected_reasoning=True,
+        expect_terminated=False,
+    )
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_streaming_fallback_reasoner_implicit_end(
+    tokenizer, backend: StructuredOutputsBackend
+):
+    """Parsers without reasoning_end_token_ids (e.g. Inkling) still mask
+    grammar-invalid implicit ends and include valid ones as first content."""
+    implicit_id, explicit_id = _to_token_ids(tokenizer, (IMPLICIT_THINK_END, THINK_END))
+    # 1. JSON rejects IMPLICIT_THINK_END -> masked while reasoning.
+    manager_json, req_json = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={
+            "implicit_marker": implicit_id,
+            "explicit_marker": explicit_id,
+        },
+        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA),
+    )
+    manager_json.reasoner_cls = MockStreamingImplicitReasoner
+    drafts_json = _to_token_ids(tokenizer, (" ", " "))
+    bm_json = manager_json.grammar_bitmask(
+        requests={req_json.request_id: req_json},
+        structured_output_request_ids=[req_json.request_id],
+        scheduled_spec_decode_tokens={req_json.request_id: drafts_json},
+    )
+    assert bm_json is not None
+    assert _row_pattern(bm_json[:3], [implicit_id]) == "RRR"
+
+    # 2. Regex accepts IMPLICIT_THINK_END as first content token -> consumed at offset.
+    manager_re, req_re = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={
+            "implicit_marker": implicit_id,
+            "explicit_marker": explicit_id,
+        },
+        structured_outputs=StructuredOutputsParams(regex="z[0-9]+"),
+    )
+    manager_re.reasoner_cls = MockStreamingImplicitReasoner
+    drafts_re = _to_token_ids(tokenizer, (" ", IMPLICIT_THINK_END, "7"))
+    _run_real_flow(
+        manager_re,
+        req_re,
+        raw_drafts=drafts_re,
+        expected_validated=drafts_re,
+        expected_row_pattern="UUCC",
+        expected_reasoning=True,
+        expect_terminated=False,
+    )
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

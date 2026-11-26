@@ -65,8 +65,12 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(input_ids)
 
-    def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
-        return self._parser_engine.find_reasoning_end(token_ids)
+    def find_reasoning_end(
+        self,
+        token_ids: Sequence[int],
+        prefix_token_ids: Sequence[int] = (),
+    ) -> ReasoningEnd | None:
+        return self._parser_engine.find_reasoning_end(token_ids, prefix_token_ids)
 
     def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
         self._parser_engine.set_prompt_token_ids(prompt_token_ids)
@@ -123,6 +127,11 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     @property
     def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
         return self._parser_engine.implicit_reasoning_end_token_ids
+
+    @property
+    def implicit_reasoning_end_sequences(self) -> tuple[tuple[int, ...], ...]:
+        engine = getattr(self, "_parser_engine", None)
+        return engine.implicit_reasoning_end_sequences if engine is not None else ()
 
     def adjust_request(
         self,

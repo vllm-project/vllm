@@ -71,7 +71,17 @@ class ReasoningParser:
         """Reasoning-end tokens that are also content, e.g. a tool-call start."""
         return frozenset()
 
-    def find_reasoning_end(self, token_ids: Sequence[int]) -> "ReasoningEnd | None":
+    @property
+    def implicit_reasoning_end_sequences(self) -> tuple[tuple[int, ...], ...]:
+        """Multi-token sequences that implicitly end reasoning as content,
+        e.g. a multi-token tool-call opener."""
+        return ()
+
+    def find_reasoning_end(
+        self,
+        token_ids: Sequence[int],
+        prefix_token_ids: Sequence[int] = (),
+    ) -> "ReasoningEnd | None":
         """Find the first reasoning end in `token_ids`.
 
         Returns its offset and whether its token is content, or

@@ -82,6 +82,64 @@ def test_registered_adapters_parse_parallel_calls_across_chunks(
     ]
 
 
+@pytest.mark.parametrize("opener_text", ["<｜DSML｜ calls>", "<｜DSML｜ tool_calls>"])
+def test_multi_token_tool_opener_marks_reasoning_end(opener_text):
+    from tests.parser.engine.conftest import make_mock_tokenizer
+
+    subwords = {
+        "<think>": 50,
+        "</think>": 51,
+        "<｜User｜>": 54,
+        "<｜Assistant｜>": 55,
+        "<": 30,
+        "｜DSML｜": 128825,
+        " calls": 10699,
+        " tool": 4105,
+        "_c": 4941,
+        "alls": 12548,
+        ">": 32,
+    }
+    pieces_sorted = sorted(subwords, key=len, reverse=True)
+
+    def encode_fn(t: str, add_special_tokens: bool = False) -> list[int]:
+        out: list[int] = []
+        i = 0
+        while i < len(t):
+            matched = next((pc for pc in pieces_sorted if t.startswith(pc, i)), None)
+            if matched is not None:
+                out.append(subwords[matched])
+                i += len(matched)
+            else:
+                out.append(ord(t[i]))
+                i += 1
+        return out
+
+    tokenizer = make_mock_tokenizer(subwords)
+    tokenizer.encode.side_effect = encode_fn
+    reasoner_cls = ParserManager.get_reasoning_parser("deepseek_v41")
+    assert reasoner_cls is not None
+    reasoner = reasoner_cls(tokenizer, chat_template_kwargs={"thinking": True})
+    reasoning_ids = tokenizer.encode("Let me check a < b.", add_special_tokens=False)
+    opener_ids = tokenizer.encode(opener_text, add_special_tokens=False)
+    tail_ids = tokenizer.encode('{"a": 1}', add_special_tokens=False)
+
+    assert len(opener_ids) > 1
+    assert tuple(opener_ids) in reasoner.implicit_reasoning_end_sequences
+    assert not reasoner.is_reasoning_end([55, 50, *reasoning_ids, *opener_ids[:-1]])
+    assert reasoner.is_reasoning_end([55, 50, *reasoning_ids, *opener_ids])
+    # A new assistant turn re-entering <think> resets reasoning_end to False.
+    assert not reasoner.is_reasoning_end(
+        [55, 50, *reasoning_ids, *opener_ids, 54, 55, 50, *reasoning_ids]
+    )
+
+    split_end = reasoner.find_reasoning_end(
+        opener_ids[-2:] + tail_ids,
+        prefix_token_ids=reasoning_ids + opener_ids[:-2],
+    )
+    assert split_end == (1, True)
+    assert split_end is not None and split_end.token_len == len(opener_ids)
+
+
 @pytest.mark.parametrize("thinking", [False, True])
 def test_registered_adapters_parse_complete_output(thinking):
     text = ("Plan.</think>" if thinking else "") + CALLS

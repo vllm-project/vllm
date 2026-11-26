@@ -23,7 +23,7 @@ from vllm.v1.structured_output.utils import (
     allocate_token_bitmask,
     strip_speculative_padding,
 )
-from vllm.v1.token_buffer import TokenIdsView
+from vllm.v1.token_buffer import TokenIdsView, token_slice
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -262,6 +262,59 @@ class StructuredOutputManager:
             structured_req.masked_reasoning_end_ids = masked
         return structured_req.masked_reasoning_end_ids
 
+    def _masked_reasoning_end_sequences(
+        self, request: "Request"
+    ) -> tuple[tuple[int, ...], ...]:
+        """Multi-token implicit reasoning ends the grammar rejects as content."""
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        if structured_req.masked_reasoning_end_seqs is None:
+            masked_seqs: tuple[tuple[int, ...], ...] = ()
+            reasoner = self._get_reasoner(request)
+            if reasoner is not None and reasoner.implicit_reasoning_end_sequences:
+                grammar = structured_req.grammar
+                assert isinstance(grammar, StructuredOutputGrammar)
+                masked_seqs = tuple(
+                    seq
+                    for seq in reasoner.implicit_reasoning_end_sequences
+                    if len(grammar.validate_tokens(list(seq))) < len(seq)
+                )
+            structured_req.masked_reasoning_end_seqs = masked_seqs
+        return structured_req.masked_reasoning_end_seqs
+
+    @staticmethod
+    def _row_masked_reasoning_ends(
+        base_masked_ids: tuple[int, ...],
+        masked_seqs: tuple[tuple[int, ...], ...],
+        history_ids: Sequence[int],
+        spec_prefix: Sequence[int],
+    ) -> tuple[int, ...]:
+        if not masked_seqs:
+            return base_masked_ids
+        extra: list[int] = []
+        total_len = len(history_ids) + len(spec_prefix)
+        for seq in masked_seqs:
+            prefix_len = len(seq) - 1
+            if prefix_len <= 0 or total_len < prefix_len:
+                continue
+            need_hist = max(0, prefix_len - len(spec_prefix))
+            matched = True
+            if need_hist > 0:
+                h_start = len(history_ids) - need_hist
+                for idx in range(need_hist):
+                    if history_ids[h_start + idx] != seq[idx]:
+                        matched = False
+                        break
+            if matched:
+                s_start = max(0, len(spec_prefix) - prefix_len)
+                for idx in range(prefix_len - need_hist):
+                    if spec_prefix[s_start + idx] != seq[need_hist + idx]:
+                        matched = False
+                        break
+            if matched and seq[-1] not in base_masked_ids and seq[-1] not in extra:
+                extra.append(seq[-1])
+        return (*base_masked_ids, *extra) if extra else base_masked_ids
+
     def _get_constraint_bounds(
         self,
         request: "Request",
@@ -304,17 +357,38 @@ class StructuredOutputManager:
         if num_spec_tokens <= 0:
             return _NO_SPEC_TOKENS
 
-        # Parsers that know their end tokens also report whether one is content.
-        if reasoner.reasoning_end_token_ids:
-            end = reasoner.find_reasoning_end(spec_tokens)
+        # Parsers that know their end tokens/sequences also report whether one
+        # is content.
+        end_seqs = reasoner.implicit_reasoning_end_sequences
+        if reasoner.reasoning_end_token_ids or end_seqs:
+            if end_seqs:
+                all_ids = request._all_token_ids
+                prior_len = (
+                    len(all_ids) - num_spec_tokens
+                    if spec_tokens_committed
+                    else len(all_ids)
+                )
+                max_prefix = max(len(seq) for seq in end_seqs) - 1
+                prefix_ids = token_slice(
+                    all_ids, max(0, prior_len - max_prefix), prior_len
+                )
+                end = reasoner.find_reasoning_end(spec_tokens, prefix_ids)
+            else:
+                end = reasoner.find_reasoning_end(spec_tokens)
             if end is not None:
+                if end.offset >= num_spec_tokens:
+                    return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
                 constraint_start = end.offset + 1
                 if end.implicit:
-                    return ConstraintBounds(end.offset, constraint_start)
+                    token_len = getattr(end, "token_len", 1)
+                    return ConstraintBounds(
+                        end.offset - token_len + 1, constraint_start
+                    )
                 return ConstraintBounds(constraint_start, constraint_start)
 
-        # Fallback: the grammar starts after the end token. A view, not a copy,
-        # of all_token_ids: most parsers don't read it every step.
+        # Fallback: the grammar starts after the end token unless that token is
+        # declared as an implicit content-bearing reasoning end. A view, not a
+        # copy, of all_token_ids: most parsers don't read it every step.
         if spec_tokens_committed:
             if not spec_tokens or not reasoner.is_reasoning_end_streaming(
                 request.all_token_ids, spec_tokens
@@ -329,12 +403,20 @@ class StructuredOutputManager:
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
             delta_ids = list(spec_tokens)
 
+        end_offset = 0
         for i in range(num_spec_tokens - 1, 0, -1):
             input_ids.pop()
             delta_ids.pop()
             if not reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
-                return ConstraintBounds(i + 1, i + 1)
-        return ConstraintBounds(1, 1)
+                end_offset = i
+                break
+        constraint_start = end_offset + 1
+        grammar_start = (
+            end_offset
+            if spec_tokens[end_offset] in reasoner.implicit_reasoning_end_token_ids
+            else constraint_start
+        )
+        return ConstraintBounds(grammar_start, constraint_start)
 
     def trim_spec_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
         """Trim structured-output padding and grammar-invalid suffixes."""
@@ -345,7 +427,9 @@ class StructuredOutputManager:
 
         spec_tokens = strip_speculative_padding(spec_tokens)
 
-        grammar_start, _ = self._get_constraint_bounds(request, spec_tokens)
+        grammar_start, constraint_start = self._get_constraint_bounds(
+            request, spec_tokens
+        )
         if grammar_start >= len(spec_tokens):
             return spec_tokens
 
@@ -356,10 +440,18 @@ class StructuredOutputManager:
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
         if grammar.is_terminated():
-            return spec_tokens[:grammar_start]
-        prefix = spec_tokens[:grammar_start]
-        len_validated = len(grammar.validate_tokens(spec_tokens[grammar_start:]))
-        return prefix + spec_tokens[grammar_start : grammar_start + len_validated + 1]
+            return spec_tokens[: max(0, grammar_start)]
+        if grammar_start < 0:
+            all_ids = request._all_token_ids
+            history_prefix = list(
+                token_slice(all_ids, len(all_ids) + grammar_start, len(all_ids))
+            )
+            tokens_to_validate = history_prefix + spec_tokens
+        else:
+            tokens_to_validate = spec_tokens[grammar_start:]
+        len_validated = len(grammar.validate_tokens(tokens_to_validate))
+        keep = max(constraint_start, grammar_start + len_validated + 1)
+        return spec_tokens[:keep]
 
     def grammar_bitmask(
         self,
@@ -414,7 +506,14 @@ class StructuredOutputManager:
                     self._get_constraint_bounds(request, ()).constraint_start == 0
                 )
                 masked_ids = (
-                    () if apply_bitmask else self._masked_reasoning_ends(request)
+                    ()
+                    if apply_bitmask
+                    else self._row_masked_reasoning_ends(
+                        self._masked_reasoning_ends(request),
+                        self._masked_reasoning_end_sequences(request),
+                        request._all_token_ids,
+                        (),
+                    )
                 )
                 batch.append((grammar, cumulative_index, apply_bitmask, masked_ids))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
@@ -447,8 +546,25 @@ class StructuredOutputManager:
                     request, unpadded_tokens
                 )
                 # Rows before constraint_start are still reasoning.
-                masked_ids = (
+                base_masked_ids = (
                     self._masked_reasoning_ends(request) if constraint_start else ()
+                )
+                masked_seqs = (
+                    self._masked_reasoning_end_sequences(request)
+                    if constraint_start
+                    else ()
+                )
+                history_ids = request._all_token_ids
+                history_opener_prefix: list[int] = (
+                    list(
+                        token_slice(
+                            history_ids,
+                            len(history_ids) + grammar_start,
+                            len(history_ids),
+                        )
+                    )
+                    if grammar_start < 0
+                    else []
                 )
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
@@ -466,13 +582,33 @@ class StructuredOutputManager:
                         continue
 
                     apply_bitmask = i >= constraint_start
-                    row_masked = masked_ids if i < constraint_start else ()
+                    row_masked = (
+                        self._row_masked_reasoning_ends(
+                            base_masked_ids,
+                            masked_seqs,
+                            history_ids,
+                            req_tokens[:i],
+                        )
+                        if i < constraint_start
+                        else ()
+                    )
                     self._fill_bitmasks(
                         ((grammar, base_index + i, apply_bitmask, row_masked),)
                     )
                     if token == -1:
                         padding_or_grammar_invalid = True
-                    elif i >= grammar_start:
+                    elif grammar_start < constraint_start and i == constraint_start - 1:
+                        opener_tokens = (
+                            history_opener_prefix
+                            + req_tokens[max(0, grammar_start) : i + 1]
+                        )
+                        if not grammar.is_terminated() and grammar.accept_tokens(
+                            req_id, opener_tokens
+                        ):
+                            state_advancements += len(opener_tokens)
+                        else:
+                            padding_or_grammar_invalid = True
+                    elif i >= constraint_start:
                         if not grammar.is_terminated() and grammar.accept_tokens(
                             req_id, [token]
                         ):
@@ -505,15 +641,24 @@ class StructuredOutputManager:
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
 
-        grammar_start, _ = self._get_constraint_bounds(
+        grammar_start, constraint_start = self._get_constraint_bounds(
             request, new_token_ids, spec_tokens_committed=True
         )
         # Early return only when no reasoning-end token is present.
         # Otherwise, latch structured_req.reasoning_ended.
-        if grammar_start > len(new_token_ids):
+        if constraint_start > len(new_token_ids) and grammar_start > len(new_token_ids):
             return True
+        if grammar_start < 0:
+            all_ids = request._all_token_ids
+            prior_len = len(all_ids) - len(new_token_ids)
+            tokens_to_accept = (
+                list(token_slice(all_ids, prior_len + grammar_start, prior_len))
+                + new_token_ids
+            )
+        else:
+            tokens_to_accept = new_token_ids[grammar_start:]
         structured_req.reasoning_ended = True
-        return grammar.accept_tokens(request.request_id, new_token_ids[grammar_start:])
+        return grammar.accept_tokens(request.request_id, tokens_to_accept)
 
     def clear_backend(self) -> None:
         # Finish tasks that can still use the backend before releasing it.

@@ -31,6 +31,9 @@ class StructuredOutputRequest:
     # Implicit reasoning-end tokens the grammar rejects as the first content
     # token; masked while the request reasons. Computed on first use.
     masked_reasoning_end_ids: tuple[int, ...] | None = None
+    # Multi-token implicit reasoning-end sequences the grammar rejects at start;
+    # when the preceding tokens match seq[:-1], seq[-1] is masked while reasoning.
+    masked_reasoning_end_seqs: tuple[tuple[int, ...], ...] | None = None
 
     @staticmethod
     def from_sampling_params(

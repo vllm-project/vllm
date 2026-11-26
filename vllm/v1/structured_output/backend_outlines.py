@@ -74,10 +74,13 @@ class OutlinesBackend(StructuredOutputBackend):
                 f"Invalid request type for Outlines backend ({request_type!s})"
             )
         index = self._compile_index(regex, self.vocabulary)
-        max_rollback_tokens = (
-            self.vllm_config.speculative_config.num_speculative_tokens
-            if self.vllm_config.speculative_config is not None
-            else 0
+        max_rollback_tokens = max(
+            (
+                self.vllm_config.speculative_config.num_speculative_tokens
+                if self.vllm_config.speculative_config is not None
+                else 0
+            ),
+            16,
         )
         return OutlinesGrammar(
             vocab_size=self.vocab_size,

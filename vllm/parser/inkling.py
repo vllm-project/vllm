@@ -425,25 +425,52 @@ class InklingParser(ParserEngine):
             if token_id in special_ids:
                 break
 
+    @property
+    def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
+        vocab = self.vocab
+        return frozenset(
+            token_id
+            for token in (
+                CONTENT_INVOKE_TOOL_JSON,
+                CONTENT_INVOKE_TOOL_TEXT,
+                CONTENT_TOOL_ERROR,
+            )
+            if (token_id := vocab.get(token)) is not None
+        )
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         if self._is_inkling2:
             return self._inkling2_is_reasoning_end(input_ids)
         vocab = self.vocab
         reasoning_ids = {vocab.get(CONTENT_THINKING), vocab.get(MESSAGE_MODEL)}
-        ended_ids = {vocab.get(CONTENT_TEXT), vocab.get(CONTENT_MODEL_END_SAMPLING)}
+        ended_ids = {
+            vocab.get(CONTENT_TEXT),
+            vocab.get(CONTENT_INVOKE_TOOL_JSON),
+            vocab.get(CONTENT_INVOKE_TOOL_TEXT),
+            vocab.get(CONTENT_TOOL_ERROR),
+            vocab.get(CONTENT_MODEL_END_SAMPLING),
+        }
         i = rfind_tokens(input_ids, reasoning_ids | ended_ids)
         return i >= 0 and input_ids[i] in ended_ids
 
     def _inkling2_is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        """Whether the latest block is a text block of a model message.
+        """Whether the latest block is a non-thinking block of a model message.
 
         A prompt that ends between messages has not ended reasoning: the
         model may open a thinking block.
         """
         vocab = self.vocab
-        text_id = vocab[CONTENT_TEXT]
-        block_ids = {
-            text_id,
+        ended_block_ids = {
+            vocab[token]
+            for token in (
+                CONTENT_TEXT,
+                CONTENT_INVOKE_TOOL_JSON,
+                CONTENT_INVOKE_TOOL_TEXT,
+                CONTENT_TOOL_ERROR,
+            )
+            if token in vocab
+        }
+        block_ids = ended_block_ids | {
             vocab[CONTENT_THINKING],
             vocab[CONTENT_MODEL_END_SAMPLING],
         }
@@ -454,10 +481,12 @@ class InklingParser(ParserEngine):
         latest_block = None
         for token_id in reversed(input_ids):
             if token_id in role_ids:
-                return latest_block == text_id and token_id == vocab[MESSAGE_MODEL]
+                return (
+                    latest_block in ended_block_ids and token_id == vocab[MESSAGE_MODEL]
+                )
             if latest_block is None and token_id in block_ids:
                 latest_block = token_id
-        return latest_block == text_id
+        return latest_block in ended_block_ids
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         vocab = self.vocab
