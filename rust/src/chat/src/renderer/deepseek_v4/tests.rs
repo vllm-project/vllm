@@ -840,7 +840,7 @@ fn custom_roles_are_rejected_as_request_errors() {
 
     let error = DeepSeekV4ChatRenderer::default().render(&request).unwrap_err();
 
-    assert!(error.is_request_validation_error());
+    assert!(error.kind().is_invalid_request());
     expect!["chat role `root` is not supported by this chat renderer"]
         .assert_eq(&error.to_report_string());
 }

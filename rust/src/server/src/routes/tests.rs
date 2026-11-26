@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -51,7 +52,9 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{
+    BoxGenerateOutputStream, EngineCoreLlm, GenerateRequest, Llm, LlmFingerprint, LlmInfo,
+};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
@@ -965,12 +968,11 @@ async fn dev_routes_follow_api_server_options() {
     for (server_dev_mode, expected) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
         let (chat, engine_task) = test_chat_with_engine_handle().await;
         let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
+            (AppState::new(vec!["model".to_string()], chat).with_engine_core_client())
+                .with_api_server_options(ApiServerOptions {
                     server_dev_mode,
                     ..Default::default()
-                },
-            ),
+                }),
         ));
 
         let response = app
@@ -1004,12 +1006,11 @@ async fn lora_routes_follow_api_server_options() {
     ] {
         let (chat, engine_task) = test_chat_with_engine_handle().await;
         let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
+            (AppState::new(vec!["model".to_string()], chat).with_engine_core_client())
+                .with_api_server_options(ApiServerOptions {
                     allow_runtime_lora_updating,
                     ..Default::default()
-                },
-            ),
+                }),
         ));
 
         for uri in ["/v1/load_lora_adapter", "/v1/unload_lora_adapter"] {
@@ -1488,8 +1489,8 @@ async fn scale_out_abort_requests_validates_body() {
         None {"request_ids": ["unknown"]} -> 200 OK 
         Some("text/plain") {"request_ids": "unknown"} -> 200 OK 
         Some("application/json") {} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: missing field `request_ids` at line 1 column 2","type":"Bad Request","param":null,"code":400}}
-        Some("application/json") {"request_ids": null} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 21","type":"Bad Request","param":null,"code":400}}
-        Some("application/json") {"request_ids": [1]} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 20","type":"Bad Request","param":null,"code":400}}
+        Some("application/json") {"request_ids": null} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 21","type":"Bad Request","param":"body.request_ids","code":400}}
+        Some("application/json") {"request_ids": [1]} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 20","type":"Bad Request","param":"body.request_ids","code":400}}
         Some("application/json") {"request_ids":  -> 400 Bad Request {"error":{"message":"Failed to parse the request body as JSON: request_ids: EOF while parsing a value at line 1 column 16","type":"Bad Request","param":null,"code":400}}
         None  -> 400 Bad Request {"error":{"message":"Failed to parse the request body as JSON: EOF while parsing a value at line 1 column 0","type":"Bad Request","param":null,"code":400}}"#]].assert_eq(&results.join("\n"));
     engine_task.abort_and_join().await;
@@ -1689,10 +1690,10 @@ async fn test_dev_mode_app_with_ready(
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let app = build_router_with_gates(
-        Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        )),
+        Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_engine_core_client(),
+        ),
         RouteGates {
             dev_mode: true,
             ..RouteGates::default()
@@ -1878,10 +1879,10 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
     (
-        Arc::new(configure(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        Arc::new(configure(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_engine_core_client(),
+        )),
         engine_task,
     )
 }
@@ -2542,7 +2543,9 @@ async fn render_chat_uses_processor_owned_parser_selections() {
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // A nonexistent server-configured parser is a server error, matching
+    // `/v1/chat/completions`.
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let body = String::from_utf8(body.to_vec()).expect("decode body");
     assert!(
@@ -11019,7 +11022,7 @@ async fn chat_render_treats_empty_tools_as_omitted() {
               "error": {
                 "message": "tool_choice requires at least one available tool",
                 "type": "BadRequestError",
-                "param": null,
+                "param": "tool_choice",
                 "code": 400
               }
             }"#]]
@@ -11036,7 +11039,7 @@ async fn chat_render_treats_empty_tools_as_omitted() {
           "error": {
             "message": "tool_choice function `f` was not found in the available tools",
             "type": "BadRequestError",
-            "param": null,
+            "param": "tool_choice",
             "code": 400
           }
         }"#]]
@@ -12332,6 +12335,195 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
     }
+
+    engine_task.abort_and_join().await;
+}
+
+/// An `Llm` without an engine-core client, standing in for a remote engine
+/// that cannot take requests right now.
+struct UnavailableLlm {
+    info: LlmInfo,
+    health: Arc<tokio::sync::watch::Sender<bool>>,
+    readiness: tokio::sync::watch::Sender<bool>,
+}
+
+impl UnavailableLlm {
+    fn new() -> Self {
+        Self {
+            info: LlmInfo {
+                max_model_len: 4096,
+                model_dtype: None,
+                supports_lora: true,
+                allow_missing_mm_embeddings: false,
+                vllm_version: "test".to_string(),
+                fingerprint: LlmFingerprint {
+                    vllm_version: "test".to_string(),
+                    config_hash: None,
+                    tensor_parallel_size: 1,
+                    pipeline_parallel_size: 1,
+                    data_parallel_size: 1,
+                    enable_expert_parallel: false,
+                },
+            },
+            health: Arc::new(tokio::sync::watch::channel(true).0),
+            readiness: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    /// The sender of the health this `Llm` reports.
+    fn health(&self) -> Arc<tokio::sync::watch::Sender<bool>> {
+        self.health.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Llm for UnavailableLlm {
+    fn info(&self) -> &LlmInfo {
+        &self.info
+    }
+
+    fn subscribe_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.health.subscribe()
+    }
+
+    fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.readiness.subscribe()
+    }
+
+    async fn generate_n(
+        &self,
+        _request: GenerateRequest,
+        _n: NonZeroU32,
+    ) -> vllm_llm::Result<Vec<BoxGenerateOutputStream>> {
+        Err(vllm_llm::Error::Unavailable {
+            message: "no engine can take the request".to_string(),
+        })
+    }
+
+    async fn abort(&self, _external_ids: &[String]) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(self: Box<Self>) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn llm_without_engine_core_serves_generation_routes_only() {
+    let llm = UnavailableLlm::new();
+    let health = llm.health();
+    let chat = ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()));
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+        RouteGates {
+            dev_mode: true,
+            runtime_lora_updating: true,
+            ..RouteGates::default()
+        },
+    );
+
+    // Routes that drive the engine-core client are not registered, even with
+    // dev mode and runtime LoRA updating enabled.
+    for (method, uri) in [
+        ("POST", "/sleep"),
+        ("POST", "/reset_prefix_cache"),
+        ("POST", "/v1/load_lora_adapter"),
+        ("GET", "/kv_event_sources"),
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    let response = app
+        .clone()
+        .call(Request::builder().uri("/health").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Generation goes through the `Llm`, and its unavailability maps to 503.
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({ "model": "test-model", "prompt": "hello" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "test-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    // `/health` follows the `Llm`.
+    health.send_replace(false);
+    let response = app
+        .clone()
+        .call(Request::builder().uri("/health").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn provided_engine_core_llm_is_opaque() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-provided",
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    // Only an `EngineCoreLlm` the server connected itself drives the
+    // engine-core routes; one passed in as `LlmSource::Provided` does not.
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_prefix_cache")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     engine_task.abort_and_join().await;
 }
@@ -15124,4 +15316,258 @@ async fn render_forwards_n_to_the_generate_request() {
     .await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["sampling_params"]["n"], 2, "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn request_validation_reports_canonical_param_across_routes() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-validation-params",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                enable_scale_out: true,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let chat_base = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let completion_base = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "prompt": "hello",
+    });
+    let responses_base = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "input": "hello",
+    });
+    let generate_base = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "token_ids": [1, 2],
+        "sampling_params": {},
+    });
+
+    let with_patch = |mut base: serde_json::Value, patch: serde_json::Value| {
+        base.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
+        base
+    };
+
+    for (uri, body, expected_param) in [
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"temperature": -1.0})),
+            Some("temperature"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"top_p": 0.0})),
+            Some("top_p"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"min_p": 1.5})),
+            Some("min_p"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"repetition_penalty": 0.0})),
+            Some("repetition_penalty"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"max_completion_tokens": 0})),
+            Some("max_tokens"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"max_tokens": 0})),
+            Some("max_tokens"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"min_tokens": 10, "max_completion_tokens": 5}),
+            ),
+            None,
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"min_tokens": 2, "max_tokens": 8, "max_completion_tokens": 1}),
+            ),
+            None,
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"cache_salt": ""})),
+            Some("cache_salt"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"stop": [""]})),
+            Some("stop"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"stop": ["a", "b", "c", "d", "e"]}),
+            ),
+            Some("stop"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"top_logprobs": 1})),
+            Some("top_logprobs"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"logprobs": true, "top_logprobs": -2}),
+            ),
+            Some("logprobs"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"stream": false, "stream_options": {"include_usage": true}}),
+            ),
+            Some("stream_options"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"messages": []})),
+            Some("messages"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"continue_final_message": true})),
+            Some("continue_final_message"),
+        ),
+        (
+            "/v1/completions",
+            with_patch(completion_base.clone(), json!({"temperature": -0.5})),
+            Some("temperature"),
+        ),
+        (
+            "/v1/completions",
+            with_patch(completion_base.clone(), json!({"max_tokens": 0})),
+            Some("max_tokens"),
+        ),
+        (
+            "/v1/completions",
+            with_patch(completion_base.clone(), json!({"cache_salt": ""})),
+            Some("cache_salt"),
+        ),
+        (
+            "/v1/completions",
+            with_patch(
+                completion_base.clone(),
+                json!({"stop": ["a", "b", "c", "d", "e"]}),
+            ),
+            Some("stop"),
+        ),
+        (
+            "/v1/responses",
+            with_patch(responses_base.clone(), json!({"max_output_tokens": 0})),
+            Some("max_tokens"),
+        ),
+        (
+            "/v1/responses",
+            with_patch(responses_base.clone(), json!({"top_p": 0.0})),
+            Some("top_p"),
+        ),
+        (
+            "/v1/responses",
+            with_patch(responses_base.clone(), json!({"cache_salt": ""})),
+            Some("cache_salt"),
+        ),
+        (
+            "/v1/responses",
+            with_patch(
+                responses_base.clone(),
+                json!({"stop": ["a", "b", "c", "d", "e"]}),
+            ),
+            Some("stop"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"max_tokens": 0}}),
+            ),
+            Some("max_tokens"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"top_p": 0.0}}),
+            ),
+            Some("top_p"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"bad_words_token_ids": [[999_999]]}}),
+            ),
+            Some("bad_words_token_ids"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(generate_base.clone(), json!({"cache_salt": ""})),
+            Some("cache_salt"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"stop": ["a", "b", "c", "d", "e"]}}),
+            ),
+            Some("stop"),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body} -> {json}");
+        let expected_value = match expected_param {
+            Some(param) => serde_json::Value::String(param.to_string()),
+            None => serde_json::Value::Null,
+        };
+        assert_eq!(
+            json["error"].as_object().and_then(|obj| obj.get("param")),
+            Some(&expected_value),
+            "{uri} {body} -> {json}"
+        );
+    }
+
+    // Valid values previously rejected by `validator`'s artificial bounds are
+    // now accepted, matching Python's `SamplingParams` and `JsonSchemaFormat`;
+    // `min_tokens` is checked against the effective `max_completion_tokens`.
+    let body = with_patch(
+        chat_base,
+        json!({
+            "min_tokens": 2,
+            "max_tokens": 1,
+            "max_completion_tokens": 8,
+            "repetition_penalty": 2.5,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "", "schema": {"type": "object"}},
+            }
+        }),
+    );
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body} -> {json}");
 }
