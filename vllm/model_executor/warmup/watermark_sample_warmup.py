@@ -72,6 +72,7 @@ def watermark_sample_warmup(worker: Worker) -> None:
         return
 
     from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+    from vllm.v1.watermarking.synthid_text import SynthIDTextWatermarker
     from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 
     # Read the sampler the runner built instead of rebuilding it from config:
@@ -87,7 +88,11 @@ def watermark_sample_warmup(worker: Worker) -> None:
     device = worker.device
     try:
         keys = _philox_sampler_keys(sampler.watermarker)
-        if not keys:
+        watermarker = sampler.watermarker
+        synthid_text = (
+            watermarker if isinstance(watermarker, SynthIDTextWatermarker) else None
+        )
+        if not keys and synthid_text is None:
             return
 
         # The sampler passes model-dtype logits through when no logits
@@ -139,6 +144,19 @@ def watermark_sample_warmup(worker: Worker) -> None:
             logits = torch.zeros(
                 (_NUM_WARMUP_TOKENS, vocab_size), dtype=dtype, device=device
             )
+            if synthid_text is not None:
+                from vllm.v1.worker.gpu.sample.synthid_text import synthid_text_sample
+
+                # ``SynthIDTextWatermarker.sample`` launches the kernel only with
+                # the skip mask the sampler always passes.
+                synthid_text_sample(
+                    logits,
+                    contexts,
+                    synthid_text.prf.key,
+                    synthid_text.depth,
+                    use_fp64=sampler.use_fp64_gumbel,
+                    **sampling_state,
+                )
             for key in keys:
                 for use_skip_mask in with_skip_mask:
                     philox_gumbel_sample(
