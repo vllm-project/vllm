@@ -282,7 +282,7 @@ def test_glimmer_engine_rejects_video_above_profiled_tokens(vllm_runner) -> None
             },
             sampling_params,
         )
-        with pytest.raises(ValueError, match="profiles at most 6912"):
+        with pytest.raises(ValueError, match="accepts at most 6912"):
             runner.llm.generate(
                 {
                     "prompt": "<|video|>Describe.",

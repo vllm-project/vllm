@@ -314,8 +314,8 @@ class MuseGlimmerMultiModalProcessor(
                     raise ValueError(
                         f"The {modality} has {num_groups * group_tokens} tokens "
                         f"({group_tokens} per temporal group), but Muse-Glimmer "
-                        f"profiles at most {max_tokens[modality]} "
-                        f"({max_group_tokens[modality]} per group) at startup. "
+                        f"accepts at most {max_tokens[modality]} "
+                        f"({max_group_tokens[modality]} per group). "
                         "Reduce its size or frame count, or for videos raise "
                         "`num_frames` in `--media-io-kwargs`."
                     )

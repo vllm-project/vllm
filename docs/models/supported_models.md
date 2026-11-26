@@ -770,7 +770,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     `meta-models/Muse-Glimmer-30B-assistant` checkpoint, which vLLM serves through
     its [DFlash](../features/speculative_decoding/README.md) path.
     Preprocessing rejects an image or video that needs more vision tokens than
-    startup profiles. An image may use up to `max_image_tokens` (4,096 by
+    the per-item limit. An image may use up to `max_image_tokens` (4,096 by
     default), and each temporal group of a video (`temporal_patch_size`, 2
     frames) up to `max_video_frame_tokens` (144). A video's total is capped at
     the per-group limit times the number of groups that fit in `max_model_len`,
@@ -779,7 +779,9 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     defaults. Raising `num_frames` there raises the video limit; a per-request
     `media_io_kwargs` cannot raise it past the startup value. Because the cap
     counts tokens, a longer low-resolution video that uses fewer tokens per
-    group can still fit.
+    group can still fit. Profiling hints in `--limit-mm-per-prompt` (such as
+    `num_frames`) only shrink the startup dummy, as for other models; they do
+    not lower this limit.
 
 !!! note
     Both Nemotron Nano architecture names and `NemotronH_Omni_Reasoning_V3` map to

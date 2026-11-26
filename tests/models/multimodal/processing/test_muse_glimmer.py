@@ -12,6 +12,20 @@ from ...utils import build_model_context
 MODEL_ID = "meta-models/Muse-Glimmer-30B"
 
 
+def _video(num_frames: int, height: int, width: int) -> tuple[np.ndarray, dict]:
+    return (
+        np.zeros((num_frames, height, width, 3), dtype=np.uint8),
+        {
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "total_num_frames": num_frames,
+            "frames_indices": list(range(num_frames)),
+            "video_backend": "opencv",
+            "do_sample_frames": False,
+        },
+    )
+
+
 def _budget_and_dummy(
     modality: str, mm_processor_kwargs: dict[str, object] | None
 ) -> tuple[int, int]:
@@ -82,18 +96,11 @@ def test_video_budget_covers_loader_frames(loader_frames: int | None, num_frames
         seq_len=ctx.model_config.max_model_len, mm_counts={"video": 1}
     )
     assert tokens is not None
-    video = np.zeros((num_frames, 336, 336, 3), dtype=np.uint8)
-    metadata = {
-        "fps": 2.0,
-        "duration": num_frames / 2.0,
-        "total_num_frames": num_frames,
-        "frames_indices": list(range(num_frames)),
-        "video_backend": "opencv",
-        "do_sample_frames": False,
-    }
     processed = processor(
         processor.dummy_inputs.get_dummy_text({"video": 1}),
-        mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+        mm_items=processor.info.parse_mm_data(
+            {"video": [_video(num_frames, 336, 336)]}
+        ),
         hf_processor_mm_kwargs={},
     )
     dummy = processor.get_dummy_mm_inputs({"video": 1})
@@ -138,17 +145,7 @@ def test_items_above_profiled_tokens_are_rejected(
     if modality == "image":
         item: object = Image.new("RGB", (width, height))
     else:
-        item = (
-            np.zeros((num_frames, height, width, 3), dtype=np.uint8),
-            {
-                "fps": 2.0,
-                "duration": num_frames / 2.0,
-                "total_num_frames": num_frames,
-                "frames_indices": list(range(num_frames)),
-                "video_backend": "opencv",
-                "do_sample_frames": False,
-            },
-        )
+        item = _video(num_frames, height, width)
 
     def process():
         return processor(
@@ -158,7 +155,7 @@ def test_items_above_profiled_tokens_are_rejected(
         )
 
     if rejected:
-        with pytest.raises(ValueError, match="Muse-Glimmer profiles at most"):
+        with pytest.raises(ValueError, match="Muse-Glimmer accepts at most"):
             process()
         return
     tokens = processor.info.get_mm_max_tokens_per_item(
@@ -167,3 +164,26 @@ def test_items_above_profiled_tokens_are_rejected(
     assert tokens is not None
     num_embeds = process()["mm_placeholders"][modality][0].get_num_embeds()
     assert 0 < num_embeds <= tokens[modality]
+
+
+def test_frame_hint_shrinks_dummy_but_not_limit():
+    ctx = build_model_context(
+        MODEL_ID,
+        model_config_kwargs={"max_model_len": 20480},
+        limit_mm_per_prompt={"image": 0, "video": {"count": 1, "num_frames": 32}},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len, mm_counts={"video": 1}
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    processed = processor(
+        processor.dummy_inputs.get_dummy_text({"video": 1}),
+        mm_items=processor.info.parse_mm_data({"video": [_video(96, 336, 336)]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert tokens is not None
+    assert tokens["video"] == 6912
+    assert dummy["mm_placeholders"]["video"][0].get_num_embeds() == 2304
+    assert processed["mm_placeholders"]["video"][0].get_num_embeds() == 6912
