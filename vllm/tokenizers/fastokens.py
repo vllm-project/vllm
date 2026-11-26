@@ -10,11 +10,26 @@ idempotent, so it applies to any tokenizer mode that ends up loading an HF
 fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …).
 """
 
+import json
 from importlib.metadata import PackageNotFoundError, version
 
 from packaging.version import Version
 
 _MIN_FASTOKENS_VERSION = "0.3.6"
+
+
+def get_fastokens_decoder_config(backend) -> dict | None:
+    """Read the immutable decoder config hidden by fastokens' decoder shim."""
+    if type(backend).__module__.partition(".")[0] != "fastokens":
+        return None
+    cache_key = "_vllm_prompt_decoder_config"
+    try:
+        if not hasattr(backend, cache_key):
+            config = json.loads(backend.to_str()).get("decoder")
+            setattr(backend, cache_key, config)
+        return getattr(backend, cache_key)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def apply_fastokens_patch() -> None:

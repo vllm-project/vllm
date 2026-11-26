@@ -416,6 +416,37 @@ class MistralTokenizer(TokenizerLike):
             ids, skip_special_tokens=skip_special_tokens
         )
 
+    @cached_property
+    def _sentencepiece_offset_decoder(self):
+        from sentencepiece import SentencePieceProcessor
+
+        assert isinstance(self.tokenizer, SentencePieceTokenizer)
+        return SentencePieceProcessor(model_file=str(self.tokenizer.file_path))
+
+    def decode_prompt_with_offsets(
+        self, ids: list[int]
+    ) -> tuple[str, list[int]] | None:
+        """Return native decode spans; callers must verify the echoed text."""
+        from .detokenizer_utils import (
+            decode_sentencepiece_with_offsets,
+            decode_utf8_with_offsets,
+        )
+
+        if self.is_spm:
+            try:
+                return decode_sentencepiece_with_offsets(
+                    self._sentencepiece_offset_decoder, ids
+                )
+            except (OSError, RuntimeError):
+                return None
+        assert isinstance(self.tokenizer, Tekkenizer)
+        return decode_utf8_with_offsets(
+            [
+                self.tokenizer.id_to_byte_piece(token_id, SpecialTokenPolicy.KEEP)
+                for token_id in ids
+            ]
+        )
+
     def batch_decode(
         self, ids: list[list[int]] | list[int], skip_special_tokens: bool = False
     ) -> str:

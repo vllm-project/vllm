@@ -4,8 +4,194 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
+from itertools import groupby
 
 from vllm.tokenizers import TokenizerLike
+
+
+@lru_cache(maxsize=1)
+def _byte_level_decoder() -> dict[str, int]:
+    from transformers.convert_slow_tokenizer import bytes_to_unicode
+
+    return {char: byte for byte, char in bytes_to_unicode().items()}
+
+
+def decode_token_ids_with_offsets(
+    tokenizer: TokenizerLike, token_ids: list[int], *, skip_special_tokens: bool = False
+) -> tuple[str, list[int]] | None:
+    """Return backend-native prompt decoding and character starts if supported.
+
+    Callers must check that the text matches the echo's decoding policy.
+    """
+    from tokenizers.decoders import ByteLevel
+
+    if skip_special_tokens:
+        special_ids = set(tokenizer.all_special_ids)
+        visible = [i for i, tid in enumerate(token_ids) if tid not in special_ids]
+        decoded = decode_token_ids_with_offsets(
+            tokenizer, [token_ids[i] for i in visible]
+        )
+        if decoded is None:
+            return None
+        text, starts = decoded
+        offsets = [len(text)] * len(token_ids)
+        for i, start in zip(visible, starts):
+            offsets[i] = start
+        for i in range(len(offsets) - 2, -1, -1):
+            if token_ids[i] in special_ids:
+                offsets[i] = offsets[i + 1]
+        return text, offsets
+
+    decode_with_offsets = getattr(tokenizer, "decode_prompt_with_offsets", None)
+    if callable(decode_with_offsets):
+        return decode_with_offsets(token_ids)
+
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None or backend.decoder is None:
+        return None
+
+    tokens = [backend.id_to_token(token_id) for token_id in token_ids]
+    if any(token is None for token in tokens):
+        return None
+    if not isinstance(backend.decoder, ByteLevel):
+        try:
+            config = json.loads(backend.decoder.__getstate__())
+        except Exception:
+            from .fastokens import get_fastokens_decoder_config
+
+            config = get_fastokens_decoder_config(backend)
+        if config is None:
+            return None
+        if config["type"] != "ByteLevel":
+            return _decode_byte_fallback_with_offsets(tokens, config)
+
+    byte_decoder = _byte_level_decoder()
+    pieces: list[bytes] = []
+    for token in tokens:
+        try:
+            piece = bytes(byte_decoder[char] for char in token)
+        except KeyError:
+            # ByteLevel decodes a token literally if any character is outside
+            # its alphabet (for example an added Unicode token).
+            piece = token.encode("utf-8")
+        pieces.append(piece)
+
+    return decode_utf8_with_offsets(pieces)
+
+
+def decode_utf8_with_offsets(pieces: list[bytes]) -> tuple[str, list[int]]:
+    """Decode UTF-8 pieces, retaining starts inside split characters."""
+    text = b"".join(pieces).decode("utf-8", errors="replace")
+    return text, _utf8_token_offsets(pieces, text)
+
+
+def decode_sentencepiece_with_offsets(
+    sp_model, token_ids: list[int]
+) -> tuple[str, list[int]]:
+    from sentencepiece import sentencepiece_pb2
+
+    proto = sentencepiece_pb2.SentencePieceText.FromString(
+        sp_model.decode_ids_as_serialized_proto(token_ids)
+    )
+    byte_to_char = [0]
+    for index, char in enumerate(proto.text):
+        byte_to_char.extend([index] * (len(char.encode("utf-8")) - 1))
+        byte_to_char.append(index + 1)
+    return proto.text, [byte_to_char[piece.begin] for piece in proto.pieces]
+
+
+def _decode_byte_fallback_with_offsets(
+    tokens: list[str], config: dict
+) -> tuple[str, list[int]] | None:
+    steps = config["decoders"] if config["type"] == "Sequence" else [config]
+    fallback = next(
+        (i for i, step in enumerate(steps) if step["type"] == "ByteFallback"), None
+    )
+    if fallback is None:
+        return None
+    for step in steps[:fallback]:
+        if step["type"] != "Replace" or "String" not in step["pattern"]:
+            return None
+        tokens = [
+            token.replace(step["pattern"]["String"], step["content"])
+            for token in tokens
+        ]
+    after = steps[fallback + 1 :]
+    if after:
+        if after[0]["type"] != "Fuse":
+            return None
+        after = after[1:]
+    if any(step["type"] != "Strip" for step in after):
+        return None
+
+    parts: list[str] = []
+    offsets: list[int] = []
+    position = 0
+    for is_byte, group in groupby(tokens, _is_byte_fallback_token):
+        pieces = list(group)
+        if not is_byte:
+            for token in pieces:
+                offsets.append(position)
+                parts.append(token)
+                position += len(token)
+            continue
+        byte_pieces = [bytes([int(token[3:5], 16)]) for token in pieces]
+        try:
+            text = b"".join(byte_pieces).decode("utf-8")
+        except UnicodeDecodeError:
+            # ByteFallback replaces every byte in an invalid run separately.
+            text = "\ufffd" * len(byte_pieces)
+            starts = list(range(len(byte_pieces)))
+        else:
+            starts = _utf8_token_offsets(byte_pieces, text)
+        offsets.extend(position + start for start in starts)
+        parts.append(text)
+        position += len(text)
+    text = "".join(parts)
+    for step in after:
+        content = step["content"]
+        if not content:
+            return None
+        left, right = 0, len(text)
+        for _ in range(step["start"]):
+            if text.startswith(content, left, right):
+                left += len(content)
+        for _ in range(step["stop"]):
+            if text.endswith(content, left, right):
+                right -= len(content)
+        text = text[left:right]
+        offsets = [max(0, min(start - left, len(text))) for start in offsets]
+    return text, offsets
+
+
+def _is_byte_fallback_token(token: str) -> bool:
+    return (
+        len(token) == 6
+        and token.startswith("<0x")
+        and token.endswith(">")
+        and all(char in "0123456789abcdefABCDEF" for char in token[3:5])
+    )
+
+
+def _utf8_token_offsets(pieces: list[bytes], text: str) -> list[int]:
+    raw = b"".join(pieces)
+    offsets: list[int] = []
+    byte_offset = token_start = token_index = 0
+    for char_offset, char in enumerate(text):
+        if char == "\ufffd" and not raw.startswith(b"\xef\xbf\xbd", byte_offset):
+            try:
+                raw[byte_offset : byte_offset + 4].decode("utf-8")
+            except UnicodeDecodeError as error:
+                byte_offset += error.end
+        else:
+            byte_offset += len(char.encode("utf-8"))
+        while token_index < len(pieces) and token_start < byte_offset:
+            offsets.append(char_offset)
+            token_start += len(pieces[token_index])
+            token_index += 1
+    offsets.extend([len(text)] * (len(pieces) - token_index))
+    return offsets
 
 
 def _replace_none_with_empty(tokens: list[str | None]):

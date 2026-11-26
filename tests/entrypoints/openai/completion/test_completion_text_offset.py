@@ -7,7 +7,10 @@ import pytest
 
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.completion.serving import (
+    OpenAIServingCompletion,
+    _get_prompt_text_offsets,
+)
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -16,6 +19,56 @@ TOKENS = [(1, "abc"), (2, " de"), (3, "!")]
 # Text deltas as the detokenizer streams them with stop=["\n\n"]: one char is
 # held back until the request finishes, so the text lags the tokens.
 TEXT_DELTAS = ["ab", "c d", "e!"]
+
+
+@pytest.mark.parametrize("add_special_tokens", [False, True])
+@pytest.mark.parametrize("special_count", [1, 2])
+@pytest.mark.parametrize(
+    "text,source_starts",
+    [
+        (" É x", [1, 3]),
+        (" É x ", [1, 3]),
+        ("</s> É x", [0, 5, 7]),
+        (" É x </s>", [1, 3, 5]),
+    ],
+)
+def test_normalized_echo_offsets_preserve_special_token_boundaries(
+    text, source_starts, add_special_tokens, special_count
+):
+    from tokenizers import (
+        Tokenizer,
+        decoders,
+        models,
+        normalizers,
+        pre_tokenizers,
+        processors,
+    )
+    from transformers import TokenizersBackend
+
+    backend = Tokenizer(
+        models.WordLevel(
+            {"[UNK]": 0, "<s>": 1, "</s>": 2, "é": 3, "x": 4}, unk_token="[UNK]"
+        )
+    )
+    backend.normalizer = normalizers.Sequence(
+        [normalizers.Strip(), normalizers.Lowercase()]
+    )
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    backend.decoder = decoders.WordPiece(cleanup=False)
+    backend.post_processor = processors.TemplateProcessing(
+        single=" ".join([*["<s>"] * special_count, "$A", *["</s>"] * special_count]),
+        special_tokens=[("<s>", 1), ("</s>", 2)],
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend, bos_token="<s>", eos_token="</s>", unk_token="[UNK]"
+    )
+    ids = tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    expected = (
+        [*[0] * special_count, *source_starts, *[len(text)] * special_count]
+        if add_special_tokens
+        else source_starts
+    )
+    assert _get_prompt_text_offsets(tokenizer, ids, text) == [*expected, len(text)]
 
 
 def _logprobs(i: int) -> dict[int, Logprob]:

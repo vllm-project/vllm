@@ -48,6 +48,8 @@ from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import decode_token_ids_with_offsets
+from vllm.tokenizers.hf import encode_with_special_tokens_mask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
@@ -84,6 +86,73 @@ def _get_echoed_prompt_logprobs(
         visible_ids.append(token_id)
         visible_logprobs.append(logprob)
     return visible_ids, visible_logprobs
+
+
+def _get_prompt_text_offsets(
+    tokenizer: TokenizerLike | None, token_ids: list[int], text: str
+) -> list[int] | None:
+    """Return prompt starts and the continuation boundary in echoed text."""
+    if tokenizer is None or not token_ids or text.isascii():
+        return None
+    for skip_special_tokens in (False, True):
+        decoded = decode_token_ids_with_offsets(
+            tokenizer, token_ids, skip_special_tokens=skip_special_tokens
+        )
+        if (
+            decoded is not None
+            and decoded[0] == text
+            and len(decoded[1]) == len(token_ids)
+        ):
+            return [*decoded[1], len(text)]
+    # Some policies echo literal vocabulary pieces rather than decoded bytes.
+    pieces = [tokenizer.decode([token_id]) for token_id in token_ids]
+    if "".join(pieces) == text:
+        offsets = [0]
+        for piece in pieces:
+            offsets.append(offsets[-1] + len(piece))
+        return offsets
+    # Normalization can change text without changing its token IDs. Encoding
+    # offsets retain positions in the original echo rather than its decode.
+    if (
+        getattr(tokenizer, "is_fast", False)
+        and getattr(tokenizer, "backend_tokenizer", None) is not None
+    ):
+        for add_special_tokens in (False, True):
+            try:
+                encoding = encode_with_special_tokens_mask(
+                    tokenizer,
+                    text,
+                    add_special_tokens=add_special_tokens,
+                    return_offsets_mapping=True,
+                )
+            except (NotImplementedError, TypeError, ValueError):
+                return None
+            encoding_offsets = encoding.get("offset_mapping")
+            special_tokens_mask = encoding.get("special_tokens_mask")
+            if (
+                encoding["input_ids"] == token_ids
+                and encoding_offsets is not None
+                and len(encoding_offsets) == len(token_ids)
+                and special_tokens_mask is not None
+                and len(special_tokens_mask) == len(token_ids)
+            ):
+                first_source = next(
+                    (i for i, special in enumerate(special_tokens_mask) if not special),
+                    None,
+                )
+                if first_source is None:
+                    return None
+                starts = [start for start, _ in encoding_offsets]
+                next_start = len(text)
+                # Added tokens have no source span: prefix tokens precede the
+                # echo; suffix tokens follow it. User special tokens keep theirs.
+                for i in range(len(starts) - 1, -1, -1):
+                    if special_tokens_mask[i]:
+                        starts[i] = 0 if i < first_source else next_start
+                    else:
+                        next_start = starts[i]
+                return [*starts, len(text)]
+    return None
 
 
 _PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
@@ -408,6 +477,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             stream_options, self.enable_force_include_usage
         )
 
+        prompt_text_offsets: dict[int, list[int] | None] = {}
         last_res: RequestOutput | None = None
         try:
             # Requests that can only emit plain delta chunks render them from a
@@ -451,6 +521,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     prompt_token_ids_to_return: list[int] | None = None
 
                     assert request.max_tokens is not None
+                    echo_offsets = None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
                         echo_token_ids = prompt_token_ids
@@ -491,6 +562,24 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 if request.logprobs is not None
                                 else None
                             )
+                        if (
+                            request.logprobs is not None
+                            and not request.return_token_ids
+                            and not (
+                                request.return_tokens_as_token_ids
+                                if request.return_tokens_as_token_ids is not None
+                                else self.return_tokens_as_token_ids
+                            )
+                        ):
+                            if prompt_idx not in prompt_text_offsets:
+                                prompt_text_offsets[prompt_idx] = (
+                                    _get_prompt_text_offsets(
+                                        tokenizer,
+                                        as_list(echo_token_ids),
+                                        prompt_text,
+                                    )
+                                )
+                            echo_offsets = prompt_text_offsets[prompt_idx]
                         prompt_token_ids_to_return = prompt_token_ids
                         has_echoed[i] = True
                     else:
@@ -524,6 +613,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             logprob_token_ids=request.logprob_token_ids,
                             initial_text_offset=next_text_offsets[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
+                            prompt_text_offsets=echo_offsets,
                         )
                         # Advance by the tokens just reported, not by delta_text:
                         # text held back for stop strings lags the tokens.
@@ -531,6 +621,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             next_text_offsets[i] = logprobs.text_offset[-1] + len(
                                 logprobs.tokens[-1]
                             )
+                            if (
+                                echo_offsets is not None
+                                and len(delta_token_ids) == len(echo_offsets) - 1
+                            ):
+                                next_text_offsets[i] = echo_offsets[-1]
                     else:
                         logprobs = None
 
@@ -705,6 +800,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
             assert prompt_token_ids is not None
             prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
             prompt_text = final_res.prompt
+            echo_offsets = None
+            echo_offsets_computed = False
 
             token_ids: GenericSequence[int]
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
@@ -751,6 +848,23 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     out_logprobs = output.logprobs
                     output_text = output.text
 
+                if (
+                    request.echo
+                    and request.logprobs is not None
+                    and not request.return_token_ids
+                    and not echo_offsets_computed
+                    and not (
+                        request.return_tokens_as_token_ids
+                        if request.return_tokens_as_token_ids is not None
+                        else self.return_tokens_as_token_ids
+                    )
+                ):
+                    assert prompt_text is not None
+                    echo_offsets = _get_prompt_text_offsets(
+                        tokenizer, as_list(echo_token_ids), prompt_text
+                    )
+                    echo_offsets_computed = True
+
                 if request.logprobs is not None:
                     assert out_logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_completion_logprobs(
@@ -760,6 +874,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         num_output_top_logprobs=request.logprobs,
                         logprob_token_ids=request.logprob_token_ids,
                         return_as_token_id=request.return_tokens_as_token_ids,
+                        prompt_text_offsets=echo_offsets,
                     )
                 else:
                     logprobs = None
@@ -857,6 +972,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         logprob_token_ids: list[int] | None = None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
+        prompt_text_offsets: list[int] | None = None,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""
         out_text_offset: list[int] = []
@@ -927,7 +1043,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     }
                 )
 
-            if len(out_text_offset) == 0:
+            if prompt_text_offsets is not None and i < len(prompt_text_offsets):
+                out_text_offset.append(initial_text_offset + prompt_text_offsets[i])
+            elif len(out_text_offset) == 0:
                 out_text_offset.append(initial_text_offset)
             else:
                 out_text_offset.append(out_text_offset[-1] + last_token_len)

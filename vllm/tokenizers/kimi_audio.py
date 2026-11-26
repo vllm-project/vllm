@@ -312,6 +312,11 @@ class KimiAudioTokenizer(TokenizerLike):
             ids = [token_id for token_id in ids if token_id not in special_ids]
         return self._tokenizer.decode(ids)
 
+    def decode_prompt_with_offsets(self, ids: list[int]) -> tuple[str, list[int]]:
+        from .detokenizer_utils import decode_utf8_with_offsets
+
+        return decode_utf8_with_offsets(self._tokenizer.decode_tokens_bytes(ids))
+
     @overload
     def convert_tokens_to_ids(self, tokens: str) -> int: ...
 
