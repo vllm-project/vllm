@@ -18,7 +18,7 @@ torch==2.15.0
 torchaudio
 torchvision
 torchcodec >= 0.16 # Required for the torchcodec video and image decoding backends
-pyzes
+pyzes==0.1.3
 
 auto_round_lib==0.16.0
 --find-links=https://vllm-project.github.io/vllm-xpu-kernels/whl/vllm-xpu-kernels/
