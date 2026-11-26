@@ -207,13 +207,11 @@ def hc_down_silu_sm100_supported(
 def hc_down_silu_sm100(
     xn: torch.Tensor, w_down: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused down+inject GEMM + SiLU on SM100 (tcgen05).
+    """Fused down+inject GEMM + SiLU on SM100 (tcgen05), H=10240, rank=320.
 
-    SiLU reads the fp32 accumulator (no bf16 rounding of the GEMM output
-    first), so results match the unfused path only at bf16 noise.
-    Only hc_count 4, hidden size 2560 and rank 320 are supported.
-    `w_down` must be a static weight: it is loaded before the kernel's PDL
-    wait, so no in-flight earlier kernel may write it.
+    SiLU reads the fp32 accumulator: results differ from the unfused path
+    at bf16 noise level. `w_down` must be a static weight: it is loaded
+    before the PDL wait, so no in-flight earlier kernel may write it.
     """
     M = xn.shape[0]
     lowrank = xn.new_empty(M, 320)
