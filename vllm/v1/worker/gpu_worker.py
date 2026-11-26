@@ -20,7 +20,6 @@ from torch.distributed import ReduceOp
 
 import vllm.envs as envs
 from vllm.config import (
-    CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
     update_config,
@@ -197,34 +196,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
     return torch_reserved
 
 
-def get_compile_warmup_sizes(
-    warmup_sizes: list[int],
-    cg_capture_sizes: list[int],
-    compile_ranges: list["Range"],
-    max_reachable_tokens: int,
-) -> list[int]:
-    """Sizes to warm up so every compile range gets compiled.
-
-    `max_reachable_tokens` is min(max_num_batched_tokens,
-    max_num_seqs * max_model_len); larger batches never occur at runtime.
-    Exceeding max_num_seqs * max_model_len would also need a dummy request
-    longer than max_model_len, which overruns the block table in attention.
-    """
-    sizes = [
-        x for x in warmup_sizes if isinstance(x, int) and x <= max_reachable_tokens
-    ]
-    covered = set(cg_capture_sizes) | set(sizes)
-    for compile_range in compile_ranges:
-        if any(x in compile_range for x in covered):
-            continue
-        size = min(compile_range.end, max_reachable_tokens)
-        if size >= compile_range.start:
-            sizes.append(size)
-    return sizes
-
-
 if TYPE_CHECKING:
-    from vllm.config.utils import Range
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -1114,27 +1086,12 @@ class Worker(WorkerBase):
             self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and has_compiled_submodule(self.model_runner.get_model())
         ):
-            # warm up sizes that are not in cudagraph capture sizes,
-            # but users still want to compile for better performance,
-            # e.g. for the max-num-batched token size in chunked prefill.
-            compile_sizes = self.vllm_config.compilation_config.compile_sizes
-            warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []  # type: ignore[assignment]
-            cg_capture_sizes: list[int] = []
-
-            if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
-                warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
-
-            warmup_sizes = get_compile_warmup_sizes(
-                warmup_sizes,
-                cg_capture_sizes,
-                self.vllm_config.compilation_config.get_compile_ranges(),
+            warmup_sizes = self.vllm_config.compilation_config.get_compile_warmup_sizes(
                 max_reachable_tokens=min(
                     self.scheduler_config.max_num_batched_tokens,
                     self.scheduler_config.max_num_seqs
                     * self.model_config.max_model_len,
-                ),
+                )
             )
 
         # We skip EPLB here since we don't want to record dummy metrics

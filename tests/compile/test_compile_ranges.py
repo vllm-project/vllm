@@ -19,7 +19,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.config.compilation import CompilationConfig, CompilationMode
+from vllm.config.compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import Range
 from vllm.forward_context import set_forward_context
@@ -138,6 +138,36 @@ def test_compile_config_get_compile_ranges():
         Range(start=9, end=32),
         Range(start=33, end=8192),
     ]
+
+
+@pytest.mark.parametrize(
+    "compile_sizes,endpoints,max_reachable,expected",
+    [
+        (None, [3072], 2048, []),
+        (None, [8, 32, 3072], 2048, [32, 2048]),
+        (None, [8, 32, 3072], 8192, [32, 3072]),
+        (None, [8, 4096, 8192], 2048, [2048]),
+        ([16, 4096], [8, 32, 8192], 2048, [16, 2048]),
+    ],
+    ids=[
+        "covered-by-cudagraph",
+        "issue-66242-capped",
+        "reachable-unchanged",
+        "unreachable-range-skipped",
+        "unreachable-compile-size-dropped",
+    ],
+)
+def test_compile_warmup_sizes_stay_within_reachable_tokens(
+    compile_sizes, endpoints, max_reachable, expected
+):
+    compilation_config = CompilationConfig(
+        compile_sizes=compile_sizes,
+        compile_ranges_endpoints=endpoints,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        cudagraph_capture_sizes=[1, 2],
+    )
+    sizes = compilation_config.get_compile_warmup_sizes(max_reachable)
+    assert sorted(sizes) == expected
 
 
 def test_compile_ranges_idempotent():
