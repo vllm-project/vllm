@@ -10011,7 +10011,8 @@ def test_priority_queue_equal_arrival_time_tiebreak():
 
     assert queue.pop_request().request_id == "req_a"
     assert queue.pop_request().request_id == "req_b"
-=======
+
+
 def test_reset_encoder_cache_publishes_clear_event_while_idle():
     """An idle engine must publish `AllECCleared` on reset.
 
