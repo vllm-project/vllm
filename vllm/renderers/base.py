@@ -1276,6 +1276,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
     @staticmethod
     def _copy_prompt_dict(prompt: DictPrompt) -> DictPrompt:
+        # Copy top-level and nested dicts to avoid mutating caller arguments.
         if "encoder_prompt" in prompt:
             enc_dec_prompt = cast(EncoderDecoderDictPrompt, prompt)
             copied = dict(enc_dec_prompt)
