@@ -4,7 +4,6 @@
 
 import functools
 from collections.abc import Callable
-from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -963,21 +962,3 @@ def dispatch_unquantized_gemm(
         vllm_backend=linear_backend,
         pdl=current_platform.is_arch_support_pdl(),
     )
-
-
-@contextmanager
-def use_output_lora_mapping(module: torch.nn.Module):
-    """Use per-output adapter metadata for an FFN reduced to logits rows."""
-    wrappers = {
-        child.punica_wrapper
-        for child in module.modules()
-        if hasattr(child, "punica_wrapper")
-    }
-    original = [(wrapper, wrapper.token_mapping_meta) for wrapper in wrappers]
-    try:
-        for wrapper, _ in original:
-            wrapper.token_mapping_meta = wrapper.prompt_mapping_meta
-        yield
-    finally:
-        for wrapper, metadata in original:
-            wrapper.token_mapping_meta = metadata

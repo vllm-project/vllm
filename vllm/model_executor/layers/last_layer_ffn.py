@@ -6,8 +6,6 @@ from contextvars import ContextVar
 
 import torch
 
-from vllm.model_executor.layers.utils import use_output_lora_mapping
-
 _indices: ContextVar[torch.Tensor | None] = ContextVar(
     "last_layer_ffn_indices", default=None
 )
@@ -27,6 +25,24 @@ def using_last_layer_ffn_indices(
 
 def current_last_layer_ffn_indices() -> torch.Tensor | None:
     return _indices.get()
+
+
+@contextmanager
+def use_output_lora_mapping(module: torch.nn.Module):
+    """Use per-output adapter metadata for an FFN reduced to logits rows."""
+    wrappers = {
+        child.punica_wrapper
+        for child in module.modules()
+        if hasattr(child, "punica_wrapper")
+    }
+    original = [(wrapper, wrapper.token_mapping_meta) for wrapper in wrappers]
+    try:
+        for wrapper, _ in original:
+            wrapper.token_mapping_meta = wrapper.prompt_mapping_meta
+        yield
+    finally:
+        for wrapper, metadata in original:
+            wrapper.token_mapping_meta = metadata
 
 
 def apply_pruned_last_ffn(hidden, residual, norm, mlp):
