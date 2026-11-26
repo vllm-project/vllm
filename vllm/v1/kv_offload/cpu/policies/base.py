@@ -34,7 +34,7 @@ class ChunkStatus(ctypes.Structure):
 
     _fields_ = [
         ("ref_cnt", ctypes.c_int32),
-        ("lease_cnt", ctypes.c_uint32),
+        ("lease_cnt", ctypes.c_int32),
         ("chunk_id", ctypes.c_int64),
     ]
 
@@ -148,7 +148,7 @@ class CachePolicy(ABC):
         """
 
     def on_retention_changed(self, key: OffloadKey, retained: bool) -> None:
-        """Called after a resident chunk's lease count crosses zero."""
+        """Called whenever a resident chunk gains its first lease or loses its last."""
         return
 
     def mark_evictable(self, key: OffloadKey) -> None:

@@ -316,7 +316,8 @@ class ARCCachePolicy(CachePolicy):
 
             if len(candidates) == n:
                 break
-        else:
+
+        if len(candidates) < n:
             return None
 
         # Apply all evictions now that we know n candidates exist.
