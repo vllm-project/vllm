@@ -236,7 +236,7 @@ def _merge_mm_processor_kwargs(
 class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
 
-    count: int = Field(default=999, ge=0)
+    count: int | None = Field(default=999, ge=0)
     allow_embeds: bool = True
 
 
@@ -244,6 +244,7 @@ class BaseDummyOptions:
 class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
 
+    count: int | None = Field(default=None, ge=0)
     num_frames: int | None = Field(default=None, gt=0)
     width: int | None = Field(default=None, gt=0)
     height: int | None = Field(default=None, gt=0)
@@ -335,7 +336,8 @@ class MultiModalConfig:
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
-    Defaults to 999 for each modality.
+    Defaults to 999 for each modality unless the model processor provides a
+    lower default.
 
     Legacy format (count only):
         {"image": 16, "video": 2}
@@ -530,12 +532,6 @@ class MultiModalConfig:
     def _validate_mm_encoder_attn_backend(
         cls, value: str | AttentionBackendEnum | None
     ) -> AttentionBackendEnum | None:
-        if isinstance(value, str) and value.upper() == "XFORMERS":
-            raise ValueError(
-                "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
-                "details). Please select a supported attention backend."
-            )
-
         if value is None or isinstance(value, AttentionBackendEnum):
             return value
 
@@ -739,7 +735,7 @@ class MultiModalConfig:
 
         limit_data = self.limit_per_prompt.get(modality)
 
-        if limit_data is None:
+        if limit_data is None or limit_data.count is None:
             # Unspecified modality is set to 999 by default
             return 999
 

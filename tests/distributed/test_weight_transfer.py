@@ -7,6 +7,7 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import builtins
+import importlib
 import importlib.util
 import math
 import pickle
@@ -21,9 +22,12 @@ from unittest.mock import MagicMock
 import pybase64 as base64
 import pytest
 import ray
+import safetensors.torch
 import torch
+from huggingface_hub import save_torch_state_dict
 from torch.multiprocessing.reductions import reduce_tensor
 
+from vllm.config.load import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
@@ -37,6 +41,7 @@ from vllm.distributed.weight_transfer import (
     WeightSource,
     WeightTransferEngineFactory,
     WeightTransferTrainerFactory,
+    sparse_disk_engine,
 )
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
@@ -65,6 +70,12 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+)
+from vllm.distributed.weight_transfer.sparse_disk_engine import (
+    SparseDiskTrainerInitInfo,
+    SparseDiskWeightTransferEngine,
+    patch_file,
+    save_sparse_patches,
 )
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLTrainerInitInfo,
@@ -599,6 +610,55 @@ class TestEngineRegistry:
             config, vllm_config, device, model
         )
         assert engine is module.ModelExpressWeightTransferEngine.return_value
+
+    def test_connex_registration_is_native_and_lazy(self, monkeypatch):
+        from vllm.distributed.weight_transfer import factory
+
+        imported = []
+        module = MagicMock()
+        module.ConnexWeightTransferEngine.__name__ = "ConnexWeightTransferEngine"
+
+        def import_module(name):
+            imported.append(name)
+            return module
+
+        monkeypatch.setattr(factory.importlib, "import_module", import_module)
+        config = WeightTransferConfig(backend="connex")
+        vllm_config = create_mock_vllm_config()
+        device = torch.device("cpu")
+        model = MagicMock(spec=torch.nn.Module)
+
+        assert imported == []
+        engine = WeightTransferEngineFactory.create_engine(
+            config, vllm_config, device, model
+        )
+
+        assert imported == ["vllm.distributed.weight_transfer.connex_engine"]
+        module.ConnexWeightTransferEngine.assert_called_once_with(
+            config, vllm_config, device, model
+        )
+        assert engine is module.ConnexWeightTransferEngine.return_value
+
+    def test_connex_missing_package_raises_install_hint(self, monkeypatch):
+        import sys
+
+        for name in [
+            m for m in sys.modules if m == "connex" or m.startswith("connex.")
+        ]:
+            monkeypatch.delitem(sys.modules, name)
+        monkeypatch.delitem(
+            sys.modules, "vllm.distributed.weight_transfer.connex_engine", raising=False
+        )
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "connex" or name.startswith("connex."):
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        with pytest.raises(ImportError, match="connex-ai"):
+            importlib.import_module("vllm.distributed.weight_transfer.connex_engine")
 
     def test_create_engine_invalid_backend(self):
         config = WeightTransferConfig(backend="invalid")
@@ -1312,6 +1372,276 @@ def test_sparse_nccl_failed_batch_still_drains_the_wire_cpu(monkeypatch):
     assert model.b.eq(-1).all()
 
 
+_SPARSE_DISK_BASE = {
+    "a": torch.arange(4, dtype=torch.bfloat16),
+    "b": torch.zeros(2, 2),
+    "c": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e4m3fn),
+    "rows": torch.arange(16, dtype=torch.bfloat16).view(4, 4),
+    "cols": torch.arange(16, 32, dtype=torch.bfloat16).view(4, 4),
+    "unused": torch.zeros(2),
+    "norm": torch.ones(3, dtype=torch.bfloat16),
+    "split": torch.arange(8, dtype=torch.bfloat16).view(2, 4),
+    "scale": torch.tensor(2.0),
+}
+_SPARSE_DISK_MODEL_CONFIG = SimpleNamespace(
+    quantization=None, dtype=torch.bfloat16, word_embeddings_untied_by_checkpoint=False
+)
+
+
+def _write_sparse_disk_checkpoint(folder, weights=_SPARSE_DISK_BASE):
+    """A two-shard checkpoint with an index, in three dtypes."""
+    folder.mkdir()
+    save_torch_state_dict(dict(weights), folder, max_shard_size=80)
+    assert len(list(folder.glob("model-*-of-00002.safetensors"))) == 2
+    assert (folder / "model.safetensors.index.json").exists()
+
+
+def _read_sparse_disk_checkpoint(folder):
+    weights: dict[str, torch.Tensor] = {}
+    for file in sorted(folder.glob("*.safetensors")):
+        weights |= safetensors.torch.load_file(file)
+    return weights
+
+
+def _sparse_disk_model(weights):
+    """A model cold-started on `weights` whose loaders take the halves a second
+    tensor-parallel rank takes ("rows" along dim 0, "cols" along dim 1), split
+    "split" along dim 1 over two parameters and double "a" in place, which a load
+    plan leaves to `load_weights`; it skips "unused"."""
+    from vllm.model_executor.model_loader.reload.direct import track_loaded_params
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+    loaders = {
+        "a": lambda p, w: p.copy_(w.mul_(2)),  # changes its input
+        "rows": lambda p, w: p.copy_(w[2:]),
+        "cols": lambda p, w: p.copy_(w[:, 2:]),
+    }
+    shapes = {"rows": (2, 4), "cols": (4, 2)}
+    model = torch.nn.Module()
+    params = {n: (t.shape, t.dtype) for n, t in _SPARSE_DISK_BASE.items()}
+    params |= dict.fromkeys(("split_lo", "split_hi"), ((2, 2), torch.bfloat16))
+    for name, (shape, dtype) in params.items():
+        if name in ("unused", "split"):
+            continue
+        p = torch.nn.Parameter(
+            torch.zeros(shapes.get(name, shape), dtype=dtype), requires_grad=False
+        )
+        p.weight_loader = loaders.get(name, lambda p, w: p.copy_(w))
+        model.register_parameter(name, p)
+
+    def load_weights(weights):
+        params = dict(model.named_parameters())
+        loaded = set()
+        for name, w in weights:
+            if name == "split":
+                params["split_lo"].copy_(w[:, :2])
+                params["split_hi"].copy_(w[:, 2:])
+                loaded |= {"split_lo", "split_hi"}
+            elif name in params:
+                params[name].weight_loader(params[name], w)
+                loaded.add(name)
+        return loaded
+
+    model.load_weights = load_weights
+    track_loaded_params(model)  # as a direct-mode cold start does
+    model.load_weights(weights.items())
+    process_weights_after_loading(model, _SPARSE_DISK_MODEL_CONFIG, torch.device("cpu"))
+    return model
+
+
+def _bits(model):
+    return {
+        n: p.data.reshape(-1).view(torch.uint8).tolist()
+        for n, p in model.named_parameters()
+    }
+
+
+def _dense_patch(weights, versions):
+    """The weights after writing every patch of `versions`, in order."""
+    weights = {name: t.clone() for name, t in weights.items()}
+    for patches in versions:
+        for patch in patches:
+            weights[patch.name].view(-1)[patch.indices.long()] = patch.values
+    return weights
+
+
+_SPARSE_DISK_VERSIONS = [
+    [
+        _sparse_test_patch("a", [0, 3], [9.0, -9.0], torch.bfloat16),
+        _sparse_test_patch("b", [3], [5.0], torch.float32, (2, 2)),
+        _sparse_test_patch("c", [1], [4.0], torch.float8_e4m3fn, (3,)),
+        _sparse_test_patch(
+            "rows", [1, 9, 14], [-1.0, -2.0, -3.0], torch.bfloat16, (4, 4)
+        ),
+        _sparse_test_patch("norm", [0, 2], [0.5, 1.5], torch.bfloat16, (3,)),
+        _sparse_test_patch(
+            "split", [1, 2, 3, 6], [-1.0, -2.0, -3.0, -4.0], torch.bfloat16, (2, 4)
+        ),
+        _sparse_test_patch("scale", [0], [3.0], torch.float32, ()),
+        _sparse_test_patch("cols", [], [], torch.bfloat16, (4, 4)),
+    ],
+    [
+        _sparse_test_patch("a", [3], [7.0], torch.bfloat16),
+        _sparse_test_patch("b", [0, 3], [1.0, 2.0], torch.float32, (2, 2)),
+        _sparse_test_patch("unused", [1], [6.0], torch.float32, (2,)),
+        _sparse_test_patch(
+            "cols", [0, 3, 6, 13], [-4.0, -5.0, -6.0, -7.0], torch.bfloat16, (4, 4)
+        ),
+    ],
+]
+
+
+class _SparseDiskServer:
+    """An inference server with one sparse disk worker on a toy model, driven
+    as a `VLLMWeightSyncClient`."""
+
+    def __init__(self, checkpoint):
+        self.model = _sparse_disk_model(_read_sparse_disk_checkpoint(checkpoint))
+        vllm_config = create_mock_vllm_config()
+        vllm_config.load_config = LoadConfig()
+        vllm_config.model_config = SimpleNamespace(
+            model=str(checkpoint), revision=None, **vars(_SPARSE_DISK_MODEL_CONFIG)
+        )
+        self.engine = WeightTransferEngineFactory.create_engine(
+            WeightTransferConfig(backend="sparse_disk"),
+            vllm_config,
+            torch.device("cpu"),
+            self.model,
+        )
+        assert isinstance(self.engine, SparseDiskWeightTransferEngine)
+
+    def catch_up(self, version):
+        self.start_weight_update()
+        self.update_weights({"version": version})
+        self.finish_weight_update()
+
+    def init_weight_transfer_engine(self, init_info):
+        self.engine.init_transfer_engine(self.engine.parse_init_info(init_info))
+
+    def start_weight_update(self):
+        self.engine.start_weight_update()
+
+    def update_weights(self, update_info):
+        self.engine.receive_weights(self.engine.parse_update_info(update_info))
+
+    def finish_weight_update(self, weight_version=None):
+        self.engine.finish_weight_update()
+
+
+@pytest.fixture
+def _sparse_disk(tmp_path, monkeypatch):
+    """A checkpoint, a patch directory and one server whose trainer published
+    and sent both versions."""
+    from vllm.model_executor.model_loader.reload import lifecycle
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setattr(lifecycle, "_weight_update_active", False)
+    monkeypatch.setattr(sparse_disk_engine, "_APPLY_CHUNK", 3)  # chunks cut names
+    checkpoint, patch_dir = tmp_path / "checkpoint", tmp_path / "patches"
+    _write_sparse_disk_checkpoint(checkpoint)
+    patch_dir.mkdir()
+    server = _SparseDiskServer(checkpoint)
+    trainer = WeightTransferTrainerFactory.trainer_init(
+        SparseDiskTrainerInitInfo(patch_dir=str(patch_dir), rank=0), client=server
+    )
+    for patches in _SPARSE_DISK_VERSIONS:
+        trainer.publish(patches)
+        trainer.send_weights()
+    return checkpoint, patch_dir, server
+
+
+def test_sparse_disk_updates_equal_a_cold_start_on_the_patched_checkpoint_cpu(
+    tmp_path, _sparse_disk
+):
+    """The trainer's sends, a reload after the weights were lost, and servers
+    started later from the startup or a newer checkpoint all end bit for bit as a
+    cold start on the densely patched checkpoint. A re-init with another base
+    version and an update older than the model are refused."""
+    checkpoint, patch_dir, server = _sparse_disk
+    base = _read_sparse_disk_checkpoint(checkpoint)
+    expected = _bits(_sparse_disk_model(_dense_patch(base, _SPARSE_DISK_VERSIONS)))
+    assert _bits(server.model) == expected
+    for p in server.model.parameters():
+        p.data.fill_(0)  # as level 2 sleep discards them
+    server.catch_up(2)
+    assert _bits(server.model) == expected
+    with pytest.raises(FileExistsError):  # each version is written once
+        save_sparse_patches(_SPARSE_DISK_VERSIONS[1], patch_dir, 2)
+    with pytest.raises(ValueError, match="started from version 0"):
+        server.init_weight_transfer_engine(
+            {"patch_dir": str(patch_dir), "base_version": 2}
+        )
+    server.init_weight_transfer_engine({"patch_dir": str(patch_dir)})  # reconnect
+    v2, hidden = patch_file(patch_dir, 2), tmp_path / "v2"
+    v2.rename(hidden)
+    with pytest.raises(FileNotFoundError):
+        server.catch_up(2)  # the rebuilt copy stops at version 1
+    hidden.rename(v2)
+    for older in (0, 1):  # would roll the model back
+        with pytest.raises(RuntimeError, match="only move forward"):
+            server.catch_up(older)
+    newer = tmp_path / "newer"
+    _write_sparse_disk_checkpoint(newer, _dense_patch(base, _SPARSE_DISK_VERSIONS[:1]))
+    for start, base_version in ((checkpoint, 0), (newer, 1)):
+        if base_version:
+            patch_file(patch_dir, 1).unlink()  # pruned: in the newer checkpoint
+        late = _SparseDiskServer(start)
+        late.init_weight_transfer_engine(
+            {"patch_dir": str(patch_dir), "base_version": base_version}
+        )
+        late.catch_up(2)
+        assert _bits(late.model) == expected
+
+
+def _rewrite_patch_file(path, edit):
+    """Rewrite a patch file through `edit(tensors)`, past the writer's checks."""
+    with safetensors.safe_open(path, framework="pt") as f:
+        tensors = {k: f.get_tensor(k) for k in f.keys()}  # noqa: SIM118
+        metadata = f.metadata()
+    edit(tensors)
+    path.write_bytes(safetensors.torch.save(tensors, metadata))
+
+
+@pytest.mark.parametrize(
+    ("bad", "edit", "error"),
+    [
+        (_sparse_test_patch("d", [0], [1.0], torch.float32), None, "not in the"),
+        (
+            _sparse_test_patch("a", [0], [1.0], torch.bfloat16, (2, 2)),
+            None,
+            ", the checkpoint",
+        ),
+        (_sparse_test_patch("a", [0], [1.0], torch.float32), None, ", the checkpoint"),
+        (  # repeated across a chunk boundary
+            _sparse_test_patch("a", [0, 1, 2, 3], [1.0] * 4, torch.bfloat16),
+            lambda t: t["1.indices"].copy_(torch.tensor([0, 1, 2, 2])),
+            "bad indices",
+        ),
+        (
+            _sparse_test_patch("a", [3], [1.0], torch.bfloat16),
+            lambda t: t["1.indices"].fill_(4),
+            "bad indices",
+        ),
+    ],
+)
+def test_sparse_disk_bad_file_is_refused_before_any_write_cpu(
+    _sparse_disk, bad, edit, error
+):
+    """A file with one bad patch is refused before it writes the host copy, so
+    a new update to the last version restores the model."""
+    _, patch_dir, server = _sparse_disk
+    expected = _bits(server.model)
+    good = _sparse_test_patch("b", [1], [3.0], torch.float32, (2, 2))
+    path = save_sparse_patches([good, bad], patch_dir, 3)
+    if edit is not None:
+        _rewrite_patch_file(path, edit)
+    server.start_weight_update()
+    with pytest.raises(ValueError, match=error):
+        server.update_weights({"version": 3})
+    server.catch_up(2)  # a failed update ends the worker's session
+    assert _bits(server.model) == expected
+
+
 # --- Unit Tests: IPCWeightTransferUpdateInfo Validation ---
 
 
@@ -1976,6 +2306,21 @@ class TestTrainerClients:
         client.shutdown_weight_transfer_engine()
         assert captured == {"path": "shutdown_weight_transfer_engine", "json": None}
 
+    def test_http_client_finish_raises_on_baseline_mismatch(self, monkeypatch):
+        """finish_weight_update sends the baseline and raises on a mismatch."""
+        captured = {}
+
+        def fake_post(self, path, json=None):
+            captured["json"] = json
+            return {"match": False, "mismatches": ["dp0:pp0:pcp0:tp0:w"]}
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        baseline = {"dp0:pp0:pcp0:tp0:w": "0" * 64}
+        with pytest.raises(RuntimeError, match="dp0:pp0:pcp0:tp0:w"):
+            client.finish_weight_update(baseline=baseline)
+        assert captured["json"] == {"baseline": baseline}
+
 
 class TestModuleSource:
     """`ModuleSource` metadata vs. its iteration modes (dense, no GPU)."""
@@ -2104,10 +2449,12 @@ class TestDeferredProcessingContract:
 
     def _engines(self):
         registry = dict(WeightTransferEngineFactory._registry)
-        # ModelExpress is an optional, separately installed package, but its
-        # backend is always registered. Skip it when the package is missing.
-        if importlib.util.find_spec("modelexpress") is None:
-            registry.pop("modelexpress")
+        # ModelExpress and Connex are optional, separately installed packages,
+        # but their backends are always registered. Skip each one whose
+        # package is missing.
+        for name, package in (("modelexpress", "modelexpress"), ("connex", "connex")):
+            if importlib.util.find_spec(package) is None:
+                registry.pop(name)
         return {name: loader() for name, loader in registry.items()}
 
     def test_every_engine_declares_whether_it_defers(self):
@@ -2158,6 +2505,36 @@ class TestTrainerFactory:
                 )
         finally:
             WeightTransferTrainerFactory._registry = saved
+
+    def test_connex_trainer_registration_is_lazy(self, monkeypatch):
+        from vllm.distributed.weight_transfer import factory
+
+        imported = []
+        module = MagicMock()
+        module.ConnexTrainerWeightTransferEngine.__name__ = (
+            "ConnexTrainerWeightTransferEngine"
+        )
+
+        def import_module(name):
+            imported.append(name)
+            return module
+
+        monkeypatch.setattr(factory.importlib, "import_module", import_module)
+        init_info = MagicMock(backend="connex")
+        client = RecordingClient()
+        source = ModuleSource(_module_with(("w", torch.zeros(2))))
+
+        assert imported == []
+        engine = WeightTransferTrainerFactory.trainer_init(
+            init_info, client=client, source=source
+        )
+
+        assert imported == ["vllm.distributed.weight_transfer.connex_engine"]
+        trainer_init = module.ConnexTrainerWeightTransferEngine.trainer_init
+        trainer_init.assert_called_once_with(
+            init_info=init_info, client=client, source=source
+        )
+        assert engine is trainer_init.return_value
 
     def test_unknown_backend_raises(self):
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):

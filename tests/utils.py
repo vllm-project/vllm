@@ -1621,8 +1621,11 @@ def wait_for_gpu_memory_to_clear(
         and envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn"
     ):
         # HIP memory queries initialize HIP, which forces vLLM to spawn instead
-        # of fork its engine processes; poll from a forked child instead.
-        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("fork")) as pool:
+        # of fork its engine processes; poll from a child instead. Spawn it: HIP
+        # may already be initialized outside torch, and a forked child can't use it.
+        with ProcessPoolExecutor(
+            max_workers=1, mp_context=get_context("spawn")
+        ) as pool:
             pool.submit(
                 _wait_for_gpu_memory_to_clear_with_hip,
                 devices=devices,
