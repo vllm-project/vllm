@@ -10,6 +10,7 @@ import pytest
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig, VllmConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import TokensPrompt
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.multimodal.utils import encode_video_url
 from vllm.renderers.base import BaseRenderer
@@ -214,19 +215,23 @@ class TestCmplPath:
     @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
     def test_prompt_extras_is_not_mutated(self, is_async):
         renderer = _StubRenderer()
+        prompt: TokensPrompt = {
+            "prompt_token_ids": [1],
+            "multi_modal_data": {"image": "<img>"},
+        }
         prompt_extras = {"media_io_kwargs": REQ_KW, "cache_salt": "request-1"}
 
         if is_async:
             asyncio.run(
                 renderer.render_cmpl_async(
-                    [{"multi_modal_data": {"image": "<img>"}}],
+                    [prompt],
                     object(),
                     prompt_extras=prompt_extras,
                 )
             )
         else:
             renderer.render_cmpl(
-                [{"multi_modal_data": {"image": "<img>"}}],
+                [prompt],
                 object(),
                 prompt_extras=prompt_extras,
             )
