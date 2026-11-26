@@ -43,7 +43,7 @@ helper initializes the CUDA driver and reads only CUDA-visible device UUIDs,
 without creating CUDA contexts or importing Torch. NVML verifies each MIG handle.
 Discovery or permission failures remain unknown; NVML sibling instances are never
 enumerated. MIG utilization stays absent.
-CPU jobs and AMD mirrors do not collect GPU samples.
+CPU jobs and AMD jobs do not collect GPU samples.
 
 Run the helper tests without loading vLLM or requiring a GPU:
 

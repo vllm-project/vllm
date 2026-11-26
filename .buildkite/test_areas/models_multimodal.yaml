@@ -2,111 +2,91 @@ group: Models - Multimodal
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 1: qwen2"
+- label: 'Multimodal Models (Standard) 1: qwen2'
   key: multi-modal-models-standard-1-qwen2
+  devices:
+    h200_18gb:
+      timeout_in_minutes: 68
+    mi355_dpx:
+      timeout_in_minutes: 65
   automatic_shard: true
-  timeout_in_minutes: 68
-  device: h200_18gb
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
     - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 1: qwen2"
-      dind: false
-      automatic_shard: true
-      device: mi355_dpx
-      timeout_in_minutes: 65
-      depends_on:
-      - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 2: qwen3 + gemma"
+- label: 'Multimodal Models (Standard) 2: qwen3 + gemma'
   key: multi-modal-models-standard-2-qwen3-gemma
+  devices:
+    h200_18gb:
+      timeout_in_minutes: 75
+    mi355_dpx:
+      timeout_in_minutes: 55
   automatic_shard: true
-  timeout_in_minutes: 75
-  device: h200_18gb
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
     - pytest -v -s models/multimodal/generation/test_mm_prefix_lm.py -m core_model
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
     - pytest -v -s models/multimodal/generation/test_qwen3_vl.py -m core_model
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 2: qwen3 + gemma"
-      automatic_shard: true
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 55
-      depends_on:
-      - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 3: llava + qwen2_vl"
-  device: h200_35gb
+- label: 'Multimodal Models (Standard) 3: llava + qwen2_vl'
   key: multi-modal-models-standard-3-llava-qwen2-vl
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 40
+    mi250_1:
+      timeout_in_minutes: 55
   automatic_shard: true
-  timeout_in_minutes: 40
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
-  mirror:
-    amd:
-      automatic_shard: true
-      label: ":amd: (MI250) Multimodal Models (Standard) 3: llava + qwen2_vl"
-      dind: false
-      device: mi250_1
-      timeout_in_minutes: 55
-      depends_on:
-      - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Unlimited-OCR-2"
-  device: h200_35gb
+- label: Unlimited-OCR-2
   key: unlimited-ocr2-generation
-  automatic_shard: true
-  timeout_in_minutes: 30
-  source_file_dependencies:
-  - vllm/
-  - examples/generate/multimodal/vision_language_multi_image_offline.py
-  - tests/models/multimodal/generation/test_unlimited_ocr.py
-  - tests/models/multimodal/processing/test_unlimited_ocr.py
-  commands:
-    - pytest -v -s models/multimodal/generation/test_unlimited_ocr.py -m core_model
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Unlimited-OCR-2"
-      automatic_shard: true
-      device: mi355_dpx
-      dind: false
+  devices:
+    h200_35gb:
       timeout_in_minutes: 30
-      depends_on:
-      - image-build-amd
       commands:
-      - >-
-        pytest -v -s models/multimodal/generation/test_unlimited_ocr.py
-        -m core_model
-      - >-
-        pytest -v -s models/multimodal/processing/test_unlimited_ocr.py
-
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper"
-  device: h200_35gb
-  key: multi-modal-models-standard-4-other-whisper
+        - pytest -v -s models/multimodal/generation/test_unlimited_ocr.py -m core_model
+    mi355_dpx:
+      timeout_in_minutes: 30
+      source_file_dependencies:
+        - tests/models/multimodal/processing/test_unlimited_ocr.py
+      commands:
+        - >-
+          pytest -v -s models/multimodal/generation/test_unlimited_ocr.py
+          -m core_model
+        - >-
+          pytest -v -s models/multimodal/processing/test_unlimited_ocr.py
   automatic_shard: true
-  timeout_in_minutes: 75
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal
+    - vllm/
+    - examples/generate/multimodal/vision_language_multi_image_offline.py
+    - tests/models/multimodal/generation/test_unlimited_ocr.py
+
+- label: 'Multimodal Models (Standard) 4: other + whisper'
+  key: multi-modal-models-standard-4-other-whisper
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 75
+    mi355_dpx:
+      timeout_in_minutes: 70
+  automatic_shard: true
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal
   commands:
     - >-
       pytest -v -s
@@ -125,128 +105,108 @@ steps:
     - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
     - pytest models/multimodal/generation/test_memory_leak.py -m core_model
     - pytest -v -s models/multimodal/generation/test_whisper.py -m core_model
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Multimodal Models (Standard) 4: other + whisper"
-      automatic_shard: true
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 70
-      depends_on:
-      - image-build-amd
 
-- label: ":computer: (CPU) Multimodal Processor"
+- label: Multimodal Processor
   key: multi-modal-processor-cpu
+  devices:
+    cpu-medium:
+      timeout_in_minutes: 125
   automatic_shard: true
-  depends_on:
-  - image-build-cpu
-  timeout_in_minutes: 125
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal
-  - tests/models/registry.py
-  device: cpu-medium
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal
+    - tests/models/registry.py
   commands:
     - >-
       pytest -v -s
       models/multimodal/processing
       --ignore models/multimodal/processing/test_tensor_schema.py
 
-- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
+- label: Multimodal Processor
   key: multi-modal-processor
-  automatic_shard: true
-  timeout_in_minutes: 98
-  device: h200_18gb
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal
-  - tests/models/registry.py
-  commands:
-    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Multimodal Processor"
-      automatic_shard: true
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 115
-      depends_on:
-      - image-build-amd
+  devices:
+    h200_18gb:
+      timeout_in_minutes: 98
       commands:
-      - pytest -v -s models/multimodal/processing/test_tensor_schema.py
-      - pytest -v -s models/multimodal/processing/test_mistral3.py::test_pixtral_patch_embed_preserves_image_order_and_strides models/multimodal/test_mimo_v2_omni.py
-
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Accuracy Eval (Small Models)"
-  device: h200_35gb
-  key: multi-modal-accuracy-eval-small-models
+        - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+    mi355_dpx:
+      timeout_in_minutes: 115
+      commands:
+        - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+        - pytest -v -s models/multimodal/processing/test_mistral3.py::test_pixtral_patch_embed_preserves_image_order_and_strides models/multimodal/test_mimo_v2_omni.py
   automatic_shard: true
-  timeout_in_minutes: 30
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal
+    - tests/models/registry.py
+
+- label: Multimodal Accuracy Eval (Small Models)
+  key: multi-modal-accuracy-eval-small-models
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 30
+    mi355_dpx:
+      timeout_in_minutes: 35
+      source_file_dependencies:
+        - vllm/platforms/rocm.py
+        - vllm/model_executor/model_loader/
+  automatic_shard: true
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
-  - vllm/multimodal/
-  - vllm/inputs/
-  - vllm/v1/core/
+    - vllm/multimodal/
+    - vllm/inputs/
+    - vllm/v1/core/
   commands:
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
-  mirror:
-    amd:
-      automatic_shard: true
-      label: ":amd: (MI355 DPX) Multimodal Accuracy Eval (Small Models)"
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 35
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/multimodal/
-      - vllm/inputs/
-      - vllm/v1/core/
-      - vllm/platforms/rocm.py
-      - vllm/model_executor/model_loader/
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
-- label: ":nvidia: (B200) [Nightly] Multimodal FlashInfer Autotuning"
+- label: Multimodal FlashInfer Autotuning
   key: multi-modal-flashinfer-autotuning
+  devices:
+    b200-k8s:
+      optional: true
+      num_devices: 2
+      timeout_in_minutes: 30
   automatic_shard: true
-  device: b200-k8s
-  num_devices: 2
-  timeout_in_minutes: 30
-  optional: true
   env:
     VLLM_WORKER_MULTIPROC_METHOD: spawn
   source_file_dependencies:
-  - vllm/config/kernel.py
-  - vllm/config/multimodal.py
-  - vllm/model_executor/warmup/
-  - vllm/model_executor/kernels/linear/nvfp4/
-  - vllm/model_executor/kernels/linear/mxfp8/
-  - vllm/model_executor/layers/quantization/online/
-  - vllm/multimodal/encoder_budget.py
-  - vllm/model_executor/models/pixtral.py
-  - vllm/model_executor/models/qwen2_5_vl.py
-  - vllm/model_executor/models/vision.py
-  - vllm/utils/flashinfer.py
-  - vllm/v1/core/encoder_cache_manager.py
-  - vllm/v1/worker/gpu/
-  - tests/model_executor/test_flashinfer_encoder_autotune.py
+    - vllm/config/kernel.py
+    - vllm/config/multimodal.py
+    - vllm/model_executor/warmup/
+    - vllm/model_executor/kernels/linear/nvfp4/
+    - vllm/model_executor/kernels/linear/mxfp8/
+    - vllm/model_executor/layers/quantization/online/
+    - vllm/multimodal/encoder_budget.py
+    - vllm/model_executor/models/pixtral.py
+    - vllm/model_executor/models/qwen2_5_vl.py
+    - vllm/model_executor/models/vision.py
+    - vllm/utils/flashinfer.py
+    - vllm/v1/core/encoder_cache_manager.py
+    - vllm/v1/worker/gpu/
+    - tests/model_executor/test_flashinfer_encoder_autotune.py
   commands:
     - pytest -v -s model_executor/test_flashinfer_encoder_autotune.py
 
-- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)"
-  device: h200_35gb
+- label: Multimodal Models (Extended Generation 1)
   key: multi-modal-models-extended-generation-1
+  devices:
+    h200_35gb:
+      optional: true
+    mi355_dpx:
+      optional: true
+      timeout_in_minutes: 100
   automatic_shard: true
-  optional: true
   env:
     # Engines in a shard can start after other tests touched CUDA in the
     # pytest process, so never fork them.
     VLLM_WORKER_MULTIPROC_METHOD: spawn
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal/generation
-  - tests/models/multimodal/test_mapping.py
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal/generation
+    - tests/models/multimodal/test_mapping.py
   commands:
     - >-
       pytest -v -s
@@ -254,100 +214,67 @@ steps:
       -m 'not core_model'
       --ignore models/multimodal/generation/test_common.py
     - pytest -v -s models/multimodal/test_mapping.py
-  mirror:
-    amd:
-      automatic_shard: true
-      label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 1)"
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 100
-      depends_on:
-      - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (PPL)"
-  device: h200_35gb
+- label: Multimodal Models (PPL)
   key: multi-modal-models-extended-ppl
+  devices:
+    h200_35gb:
+      optional: true
+    mi355_dpx:
+      optional: true
+      timeout_in_minutes: 90
   automatic_shard: true
-  optional: true
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal/generation_ppl_test/
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal/generation_ppl_test/
   commands:
     - pytest -v -s models/multimodal/generation_ppl_test/
-  mirror:
-    amd:
-      automatic_shard: true
-      label: ":amd: (MI355 DPX) Multimodal Models (PPL)"
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 90
-      depends_on:
-      - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 2)"
-  device: h200_35gb
+- label: Multimodal Models (Extended Generation 2)
   key: multi-modal-models-extended-generation-2
+  devices:
+    h200_35gb:
+      optional: true
+    mi355_dpx:
+      optional: true
+      timeout_in_minutes: 100
   automatic_shard: true
-  optional: true
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal/generation
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal/generation
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 2)"
-      automatic_shard: true
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 100
-      depends_on:
-      - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 3)"
-  device: h200_35gb
+- label: Multimodal Models (Extended Generation 3)
   key: multi-modal-models-extended-generation-3
+  devices:
+    h200_35gb:
+      optional: true
+    mi355_dpx:
+      optional: true
+      timeout_in_minutes: 90
   automatic_shard: true
-  optional: true
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal/generation
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal/generation
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 3)"
-      dind: false
-      automatic_shard: true
-      device: mi355_dpx
-      timeout_in_minutes: 90
-      depends_on:
-      - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Pooling)"
+- label: Multimodal Models (Extended Pooling)
   key: multi-modal-models-extended-pooling
+  devices:
+    h200_35gb:
+      optional: true
+    mi355_dpx:
+      optional: true
+      timeout_in_minutes: 75
   automatic_shard: true
-  optional: true
-  device: h200_35gb
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/models/multimodal/pooling
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/models/multimodal/pooling
   commands:
     - pytest -v -s models/multimodal/pooling -m 'not core_model'
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Multimodal Models (Extended Pooling)"
-      dind: false
-      automatic_shard: true
-      device: mi355_dpx
-      timeout_in_minutes: 75
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/
-      - "!vllm/distributed/kv_transfer/"
-      - tests/models/multimodal/pooling
