@@ -38,23 +38,13 @@ def get_decode_stream_seed(
     prompt_token_ids: list[int] | None,
     skip_special_tokens: bool,
 ) -> list[int] | None:
-    """Return the prompt suffix used to prime a `DecodeStream`.
+    """Return a prompt tail that primes a `DecodeStream` like the full prompt.
 
-    `DecodeStream` decodes all of its seed ids on the first `step()`, so
-    seeding it with the whole prompt costs O(prompt) time. Once it has emitted
-    text it keeps only the ids that follow, so the seed only shapes the first
-    delta, and a tail reproduces that delta exactly if:
-
-    - It holds `INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET` tokens that decode
-      to text on their own. Metaspace, WordPiece and leading-`Strip` decoders
-      treat the start of the decoded text specially (e.g. drop a leading
-      space), so tokens that decode to nothing, such as skipped special
-      tokens or whitespace that such a decoder strips, must not count.
-    - Its text does not end in U+FFFD, i.e. it does not start inside the
-      multi-byte character or byte-fallback run that the prompt ends with;
-      such a window is extended to the start of the character. If the prompt
-      itself ends in U+FFFD, `DecodeStream` streams its whole seed text in
-      the first delta, so the full prompt is used to keep that output.
+    The seed only shapes the first delta, so a short tail avoids an O(prompt)
+    decode. The tail holds `INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET` tokens
+    that decode to text on their own (decoders like Metaspace treat the start
+    of the text specially), extended if its text ends in U+FFFD. Falls back to
+    the full prompt if the prompt's own text ends in U+FFFD.
     """
     if not prompt_token_ids:
         return prompt_token_ids

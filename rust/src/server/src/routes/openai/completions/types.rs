@@ -8,22 +8,15 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_with::DefaultOnNull;
-use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::{Prompt, TruncationSide};
 
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::types::{
-    LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
-    Usage, default_true, deserialize_request_top_k, validate_stop,
+    LogProbs, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray, Usage,
+    default_true, deserialize_request_top_k,
 };
-
-/// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
-/// / OpenAI default.
-fn default_completion_max_tokens() -> Option<u32> {
-    Some(16)
-}
 
 /// The `prompt` of a completions request: one prompt, or a batch of prompts
 /// that each get `n` choices.
@@ -58,14 +51,16 @@ impl CompletionPrompt {
 /// wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
 #[serde_with::serde_as]
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CompletionRequest {
     // -------- Standard OpenAI API Parameters --------
     /// ID of the model to use
     pub model: Option<String>,
 
     /// The prompt(s) to generate completions for.
-    pub prompt: CompletionPrompt,
+    ///
+    /// `None` (missing or null) is rejected when the request is lowered.
+    pub prompt: Option<CompletionPrompt>,
 
     /// Echo back the prompt in addition to the completion
     #[serde(default)]
@@ -82,9 +77,8 @@ pub struct CompletionRequest {
     /// Include the log probabilities on the logprobs most likely tokens
     pub logprobs: Option<i32>,
 
-    /// The maximum number of tokens to generate (defaults to 16 when absent,
-    /// matching the Python vLLM / OpenAI API convention)
-    #[serde(default = "default_completion_max_tokens")]
+    /// The maximum number of tokens to generate (defaults to 16 when absent or
+    /// null during lowering, matching the Python vLLM / OpenAI API convention)
     pub max_tokens: Option<u32>,
 
     /// How many completions to generate for each prompt
@@ -99,7 +93,6 @@ pub struct CompletionRequest {
     pub seed: Option<i64>,
 
     /// Up to 4 sequences where the API will stop generating further tokens
-    #[validate(custom(function = "validate_stop"))]
     pub stop: Option<StringOrArray>,
 
     /// Whether to stream back partial progress
@@ -241,7 +234,6 @@ pub struct CompletionRequest {
     pub routed_experts_prompt_start: Option<u32>,
 
     /// Salt for prefix cache isolation in multi-user environments
-    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
     /// KV transfer parameters for disaggregated serving
@@ -257,18 +249,6 @@ pub struct CompletionRequest {
     /// Additional fields
     #[serde(flatten)]
     pub other: Map<String, Value>,
-}
-
-impl Normalizable for CompletionRequest {
-    /// Normalize the request by applying defaults.
-    fn normalize(&mut self) {
-        // An explicit `"max_tokens": null` deserializes to `None`, bypassing the
-        // serde field default. Coerce it back to the default so it behaves like
-        // an absent field, matching Python vLLM's `normalize_null_max_tokens`.
-        if self.max_tokens.is_none() {
-            self.max_tokens = default_completion_max_tokens();
-        }
-    }
 }
 
 /// Mirrors the Python vLLM `CompletionResponse` class.
@@ -376,7 +356,7 @@ mod tests {
     fn prompt_accepts_one_prompt_or_a_batch_of_one_kind() {
         let prompts = |prompt: Value| {
             serde_json::from_value::<CompletionRequest>(json!({ "prompt": prompt }))
-                .map(|request| request.prompt.into_prompts())
+                .map(|request| request.prompt.unwrap().into_prompts())
         };
         assert_eq!(prompts(json!("a")).unwrap(), [Prompt::Text("a".into())]);
         assert_eq!(

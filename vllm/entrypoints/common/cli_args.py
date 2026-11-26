@@ -429,10 +429,15 @@ class FrontendArgs(BaseFrontendArgs):
 
 def resolve_default_chat_template_kwargs(
     args: argparse.Namespace,
+    tokenizer_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve renderer defaults, including the dedicated Cohere format flag."""
+    """Resolve renderer defaults, including the dedicated Cohere format flag.
+
+    `cohere_format` is only injected for `--tokenizer-mode cohere`; other
+    renderers don't consume it.
+    """
     kwargs = dict(args.default_chat_template_kwargs or {})
-    if getattr(args, "cohere_format", None):
+    if getattr(args, "cohere_format", None) and tokenizer_mode == "cohere":
         kwargs.setdefault("cohere_format", args.cohere_format)
     return kwargs
 

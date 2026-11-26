@@ -36,6 +36,7 @@ steps:
   - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   - tests/entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py
+  - tests/entrypoints/openai/decisions/test_decisions_e2e.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -64,6 +65,8 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
   - pytest -v -s entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py
+  # The Rust frontend does not implement /v1/systemone yet.
+  - pytest -v -s entrypoints/openai/decisions/test_decisions_e2e.py -k "not systemone"
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
@@ -99,6 +102,7 @@ steps:
       - tests/entrypoints/serve/instrumentator/test_uds.py
       - tests/v1/sample/test_logprobs_e2e.py
       - tests/entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py
+      - tests/entrypoints/openai/decisions/test_decisions_e2e.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"
@@ -133,10 +137,10 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   - pytest -v -s entrypoints/serve/instrumentator/test_basic.py
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
-  # run_batch drives the Python batch runner, not a server. test_metrics_exist needs
-  # vllm:admission_rejections (text) and image inputs (multimodal), which the Rust frontend lacks.
-  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist"
-  # /tokenizer_info returns 501 in the Rust frontend.
+  # run_batch drives the Python batch runner, not a server. The multimodal model (SmolVLM,
+  # Idefics3) has no Rust processor, so the Rust frontend refuses to start it.
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not multimodal"
+  # The Rust frontend does not implement /tokenizer_info.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
   # The Rust frontend loads runtime LoRA paths only under VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES and
   # rejects beam search.
@@ -218,6 +222,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Chat Completions"
   key: rust-frontend-chat-completions
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_35gb
   working_dir: "/vllm-workspace/tests"
@@ -233,6 +238,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat.py -k "not test_invocations"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Rust Frontend Chat Completions"
       dind: false
       device: mi355_dpx

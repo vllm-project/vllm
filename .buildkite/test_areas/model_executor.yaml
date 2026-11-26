@@ -88,6 +88,7 @@ steps:
 - label: ":nvidia: (B200) Weight Reload Refit"
   device: b200-k8s
   key: weight-reload-refit
+  automatic_shard: true
   timeout_in_minutes: 45
   # the reload code, what the test drives directly and the gpt-oss path; the
   # nightly steps cover the other quantization, attention and model files
@@ -124,6 +125,7 @@ steps:
 - label: ":nvidia: (B200) [Nightly] Weight Reload Refit Extra Cases"
   device: b200-k8s
   key: weight-reload-refit-nightly
+  automatic_shard: true
   optional: true
   timeout_in_minutes: 45
   source_file_dependencies: &weight-reload-refit-nightly-deps
@@ -165,6 +167,7 @@ steps:
   device: b200-k8s
   num_devices: 2
   key: weight-reload-refit-2gpu
+  automatic_shard: true
   optional: true
   timeout_in_minutes: 45
   source_file_dependencies: *weight-reload-refit-nightly-deps

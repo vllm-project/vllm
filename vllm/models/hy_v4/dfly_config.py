@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedConfig
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dfly.config import DFlySpeculatorConfig
 
 if TYPE_CHECKING:
@@ -91,6 +92,18 @@ def _validate_checkpoint_quantization(config: object) -> None:
         )
         if not (is_fp8 or is_mxfp4):
             raise ValueError(error)
+
+
+def _validate_dfly_quantization(config: object) -> None:
+    if isinstance(config, dict) and config.get("quant_method") == "compressed-tensors":
+        # Any layer scheme works for the target; draft layers check their own.
+        # An empty transform_config means no transforms.
+        if config.get("kv_cache_scheme") is not None or config.get("transform_config"):
+            raise ValueError(
+                "DFly does not support compressed-tensors kv_cache_scheme or transforms"
+            )
+        return
+    _validate_checkpoint_quantization(config)
 
 
 def _derive_dfly_config(
@@ -182,7 +195,8 @@ def _derive_dfly_config(
 class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
     """HYV4's configuration and implementation of DFly speculative decoding."""
 
-    speculator_class = "vllm.models.hy_v4.nvidia.dfly_speculator.HYV4DFlySpeculator"
+    # Resolved per platform by the `vllm.models.hy_v4` entry point.
+    speculator_class = "vllm.models.hy_v4.HYV4DFlySpeculator"
     target_model_type = "hy_v4"
 
     @classmethod
@@ -200,7 +214,6 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
     @classmethod
     def verify_target_parallel_config(cls, spec: "SpeculativeConfig") -> None:
         for field in (
-            "data_parallel_size",
             "pipeline_parallel_size",
             "prefill_context_parallel_size",
             "decode_context_parallel_size",
@@ -232,9 +245,7 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
             raise ValueError("DFly requires a BF16 target dtype")
         checkpoint_quantized = target.quantization in ("fp8", "compressed-tensors")
         if checkpoint_quantized:
-            _validate_checkpoint_quantization(
-                target.model_arch_config.quantization_config
-            )
+            _validate_dfly_quantization(target.model_arch_config.quantization_config)
         elif target.quantization is not None:
             from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
             from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -248,8 +259,9 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
                 QuantizationConfigArgs(moe=QuantSpec(weight=kFp8Static128BlockSym))
             ):
                 raise ValueError(
-                    "DFly supports only unquantized targets, checkpoint blockwise "
-                    "FP8/MXFP4 or online MoE-only fp8_per_block quantization"
+                    "DFly supports only unquantized targets, compressed-tensors or "
+                    "blockwise FP8 checkpoints, or online MoE-only fp8_per_block "
+                    "quantization"
                 )
         if checkpoint_quantized:
             if draft.quantization != target.quantization or spec.quantization not in (
@@ -257,9 +269,7 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
                 target.quantization,
             ):
                 raise ValueError("DFly must use the checkpoint's quantization")
-            _validate_checkpoint_quantization(
-                draft.model_arch_config.quantization_config
-            )
+            _validate_dfly_quantization(draft.model_arch_config.quantization_config)
         elif draft.quantization is not None or spec.quantization is not None:
             raise ValueError("DFly does not support quantized draft weights")
         parallel = spec.target_parallel_config
@@ -310,7 +320,17 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
         super().adapt_draft_model_config(spec)
 
     @classmethod
+    def verify_platform(cls, spec: "SpeculativeConfig") -> None:
+        if not current_platform.is_rocm():
+            return
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            raise NotImplementedError("HYV4 DFly on ROCm requires gfx950")
+
+    @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
+        cls.verify_platform(spec)
         if spec.kv_cache_dtype not in (None, "auto", "bfloat16", "fp8_ds_mla"):
             raise ValueError("DFly requires BF16 or fp8_ds_mla draft MLA KV cache")
         if spec.attention_backend is not None:

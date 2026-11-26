@@ -406,7 +406,7 @@ class NixlBaseConnectorScheduler:
         """
         return max(
             1 if self._has_mamba or self._bounded_replay else 0,
-            self.vllm_config.num_prefill_lookahead_tokens - 1,
+            self.vllm_config.num_reprefillable_tokens,
         )
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
