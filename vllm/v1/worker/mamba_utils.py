@@ -724,7 +724,7 @@ def _get_mamba_gpu_state_copy_funcs(
                 "ReplaySSM trackers require conv and temporal canonical "
                 "states and three bound ring states"
             )
-        state_copy_funcs += (get_temporal_copy_spec,) * 3
+        state_copy_funcs += (get_temporal_copy_spec,) * (len(spec.shapes) - 2)
     return state_copy_funcs
 
 
@@ -955,10 +955,6 @@ class MambaSpecDecodeGPUContext:
                 )
                 has_baseline_layer |= not uses_replayssm_trackers
                 if uses_replayssm_trackers:
-                    if len(kv_caches) != len(state_copy_funcs):
-                        raise ValueError(
-                            "ReplaySSM trackers require five bound Mamba2 states"
-                        )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
                     raise ValueError(
@@ -1078,12 +1074,17 @@ class MambaSpecDecodeGPUContext:
             )
 
         if replayssm_groups:
+            _, num_speculative_blocks = get_mamba_group_params(
+                kv_cache_config, self.mamba_group_ids
+            )
             self.replayssm = ReplaySSMModelContext.create(
                 replayssm_groups,
                 self.num_accepted_tokens_snapshot.numel(),
                 materialize_prefixes=is_mamba_prefix_caching_group(
                     kv_cache_config.kv_cache_groups[self.mamba_group_ids[0]]
                 ),
+                # ReplaySSM reserves speculative blocks only for its rings.
+                ring_col=num_speculative_blocks,
             )
 
         self.is_initialized = True

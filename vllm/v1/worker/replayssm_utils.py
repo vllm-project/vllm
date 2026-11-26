@@ -133,13 +133,24 @@ def _reset_new_replayssm_slots_kernel(
     tracker_start_ptrs,
     tracker_committed_ptrs,
     block_table_strides,
+    src_slots_ptrs,
+    ring_slots_ptrs,
+    dst_slots_ptrs,
+    plan_ring_start,
+    plan_flush_count,
+    num_layers,
     PAD_SLOT_ID: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr,
+    MAX_NUM_REQS: tl.constexpr,
+    RING_BUFFER_LEN: tl.constexpr,
+    RING_COL: tl.constexpr,
 ) -> None:
     """Copy live cursors or reset a fresh destination in this cache group.
 
     Source and destination are logical block-table columns. Their slot lookups
-    distinguish a missing group-local source from a continuation.
+    distinguish a missing group-local source from a continuation. With rings
+    `RING_COL` blocks past the state, the new block's rings start empty, so the
+    plan folds the committed records into the source checkpoint first.
     """
     batch_idx = tl.program_id(0)
     group_idx = tl.program_id(1)
@@ -177,6 +188,33 @@ def _reset_new_replayssm_slots_kernel(
     changed = valid_dst & (~valid_src | (src_slot != dst_slot))
     start = tl.load(tracker_start + src_slot, mask=valid_src, other=0)
     committed = tl.load(tracker_committed + src_slot, mask=valid_src, other=0)
+    if RING_COL > 0:
+        fold = changed & valid_src & (committed > 0)
+        ring_slot = tl.load(
+            block_table + batch_idx * block_table_stride_req + src_col + RING_COL,
+            mask=fold,
+            other=PAD_SLOT_ID,
+        )
+        writes_plan = group_idx == 0
+        tl.store(plan_ring_start + batch_idx, start, mask=writes_plan)
+        tl.store(
+            plan_flush_count + batch_idx,
+            tl.where(fold, committed, -1),
+            mask=writes_plan,
+        )
+        src_slots = tl.load(src_slots_ptrs + group_idx).to(tl.pointer_type(tl.int32))
+        ring_slots = tl.load(ring_slots_ptrs + group_idx).to(tl.pointer_type(tl.int32))
+        dst_slots = tl.load(dst_slots_ptrs + group_idx).to(tl.pointer_type(tl.int32))
+        for layer_idx in range(tl.load(num_layers + group_idx)):
+            slot_offset = layer_idx * MAX_NUM_REQS + batch_idx
+            fold_slot = tl.where(fold, src_slot, PAD_SLOT_ID)
+            tl.store(src_slots + slot_offset, fold_slot)
+            tl.store(ring_slots + slot_offset, ring_slot)
+            tl.store(dst_slots + slot_offset, fold_slot)
+        start = tl.where(fold, (start + committed) % RING_BUFFER_LEN, start)
+        committed = tl.where(fold, 0, committed)
+        tl.store(tracker_start + src_slot, start, mask=fold)
+        tl.store(tracker_committed + src_slot, committed, mask=fold)
     tl.store(tracker_start + dst_slot, start, mask=changed)
     tl.store(tracker_committed + dst_slot, committed, mask=changed)
 
@@ -208,6 +246,8 @@ def _postprocess_replayssm_kernel(
     HAS_IDX_MAPPING: tl.constexpr,
     MATERIALIZE_PREFIXES: tl.constexpr,
     LIVE_COL_IS_ZERO: tl.constexpr,
+    ring_slots_ptrs=None,
+    RING_COL: tl.constexpr = 0,
 ) -> None:
     """Commit a completed step and prepare an optional prefix snapshot."""
     batch_idx = tl.program_id(0)
@@ -294,6 +334,17 @@ def _postprocess_replayssm_kernel(
                 dst_slots + slot_offset,
                 tl.where(materialize, dst_slot, PAD_SLOT_ID),
             )
+        if RING_COL > 0:
+            ring_slot = tl.load(
+                block_table + batch_idx * block_table_stride_req + live_col + RING_COL,
+                mask=materialize,
+                other=PAD_SLOT_ID,
+            )
+            ring_slots = tl.load(ring_slots_ptrs + group_idx).to(
+                tl.pointer_type(tl.int32)
+            )
+            for layer_idx in range(tl.load(num_layers + group_idx)):
+                tl.store(ring_slots + layer_idx * MAX_NUM_REQS + batch_idx, ring_slot)
     if prefilling:
         if MATERIALIZE_PREFIXES:
             first_col = computed_before // MAMBA_BLOCK_SIZE
@@ -399,11 +450,14 @@ class ReplaySSMModelContext:
     ring_start_ptrs: torch.Tensor
     num_committed_ptrs: torch.Tensor
     src_slots_ptrs: torch.Tensor
+    ring_slots_ptrs: torch.Tensor
     dst_slots_ptrs: torch.Tensor
     num_layers: torch.Tensor
     # Prefix-cache snapshots only; they read Mamba2's states and A.
     materialize_tables: _ReplaySSMMaterializeTables | None
+    materializer: Callable[..., None] | None
     src_slots: torch.Tensor
+    ring_slots: torch.Tensor
     dst_slots: torch.Tensor
     plan_ring_start: torch.Tensor
     plan_flush_count: torch.Tensor
@@ -413,6 +467,7 @@ class ReplaySSMModelContext:
     logical_window: int
     ring_buffer_len: int
     materialize_prefixes: bool
+    ring_col: int
 
     @classmethod
     def create(
@@ -420,10 +475,13 @@ class ReplaySSMModelContext:
         grouped: Sequence[tuple[list[Any], MambaSpec, torch.Tensor]],
         max_num_reqs: int,
         materialize_prefixes: bool,
+        ring_col: int = 0,
     ) -> "ReplaySSMModelContext":
         mixers = [mixer for group, _, _ in grouped for mixer in group]
         first = mixers[0]
         first_spec = grouped[0][1]
+        materializer = getattr(first, "replayssm_materializer", None)
+        mamba2_tables = materialize_prefixes and materializer is None
         # Homogeneous groups share cache-hit lookup, logical columns, and replay
         # transitions. The scheduler still assigns each group its own slots.
         assert all(spec == first_spec for _, spec, _ in grouped), (
@@ -432,7 +490,7 @@ class ReplaySSMModelContext:
         geometry = [(state.shape[1:], state.dtype) for state in first.kv_cache[1:]]
         assert all(
             [(state.shape[1:], state.dtype) for state in mixer.kv_cache[1:]] == geometry
-            and (not materialize_prefixes or mixer.A.dtype == first.A.dtype)
+            and (not mamba2_tables or mixer.A.dtype == first.A.dtype)
             and mixer.replayssm_buffer_len == first.replayssm_buffer_len
             for mixer in mixers
         ), "ReplaySSM trackers require equal materialization geometry"
@@ -445,6 +503,7 @@ class ReplaySSMModelContext:
             dtype=torch.int32,
             device=device,
         )
+        ring_slots = torch.full_like(src_slots, NULL_BLOCK_ID)
         dst_slots = torch.full_like(src_slots, NULL_BLOCK_ID)
         layer_offsets = [0]
         for group, _, _ in grouped:
@@ -466,6 +525,9 @@ class ReplaySSMModelContext:
             src_slots_ptrs=_cuda_i64_ptrs(
                 [src_slots[offset] for offset in layer_offsets[:-1]]
             ),
+            ring_slots_ptrs=_cuda_i64_ptrs(
+                [ring_slots[offset] for offset in layer_offsets[:-1]]
+            ),
             dst_slots_ptrs=_cuda_i64_ptrs(
                 [dst_slots[offset] for offset in layer_offsets[:-1]]
             ),
@@ -475,7 +537,7 @@ class ReplaySSMModelContext:
                 device=device,
             ),
             materialize_tables=None
-            if not materialize_prefixes
+            if not mamba2_tables
             else _ReplaySSMMaterializeTables(
                 state_ptrs=_cuda_i64_ptrs([m.kv_cache[1] for m in mixers]),
                 state_slot_strides=_cuda_i64_slot_strides(
@@ -497,7 +559,9 @@ class ReplaySSMModelContext:
                 state_scale_ptrs=zero_table,
                 state_scale_slot_strides=zero_table,
             ),
+            materializer=None if materializer is None else materializer(mixers),
             src_slots=src_slots,
+            ring_slots=ring_slots,
             dst_slots=dst_slots,
             plan_ring_start=torch.zeros(max_num_reqs, dtype=torch.int32, device=device),
             plan_flush_count=torch.full(
@@ -511,10 +575,29 @@ class ReplaySSMModelContext:
             logical_window=int(first.replayssm_buffer_len),
             ring_buffer_len=first.kv_cache[2].size(2),
             materialize_prefixes=materialize_prefixes,
+            ring_col=ring_col,
         )
 
     def _materialize(self, num_reqs: int) -> None:
         """Publish all canonical prefix snapshots in one kernel launch."""
+        _compact_replayssm_requests_kernel[(1,)](
+            self.plan_flush_count,
+            self.active_request_indices,
+            num_reqs,
+            MAX_NUM_REQS=self.max_num_reqs,
+            BLOCK_SIZE=triton.next_power_of_2(self.max_num_reqs),
+        )
+        if self.materializer is not None:
+            self.materializer(
+                self.src_slots,
+                self.ring_slots,
+                self.dst_slots,
+                self.plan_ring_start,
+                self.plan_flush_count,
+                self.active_request_indices,
+                num_reqs,
+            )
+            return
         first = self.mixers[0]
         mamba_config = first.mamba_config
         assert self.materialize_tables is not None
@@ -586,9 +669,20 @@ class ReplaySSMModelContext:
             self.ring_start_ptrs,
             self.num_committed_ptrs,
             self.block_table_strides,
+            self.src_slots_ptrs,
+            self.ring_slots_ptrs,
+            self.dst_slots_ptrs,
+            self.plan_ring_start,
+            self.plan_flush_count,
+            self.num_layers,
             PAD_SLOT_ID=NULL_BLOCK_ID,
             HAS_IDX_MAPPING=idx_mapping is not None,
+            MAX_NUM_REQS=self.max_num_reqs,
+            RING_BUFFER_LEN=self.ring_buffer_len,
+            RING_COL=self.ring_col,
         )
+        if self.ring_col:
+            self._materialize(num_reqs)
 
     def postprocess(
         self,
@@ -632,16 +726,11 @@ class ReplaySSMModelContext:
             HAS_IDX_MAPPING=idx_mapping is not None,
             MATERIALIZE_PREFIXES=self.materialize_prefixes,
             LIVE_COL_IS_ZERO=live_cols is None,
+            ring_slots_ptrs=self.ring_slots_ptrs,
+            RING_COL=self.ring_col,
         )
         if not self.materialize_prefixes:
             return
-        _compact_replayssm_requests_kernel[(1,)](
-            self.plan_flush_count,
-            self.active_request_indices,
-            num_reqs,
-            MAX_NUM_REQS=self.max_num_reqs,
-            BLOCK_SIZE=triton.next_power_of_2(self.max_num_reqs),
-        )
         self._materialize(num_reqs)
 
 
