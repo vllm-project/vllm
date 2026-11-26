@@ -458,20 +458,22 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
     tools
         .into_iter()
         .map(|tool| {
+            // A JSON schema object or `null`, as the HTTP tool DTO accepts.
             let parameters = if tool.parameters_json.is_empty() {
-                serde_json::Value::Null
+                None
             } else {
-                serde_json::from_str(&tool.parameters_json).map_err(|error| {
-                    Status::invalid_argument(format!(
-                        "invalid parameters_json for tool `{}`: {error}",
-                        tool.name
-                    ))
-                })?
+                serde_json::from_str::<Option<serde_json::Map<_, _>>>(&tool.parameters_json)
+                    .map_err(|error| {
+                        Status::invalid_argument(format!(
+                            "invalid parameters_json for tool `{}`: {error}",
+                            tool.name
+                        ))
+                    })?
             };
             Ok(ChatTool {
                 name: tool.name,
                 description: tool.description,
-                parameters,
+                parameters: parameters.map_or(serde_json::Value::Null, serde_json::Value::Object),
                 strict: tool.strict,
                 defer_loading: tool.defer_loading,
             })

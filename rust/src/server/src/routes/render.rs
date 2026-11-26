@@ -220,15 +220,7 @@ pub(crate) async fn render_chat<S: RenderContext>(
         // its output grammar is the same for every sample.
         .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(|error| match error {
-            // TODO: remove once client vs server ChatTemplate errors are split
-            // in `vllm-chat`; keeps `render_chat` from regressing 400 -> 500
-            // for this variant in the meantime.
-            vllm_chat::Error::ChatTemplate(_) => {
-                ApiError::invalid_request(error.to_report_string(), None)
-            }
-            other => chat_submit_error("failed to prepare render chat request", other),
-        })?
+        .map_err(|error| chat_submit_error("failed to prepare render chat request", error))?
         .text_request;
     Ok(Json(lower_render_request(
         state.as_ref(),
