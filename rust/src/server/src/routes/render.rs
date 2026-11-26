@@ -13,7 +13,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
-use thiserror_ext::AsReport as _;
+use vllm_chat::ChatRequest;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
@@ -164,6 +164,35 @@ fn hoist_transfer_params(
     Some(params)
 }
 
+pub(crate) struct LoweredChatRender {
+    pub(crate) chat_request: ChatRequest,
+    pub(crate) model: String,
+}
+
+pub(crate) async fn lower_chat_render_request<S: RenderContext>(
+    state: &S,
+    body: ChatCompletionRequest,
+    headers: &HeaderMap,
+) -> Result<LoweredChatRender, ApiError> {
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model(requested_model).await;
+    let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
+
+    let request_context = resolve_request_context(headers, body.request_id.as_deref())?;
+
+    let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
+    validate_max_output_tokens(
+        "max_completion_tokens",
+        chat_request.sampling_params.max_tokens,
+        state.text_processor().max_model_len(),
+    )?;
+
+    Ok(LoweredChatRender {
+        chat_request,
+        model,
+    })
+}
+
 /// `/v1/chat/completions/render` on both the render-only server and, with
 /// `--enable-scale-out`, the engine-backed server.
 pub(crate) async fn render_chat<S: RenderContext>(
@@ -172,9 +201,6 @@ pub(crate) async fn render_chat<S: RenderContext>(
     body: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
     let Json(body) = body?;
-    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
-    let lora_resolution = state.resolve_model(requested_model).await;
-    let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
     let n = body.n;
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
@@ -183,29 +209,17 @@ pub(crate) async fn render_chat<S: RenderContext>(
         Some(false) => MmPayload::None,
         _ => MmPayload::Tensors,
     });
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
-    let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
-    validate_max_output_tokens(
-        "max_completion_tokens",
-        chat_request.sampling_params.max_tokens,
-        state.text_processor().max_model_len(),
-    )?;
+    let LoweredChatRender {
+        chat_request,
+        model,
+    } = lower_chat_render_request(state.as_ref(), body, &headers).await?;
     let text_request = state
         .chat_processor()
         // The parallel samples of `n` are the generate request's to fan out;
         // its output grammar is the same for every sample.
         .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(|error| match error {
-            // TODO: remove once client vs server ChatTemplate / Multimodal
-            // errors are split in `vllm-chat` (alongside the gRPC render
-            // mapping in `grpc/render.rs`); keeps `render_chat` from
-            // regressing 400 -> 500 for these variants in the meantime.
-            vllm_chat::Error::ChatTemplate(_) | vllm_chat::Error::Multimodal(_) => {
-                ApiError::invalid_request(error.to_report_string(), None)
-            }
-            other => chat_submit_error("failed to prepare render chat request", other),
-        })?
+        .map_err(|error| chat_submit_error("failed to prepare render chat request", error))?
         .text_request;
     Ok(Json(lower_render_request(
         state.as_ref(),
