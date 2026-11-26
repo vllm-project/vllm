@@ -9,6 +9,7 @@ import weakref
 import msgspec.msgpack
 import zmq
 
+from vllm import envs
 from vllm.config import LoggingConfig, ParallelConfig
 from vllm.logger import configure_logging, init_logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -55,14 +56,15 @@ class DPCoordinator:
 
     def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
         try:
-            timeout = 120
+            timeout = envs.VLLM_DP_COORDINATOR_READY_TIMEOUT_S
             ready = multiprocessing.connection.wait(
                 [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
             )
             if not ready:
                 raise RuntimeError(
                     "DP Coordinator process failed to report ZMQ addresses "
-                    f"within timeout={timeout} seconds during startup."
+                    f"within timeout={timeout} seconds during startup. "
+                    "Set VLLM_DP_COORDINATOR_READY_TIMEOUT_S to adjust this wait."
                 )
             try:
                 return zmq_addr_pipe.recv()
