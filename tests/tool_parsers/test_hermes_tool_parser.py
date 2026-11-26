@@ -232,9 +232,7 @@ def test_hermes_streaming_tool_call_with_name_key_argument(
     any_chat_request: ChatCompletionRequest,
     stream_interval: int,
 ) -> None:
-    """An argument literally named "name" must not be mistaken for the
-    tool's own name field (regression: hunyuan_a13b/xlam phantom-tool-call
-    bug class, vllm-project/vllm#49535)."""
+    """An argument named "name" is not taken as the tool name (#49535)."""
     text = (
         '<tool_call>{"name": "create_user", '
         '"arguments": {"name": "Alice", "role": "admin"}}</tool_call>'
@@ -245,10 +243,10 @@ def test_hermes_streaming_tool_call_with_name_key_argument(
     )
 
     tool_deltas = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
-    assert tool_deltas, "Expected at least one tool call delta"
-    assert tool_deltas[0].function.name == "create_user"
+    assert tool_deltas
+    assert get_function_delta(tool_deltas[0]).name == "create_user"
 
-    args_str = "".join(tc.function.arguments or "" for tc in tool_deltas)
+    args_str = "".join(get_function_delta(tc).arguments or "" for tc in tool_deltas)
     assert json.loads(args_str) == {"name": "Alice", "role": "admin"}
 
 
@@ -424,26 +422,32 @@ def test_hermes_parser_non_streaming_tool_call_invalid_json(
     assert not tool_call.tools_called
 
 
-def test_hermes_parser_unified_parse_rejects_invalid_json(
+@pytest.mark.parametrize(
+    ("body", "is_valid"),
+    [
+        ('{"name": "final_answer", "arguments": {"trigger": true}}', True),
+        ('{"name": "final_answer", "arguments": {"trigger": true}', False),
+        ('{"arguments": {"trigger": true}}', False),
+    ],
+    ids=["valid", "truncated", "missing_name"],
+)
+def test_hermes_parser_parse_rejects_malformed_tool_call(
     qwen_tokenizer: TokenizerLike,
     any_chat_request: ChatCompletionRequest,
+    body: str,
+    is_valid: bool,
 ) -> None:
-    """`HermesParser.parse` bypasses the tool-parser adapter, so the
-    all-or-nothing JSON check must live in the engine config to cover it."""
-    valid = '<tool_call>\n{"name": "final_answer", "arguments": {"trigger": true}}'
-    invalid = '<tool_call>\n{"name": "final_answer", "arguments": {"trigger": true}'
-
-    _, _, tool_calls = HermesParser(qwen_tokenizer).parse(
-        valid, any_chat_request, enable_auto_tools=True
-    )
-    assert tool_calls is not None
-    assert tool_calls[0].name == "final_answer"
-
+    """A malformed tool call is returned as content through `parse` too."""
+    text = f"<tool_call>\n{body}"
     _, content, tool_calls = HermesParser(qwen_tokenizer).parse(
-        invalid, any_chat_request, enable_auto_tools=True
+        text, any_chat_request, enable_auto_tools=True
     )
-    assert tool_calls is None
-    assert content == invalid
+    if is_valid:
+        assert tool_calls is not None
+        assert tool_calls[0].name == "final_answer"
+    else:
+        assert tool_calls is None
+        assert content == text
 
 
 def test_hermes_streaming_content_and_tool_call_in_single_chunk(

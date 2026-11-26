@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Hermes 2 Pro tool-call parser, backed by the declarative parser engine.
+"""Hermes 2 Pro tool calls, one JSON object per tag pair:
 
-Tool calls repeat as back-to-back pairs:
-
-    <tool_call>{"name": "get_weather", "arguments": {"city": "SF"}}</tool_call>
-
-The body is a JSON wrapper, so the name comes from the engine's
-name-from-args path and `_hermes_arg_converter` carves out the
-`arguments` value -- the same shape as Inkling, with the key spelled
-`arguments`.
+<tool_call>{"name": "get_weather", "arguments": {"city": "SF"}}</tool_call>
 """
 
 from __future__ import annotations
@@ -42,12 +35,8 @@ TOOL_CALL_END = "</tool_call>"
 
 
 def _hermes_arg_converter(raw_args: str, partial: bool) -> str:
-    """Carve the `arguments` object out of the tool-call JSON wrapper.
-
-    The engine treats the whole `TOOL_ARGS` span as the arguments, and
-    skips `_fix_arg_types` when there is no converter, so omitting one
-    makes streaming and non-streaming disagree on argument types.
-    """
+    # Without a converter the engine streams the whole wrapper and skips
+    # schema type coercion, so streaming and non-streaming would disagree.
     span = extract_json_member_object(raw_args, "arguments")
     if span is None:
         return "" if partial else "{}"
@@ -55,19 +44,17 @@ def _hermes_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 def _validate_tool_call_bodies(tool_call_regex: re.Pattern, text: str) -> bool | None:
-    """Reject the whole response when any tool-call body is not valid JSON.
-
-    Matches the legacy parser: non-streaming is all-or-nothing, while
-    streaming keeps the engine's best-effort behaviour. Returns `None`
-    when there is no tool call to judge.
-    """
+    # Like the legacy parser, non-streaming drops every tool call and returns
+    # the text as content if any body is not a JSON object with a string name.
     found = False
     for match in tool_call_regex.finditer(text):
         found = True
         body = match.group(1) if match.group(1) is not None else match.group(2)
         try:
-            json.loads(body)
-        except (json.JSONDecodeError, ValueError):
+            call = json.loads(body)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(call, dict) or not isinstance(call.get("name"), str):
             return False
     return True if found else None
 
@@ -82,15 +69,10 @@ def hermes_config(
     tool_call_regex = re.compile(f"{start}(.*?){end}|{start}(.*)", re.DOTALL)
     return ParserEngineConfig(
         name=name,
-        initial_state=ParserState.CONTENT,
         terminals={
             "TOOL_START": tool_call_start,
             "TOOL_END": tool_call_end,
         },
-        # Text-matched only, like the legacy parser: `ParserEngine.adjust_request`
-        # keeps special tokens in the detokenized text, so the tags always
-        # reach the lexer as text.
-        token_id_terminals={},
         transitions={
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_ARGS,
@@ -105,22 +87,12 @@ def hermes_config(
         complete_tool_call_validator=functools.partial(
             _validate_tool_call_bodies, tool_call_regex
         ),
-        stream_arg_deltas=True,
-        tool_args_json=True,
-        strip_trailing_reasoning_whitespace=True,
-        drop_whitespace_only_content_before_tools=True,
         strip_content_whitespace_with_tools=False,
-        validate_tool_names=False,
     )
 
 
 class HermesParser(ParserEngine):
-    """Hermes 2 Pro parser backed by the declarative parser engine.
-
-    Delimiters are class attributes so subclasses can reuse this grammar
-    with different tags; see `LongcatParser`.
-    """
-
+    # Class attributes so variants with other tags can subclass (Longcat).
     CONFIG_NAME: str = "hermes"
     TOOL_CALL_START: str = TOOL_CALL_START
     TOOL_CALL_END: str = TOOL_CALL_END

@@ -92,9 +92,7 @@ def _discover_pairings() -> list[_PairingInfo]:
             continue
         cfg = engine_cls(bare_tok, None).parser_engine_config
         if cfg.name in ("hermes", "longcat"):
-            # Hermes and Longcat match their tags as text only, so they do not
-            # fit this TOOL_END-token harness. They are covered by
-            # tests/tool_parsers/test_{hermes,longcat}_tool_parser.py.
+            # Dedicated coverage lives in tests/tool_parsers/.
             continue
         if cfg.name == "llama_json":
             # Llama JSON has no TOOL_END terminal; dedicated coverage lives

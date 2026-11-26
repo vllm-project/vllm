@@ -73,9 +73,7 @@ def _discover_parsers() -> list[_ParserInfo]:
         # Concrete parsers supply parser_engine_config themselves
         cfg = obj(bare_tok, None).parser_engine_config  # type: ignore[call-arg]
         if cfg.name in ("hermes", "longcat"):
-            # Hermes and Longcat match their tags as text only, so they do not
-            # fit this TOOL_END-token harness. They are covered by
-            # tests/tool_parsers/test_{hermes,longcat}_tool_parser.py.
+            # Dedicated coverage lives in tests/tool_parsers/.
             continue
         if cfg.name == "llama_json":
             # Llama JSON uses a semicolon-separated collection with no
