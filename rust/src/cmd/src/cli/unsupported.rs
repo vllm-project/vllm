@@ -208,7 +208,6 @@ pub struct EngineUnsupportedArgs {
     /// passed. Only enable this flag for trusted users!
     #[arg(
         long,
-        visible_alias = "no-enable-prompt-embeds",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -234,7 +233,6 @@ pub struct EngineUnsupportedArgs {
     /// down fault DPEngineCore.
     #[arg(
         long,
-        visible_alias = "no-enable-fault-tolerance",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -243,7 +241,6 @@ pub struct EngineUnsupportedArgs {
     /// Enable elastic expert parallelism with stateless NCCL groups for DP/EP.
     #[arg(
         long,
-        visible_alias = "no-enable-elastic-ep",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -254,7 +251,6 @@ pub struct EngineUnsupportedArgs {
     /// and currently only supports some MM models such as the Qwen VL series.
     #[arg(
         long,
-        visible_alias = "no-enable-tower-connector-lora",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -302,17 +298,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
 
-    /// Maximum number of requests that can be in-flight (waiting or running)
-    /// at the same time. When the limit is reached, new requests are rejected
-    /// with HTTP 503 so the client can retry on another instance.
-    #[arg(long)]
-    pub max_num_queued_reqs: Option<Unsupported>,
-
-    /// Maximum total prompt tokens of requests currently in the prefill phase.
-    /// When the limit is reached, new requests are rejected with HTTP 503.
-    #[arg(long)]
-    pub max_num_queued_tokens: Option<Unsupported>,
-
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
     ///
@@ -343,7 +328,6 @@ pub struct ServerUnsupportedArgs {
     /// because they can change multimodal preprocessing resource usage.
     #[arg(
         long,
-        visible_alias = "no-trust-request-mm-kwargs",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -357,7 +341,6 @@ pub struct ServerUnsupportedArgs {
     /// to specify which parser to use.
     #[arg(
         long,
-        visible_alias = "no-enable-auto-tool-choice",
         default_missing_value = "true",
         num_args = 0..=1,
         hide = true
@@ -382,7 +365,6 @@ pub struct ServerUnsupportedArgs {
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
-        visible_alias = "no-enable-server-load-tracking",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -397,7 +379,6 @@ pub struct ServerUnsupportedArgs {
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
         long,
-        visible_alias = "no-enable-ssl-refresh",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -417,7 +398,6 @@ pub struct ServerUnsupportedArgs {
     /// endpoints at all.
     #[arg(
         long,
-        visible_alias = "no-disable-fastapi-docs",
         default_missing_value = "true",
         num_args = 0..=1,
         hide = true
@@ -447,7 +427,6 @@ pub struct ServerUnsupportedArgs {
     /// endpoints at all.
     #[arg(
         long,
-        visible_alias = "no-enable-offline-docs",
         default_missing_value = "true",
         num_args = 0..=1,
         hide = true
@@ -458,7 +437,6 @@ pub struct ServerUnsupportedArgs {
     /// Can significantly improve late-interaction scoring performance.
     #[arg(
         long,
-        visible_alias = "no-enable-flash-late-interaction",
         default_missing_value = "true",
         num_args = 0..=1
     )]

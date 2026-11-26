@@ -34,8 +34,11 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module")
-def server(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+def server(default_server_args, request):
+    model_name, env_dict = getattr(request, "param", (MODEL_NAME, None))
+    with RemoteOpenAIServer(
+        model_name, default_server_args, env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 
@@ -114,6 +117,77 @@ async def test_completion_truncation_side_controls_prompt_truncation(
         },
     )
     assert left_completion.choices[0].prompt_token_ids == prompt_token_ids[-4:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    # Exercise the Python renderer even when this module runs in Rust frontend CI.
+    [("facebook/opt-125m", {"VLLM_USE_RUST_FRONTEND": "0"})],
+    indirect=True,
+    ids=["python-opt"],
+)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("max_tokens", [0, 3])
+@pytest.mark.parametrize(
+    "prompt,keep,expected",
+    [
+        ("Hello, my name is", 4, "Hello, my"),
+        ("</s>Hello, my name is", 4, "</s>Hello,"),
+        ("Hello, my name is", 1, ""),
+    ],
+)
+async def test_truncated_echo_excludes_only_added_special_tokens(
+    client: openai.AsyncOpenAI,
+    prompt: str,
+    keep: int,
+    expected: str,
+    stream: bool,
+    max_tokens: int,
+) -> None:
+    extra_body = {"truncate_prompt_tokens": keep, "truncation_side": "right"}
+    generated = await client.completions.create(
+        model="facebook/opt-125m",
+        prompt=prompt,
+        max_tokens=max(1, max_tokens),
+        temperature=0.0,
+        extra_body={**extra_body, "return_token_ids": True},
+    )
+    tokenizer = get_tokenizer("facebook/opt-125m")
+    assert generated.choices[0].prompt_token_ids == tokenizer.encode(prompt)[:keep]
+    assert generated.usage is not None
+    assert generated.usage.prompt_tokens == keep
+    response = await client.completions.create(
+        model="facebook/opt-125m",
+        prompt=prompt,
+        echo=True,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        logprobs=0,
+        stream=stream,
+        extra_body=extra_body,
+    )
+    choices = (
+        [chunk.choices[0] async for chunk in response] if stream else response.choices
+    )
+    if not stream:
+        assert response.usage is not None
+        assert response.usage.prompt_tokens == keep
+    text = "".join(choice.text for choice in choices)
+    generated_text = generated.choices[0].text if max_tokens else ""
+    assert text == expected + generated_text
+    offset = 0
+    for choice in choices:
+        assert choice.logprobs is not None
+        assert len(choice.logprobs.tokens) == len(choice.logprobs.token_logprobs)
+        assert len(choice.logprobs.tokens) == len(choice.logprobs.top_logprobs)
+        for token, text_offset in zip(
+            choice.logprobs.tokens, choice.logprobs.text_offset, strict=True
+        ):
+            assert text_offset == offset
+            assert text[text_offset : text_offset + len(token)] == token
+            offset += len(token)
+    assert offset == len(text)
 
 
 @pytest.mark.asyncio
