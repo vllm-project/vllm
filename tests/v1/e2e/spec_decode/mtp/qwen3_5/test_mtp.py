@@ -269,7 +269,7 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
 
         assert cold_output.num_cached_tokens == 0
         max_safe_hit = 2 * block_size
-        # An unconditional EAGLE drop would report only one block.
+        # The hash lookahead holds back only the last prompt token.
         assert warm_output.num_cached_tokens == max_safe_hit
 
         cold_completion = cold_output.outputs[0]

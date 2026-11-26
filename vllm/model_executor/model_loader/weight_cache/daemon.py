@@ -3,9 +3,9 @@
 """Weight cache daemon for fast engine restarts.
 
 One daemon process per GPU holds the post-quantized, TP-sharded weights of its
-rank in GPU memory and serves CUDA IPC handles to vLLM engines over a Unix
-domain socket. Restarting engines map the weights via zero-copy IPC instead of
-reloading from disk.
+rank in GPU memory and serves shared storage handles to vLLM engines over a Unix
+domain socket. Restarting engines map the weights zero-copy instead of reloading
+from disk.
 
 Launch one daemon per TP rank with a single command:
 
@@ -20,7 +20,7 @@ Engines then load from the daemons with:
 Tensor, expert, data and pipeline parallelism are supported.
 
 For multi-node tensor parallelism, run one launcher per node with a shared
-rendezvous so the global TP group forms across nodes (CUDA IPC handles are
+rendezvous so the global TP group forms across nodes (weight sharing is
 node-local, so each node serves only its local GPUs' shards). Reuse the same
 `--nnodes`/`--node-rank`/`--master-addr` flags you pass the engine, plus a
 `--weight-cache-master-port` distinct from the engine's `--master-port`:
@@ -116,17 +116,19 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
 from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import StorageEntry
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
+    recv_msg,
+    send_msg,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    TensorEntry,
-    TensorKind,
     WeightCacheKey,
+    WeightCacheState,
     WeightCacheUnavailableError,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
-    recv_msg,
-    send_msg,
     verify_peer_is_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.transport import (
@@ -137,7 +139,6 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     DaemonRole,
     build_weight_cache_key,
     collect_tensors,
-    export_entries,
     export_model_attrs,
     exported_weight_bytes,
     format_daemon_role,
@@ -157,6 +158,9 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
     WEIGHT_COPY_LEASE_TIMEOUT_S,
     WeightShardSeed,
 )
+from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    build_manifest,
+)
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -166,7 +170,7 @@ logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 
 class WeightCacheDaemon:
-    """Per-GPU process that loads one TP/PP shard and serves CUDA IPC handles."""
+    """Per-GPU process that loads one shard and serves its shared storage handles."""
 
     def __init__(
         self,
@@ -181,7 +185,14 @@ class WeightCacheDaemon:
         seed_config: SeedConfig | None = None,
         device_index: int | None = None,
         warmup_cache_stores: Iterable[str] = (),
+        weight_cache_backend: str = "torch_ipc",
     ):
+        from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
+            IPC_BACKENDS,
+        )
+
+        self.backend_name = weight_cache_backend
+        self.backend = IPC_BACKENDS[weight_cache_backend]()
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
@@ -233,7 +244,7 @@ class WeightCacheDaemon:
         self.dp_rank = dp_rank
         self.world_size = self.dp_size * self.pp_size * self.tp_size
         self.local_rank = local_rank
-        # A peer's CUDA IPC handle names its device by index, so a same-host
+        # A peer's local weight handle names its device by index, so a same-host
         # mirror keeps every device visible and places its own ranks on the
         # GPUs the source does not use; the launcher infers the placement
         # from the source's GPU UUIDs and passes it explicitly.
@@ -244,6 +255,7 @@ class WeightCacheDaemon:
         self.role = format_daemon_role(is_draft)
         self.serves_model = daemon_serves_model(is_draft, self.pp_rank, self.pp_size)
         self.model: torch.nn.Module | None = None
+        self.state: WeightCacheState | None = None
         # Engine watch connections, held open for the daemon's lifetime.
         self._watchers: list[socket.socket] = []
         # Fingerprint before loading: process_weights_after_loading may
@@ -252,9 +264,6 @@ class WeightCacheDaemon:
         self.cache_key = build_weight_cache_key(
             vllm_config, self.model_config, is_draft=is_draft
         )
-        if is_draft:
-            # The engine builds the draft as the only pipeline stage.
-            self.cache_key = replace(self.cache_key, pp_size=1, pp_rank=0)
 
     def warmup(self) -> None:
         """Run each warmup cache's pass (adopting remote caches via D2D)."""
@@ -297,10 +306,34 @@ class WeightCacheDaemon:
             format_gib(torch.accelerator.memory_reserved()),
         )
 
+    def capture_state(self) -> None:
+        """Materialize canonical post-warmup storages and drop the model."""
+        assert self.model is not None
+        tensors, kinds, aliases = collect_tensors(self.model)
+        manifest, source_storages = build_manifest(tensors, kinds)
+        attrs = export_model_attrs(self.model)
+        from vllm.compilation.wrapper import remove_bytecode_hooks
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+        remove_bytecode_hooks(self.model)
+        self.model = None
+        self.vllm_config.compilation_config.static_forward_context.clear()
+        _ROPE_DICT.clear()
+        del tensors, kinds
+        gc.collect()
+        torch.accelerator.empty_cache()
+        storages = self.backend.materialize(source_storages)
+        self.state = WeightCacheState(
+            storages=storages,
+            manifest=manifest,
+            aliases=aliases,
+            attrs=attrs,
+        )
+
     def release_distributed(self) -> None:
         """Release process groups and BLAS workspaces after loading and warmup.
 
-        Serving only exports CUDA IPC handles, so the communicators (NCCL,
+        Serving only exports shared storage handles, so the communicators (NCCL,
         custom all-reduce and FlashInfer workspaces) and cached BLAS scratch
         would otherwise pin GPU memory for the daemon's lifetime.
         """
@@ -481,19 +514,18 @@ class WeightCacheDaemon:
             is_draft=self.is_draft,
         )
 
-    def _export_state(self) -> tuple[dict[str, TensorEntry], dict[str, str], dict]:
-        """Export this rank's tensors, aliases and flags for one client."""
-        assert self.model is not None
-        entries, aliases = export_entries(self.model)
-        return entries, aliases, export_model_attrs(self.model)
-
-    def _seed_state(
+    def _export_state(
         self,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, TensorKind], dict[str, str], dict]:
-        """This rank's canonical tensors, their kinds, aliases and flags."""
-        assert self.model is not None
-        tensors, kinds, aliases = collect_tensors(self.model)
-        return tensors, kinds, aliases, export_model_attrs(self.model)
+    ) -> tuple[list[StorageEntry], dict, dict[str, str], dict[str, bool]]:
+        """Export this rank's storage handles, manifest, aliases and flags."""
+        assert self.state is not None
+        state = self.state
+        return (
+            [self.backend.export_storage(record) for record in state.storages],
+            state.manifest,
+            state.aliases,
+            state.attrs,
+        )
 
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
@@ -501,11 +533,14 @@ class WeightCacheDaemon:
         if cmd == "get_state":
             self._handle_get_state(conn, request)
         elif cmd == "get_memory":
+            state = self.state
             send_msg(
                 conn,
                 {
                     "status": "ok",
-                    "memory_bytes": exported_weight_bytes(self.model),
+                    "memory_bytes": exported_weight_bytes(
+                        None if state is None else state.storages
+                    ),
                     # The launcher maps source GPUs to local device indices
                     # when it places a same-host mirror.
                     "gpu_uuid": get_current_device_uuid(),
@@ -513,7 +548,7 @@ class WeightCacheDaemon:
             )
         elif cmd == "seed":
             # A same-host peer's D2D request; the pickle plane can carry the
-            # peer_ipc seed's CUDA IPC handles, which JSON cannot.
+            # peer_ipc seed's local sharing handles, which JSON cannot.
             send_msg(conn, self.d2d.handle_request(request))
         elif cmd == "watch":
             self._handle_watch(conn)
@@ -530,22 +565,24 @@ class WeightCacheDaemon:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
             return
-        entries, aliases, attrs = self._export_state()
+        storages, manifest, aliases, attrs = self._export_state()
         send_msg(
             conn,
             {
                 "status": "ok",
-                "entries": entries,
+                "backend": self.backend_name,
+                "storages": storages,
+                "manifest": manifest,
                 "aliases": aliases,
                 "attrs": attrs,
                 "gpu_uuid": get_current_device_uuid(),
             },
         )
         logger.info_once(
-            "Weight cache %s daemon rank %d sent %d tensors (+%d aliases) to engine",
+            "Weight cache %s daemon rank %d sent %d storages (+%d aliases) to engine",
             self.role,
             self.global_rank,
-            len(entries),
+            len(storages),
             len(aliases),
         )
 
@@ -587,6 +624,7 @@ def _run_daemon(
     seed_config: SeedConfig | None = None,
     device_index: int | None = None,
     warmup_cache_stores: Iterable[str] = (),
+    weight_cache_backend: str = "torch_ipc",
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
@@ -603,12 +641,14 @@ def _run_daemon(
         seed_config=seed_config,
         device_index=device_index,
         warmup_cache_stores=warmup_cache_stores,
+        weight_cache_backend=weight_cache_backend,
     )
     daemon.load_model()
     if not daemon.serves_model:
         daemon.release_distributed()
         return
     daemon.warmup()
+    daemon.capture_state()
     # FlashInfer warmup has populated the compiler caches before the source
     # listener becomes available to target daemons.
     daemon.d2d.start_listener()

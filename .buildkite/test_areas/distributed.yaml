@@ -28,9 +28,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Comm Ops'
+      label: ':amd: (MI300 DPX) Distributed Comm Ops'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 30
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -219,9 +219,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Torchrun + Shutdown'
+      label: ':amd: (MI300 DPX) Distributed Torchrun + Shutdown'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -574,6 +574,8 @@ steps:
   - vllm/models/hy_v4/nvidia/flashmla_sparse.py
   - vllm/models/hy_v4/nvidia/model.py
   - vllm/models/hy_v4/nvidia/moe.py
+  - vllm/models/hy_v4/common/mrope.py
+  - vllm/models/hy_v4/weight_utils.py
   - vllm/models/common/ops/sequence_parallel.py
   - vllm/model_executor/layers/attention/
   - vllm/model_executor/models/deepseek_v2.py
@@ -643,7 +645,10 @@ steps:
       - tests/distributed/test_quick_all_reduce.py
       - tests/distributed/test_aiter_rms_fallback.py
       - tests/distributed/test_muse_spark_token_shard.py
+      - tests/distributed/test_muse_spark_decode_moe.py
       - vllm/models/muse_spark/amd/model.py
+      - vllm/models/muse_spark/amd/
+      - tests/models/test_muse_spark_rocm_mono.py
       - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - tests/utils.py
       - tests/distributed/test_weight_transfer.py
@@ -665,6 +670,7 @@ steps:
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
       - pytest -v -s tests/distributed/test_muse_spark_token_shard.py
+      - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
 
 - label: ":nvidia: (B200) [Nightly] Distributed"
   key: distributed-tests-2xb200

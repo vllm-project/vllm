@@ -85,7 +85,7 @@ def create_scheduler(
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
-    use_ec_connector: bool = False,
+    use_ec_connector: bool | ECTransferConfig = False,
     ec_role: str | None = None,
     kv_cache_layer_config: KVCacheLayerConfig | None = None,
     mamba_layer_config: KVCacheLayerConfig | None = None,
@@ -100,6 +100,7 @@ def create_scheduler(
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
     encoder_cache_size: int | None = None,
+    enable_logging_iteration_details: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -129,6 +130,7 @@ def create_scheduler(
         runner=runner,
     )
     if mm_encoder_only:
+        assert model_config.multimodal_config is not None
         model_config.multimodal_config.mm_encoder_only = True
     if use_ec_connector and ec_role == "ec_producer":
         model_config.multimodal_config = MultiModalConfig()
@@ -159,11 +161,6 @@ def create_scheduler(
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
-        mamba_cache_mode=(
-            mamba_layer_config.manager_config.params.mamba_cache_mode
-            if mamba_layer_config
-            else "none"
-        ),
     )
     kv_transfer_config = None
     if isinstance(use_kv_connector, MockKVConfig):
@@ -205,15 +202,15 @@ def create_scheduler(
             spec_kwargs["prompt_lookup_min"] = 1
         speculative_config = SpeculativeConfig(**spec_kwargs)
 
-    ec_transfer_config = (
-        ECTransferConfig(
+    ec_transfer_config = None
+    if isinstance(use_ec_connector, ECTransferConfig):
+        ec_transfer_config = use_ec_connector
+    elif use_ec_connector:
+        ec_transfer_config = ECTransferConfig(
             ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )
-        if use_ec_connector
-        else None
-    )
 
     diffusion_config: DiffusionConfig | None = None
     if diffusion_canvas_length is not None:
@@ -236,6 +233,7 @@ def create_scheduler(
         lora_config=lora_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
+            enable_logging_iteration_details=enable_logging_iteration_details,
         ),
     )
     if kv_cache_layer_config is None:
@@ -261,7 +259,7 @@ def create_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     return scheduler
@@ -414,11 +412,14 @@ def chunked_local_layer(
 
 
 def mamba_layer(
-    spec: MambaSpec, mamba_cache_mode="none", num_speculative_blocks=2, **config_kwargs
+    spec: MambaSpec,
+    enable_prefix_caching=False,
+    num_speculative_blocks=2,
+    **config_kwargs,
 ) -> KVCacheLayerConfig:
     return MambaManager.layer_config(
         spec,
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
         **config_kwargs,
     )
@@ -439,11 +440,11 @@ def new_sliding_window_layer(sliding_window=1, **spec_kwargs):
 
 
 def new_mamba_layer(
-    mamba_cache_mode="none", num_speculative_blocks=2, **spec_kwargs
+    enable_prefix_caching=False, num_speculative_blocks=2, **spec_kwargs
 ) -> KVCacheLayerConfig:
     return mamba_layer(
         new_mamba_spec(**spec_kwargs),
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
     )
 

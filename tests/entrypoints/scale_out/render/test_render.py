@@ -459,6 +459,22 @@ async def test_responses_render_basic(client):
 
 
 @pytest.mark.asyncio
+async def test_responses_render_input_list_reports_only_first_invalid_item(client):
+    invalid_item = {"type": "message", "role": "user"}
+    first = await client.post(
+        "/v1/responses/render", json={"model": MODEL_NAME, "input": [invalid_item]}
+    )
+    multiple = await client.post(
+        "/v1/responses/render",
+        json={"model": MODEL_NAME, "input": [invalid_item, invalid_item]},
+    )
+
+    assert first.status_code == multiple.status_code == 400
+    first_summary = first.json()["error"]["message"].splitlines()[0]
+    assert multiple.json()["error"]["message"].splitlines()[0] == first_summary
+
+
+@pytest.mark.asyncio
 async def test_responses_render_includes_prior_input_items(client):
     current_turn = {
         "role": "user",

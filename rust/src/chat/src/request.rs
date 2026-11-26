@@ -10,6 +10,8 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 pub use vllm_parser::tool::Tool as ChatTool;
 use vllm_text::TextDecodeOptions;
 pub use vllm_text::{PromptTruncation, SamplingParams};
+use xgrammar_structural_tag::AllowedToolRef;
+pub use xgrammar_structural_tag::AllowedToolsMode;
 
 use crate::error::{Error, Result};
 use crate::event::{AssistantContentBlock, AssistantMessage};
@@ -531,6 +533,12 @@ pub enum ChatToolChoice {
     Function {
         name: String,
     },
+    /// Calls are restricted to the named tools, while every tool stays in the
+    /// prompt so that the prompt prefix does not depend on the choice.
+    AllowedTools {
+        mode: AllowedToolsMode,
+        names: Vec<String>,
+    },
 }
 
 impl From<&ChatToolChoice> for xgrammar_structural_tag::ToolChoice {
@@ -540,6 +548,9 @@ impl From<&ChatToolChoice> for xgrammar_structural_tag::ToolChoice {
             ChatToolChoice::Auto => Self::auto(),
             ChatToolChoice::Required => Self::required(),
             ChatToolChoice::Function { name } => Self::function(name.clone()),
+            ChatToolChoice::AllowedTools { mode, names } => {
+                Self::allowed_tools(*mode, names.iter().map(AllowedToolRef::function).collect())
+            }
         }
     }
 }
@@ -612,6 +623,17 @@ impl ResolvedToolContext {
             ChatToolChoice::Function { name } if !names.contains(name) => {
                 return Err(Error::ToolChoiceFunctionNotFound { name: name.clone() });
             }
+            ChatToolChoice::AllowedTools {
+                mode,
+                names: allowed,
+            } => {
+                if let Some(name) = allowed.iter().find(|name| !names.contains(*name)) {
+                    return Err(Error::ToolChoiceFunctionNotFound { name: name.clone() });
+                }
+                if *mode == AllowedToolsMode::Required && allowed.is_empty() {
+                    return Err(Error::ToolChoiceRequiresTools);
+                }
+            }
             ChatToolChoice::None
             | ChatToolChoice::Auto
             | ChatToolChoice::Required
@@ -627,8 +649,18 @@ impl ResolvedToolContext {
     }
 
     /// Return whether tool output parsing is active for this request.
+    ///
+    /// An empty allowed-tools list allows no call, so it parses like `none`
+    /// while the tools stay in the prompt.
     pub fn parsing_enabled(&self) -> bool {
-        !matches!(self.tool_choice, ChatToolChoice::None) && !self.effective_tools.is_empty()
+        let allows_calls = match &self.tool_choice {
+            ChatToolChoice::None => false,
+            ChatToolChoice::AllowedTools { names, .. } => !names.is_empty(),
+            ChatToolChoice::Auto | ChatToolChoice::Required | ChatToolChoice::Function { .. } => {
+                true
+            }
+        };
+        allows_calls && !self.effective_tools.is_empty()
     }
 
     /// Drop request-level tools when `tool_choice` is `none`, so they are not
@@ -727,7 +759,8 @@ impl ChatRequest {
         }
     }
 
-    /// Validate basic request invariants before rendering.
+    /// Validate prompt-independent request invariants before rendering or
+    /// fetching remote media.
     pub fn validate(&self) -> Result<()> {
         if self.messages.is_empty() {
             return Err(Error::EmptyMessages);
@@ -742,6 +775,11 @@ impl ChatRequest {
             }
             (GenerationPromptMode::NoGenerationPrompt, _)
             | (GenerationPromptMode::StartNewAssistant, _) => {}
+        }
+        self.sampling_params.validate()?;
+        self.decode_options.validate(&self.request_id)?;
+        if let Some(salt) = self.cache_salt.as_deref() {
+            vllm_text::validate_cache_salt(salt)?;
         }
         if self.has_multimodal() && self.prompt_truncation.is_some() {
             return Err(Error::Text(
@@ -836,11 +874,12 @@ impl ChatRole {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use itertools::Itertools as _;
     use serde_json::{json, to_value};
 
     use super::{
-        ChatContent, ChatContentPart, ChatMessage, ChatRole, ChatTool, ChatToolChoice,
-        ResolvedToolContext,
+        AllowedToolRef, AllowedToolsMode, ChatContent, ChatContentPart, ChatMessage, ChatRole,
+        ChatTool, ChatToolChoice, ResolvedToolContext,
     };
     use crate::Error;
     use crate::event::AssistantContentBlock;
@@ -1051,6 +1090,13 @@ mod tests {
         assert!(matches!(error, Error::ToolReferenceNotFound { name } if name == "lookup"));
     }
 
+    fn allowed(mode: AllowedToolsMode, names: &[&str]) -> ChatToolChoice {
+        ChatToolChoice::AllowedTools {
+            mode,
+            names: names.iter().map(ToString::to_string).collect(),
+        }
+    }
+
     /// Without tools, an omitted or `auto` choice resolves to `none`, and every
     /// choice that needs a tool is rejected.
     #[test]
@@ -1080,6 +1126,16 @@ mod tests {
                 Err("ToolChoiceFunctionNotFound"),
                 Ok(lookup()),
             ),
+            (
+                Some(allowed(AllowedToolsMode::Auto, &["lookup"])),
+                Err("ToolChoiceFunctionNotFound"),
+                Ok(allowed(AllowedToolsMode::Auto, &["lookup"])),
+            ),
+            (
+                Some(allowed(AllowedToolsMode::Required, &[])),
+                Err("ToolChoiceRequiresTools"),
+                Err("ToolChoiceRequiresTools"),
+            ),
         ];
 
         for (requested, without_tools, with_tools) in cases {
@@ -1098,6 +1154,35 @@ mod tests {
                 assert_eq!(resolved, expected, "{case}");
             }
         }
+    }
+
+    /// `allowed_tools` restricts calls only: every declared tool stays
+    /// available to the renderer, so the prompt is the same whatever subset is
+    /// allowed.
+    #[test]
+    fn resolved_tool_context_keeps_every_tool_under_allowed_tools() {
+        let messages = vec![ChatMessage::developer("", Some(vec![chat_tool("scoped")]))];
+        let context = ResolvedToolContext::new(
+            &messages,
+            vec![chat_tool("lookup"), chat_tool("search")],
+            Some(allowed(AllowedToolsMode::Required, &["scoped"])),
+            true,
+        )
+        .unwrap();
+
+        let names = |tools: &[ChatTool]| tools.iter().map(|tool| tool.name.clone()).collect_vec();
+        assert_eq!(names(&context.initial_tools), ["lookup", "search"]);
+        assert_eq!(
+            names(&context.effective_tools),
+            ["lookup", "search", "scoped"]
+        );
+        assert_eq!(
+            xgrammar_structural_tag::ToolChoice::from(&context.tool_choice),
+            xgrammar_structural_tag::ToolChoice::allowed_tools(
+                AllowedToolsMode::Required,
+                vec![AllowedToolRef::function("scoped")],
+            )
+        );
     }
 
     #[test]

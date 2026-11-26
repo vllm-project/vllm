@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for ScoringIOProcessor helpers."""
 
+import asyncio
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -20,6 +21,8 @@ from transformers import (
 
 from vllm import PoolingParams, TokensPrompt
 from vllm.config import ModelConfig, VllmConfig
+from vllm.connections import MediaRequestDownloadSizeExceededError
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.scoring.io_processor import (
     BiEncoderIOProcessor,
     CrossEncoderIOProcessor,
@@ -30,14 +33,24 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
 from vllm.entrypoints.pooling.scoring.types import ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
 from vllm.entrypoints.pooling.types import (
+    EncodeCMPLRenderParams,
     OfflineScoringInputsContext,
+    PoolingEngineInput,
     ScoringRenderParams,
 )
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
-from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.chat_utils import (
+    AsyncMultiModalItemTracker,
+    ChatTemplateConfig,
+    MultiModalItemTracker,
+)
+from vllm.renderers.chat_utils.item_tracker import (
+    MediaRequestBudgets,
+    use_media_request_budgets,
+)
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers import TokenizerLike
 
@@ -98,6 +111,73 @@ def llm_reranker_processor(tmp_path, scoring_tokenizer):
         yield CrossEncoderIOProcessor(config, renderer, ChatTemplateConfig())
     finally:
         renderer.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("budget_attr", "limit_env", "limit_setting", "limit_bytes", "error_type"),
+    [
+        ("decoded_budget", "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "8", 8, ValueError),
+        (
+            "download_budget",
+            "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB",
+            "1",
+            1 << 20,
+            MediaRequestDownloadSizeExceededError,
+        ),
+    ],
+)
+async def test_pooling_workers_share_only_their_request_media_budget(
+    llm_reranker_processor,
+    monkeypatch,
+    budget_attr,
+    limit_env,
+    limit_setting,
+    limit_bytes,
+    error_type,
+):
+    monkeypatch.setenv(limit_env, limit_setting)
+
+    class AccountingProcessor(PoolingIOProcessor):
+        def render(self, render_params):
+            tracker = MultiModalItemTracker(self.model_config)
+            getattr(tracker, budget_attr).charge(limit_bytes)
+            return super().render(render_params)
+
+    processor = AccountingProcessor(
+        llm_reranker_processor.vllm_config,
+        llm_reranker_processor.renderer,
+        ChatTemplateConfig(),
+    )
+    params = EncodeCMPLRenderParams(
+        prompts=TokensPrompt(prompt_token_ids=[3]),
+        tok_params=TokenizeParams(max_total_tokens=64),
+        prompt_extras=None,
+        skip_mm_cache=False,
+        params=PoolingParams(),
+        lora_requests=None,
+        priorities=0,
+    )
+
+    budget = MediaRequestBudgets()
+    with use_media_request_budgets(budget):
+        tracker = AsyncMultiModalItemTracker(processor.model_config)
+        getattr(tracker, budget_attr).charge(1)
+
+    rejected: PoolingEngineInput | BaseException
+    accepted: PoolingEngineInput | BaseException
+    rejected, accepted = await asyncio.gather(
+        processor.render_async(params, budget),
+        processor.render_async(params, MediaRequestBudgets()),
+        return_exceptions=True,
+    )
+    assert isinstance(rejected, error_type)
+    assert limit_env in str(rejected)
+    assert not isinstance(accepted, BaseException)
+    prompt = accepted["prompts"]
+    assert prompt["type"] == "token"
+    assert prompt["prompt_token_ids"] == [3]
+    assert getattr(MultiModalItemTracker(processor.model_config), budget_attr).used == 0
 
 
 def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(

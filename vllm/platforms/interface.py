@@ -1158,7 +1158,7 @@ class Platform:
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
         checkpoint_alignment = 1
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             # Internal prefill checkpoints land on block boundaries.
             checkpoint_alignment = (
                 get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
@@ -1198,7 +1198,7 @@ class Platform:
                 attn_block_size,
             )
 
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = cache_config.block_size
 
         if packed_block_size is not None:
@@ -1374,7 +1374,7 @@ class Platform:
         """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU. device_id None means the current device.
 
-        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        On UMA systems (e.g. NVIDIA DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """

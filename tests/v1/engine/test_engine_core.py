@@ -7,6 +7,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
@@ -29,6 +30,8 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import (
     CheckpointState,
     EngineCoreRequest,
@@ -48,9 +51,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
-if not current_platform.is_cuda_alike():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        reason="V1 currently only supported on CUDA and ROCm.", allow_module_level=True
+        reason="V1 is currently supported only on CUDA, ROCm, and XPU.",
+        allow_module_level=True,
     )
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
@@ -90,44 +94,50 @@ def test_engine_core():
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
+    scheduler = engine_core.scheduler
+    assert isinstance(scheduler, Scheduler)
     """Test basic request lifecycle."""
 
     # First request.
     engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
-    assert len(engine_core.scheduler.waiting) == 1
-    assert len(engine_core.scheduler.running) == 0
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.running) == 0
 
     _ = engine_core.step_fn()
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 1
 
     # Second request.
     engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
-    assert len(engine_core.scheduler.waiting) == 1
-    assert len(engine_core.scheduler.running) == 1
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.running) == 1
 
     _ = engine_core.step_fn()
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 2
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 2
 
     # Add two requests in a row.
     engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
     engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
-    assert len(engine_core.scheduler.waiting) == 2
-    assert len(engine_core.scheduler.running) == 2
+    assert len(scheduler.waiting) == 2
+    assert len(scheduler.running) == 2
 
     _ = engine_core.step_fn()
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 4
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 4
 
     # Loop through until they are all done.
-    while (outs := engine_core.step_fn()[0].get(0)) and outs.outputs:
-        pass
+    while True:
+        step_outputs = engine_core.step_fn()[0]
+        assert step_outputs is not None
+        outs = step_outputs.get(0)
+        if not (outs and outs.outputs):
+            break
 
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
     """Test abort cycle."""
 
     # Basic abort.
@@ -135,20 +145,20 @@ def test_engine_core():
     request_id = req.request_id
 
     engine_core.add_request(*engine_core.preprocess_add_request(req))
-    assert len(engine_core.scheduler.waiting) == 1
-    assert len(engine_core.scheduler.running) == 0
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.running) == 0
     assert engine_core.scheduler.has_unfinished_requests()
     assert not engine_core.scheduler.has_finished_requests()
 
     _ = engine_core.step_fn()
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 1
     assert engine_core.scheduler.has_unfinished_requests()
     assert not engine_core.scheduler.has_finished_requests()
 
     engine_core.abort_requests([request_id])
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
     assert not engine_core.scheduler.has_unfinished_requests()
     assert engine_core.scheduler.has_finished_requests()
 
@@ -163,34 +173,34 @@ def test_engine_core():
 
     engine_core.add_request(*engine_core.preprocess_add_request(req0))
     engine_core.add_request(*engine_core.preprocess_add_request(req1))
-    assert len(engine_core.scheduler.waiting) == 2
-    assert len(engine_core.scheduler.running) == 0
+    assert len(scheduler.waiting) == 2
+    assert len(scheduler.running) == 0
 
     _ = engine_core.step_fn()
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 2
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 2
 
     engine_core.add_request(*engine_core.preprocess_add_request(req2))
-    assert len(engine_core.scheduler.waiting) == 1
-    assert len(engine_core.scheduler.running) == 2
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.running) == 2
 
     _ = engine_core.step_fn()
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 3
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 3
 
     # Abort just one.
     engine_core.abort_requests([req1.request_id])
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 2
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 2
 
     _ = engine_core.step_fn()
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 2
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 2
 
     # Abort the other requests at the same time.
     engine_core.abort_requests([req2.request_id, req0.request_id])
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
 
     # Sending duplicate requests with same request_id
     req0 = make_request()
@@ -205,8 +215,8 @@ def test_engine_core():
     while engine_core.scheduler.has_requests():
         engine_core.step_fn()
 
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
 
 
 @create_new_process_for_each_test()
@@ -247,8 +257,10 @@ def test_engine_core_advanced_sampling():
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
+    scheduler = engine_core.scheduler
+    assert isinstance(scheduler, Scheduler)
     """Test basic request lifecycle."""
     # First request.
     request: EngineCoreRequest = make_request()
@@ -262,13 +274,13 @@ def test_engine_core_advanced_sampling():
     engine_core.add_request(*engine_core.preprocess_add_request(request))
 
     def _check_engine_state():
-        assert len(engine_core.scheduler.waiting) == 1
-        assert len(engine_core.scheduler.running) == 0
+        assert len(scheduler.waiting) == 1
+        assert len(scheduler.running) == 0
         # Loop through until they are all done.
         while engine_core.scheduler.has_requests():
             engine_core.step_fn()
-        assert len(engine_core.scheduler.waiting) == 0
-        assert len(engine_core.scheduler.running) == 0
+        assert len(scheduler.waiting) == 0
+        assert len(scheduler.running) == 0
 
     _check_engine_state()
 
@@ -289,6 +301,7 @@ def test_engine_core_concurrent_batches():
     def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
         request = make_request()
         request.request_id = req_id
+        assert request.sampling_params is not None
         request.sampling_params.max_tokens = max_tokens
         return request
 
@@ -299,10 +312,10 @@ def test_engine_core_concurrent_batches():
             # Create a thread pool with a single worker
             self.thread_pool = ThreadPoolExecutor(max_workers=1)
 
-        def execute_model(
+        def execute_model(  # type: ignore[override]
             self,
-            scheduler_output,
-            non_block=False,
+            scheduler_output: SchedulerOutput,
+            non_block: bool = False,
         ) -> Future[ModelRunnerOutput | None]:
             """Make execute_model non-blocking."""
             # DummyExecutor used only for testing async case.
@@ -317,8 +330,10 @@ def test_engine_core_concurrent_batches():
             # Use the thread pool instead of creating a new thread
             return self.thread_pool.submit(_execute)
 
-        def sample_tokens(
-            self, grammar_output, non_block=False
+        def sample_tokens(  # type: ignore[override]
+            self,
+            grammar_output: GrammarOutput | None,
+            non_block: bool = False,
         ) -> Future[ModelRunnerOutput]:
             """Make sample_tokens non-blocking."""
             # DummyExecutor used only for testing async case.
@@ -362,8 +377,10 @@ def test_engine_core_concurrent_batches():
         ),
     ):
         engine_core = EngineCore(
-            vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
+            vllm_config=vllm_config, collect_stats=False, executor_class=DummyExecutor
         )
+    scheduler = engine_core.scheduler
+    assert isinstance(scheduler, Scheduler)
     assert engine_core.batch_queue is not None
 
     # Add two requests in a row. Each request have 12 prompt tokens.
@@ -378,7 +395,7 @@ def test_engine_core_concurrent_batches():
     scheduler_output = engine_core.batch_queue[-1][1]
     assert scheduler_output.num_scheduled_tokens["0"] == 10
     # num_computed_tokens should have been updated immediately.
-    assert engine_core.scheduler.requests[req0.request_id].num_computed_tokens == 10
+    assert scheduler.requests[req0.request_id].num_computed_tokens == 10
 
     # Schedule Batch 2: (2, req0), (8, req1)
     assert engine_core.step_with_batch_queue()[0] == {}
@@ -387,8 +404,8 @@ def test_engine_core_concurrent_batches():
     assert scheduler_output.num_scheduled_tokens["0"] == 2
     assert scheduler_output.num_scheduled_tokens["1"] == 8
     # num_computed_tokens should have been updated immediately.
-    assert engine_core.scheduler.requests["0"].num_computed_tokens == 12
-    assert engine_core.scheduler.requests["1"].num_computed_tokens == 8
+    assert scheduler.requests["0"].num_computed_tokens == 12
+    assert scheduler.requests["1"].num_computed_tokens == 8
 
     assert engine_core.scheduler.get_num_unfinished_requests() == 2
 
@@ -402,51 +419,64 @@ def test_engine_core_concurrent_batches():
 
     # Finish Batch 2. Get first token of req0.
     # Schedule Batch 4: (1, req0).
-    output = engine_core.step_with_batch_queue()[0].get(0)
+    step_outputs = engine_core.step_with_batch_queue()[0]
+    assert step_outputs is not None
+    output = step_outputs.get(0)
     assert output is not None
     assert len(output.outputs) == 1
-    assert engine_core.scheduler.requests[req0.request_id].num_tokens == 13
+    assert scheduler.requests[req0.request_id].num_tokens == 13
     scheduler_output = engine_core.batch_queue[-1][1]
     assert scheduler_output.num_scheduled_tokens["0"] == 1
 
     # Finish Batch 3. Get first token of req1. Schedule Batch 5: (1, req1).
-    output = engine_core.step_with_batch_queue()[0].get(0)
+    step_outputs = engine_core.step_with_batch_queue()[0]
+    assert step_outputs is not None
+    output = step_outputs.get(0)
     assert output is not None
     assert len(output.outputs) == 1
-    assert engine_core.scheduler.requests[req1.request_id].num_tokens == 13
+    assert scheduler.requests[req1.request_id].num_tokens == 13
     scheduler_output = engine_core.batch_queue[-1][1]
     assert scheduler_output.num_scheduled_tokens["1"] == 1
 
-    # Loop until req0 is finished.
-    req_id = 0
-    expected_num_tokens = [
-        engine_core.scheduler.requests["0"].num_tokens + 1,
-        engine_core.scheduler.requests["1"].num_tokens + 1,
-    ]
+    # Loop until req0 is finished. Each step's single output belongs to one
+    # request and grows its token count by one; the two concurrent batches
+    # finish in alternating order, so track the output's own request.
+    expected_num_tokens = {
+        request_id: scheduler.requests[request_id].num_tokens + 1
+        for request_id in ("0", "1")
+    }
     while engine_core.scheduler.get_num_unfinished_requests() == 2:
-        output = engine_core.step_with_batch_queue()[0]
+        step_outputs = engine_core.step_with_batch_queue()[0]
         # Every step consumes an output.
-        assert output is not None
-        assert len(output[0].outputs) == 1
-        if req_id in engine_core.scheduler.requests:
+        assert step_outputs is not None
+        assert len(step_outputs[0].outputs) == 1
+        request_id = step_outputs[0].outputs[0].request_id
+        if request_id in scheduler.requests:
             assert (
-                engine_core.scheduler.requests[req_id].num_tokens
-                == expected_num_tokens[req_id]
+                scheduler.requests[request_id].num_tokens
+                == expected_num_tokens[request_id]
             )
-        expected_num_tokens[req_id] += 1
-        req_id = (req_id + 1) % 2
+        expected_num_tokens[request_id] += 1
+
+
+def _mock_batch_queue_core() -> MagicMock:
+    """A mock EngineCore for step_with_batch_queue, without PP admission."""
+    core = MagicMock()
+    core.batch_queue = deque()
+    core.batch_queue_size = 2
+    core.deferred_step = None
+    core._pp_admission = False
+    core._wait_for_new_request = partial(EngineCore._wait_for_new_request, core)
+    return core
 
 
 @pytest.mark.parametrize("encoder_only", [True, False])
 def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     """Encoder outputs are complete; only language-model steps need sampling."""
-    core = MagicMock()
-    core.batch_queue = deque()
-    core.batch_queue_size = 2
-    core.deferred_step = None
+    core = _mock_batch_queue_core()
     core.is_mm_encoder_only = encoder_only
     core.is_pooling_model = False
-    core.scheduler.has_requests.side_effect = [True, False, False]
+    core.scheduler.should_schedule.side_effect = [True, False, False]
     scheduled = core.scheduler.schedule.return_value
     scheduled.total_num_scheduled_tokens = 16
     scheduled.pending_structured_output_tokens = False
@@ -474,15 +504,13 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
 @pytest.mark.parametrize("step_fn", [EngineCore.step, EngineCore.step_with_batch_queue])
 def test_prefill_interval_counts_only_executed_steps(step_fn):
     """Prefills run every Nth executed step; empty schedules don't advance it."""
-    core = MagicMock()
-    core.batch_queue = deque()
-    core.batch_queue_size = 2
-    core.deferred_step = None
+    core = _mock_batch_queue_core()
     core.is_mm_encoder_only = False
     core.is_pooling_model = False
     core.prefill_schedule_interval = 3
     core.num_executed_steps = 0
     core.scheduler.has_requests.return_value = True
+    core.scheduler.should_schedule.return_value = True
     core._should_throttle_prefills = lambda: EngineCore._should_throttle_prefills(core)
 
     scheduled_tokens = [16, 0, 0, 16, 16, 16]
@@ -513,7 +541,7 @@ def test_engine_core_tp():
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
 
     def get_worker_cache_config_field(worker, key: str):
@@ -538,8 +566,10 @@ def test_engine_core_invalid_request_id_type():
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
+    scheduler = engine_core.scheduler
+    assert isinstance(scheduler, Scheduler)
 
     # Test with UUID object (common mistake)
     uuid_request = make_request()
@@ -565,8 +595,8 @@ def test_engine_core_invalid_request_id_type():
     # Verify engine is still functional after errors
     valid_request = make_request()
     engine_core.add_request(*engine_core.preprocess_add_request(valid_request))
-    assert len(engine_core.scheduler.waiting) == 1
-    assert len(engine_core.scheduler.running) == 0
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.running) == 0
 
 
 @create_new_process_for_each_test()
@@ -641,18 +671,20 @@ def test_encoder_instance_zero_kv_cache(
 
     with set_default_torch_num_threads(1):
         engine_core = EngineCore(
-            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            vllm_config=vllm_config, executor_class=executor_class, collect_stats=True
         )
+    scheduler = engine_core.scheduler
+    assert isinstance(scheduler, Scheduler)
 
     # Check encoder cache manager exists
-    assert engine_core.scheduler.encoder_cache_manager is not None, (
+    assert scheduler.encoder_cache_manager is not None, (
         "encoder_cache_manager should exist"
     )
 
     if ec_role == "ec_producer":
         # Check 1: num_blocks should be 0
         # NOTE: num_blocks=1 as BlockPool always needs a null_block.
-        kv_cache_config = engine_core.scheduler.kv_cache_manager.kv_cache_config
+        kv_cache_config = scheduler.kv_cache_manager.kv_cache_config
         print(f"kv_cache_config: {kv_cache_config}")
         assert kv_cache_config.num_blocks == 1, (
             f"ec_producer should only have 1 KV blocks, "
@@ -672,10 +704,10 @@ def test_encoder_instance_zero_kv_cache(
         )
 
         # Check 4: Verify EC connector is initialized and is producer
-        assert engine_core.scheduler.ec_connector is not None, (
+        assert scheduler.ec_connector is not None, (
             "Encoder instance should have EC connector"
         )
-        assert engine_core.scheduler.ec_connector.is_producer, (
+        assert scheduler.ec_connector.is_producer, (
             "Encoder instance EC connector should be producer"
         )
 
@@ -686,7 +718,7 @@ def test_encoder_instance_zero_kv_cache(
 
     elif ec_role == "ec_consumer":
         # Check 1: num_blocks should be > 1
-        kv_cache_config = engine_core.scheduler.kv_cache_manager.kv_cache_config
+        kv_cache_config = scheduler.kv_cache_manager.kv_cache_config
         print(f"kv_cache_config: {kv_cache_config}")
         assert kv_cache_config.num_blocks > 1, (
             f"ec_consumer should have >1 KV blocks, got {kv_cache_config.num_blocks}"
@@ -699,10 +731,10 @@ def test_encoder_instance_zero_kv_cache(
         )
 
         # Check 3: Verify EC connector is consumer
-        assert engine_core.scheduler.ec_connector is not None, (
+        assert scheduler.ec_connector is not None, (
             "Consumer instance should have EC connector"
         )
-        assert not engine_core.scheduler.ec_connector.is_producer, (
+        assert not scheduler.ec_connector.is_producer, (
             "Consumer instance EC connector should be consumer"
         )
 
@@ -832,7 +864,7 @@ def test_paused_dp_rank_ignores_start_wave(paused):
     assert core.engines_running != paused
 
 
-def _pausable_engine_core_proc() -> EngineCoreProc:
+def _pausable_engine_core_proc() -> tuple[EngineCoreProc, MagicMock]:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
     core._checkpoint_state = CheckpointState.RUNNING
@@ -840,12 +872,13 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core._kv_cache_reclaimable = False
     core.model_executor = MagicMock()
     core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
-    core.scheduler = MagicMock()
-    core.scheduler.has_requests.return_value = False
+    scheduler = MagicMock()
+    core.scheduler = scheduler
+    scheduler.has_requests.return_value = False
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
-    return core
+    return core, scheduler
 
 
 @pytest.mark.parametrize(
@@ -866,12 +899,12 @@ def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected)
     (sleep, elastic EP) queue them. KV cleanup markers and inputs to an open
     streaming session are not new work, and a rejected P/D request still reaches
     the connector as a cleanup marker."""
-    core = _pausable_engine_core_proc()
+    core, scheduler = _pausable_engine_core_proc()
     core.shutdown_state = EngineShutdownState.RUNNING
     core.reject_new_requests = False
-    core.scheduler.has_request.return_value = kind == "session"
-    core.add_request = MagicMock()
-    core._send_finish_outputs_to_client = MagicMock()
+    scheduler.has_request.return_value = kind == "session"
+    core.add_request = MagicMock()  # type: ignore[method-assign]
+    core._send_finish_outputs_to_client = MagicMock()  # type: ignore[method-assign]
     request = MagicMock(
         request_id="r",
         client_index=1,
@@ -915,11 +948,11 @@ def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected)
 )
 def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_batches):
     """Reject release before touching caches or memory if work can still use KV."""
-    core = _pausable_engine_core_proc()
-    core.scheduler.pause_state = pause_state
-    core.scheduler.has_requests.return_value = has_requests
+    core, scheduler = _pausable_engine_core_proc()
+    scheduler.pause_state = pause_state
+    scheduler.has_requests.return_value = has_requests
     core.batch_queue = [object()] if has_batches else None
-    core._reset_caches = MagicMock()
+    core._reset_caches = MagicMock()  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="requires a completed pause"):
         core.release_kv_cache_memory()
@@ -933,11 +966,11 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
 )
 def test_wake_up_republishes_kv_connector_handshake_metadata(tags, republished):
     """Peers can load the KV cache registration only after the workers redid it."""
-    core = _pausable_engine_core_proc()
+    core, scheduler = _pausable_engine_core_proc()
     calls: list[str] = []
     core.model_executor.wake_up.side_effect = lambda tags: calls.append("wake_up")
     core.model_executor.get_kv_connector_handshake_metadata.return_value = [{}]
-    kv_connector = core.scheduler.get_kv_connector.return_value
+    kv_connector = scheduler.get_kv_connector.return_value
     kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = lambda metadata: (
         calls.append("publish")
     )
@@ -957,12 +990,12 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     """Preparing drains, then discards the KV cache and releases external
     state. Restoring brings external state back before the KV cache wakes and
     scheduling resumes. Repeating either is a no-op."""
-    core = _pausable_engine_core_proc()
+    core, scheduler = _pausable_engine_core_proc()
     core.vllm_config = MagicMock()
     core.model_executor.is_sleeping = False
-    core._reset_caches = MagicMock()
+    core._reset_caches = MagicMock()  # type: ignore[method-assign]
     core.reject_new_requests = False
-    core.scheduler.get_kv_connector.return_value = None
+    scheduler.get_kv_connector.return_value = None
 
     assert core.checkpoint_prepare("wait") is None
     assert core.checkpoint_prepare("wait") is None
@@ -980,7 +1013,7 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     core.checkpoint_restore()
     assert core.checkpoint_state() == (CheckpointState.RUNNING, None)
     assert _executor_calls(core) == ["checkpoint_restore", "wake_up"]
-    core.scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
+    scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
     assert not core.reject_new_requests
 
 
@@ -988,7 +1021,7 @@ def test_checkpoint_prepare_then_restore_run_in_order():
 def test_checkpoint_prepare_fails_on_drain_barrier_error(deferred: bool):
     """A failing barrier at the end of the drain leaves the engine FAILED and
     still rejecting, whether the drain completes at once or later."""
-    core = _pausable_engine_core_proc()
+    core, _ = _pausable_engine_core_proc()
     core.vllm_config = MagicMock()
     core.model_executor.is_sleeping = False
     core.model_executor.collective_rpc.side_effect = RuntimeError("device lost")
@@ -1010,15 +1043,19 @@ def test_checkpoint_prepare_fails_on_drain_barrier_error(deferred: bool):
 )
 def test_kv_cache_discard_resets_connector_unless_kept(entry, kwargs, expected):
     """Discarding the KV cache resets the connector unless the caller keeps it."""
-    core = _pausable_engine_core_proc()
+    core, scheduler = _pausable_engine_core_proc()
     core.model_executor.is_sleeping = False
     reset_calls: list[bool] = []
-    core._reset_caches = lambda reset_connector: reset_calls.append(reset_connector)
+
+    def _reset_caches(reset_connector: bool) -> None:
+        reset_calls.append(reset_connector)
+
+    core._reset_caches = _reset_caches  # type: ignore[method-assign]
 
     if entry == "sleep":
         core.sleep(level=1, mode="keep", **kwargs)
     else:
-        core.scheduler.pause_state = PauseState.PAUSED_ALL
+        scheduler.pause_state = PauseState.PAUSED_ALL
         core.release_kv_cache_memory(**kwargs)
 
     assert reset_calls == [expected]
@@ -1044,7 +1081,11 @@ def test_inproc_sleep_drains_before_keeping_connector_cache(reset_connector):
         return {}, True
 
     core.step_fn = step
-    core._reset_caches = lambda reset_connector: order.append("reset_caches")
+
+    def _reset_caches(reset_connector: bool) -> None:
+        order.append("reset_caches")
+
+    core._reset_caches = _reset_caches  # type: ignore[method-assign]
 
     core.sleep(level=1, reset_connector=reset_connector)
 
@@ -1057,11 +1098,15 @@ def test_inproc_sleep_drains_before_keeping_connector_cache(reset_connector):
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
     caches are cleared and before the caller is unblocked."""
-    core = _pausable_engine_core_proc()
+    core, _ = _pausable_engine_core_proc()
     core.engines_running = deferred
     order: list[str] = []
     core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
-    core._reset_caches = lambda **kwargs: order.append("reset_caches")
+
+    def _reset_caches(**kwargs) -> None:
+        order.append("reset_caches")
+
+    core._reset_caches = _reset_caches  # type: ignore[method-assign]
 
     result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
     if deferred:
