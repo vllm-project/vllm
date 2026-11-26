@@ -34,14 +34,13 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4AudioConfig,
     Gemma4TextConfig,
 )
+from transformers.models.gemma4.image_processing_gemma4 import (
+    get_aspect_ratio_preserving_size,
+)
 
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
-from vllm.config.multimodal import (
-    ImageDummyOptions,
-    MultiModalDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -392,10 +391,6 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 
         unit = patch_size * pooling_kernel_size
         if do_resize:
-            from transformers.models.gemma4.image_processing_gemma4 import (
-                get_aspect_ratio_preserving_size,
-            )
-
             image_height, image_width = get_aspect_ratio_preserving_size(
                 height=image_height,
                 width=image_width,
@@ -405,21 +400,18 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             )
         elif image_width % unit or image_height % unit:
             raise ValueError(
-                f"With do_resize=False, image dimensions must be multiples "
-                f"of patch_size * pooling_kernel_size ({unit}), "
-                f"got {image_width}x{image_height}."
+                f"Unresized dimensions {image_width}x{image_height} must both "
+                f"be divisible by {unit}."
             )
         num_soft_tokens = (image_height // unit) * (image_width // unit)
         if not do_resize and num_soft_tokens > max_soft_tokens:
             budget = (
-                f"the fixed per-frame video budget of {max_soft_tokens} soft tokens"
+                f"fixed video frame limit: {max_soft_tokens}"
                 if is_video_frame
                 else f"max_soft_tokens={max_soft_tokens}"
             )
             raise ValueError(
-                f"With do_resize=False, image dimensions "
-                f"{image_width}x{image_height} require {num_soft_tokens} soft tokens, "
-                f"exceeding {budget}."
+                f"Unresized input requires {num_soft_tokens} soft tokens ({budget})."
             )
         return num_soft_tokens
 
@@ -595,33 +587,6 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             text += processor.video_token * num_videos
         return text
 
-    @staticmethod
-    def _get_unresized_image_size(
-        max_soft_tokens: int,
-        unit: int,
-        options: ImageDummyOptions | VideoDummyOptions | None,
-    ) -> tuple[int, int]:
-        max_cols = (
-            options.width // unit if options and options.width else max_soft_tokens
-        )
-        max_rows = (
-            options.height // unit if options and options.height else max_soft_tokens
-        )
-        if not max_cols or not max_rows:
-            raise ValueError(
-                f"With do_resize=False, image size limits must allow at least "
-                f"one {unit}x{unit} pooling block."
-            )
-        # Maximize the valid token grid within both the budget and size limits.
-        rows, cols = max(
-            (
-                (row, min(max_cols, max_soft_tokens // row))
-                for row in range(1, min(max_rows, max_soft_tokens) + 1)
-            ),
-            key=lambda grid: (math.prod(grid), -abs(grid[0] - grid[1])),
-        )
-        return cols * unit, rows * unit
-
     def get_dummy_mm_data(
         self,
         seq_len: int,
@@ -632,24 +597,13 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
         image_processor = processor.image_processor
+        # Use processor's configured image size for dummies.
+        # Gemma4ImageProcessor sets size=None (it uses patch_size /
+        # max_soft_tokens instead of the standard size dict), so we
+        # guard against None with `or {}`.
         size = getattr(image_processor, "size", None) or {}
         img_width = size.get("width", 224)
         img_height = size.get("height", 224)
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs({})
-        if mm_counts.get("image", 0) and not _get_do_resize(
-            merged_kwargs, image_processor.do_resize
-        ):
-            max_soft_tokens, _ = _get_max_soft_tokens(merged_kwargs)
-            if (
-                not isinstance(max_soft_tokens, int)
-                or max_soft_tokens not in _SUPPORTED_SOFT_TOKENS
-            ):
-                max_soft_tokens = image_processor.max_soft_tokens
-            img_width, img_height = self._get_unresized_image_size(
-                max_soft_tokens,
-                image_processor.patch_size * image_processor.pooling_kernel_size,
-                mm_options.get("image") if mm_options else None,
-            )
 
         data: dict[str, Any] = {
             "image": self._get_dummy_images(
@@ -669,25 +623,9 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             )
 
         if num_videos > 0:
-            video_kwargs = {
-                "images_kwargs": {},
-                "max_soft_tokens": _VIDEO_MAX_SOFT_TOKENS,
-            }
-            video_processor = self.info.get_hf_processor(**video_kwargs).image_processor
-            frame_width = size.get("width", 224)
-            frame_height = size.get("height", 224)
-            if not _get_do_resize(
-                self.info.ctx.get_merged_mm_kwargs(video_kwargs),
-                video_processor.do_resize,
-            ):
-                frame_width, frame_height = self._get_unresized_image_size(
-                    _VIDEO_MAX_SOFT_TOKENS,
-                    video_processor.patch_size * video_processor.pooling_kernel_size,
-                    mm_options.get("video") if mm_options else None,
-                )
             data["video"] = self._get_dummy_videos(
-                width=frame_width,
-                height=frame_height,
+                width=img_width,
+                height=img_height,
                 num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
                 overrides=mm_options.get("video") if mm_options else None,
