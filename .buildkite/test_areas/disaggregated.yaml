@@ -524,8 +524,10 @@ steps:
       commands:
       - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy
 
-- label: ":nvidia: (L4) P2P KV-Offload tier PD accuracy"
+- label: ":nvidia: (L4) [Nightly] P2P KV-Offload tier PD accuracy"
   key: p2p-kv-offload-pd-accuracy-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -536,11 +538,12 @@ steps:
     - tests/v1/kv_offload/tiering/p2p/
     - tests/v1/kv_connector/nixl_integration/test_accuracy.py
   commands:
-    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
     - bash v1/kv_offload/tiering/p2p/config_sweep_accuracy_test.sh
 
-- label: ":nvidia: (L4) P2P KV-Offload tier PD accuracy DP/EP"
+- label: ":nvidia: (L4) [Nightly] P2P KV-Offload tier PD accuracy DP/EP"
   key: p2p-kv-offload-pd-accuracy-dp-ep-4-gpus
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -551,10 +554,10 @@ steps:
     - tests/v1/kv_offload/tiering/p2p/
     - tests/v1/kv_connector/nixl_integration/test_accuracy.py
   commands:
-    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
     - DP_EP=1 bash v1/kv_offload/tiering/p2p/config_sweep_accuracy_test.sh
 
-- label: ":nvidia: (L4) P2P KV-Offload tier PD accuracy hybrid/SWA/fp8"
+- label: ":nvidia: (L4) [Nightly] P2P KV-Offload tier PD accuracy hybrid/SWA/fp8"
   key: p2p-kv-offload-pd-accuracy-features-4-gpus
   optional: true
   timeout_in_minutes: 55
@@ -567,21 +570,21 @@ steps:
     - tests/v1/kv_offload/tiering/p2p/
     - tests/v1/kv_connector/nixl_integration/test_accuracy.py
   commands:
-    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
     - FEATURES=1 bash v1/kv_offload/tiering/p2p/config_sweep_accuracy_test.sh
 
-- label: ":nvidia: (H100) P2P KV-Offload tier PD accuracy MLA"
+- label: ":nvidia: (H100) [Nightly] P2P KV-Offload tier PD accuracy MLA"
   key: p2p-kv-offload-pd-accuracy-mla-4-gpus
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: h100
   num_devices: 4
-  optional: true
   source_file_dependencies:
     - vllm/v1/kv_offload/
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
     - tests/v1/kv_offload/tiering/p2p/
     - tests/v1/kv_connector/nixl_integration/test_accuracy.py
   commands:
-    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
     - MLA=1 bash v1/kv_offload/tiering/p2p/config_sweep_accuracy_test.sh
