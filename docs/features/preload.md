@@ -380,6 +380,27 @@ usual. A misspelled store name or a store that cannot be configured fails
 daemon startup immediately; at runtime, store operations are best-effort and
 never block warmup.
 
+Compiled runtime artifacts travel the same way, which is how an AMD deployment
+reaches the coverage FlashInfer autotuning gives an NVIDIA one. A daemon
+bundles its cache roots after warmup and publishes the bundle under a
+content-addressed key, plus a small index naming it under a digest of the
+weight fingerprint, the device architecture and the toolchain. Because the
+index is not content-addressed, a daemon that has compiled nothing yet can
+look its own bundle up and install it before building the model. The roots are
+the ones the deployment redirects: `FLASHINFER_CUBIN_DIR` and
+`FLASHINFER_WORKSPACE_BASE` everywhere, plus `TRITON_CACHE_DIR` on ROCm, which
+is where AITER's Triton kernels land. A root left at its default is not
+published, since there is no guarantee a peer can write to the same path.
+
+AITER's own module cache (`AITER_JIT_DIR`) is deliberately not published. Its
+`.so` modules ship prebuilt in the container image and are byte-identical on
+every node running it, so publishing a whole root would move gigabytes to
+share nothing — 2.4 GiB over 29k files on a gfx950 image, 569 MiB of it in a
+single module. FlyDSL's runtime cache is excluded for the same reason: one
+pickle per launch configuration, cheap to rebuild and far larger than what it
+accompanies. A deployment that compiles AITER modules the image does not ship
+still rebuilds them on every node.
+
 Prefer the `standalone-store` topology for this use case. In `embedded` mode
 every daemon contributes `global_segment_size` of host memory to the pool,
 which is hard to justify for kilobyte-sized JSON artifacts. Note that the

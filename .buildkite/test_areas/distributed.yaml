@@ -962,9 +962,12 @@ steps:
       - vllm/distributed/mooncake_store.py
       - vllm/entrypoints/cli/preload.py
       - vllm/model_executor/model_loader/weight_cache/
+      - vllm/model_executor/warmup/kernel_warmup.py
       - vllm/platforms/rocm.py
       commands:
       - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-      # test_mooncake_warmup_cache_store_e2e is not mirrored: it needs an SM100
-      # MXFP4 backend and FlashInfer, so on ROCm it can only skip.
       - pytest -v -s model_executor/model_loader/test_weight_cache.py::test_d2d_weight_seeding_cross_host
+      # test_mooncake_warmup_cache_store_e2e needs an SM100 MXFP4 backend and
+      # FlashInfer, so on ROCm it can only skip. AITER is this platform's tuned
+      # backend, so the equivalent coverage shares its compiled kernels instead.
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s model_executor/model_loader/test_weight_cache.py::test_rocm_aiter_warmup_cache_store_e2e

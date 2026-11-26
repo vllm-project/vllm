@@ -2366,6 +2366,125 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
     assert mirror_outputs == baseline_outputs
 
 
+def _jit_snapshot(root: Path) -> dict[str, int]:
+    """Relative path -> mtime_ns for the files the compile cache publishes.
+
+    `_install` restores each file's mtime from the manifest, so a file taken
+    from a peer keeps the publisher's mtime while a locally compiled one does
+    not.
+    """
+    return {
+        str(path.relative_to(root)): path.stat().st_mtime_ns
+        for path in root.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and not path.name.endswith((".lock", ".tmp"))
+    }
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="AITER and the ROCm JIT roots need ROCm"
+)
+@pytest.mark.skipif(
+    not has_mooncake(), reason="Sharing the JIT cache requires Mooncake TransferEngine"
+)
+def test_rocm_aiter_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
+    """AITER kernels published to a Mooncake store let a fresh daemon
+    generation skip compilation with no source daemon online.
+
+    The AMD counterpart of `test_mooncake_warmup_cache_store_e2e`: AITER is
+    this platform's tuned backend, and what is expensive to reproduce is its
+    compiled kernels rather than a FlashInfer autotune table. The daemon runs
+    the same `rocm_aiter_gemm_warmup` pass the engine would, which compiles
+    AITER's Triton kernels (`_gemm_a16_w16_kernel`,
+    `_fused_qk_rmsnorm_rope_gate_kernel`, the gated-delta-rule kernels) into
+    `TRITON_CACHE_DIR`, and that root is what travels. AITER's prebuilt `.so`
+    modules are not shared: they ship in the image, so every node already has
+    them.
+
+    The first generation uses GPU 0 and the second GPU 1, so the bundle is
+    also shown to be portable across devices of one architecture. The data
+    plane uses TCP, so the test needs no RDMA hardware.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        pytest.skip("Run with VLLM_ROCM_USE_AITER=1: AITER emits the artifact")
+
+    monkeypatch.setenv("MC_FORCE_TCP", "1")
+    _wait_for_previous_engines()
+    _set_visible_devices(monkeypatch, "1")
+
+    gen1_cache, gen2_cache = tmp_path / "gen1-triton", tmp_path / "gen2-triton"
+    # The engine leaves this off, so the daemon does the building instead; it
+    # is not part of the weight cache key, so the two still match.
+    daemon_args = [
+        *QWEN_CASE.daemon_args,
+        "--kernel-config",
+        json.dumps({"enable_rocm_aiter_gemm_warmup": True}),
+        "--warmup-cache-stores",
+        "mooncake",
+    ]
+
+    def jit_env(cache: Path, device: str) -> dict[str, str]:
+        # AITER_JIT_DIR is left alone: its modules come prebuilt in the image,
+        # and redirecting it at an empty directory only makes aiter rebuild
+        # them from source.
+        return {**_visibility_env(device), "TRITON_CACHE_DIR": str(cache)}
+
+    log_dir = os.environ.get("D2D_E2E_LOG_DIR")
+    log_file = (
+        (lambda name: os.path.join(log_dir, name)) if log_dir else lambda name: None
+    )
+
+    baseline_outputs = generate(vllm_runner, QWEN_CASE, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    # One AITER warmup compiles ~100 kernels; the kilobyte-artifact defaults
+    # cannot hold the resulting bundle.
+    with MooncakeCluster(
+        tmp_path, monkeypatch, local_buffer_size="512MB", segment_size="2GB"
+    ):
+        with WeightCacheDaemon(
+            QWEN_CASE.model,
+            tp_size=1,
+            extra_args=daemon_args,
+            env_extra=jit_env(gen1_cache, "0"),
+            log_file=log_file("rocm-warmup-gen1.log"),
+        ) as gen1:
+            gen1.wait_until_ready()
+            # The store started empty, so the first generation compiled in place.
+            assert "Warmed up AITER GEMMs" in gen1.logs, gen1.logs
+            assert "Published the compile cache index" in gen1.logs, gen1.logs
+            compiled = _jit_snapshot(gen1_cache)
+            assert compiled, "the warmup pass compiled nothing to share"
+
+        # gen1 is fully stopped: only the Mooncake store can serve the bundle.
+        with WeightCacheDaemon(
+            QWEN_CASE.model,
+            tp_size=1,
+            extra_args=daemon_args,
+            env_extra=jit_env(gen2_cache, "1"),
+            log_file=log_file("rocm-warmup-gen2.log"),
+        ) as gen2:
+            gen2.wait_until_ready()
+            assert "Adopted the compile cache from a shared store" in gen2.logs, (
+                gen2.logs
+            )
+            adopted = _jit_snapshot(gen2_cache)
+            assert not {
+                name for name, mtime in compiled.items() if adopted.get(name) != mtime
+            }, "gen2 recompiled instead of adopting the shared bundle"
+
+            gen2_outputs = generate(
+                vllm_runner, QWEN_CASE, gen2.socket_dir, fallback=False
+            )
+
+    assert gen2_outputs == baseline_outputs
+
+
 def _oversized_compile_cache(tmp_path: Path) -> Path:
     """A sparse cubin directory one byte over the compiled-cache bundle limit."""
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
@@ -2657,9 +2776,19 @@ def _mooncake_peer(key: str, payload: bytes, mode: str) -> None:
 class MooncakeCluster:
     """A real mooncake master plus a standalone-store segment owner."""
 
-    def __init__(self, tmp_path, monkeypatch):
+    def __init__(
+        self,
+        tmp_path,
+        monkeypatch,
+        local_buffer_size: str = "16MB",
+        segment_size: str = "256MB",
+    ):
         self._tmp_path = tmp_path
         self._monkeypatch = monkeypatch
+        # Kilobyte-sized JSON artifacts need no more than the defaults; a
+        # caller publishing compiled bundles asks for room to hold one.
+        self._local_buffer_size = local_buffer_size
+        self._segment_size = segment_size
         self._procs: list[subprocess.Popen] = []
         self._log_chunks: list[str] = []
 
@@ -2706,7 +2835,7 @@ class MooncakeCluster:
             "protocol": "tcp",
             "mode": "standalone-store",
             "global_segment_size": 0,
-            "local_buffer_size": "16MB",
+            "local_buffer_size": self._local_buffer_size,
         }
         config_path = self._tmp_path / "mooncake.json"
         config_path.write_text(json.dumps(config))
@@ -2726,7 +2855,7 @@ class MooncakeCluster:
                 "-protocol",
                 "tcp",
                 "-global_segment_size",
-                "256MB",
+                self._segment_size,
             ]
         )
 

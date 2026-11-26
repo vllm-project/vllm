@@ -9,6 +9,8 @@ import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from vllm.platforms import current_platform
+
 BUNDLE_LIMIT = 8 << 30
 
 
@@ -20,12 +22,27 @@ def _safe_path(value: str) -> PurePosixPath:
 
 
 def _cache_roots() -> dict[str, Path]:
+    variables = [
+        ("flashinfer-cubins", "FLASHINFER_CUBIN_DIR"),
+        ("flashinfer-workspace", "FLASHINFER_WORKSPACE_BASE"),
+    ]
+    if current_platform.is_rocm():
+        # Triton's per-kernel AMDGCN cache, which on ROCm holds the AITER
+        # kernels a warmup compiles. It is published only when the deployment
+        # redirects it, since there is no guarantee a peer can write the
+        # default path.
+        #
+        # AITER's own module cache (AITER_JIT_DIR) is deliberately absent. The
+        # `.so` modules ship prebuilt in the container image and are identical
+        # on every node running it, so a bundle keyed on a whole root would
+        # republish gigabytes (2.4 GiB over 29k files, 569 MiB in one module on
+        # a gfx950 CI image) to share nothing. FlyDSL's runtime cache is
+        # excluded for the same reason: one pickle per launch configuration
+        # that is cheap to rebuild.
+        variables.append(("triton-cache", "TRITON_CACHE_DIR"))
     return {
         name: Path(value).expanduser()
-        for name, variable in (
-            ("flashinfer-cubins", "FLASHINFER_CUBIN_DIR"),
-            ("flashinfer-workspace", "FLASHINFER_WORKSPACE_BASE"),
-        )
+        for name, variable in variables
         if (value := os.environ.get(variable))
     }
 
