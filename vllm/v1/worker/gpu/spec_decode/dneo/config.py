@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 
 if TYPE_CHECKING:
@@ -38,3 +40,9 @@ class DNeoSpeculatorConfig(DFlashSpeculatorConfig):
     def _anchor_first(spec: "SpeculativeConfig") -> bool:
         dflash_config = getattr(spec.draft_model_config.hf_config, "dflash_config", {})
         return bool((dflash_config or {}).get("sample_from_anchor", False))
+
+    @classmethod
+    def apply_options(cls, spec: "SpeculativeConfig") -> None:
+        # Prefix-only attention needs the context from the KV cache, not ROCM_ATTN's.
+        if current_platform.is_rocm():
+            spec.attention_backend = AttentionBackendEnum.TRITON_ATTN
