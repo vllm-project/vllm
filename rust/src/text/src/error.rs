@@ -23,6 +23,8 @@ pub enum Error {
     EmptyPromptTokenIds { request_id: String },
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
+    #[error("Too many stop strings: {count}. The max number is {max}.")]
+    TooManyStopStrings { count: usize, max: usize },
     #[error(
         "text request `{request_id}` stop strings require detokenization; enable it or use stop \
          token IDs"
@@ -81,40 +83,87 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl Error {
+/// High-level fault classification of a request error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// Invalid user request parameters (HTTP 400 / gRPC `INVALID_ARGUMENT`),
+    /// with the canonical offending parameter name when attributable to a
+    /// single field.
+    InvalidRequest { param: Option<&'static str> },
+    /// Server-side or internal failure (HTTP 500 / gRPC `INTERNAL`).
+    Internal,
+}
+
+impl ErrorKind {
+    /// Construct an [`ErrorKind::InvalidRequest`] referencing `param`.
+    pub const fn invalid_param(param: &'static str) -> Self {
+        Self::InvalidRequest { param: Some(param) }
+    }
+
+    /// Construct an [`ErrorKind::InvalidRequest`] not tied to a single field.
+    pub const fn invalid_request() -> Self {
+        Self::InvalidRequest { param: None }
+    }
+
     /// Whether this error represents invalid user request parameters.
-    pub fn is_request_validation_error(&self) -> bool {
+    pub const fn is_invalid_request(self) -> bool {
+        matches!(self, Self::InvalidRequest { .. })
+    }
+}
+
+impl Error {
+    /// Classify this error as a client request-validation failure (with its
+    /// canonical OpenAI `param`, if any) or an internal server failure.
+    pub fn kind(&self) -> ErrorKind {
         match self {
-            Self::PromptTooLong { .. }
-            | Self::PromptFillsContext { .. }
-            | Self::EmptyPromptTokenIds { .. }
-            | Self::EmptyStopString { .. }
-            | Self::StopStringsRequireDetokenize { .. }
-            | Self::TokenizerUnavailable
-            | Self::InvalidCacheSalt
-            | Self::Logprobs(_)
-            | Self::TokenIds(_)
-            | Self::SamplingParams(_)
-            | Self::MinTokensExceedsMaxTokens { .. }
-            | Self::GreedyParallelSampling { .. }
-            | Self::InvalidThinkingTokenBudget
-            | Self::TruncatePromptTokensExceedsMaxModelLen { .. }
+            Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => {
+                ErrorKind::invalid_param("input_tokens")
+            }
+            Self::EmptyPromptTokenIds { .. } => ErrorKind::invalid_param("prompt"),
+            Self::EmptyStopString { .. }
+            | Self::TooManyStopStrings { .. }
+            | Self::StopStringsRequireDetokenize { .. } => ErrorKind::invalid_param("stop"),
+            Self::InvalidCacheSalt => ErrorKind::invalid_param("cache_salt"),
+            Self::Logprobs(error) => ErrorKind::invalid_param(error.param()),
+            Self::TokenIds(error) => ErrorKind::InvalidRequest {
+                param: error.param(),
+            },
+            Self::SamplingParams(error) => ErrorKind::invalid_param(error.param()),
+            Self::InvalidThinkingTokenBudget => ErrorKind::invalid_param("thinking_token_budget"),
+            Self::TruncatePromptTokensExceedsMaxModelLen { .. }
             | Self::InvalidTruncatePromptTokens { .. }
-            | Self::TruncateUnsupportedWithMultimodal
-            | Self::InvalidRepetitionDetection { .. }
-            // An empty tokenized prompt detected later, at request prepare
-            // time, surfaces through the transparent Llm wrapper.
-            | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
-            | Self::Llm(LlmError::Unsupported { .. })
-            | Self::Llm(LlmError::PromptLogprobsUnsupported { .. })
-            | Self::Llm(LlmError::MmEmbedsExceedEncoderCache { .. })
-            | Self::Llm(LlmError::InvalidMultimodalInput { .. })
-            | Self::Llm(LlmError::RemoteInvalidRequest { .. })
-            | Self::Llm(LlmError::EngineCoreClient(
-                EngineCoreError::InvalidDataParallelRank { .. },
-            ))
-            | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
-            _ => false,
+            | Self::TruncateUnsupportedWithMultimodal => {
+                ErrorKind::invalid_param("truncate_prompt_tokens")
+            }
+            Self::InvalidRepetitionDetection { .. } => {
+                ErrorKind::invalid_param("repetition_detection")
+            }
+            Self::TokenizerUnavailable
+            | Self::MinTokensExceedsMaxTokens { .. }
+            | Self::GreedyParallelSampling { .. } => ErrorKind::invalid_request(),
+            Self::Tokenizer(_) | Self::StreamClosedBeforeTerminalOutput { .. } => {
+                ErrorKind::Internal
+            }
+            Self::Llm(error) => match error {
+                // An empty tokenized prompt detected later, at request prepare
+                // time, surfaces through the transparent Llm wrapper.
+                LlmError::EmptyPromptTokenIds { .. } => ErrorKind::invalid_param("prompt"),
+                LlmError::PromptLogprobsUnsupported { parameter } => {
+                    ErrorKind::invalid_param(parameter)
+                }
+                LlmError::Unsupported { field } => ErrorKind::invalid_param(field),
+                LlmError::MmEmbedsExceedEncoderCache { .. }
+                | LlmError::InvalidMultimodalInput { .. }
+                | LlmError::RemoteInvalidRequest { .. } => ErrorKind::invalid_request(),
+                LlmError::EngineCoreClient(error) => engine_core_error_kind(error),
+                LlmError::SamplingMaskTokenCountMismatch { .. }
+                | LlmError::AuxOutputRows(_)
+                | LlmError::Unavailable { .. }
+                | LlmError::QueueFull
+                | LlmError::PrefillBacklogFull
+                | LlmError::Remote { .. } => ErrorKind::Internal,
+            },
+            Self::EngineCore(error) => engine_core_error_kind(error),
         }
     }
 
@@ -128,15 +177,18 @@ impl Error {
             )
         )
     }
+}
 
-    /// The request parameter a validation error refers to, reported as the
-    /// `param` of the OpenAI error object.
-    pub fn param(&self) -> Option<&'static str> {
-        match self {
-            Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
-            Self::Llm(LlmError::PromptLogprobsUnsupported { parameter }) => Some(parameter),
-            _ => None,
+fn engine_core_error_kind(error: &EngineCoreError) -> ErrorKind {
+    match error {
+        EngineCoreError::InvalidDataParallelRank { .. } => {
+            ErrorKind::invalid_param("data_parallel_rank")
         }
+        EngineCoreError::InvalidStructuredOutputsParams { .. } => {
+            ErrorKind::invalid_param("structured_outputs")
+        }
+        EngineCoreError::Shared(inner) => engine_core_error_kind(inner),
+        _ => ErrorKind::Internal,
     }
 }
 

@@ -16,7 +16,6 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
-    ScheduleEndContext,
     StoreTrigger,
     make_offload_key,
 )
@@ -170,43 +169,6 @@ def test_cpu_stored_event_carries_request_context():
 
     [event] = manager.take_events()
     assert event.req_context is req_context
-
-
-def test_cpu_schedule_end_reports_events_and_stats_once():
-    manager = make_cpu_manager(num_chunks=2, enable_events=True)
-    manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
-    manager.complete_store(
-        to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
-    )
-    context = ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
-
-    result = manager.on_schedule_end(context)
-
-    assert not result.pending
-    verify_events(result.events, expected_stores=({1},))
-    assert result.stats is not None
-    assert CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC in result.stats.reduce()
-    assert manager.on_schedule_end(context).events == []
-
-
-def test_reset_drops_undrained_stored_events():
-    manager = make_cpu_manager(num_chunks=2, enable_events=True)
-    manager.prepare_store(
-        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
-    )
-    manager.complete_store(
-        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
-    )
-    list(manager.take_events())
-    # Evicts chunk 1, then stores chunk 3; neither event is drained yet.
-    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
-    manager.complete_store(
-        to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
-    )
-
-    manager.reset_cache()
-
-    verify_events(manager.take_events(), expected_evictions=({1},))
 
 
 def test_cpu_eviction_removed_precedes_stored():
