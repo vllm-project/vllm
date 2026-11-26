@@ -621,3 +621,18 @@ def test_padding_requests_take_the_rows_that_follow(
     spec = torch.arange(8 * HEADS * 64).view(8, HEADS, 64).to(core_out)
     assert torch.equal(core_out[:8], spec)
     assert torch.all(core_out[8:11] == 7) and not core_out[11:].any()
+
+
+def test_eager_steps_pad_only_to_decode_graph_batches(forward_context):
+    """The op compiles in warmup's FULL decode graphs only. A captured token
+    count that is a prefill graph (24 = 6 requests of 4 tokens here) is not a
+    batch size the op compiled, so an eager step of 5 requests pads to 8."""
+    mixer = _mixer(3, "model.layers.0.pad_batches")
+    mixer.replay_capture_sizes = [4, 8, 16, 24, 32]
+    mixer.replay_decode_requests = [1, 2, 4, 8]
+    assert mixer._replay_batches(4) == [1, 2, 4, 8]
+    # Without decode request counts, every whole-request token count.
+    other = _mixer(3, "model.layers.1.pad_batches")
+    other.replay_capture_sizes = [4, 8, 16, 24, 32]
+    other.replay_decode_requests = None
+    assert other._replay_batches(4) == [1, 2, 4, 6, 8]

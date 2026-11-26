@@ -10,6 +10,7 @@ With `--use-replayssm`, decode and speculative verify run on
 `gdp_conv_replay_decode.gdp_conv_replay` instead (see `gdp_replay.py`).
 """
 
+import bisect
 import functools
 import importlib
 
@@ -488,11 +489,15 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = (torch.tensor([]), torch.tensor([]))
         self.num_spec = vllm_config.num_speculative_tokens
-        # The replay op compiles once per batch size; eager steps pad up to a
-        # captured size, which warmup already compiled.
+        # The replay op compiles once per batch size, in warmup's FULL decode
+        # graphs; eager steps pad up to one of those (`_replay_batches`).
         self.replay_capture_sizes = sorted(
             compilation_config.cudagraph_capture_sizes or []
         )
+        self.replay_decode_requests = (
+            compilation_config.decode_cudagraph_capture_request_sizes
+        )
+        self._replay_batch_cache: dict[int, list[int]] = {}
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
@@ -816,19 +821,29 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         if not commits:
             return trackers.step_of(md)
         batch = slots.size(0)
-        # The op compiles once per batch size; eager steps pad up to a
-        # captured size, which warmup already compiled.
-        padded = min(
-            (
-                size // tokens
-                for size in self.replay_capture_sizes
-                if size % tokens == 0 and size // tokens >= batch
-            ),
-            default=batch,
-        )
+        batches = self._replay_batches(tokens)
+        i = bisect.bisect_left(batches, batch)
+        padded = batches[i] if i < len(batches) else batch
         return trackers.commit_step(
             md, slots, query_start_loc, num_accepted, tokens, padded, num_rows
         )
+
+    def _replay_batches(self, tokens: int) -> list[int]:
+        """The batch sizes warmup compiled the op for at `tokens` tokens per
+        request, ascending: the request counts of the FULL decode graphs. An
+        eager step pads up to one, so the op never compiles mid-serving."""
+        batches = self._replay_batch_cache.get(tokens)
+        if batches is None:
+            sizes = set(self.replay_capture_sizes)
+            if self.replay_decode_requests:
+                # Each decode graph runs n requests as n * tokens tokens; the
+                # other captured token counts are prefill graphs, which run the
+                # op outside the graph.
+                found = {n for n in self.replay_decode_requests if n * tokens in sizes}
+            else:
+                found = {size // tokens for size in sizes if size % tokens == 0}
+            batches = self._replay_batch_cache[tokens] = sorted(found)
+        return batches
 
     def _replay(
         self,
