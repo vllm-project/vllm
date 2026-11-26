@@ -24,6 +24,13 @@ THREADS = 512
 WAVES = THREADS // 64
 
 
+def first_task(bid, base):
+    """CTA `bid`'s first task of a stage placed from CTA `base` (any count of
+    CTAs past 0: placements that add task counts run past the grid), then every
+    BLOCKS-th."""
+    return (bid - base % BLOCKS + BLOCKS) % BLOCKS
+
+
 def device_grid() -> tuple[str, int]:
     """Get the V4.1 worker's architecture and resident grid after device binding."""
     import torch
