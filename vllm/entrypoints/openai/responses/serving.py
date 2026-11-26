@@ -33,6 +33,7 @@ from vllm.entrypoints.generate.base.serving import (
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -80,7 +81,7 @@ from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
-from vllm.logprobs import SampleLogprobs
+from vllm.logprobs import LogprobsOnePosition, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
@@ -208,6 +209,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.online_renderer.reasoning_effort_map,
             )
             .with_defaults(self.chat_template_kwargs)
             .chat_template_kwargs
@@ -254,13 +256,6 @@ class OpenAIServingResponses(GenerateBaseServing):
     def _validate_create_responses_input(
         self, request: ResponsesRequest
     ) -> ErrorResponse | None:
-        if self.use_harmony and request.is_include_output_logprobs():
-            return self.create_error_response(
-                err_type="invalid_request_error",
-                message="logprobs are not supported with gpt-oss models",
-                status_code=HTTPStatus.BAD_REQUEST,
-                param="logprobs",
-            )
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
                 err_type="invalid_request_error",
@@ -446,6 +441,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(request, raw_request)
+            data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
@@ -525,6 +521,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
+                data_parallel_rank=data_parallel_rank,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
                 reasoning_ended=True if request._grammar_from_parser else None,
                 max_tool_calls=request.max_tool_calls,
@@ -648,6 +645,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
+        data_parallel_rank: int | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
         max_tool_calls: int | None = None,
@@ -677,6 +675,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 trace_headers=trace_headers,
                 priority=priority,
                 session_id=session_id,
+                data_parallel_rank=data_parallel_rank,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
                 reasoning_ended=reasoning_ended,
             )
@@ -805,6 +804,11 @@ class OpenAIServingResponses(GenerateBaseServing):
                     incomplete=(
                         i == len(harmony_msgs) - 1 and context.last_append_flush_status
                     ),
+                    logprobs=self._create_harmony_logprobs(
+                        context.logprobs_by_message.get(id(msg), []),
+                        request,
+                        tokenizer,
+                    ),
                 )
                 if next_streamed is not None and next_streamed[0] is msg:
                     reuse_streamed_item_ids(items, next_streamed[1])
@@ -919,7 +923,11 @@ class OpenAIServingResponses(GenerateBaseServing):
             and context.request_metrics_cover_all_generation_turns
         ):
             per_request_metrics = build_per_request_timing_metrics(
-                context.request_metrics, num_generated_tokens
+                context.request_metrics,
+                num_generated_tokens,
+                first_content_token_ts=(
+                    context.first_content_token_ts if request.stream else None
+                ),
             )
         response = ResponsesResponse.from_request(
             request,
@@ -965,7 +973,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 LogprobTopLogprob(
                     token=text,
                     logprob=max(_logprob.logprob, -9999.0),
-                    bytes=list(text.encode("utf-8", errors="replace")),
+                    bytes=self._token_bytes(token_id, text),
                 )
             )
         return out
@@ -995,7 +1003,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 Logprob(
                     token=text,
                     logprob=max(token_logprob.logprob, -9999.0),
-                    bytes=list(text.encode("utf-8", errors="replace")),
+                    bytes=self._token_bytes(token_id, text),
                     top_logprobs=(
                         self._topk_logprobs(
                             logprob, top_logprobs=top_logprobs, tokenizer=tokenizer
@@ -1006,6 +1014,37 @@ class OpenAIServingResponses(GenerateBaseServing):
                 )
             )
         return out
+
+    def _token_bytes(self, token_id: int, text: str) -> list[int]:
+        """Bytes of a token for the logprobs `bytes` field.
+
+        For gpt-oss, these are the token's raw bytes, so tokens that split a
+        multi-byte character can be joined back into it.
+        """
+        if self.use_harmony and not self.return_tokens_as_token_ids:
+            raw = get_encoding().decode([token_id], errors="surrogateescape")
+            return list(raw.encode("utf-8", errors="surrogateescape"))
+        return list(text.encode("utf-8", errors="replace"))
+
+    def _create_harmony_logprobs(
+        self,
+        token_logprobs: Sequence[tuple[int, LogprobsOnePosition]],
+        request: ResponsesRequest,
+        tokenizer: TokenizerLike,
+    ) -> list[Logprob] | None:
+        """Convert (token_id, logprobs) pairs collected by HarmonyContext.
+
+        Streaming deltas, streaming done events and the final response all
+        go through here so they report identical logprobs.
+        """
+        if not request.is_include_output_logprobs():
+            return None
+        return self._create_response_logprobs(
+            token_ids=[token_id for token_id, _ in token_logprobs],
+            logprobs=[logprobs for _, logprobs in token_logprobs],
+            tokenizer=tokenizer,
+            top_logprobs=request.top_logprobs,
+        )
 
     def _log_final_output(
         self,
@@ -1261,6 +1300,9 @@ class OpenAIServingResponses(GenerateBaseServing):
             else:
                 delta_message = DeltaMessage(content=output.text)
 
+            if delta_message is not None and delta_message.content:
+                ctx.record_first_content_token(ctx.last_output.metrics)
+
             if not delta_message:
                 continue
             delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
@@ -1308,9 +1350,18 @@ class OpenAIServingResponses(GenerateBaseServing):
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
             for segment in ctx.last_append_segments:
+                if segment.token_logprobs is not None:
+                    state.pending_logprobs.append(segment.token_logprobs)
+
                 if segment.delta:
+                    delta_logprobs = None
+                    if segment.token_logprobs is not None:
+                        delta_logprobs = self._create_harmony_logprobs(
+                            state.pending_logprobs, request, tokenizer
+                        )
+                        state.pending_logprobs = []
                     for event in emit_content_delta_events(
-                        segment, state, ctx.function_tool_names
+                        segment, state, ctx.function_tool_names, delta_logprobs
                     ):
                         yield _increment_sequence_number_and_return(event)
 
@@ -1318,7 +1369,14 @@ class OpenAIServingResponses(GenerateBaseServing):
                     done_items: list[ResponseOutputItem] = []
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
-                        completed_message, state, ctx.function_tool_names
+                        completed_message,
+                        state,
+                        ctx.function_tool_names,
+                        self._create_harmony_logprobs(
+                            ctx.logprobs_by_message.get(id(completed_message), []),
+                            request,
+                            tokenizer,
+                        ),
                     ):
                         if isinstance(event, ResponseOutputItemDoneEvent):
                             done_items.append(event.item)

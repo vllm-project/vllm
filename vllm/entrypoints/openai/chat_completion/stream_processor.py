@@ -3,6 +3,9 @@
 from typing import NamedTuple
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.entrypoints.openai.chat_completion.message_assembly import (
+    keeps_tool_calls,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
@@ -27,9 +30,19 @@ class ChatStreamProcessor:
     `step` once per chunk, in order and with the chunking the engine produced.
     """
 
-    def __init__(self, request: ChatCompletionRequest, parser: Parser | None) -> None:
+    def __init__(
+        self,
+        request: ChatCompletionRequest,
+        parser: Parser | None,
+        *,
+        enable_auto_tools: bool,
+        parser_cls: type[Parser] | None,
+    ) -> None:
         self.request = request
         self.parser = parser
+        self.keep_tool_calls = keeps_tool_calls(
+            request, enable_auto_tools=enable_auto_tools, parser_cls=parser_cls
+        )
         self.num_output_tokens = 0
         self.tools_streamed = False
         # Logprobs and token IDs would leak hidden reasoning through decoded
@@ -52,8 +65,8 @@ class ChatStreamProcessor:
             prompt_token_ids: Prompt token IDs if known.
 
         Returns:
-            The delta to stream, filtered for `parallel_tool_calls` and the
-            chat `finish_reason`.
+            The delta to stream, filtered for `tool_choice` and
+            `parallel_tool_calls`, and the chat `finish_reason`.
 
         """
         delta: DeltaMessage | None
@@ -69,7 +82,12 @@ class ChatStreamProcessor:
                 finished=finish_reason is not None,
             )
             if delta is not None and delta.tool_calls:
-                self.tools_streamed = True
+                if self.keep_tool_calls:
+                    self.tools_streamed = True
+                else:
+                    delta.tool_calls = []
+                    if not delta.content and not delta.reasoning:
+                        delta = None
         else:
             delta = DeltaMessage(content=delta_text)
         self.num_output_tokens += len(delta_token_ids)

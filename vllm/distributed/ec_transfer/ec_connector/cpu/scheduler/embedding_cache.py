@@ -52,7 +52,7 @@ class EmbeddingCache:
     allocated from a free-set; when space is needed, ready + unpinned
     entries are evicted oldest-first.
 
-    The caller is responsible for deciding *when* to call ``mark_ready``
+    The caller is responsible for deciding *when* to call `mark_ready`
     (e.g. after enough engine steps have elapsed for the worker to have
     completed the write).
     """

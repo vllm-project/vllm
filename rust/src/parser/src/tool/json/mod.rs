@@ -7,8 +7,7 @@ pub use granite4::Granite4ToolParser;
 pub use hermes::HermesToolParser;
 pub use internlm2::Internlm2ToolParser;
 pub use llama::Llama3JsonToolParser;
-pub use mistral::MistralToolParser;
-pub use phi4mini::Phi4MiniJsonToolParser;
+pub(crate) use mistral::MistralJsonArrayToolParser;
 pub use qwen::Qwen3JsonToolParser;
 
 mod granite4;
@@ -16,7 +15,6 @@ mod hermes;
 mod internlm2;
 mod llama;
 mod mistral;
-mod phi4mini;
 mod qwen;
 
 use vllm_tokenizer::DecodedText;
@@ -31,7 +29,7 @@ use super::utils::{
     JsonObjectScanState, json_str, parse_buffered_event, safe_text_len, safe_text_len_mul,
     take_json_object,
 };
-use super::{Result, ToolCallDelta, ToolParserOutput};
+use super::{Result, ToolCallDelta, ToolParserError, ToolParserOutput};
 
 pub(crate) type JsonToolInput<'i> = Partial<&'i str>;
 
@@ -118,10 +116,9 @@ impl JsonToolCallParser {
         match &self.mode {
             JsonToolCallMode::Text => output.push_text(&self.buffer),
             JsonToolCallMode::Header | JsonToolCallMode::Arguments { .. } => {
-                return Err(parsing_failed!(
-                    "incomplete {} tool call",
-                    self.config.parser_name
-                ));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: self.config.parser_name,
+                });
             }
         }
         let _ = self.reset();

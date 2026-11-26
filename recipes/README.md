@@ -9,9 +9,10 @@ The site, the command builder, and the JSON API are built by
 [vllm-project/recipes](https://github.com/vllm-project/recipes). That
 repository owns the schema and the shared vocabulary (hardware profiles,
 serving strategies, KV-offload deployments) and pins this directory to a
-commit. Omni (image, video, audio) recipes stay in vllm-project/recipes for
-now (moving to vllm-omni), and Ascend NPU content is inline in these recipes
-(moving to vllm-ascend overlays).
+commit. Omni (image, video, audio) recipes live in vllm-project/vllm-omni, and
+Ascend NPU content lives in vllm-project/vllm-ascend as overlays that merge into
+these recipes when the site is built. Don't add Ascend hardware here: open those
+changes against `recipes/overlays/` in vllm-ascend.
 
 ## Editing a recipe
 
@@ -23,6 +24,15 @@ checked against [`recipe.schema.json`](https://recipes.vllm.ai/recipe.schema.jso
 on every build; an unknown or misspelled key is an error. For completion and
 inline errors in YAML-aware editors, start the file with
 `# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json`.
+
+Don't set `--gpu-memory-utilization` for CUDA or ROCm hardware, even when a
+model card recommends a value. There, vLLM sizes the KV cache from the memory
+measured after warmup and defaults the setting to 1.0, so a lower value only
+shrinks the KV cache. Set it only to leave room for something vLLM doesn't
+measure, such as another process sharing the GPU or the CPU on a unified-memory
+device like DGX Spark; see
+[GPU Memory Utilization](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization).
+Values for other hardware (TPU, XPU, CPU) still size the KV cache there.
 
 Follow the recipes repository's
 [add-recipe skill](https://github.com/vllm-project/recipes/blob/main/.agents/skills/add-recipe/SKILL.md)
@@ -38,3 +48,7 @@ To preview the site with your changes, add a gitignored `sources.local.yaml`
 to that checkout with `overrides: { vllm: ~/vllm/recipes }` and run `pnpm dev`.
 This works once vllm-project/recipes reads this directory as its `vllm`
 source (vllm-project/recipes#1095).
+
+A pull request that changes this directory gets the `recipe` label and a
+comment linking its own preview deployment, rebuilt a few minutes after each
+push.

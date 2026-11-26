@@ -35,6 +35,7 @@ from openai.types.responses.tool import (
 from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
 from pydantic import ValidationError
+from starlette.requests import Request
 
 import vllm.envs as envs
 from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
@@ -88,6 +89,7 @@ def _new_online_renderer() -> OnlineRenderer:
     renderer.exclude_tools_when_tool_choice_none = False
     renderer.parser = None
     renderer.trust_request_chat_template = True
+    renderer.reasoning_effort_map = {}
     return renderer
 
 
@@ -899,6 +901,58 @@ class TestInitializeToolSessions:
         return instance
 
     @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        "header,expected_rank", [(None, None), ("invalid", None), ("0", 0), ("3", 3)]
+    )
+    async def test_responses_data_parallel_rank(
+        self, serving_responses_instance, stream, header, expected_rank
+    ):
+        serving = serving_responses_instance
+        serving._check_model = AsyncMock(return_value=None)
+        serving._preflight = MagicMock()
+        serving._maybe_get_adapters = MagicMock(return_value=None)
+        serving._validate_generator_input = MagicMock(return_value=None)
+        serving._make_response_parser = MagicMock(return_value=None)
+        serving._get_trace_headers = AsyncMock(return_value=None)
+        serving.online_renderer.validate_chat_template.return_value = None
+        serving._render_resolved_response_inputs = AsyncMock(
+            return_value=SimpleNamespace(messages=[], engine_input=tokens_input([1, 2]))
+        )
+        serving.override_max_tokens = None
+        serving.tool_server = None
+
+        async def generate(*args, **kwargs):
+            if False:
+                yield
+
+        async def consume(request, sampling_params, result_generator, *args):
+            async for _ in result_generator:
+                pass
+            yield "done"
+
+        async def consume_full(*args):
+            return [item async for item in consume(*args)]
+
+        serving.engine_client.generate.side_effect = generate
+        serving.responses_stream_generator = consume
+        serving.responses_full_generator = consume_full
+        headers = [] if header is None else [(b"x-data-parallel-rank", header.encode())]
+        raw_request = Request({"type": "http", "headers": headers})
+        request = ResponsesRequest(input="hi", stream=stream, store=False)
+
+        result = await serving._create_responses(request, raw_request)
+        if stream:
+            result = [item async for item in result]
+        assert result == ["done"]
+        serving.engine_client.generate.assert_called_once()
+        assert (
+            serving.engine_client.generate.call_args.kwargs["data_parallel_rank"]
+            == expected_rank
+        )
+
+    @pytest.mark.asyncio
     async def test_stateful_harmony_delegates_named_tool_choice_to_renderer(
         self,
         serving_responses_instance,
@@ -970,8 +1024,13 @@ class TestInitializeToolSessions:
         assert render_request.cache_salt == "request-salt"
 
     @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("data_parallel_rank", [None, 0, 3])
     async def test_harmony_tool_followup_preserves_render_params(
-        self, serving_responses_instance, monkeypatch: pytest.MonkeyPatch
+        self,
+        serving_responses_instance,
+        monkeypatch: pytest.MonkeyPatch,
+        data_parallel_rank,
     ):
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
@@ -1014,6 +1073,7 @@ class TestInitializeToolSessions:
 
         async for _ in serving_responses_instance._generate_with_builtin_tools(
             request_id="req",
+            data_parallel_rank=data_parallel_rank,
             engine_input=tokens_input([1], cache_salt="request-salt"),
             sampling_params=MagicMock(),
             context=context,
@@ -1026,6 +1086,10 @@ class TestInitializeToolSessions:
             pass
 
         assert serving_responses_instance.engine_client.generate.call_count == 2
+        assert all(
+            call.kwargs["data_parallel_rank"] == data_parallel_rank
+            for call in serving_responses_instance.engine_client.generate.call_args_list
+        )
         assert context.request_metrics_cover_all_generation_turns is False
         followup_engine_input = (
             serving_responses_instance.engine_client.generate.call_args_list[1].args[0]
@@ -1721,6 +1785,7 @@ async def test_responses_per_request_metrics_follow_server_flag():
     enabled_response = await _make_full_metrics_response(True)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.time_to_first_content_token_ms is None
 
 
 @pytest.mark.asyncio
@@ -1731,12 +1796,15 @@ async def test_responses_streaming_metrics_only_on_completed_event():
         "hello", [10, 20], metrics=_PER_REQUEST_STATS
     )
 
+    async def result_generator():
+        yield context
+
     events = [
         event
         async for event in serving.responses_stream_generator(
             request=request,
             sampling_params=SamplingParams(max_tokens=16),
-            result_generator=_empty_context_generator(),
+            result_generator=result_generator(),
             context=context,
             model_name="test-model",
             tokenizer=MagicMock(),
@@ -1744,11 +1812,16 @@ async def test_responses_streaming_metrics_only_on_completed_event():
         )
     ]
 
+    assert any(event.type == "response.output_text.delta" for event in events)
     for event in events[:-1]:
-        assert "metrics" not in event.response.model_dump(mode="json")
+        payload = event.model_dump(mode="json")
+        assert "metrics" not in payload.get("response", payload)
     assert isinstance(events[-1], ResponseCompletedEvent)
     assert events[-1].response.metrics is not None
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert events[-1].response.metrics.time_to_first_content_token_ms == pytest.approx(
+        1500.0
+    )
 
 
 async def _stream_truncated_by_length(serving: OpenAIServingResponses):
@@ -1776,8 +1849,8 @@ async def _stream_truncated_by_length(serving: OpenAIServingResponses):
 
 @pytest.mark.asyncio
 async def test_responses_stream_truncated_by_length_reports_incomplete():
-    """A max_output_tokens cut must end the stream with ``response.incomplete``
-    and mark the cut item ``incomplete`` in both ``output_item.done`` and the
+    """A max_output_tokens cut must end the stream with `response.incomplete`
+    and mark the cut item `incomplete` in both `output_item.done` and the
     final response (#57998)."""
     events = await _stream_truncated_by_length(_make_serving_instance())
 
@@ -1793,8 +1866,8 @@ async def test_responses_stream_truncated_by_length_reports_incomplete():
 
 @pytest.mark.asyncio
 async def test_background_stream_replay_stops_on_response_incomplete():
-    """Replaying a stored background stream must end at ``response.incomplete``
-    as it does at ``response.completed``, instead of waiting for more events."""
+    """Replaying a stored background stream must end at `response.incomplete`
+    as it does at `response.completed`, instead of waiting for more events."""
     serving = _make_serving_instance()
     events = await _stream_truncated_by_length(serving)
     assert isinstance(events[-1], ResponseIncompleteEvent)
@@ -2398,25 +2471,43 @@ def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
     return (delta if streamed else []) + [completed]
 
 
-async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
-    serving = _make_serving_instance()
+async def _harmony_stream_events(
+    segment_chunks: list[list[Segment]], *, enable_per_request_metrics: bool = False
+):
+    serving = _make_serving_instance(
+        enable_per_request_metrics=enable_per_request_metrics
+    )
     serving.use_harmony = True
     parser = MagicMock(spec=HarmonyParser)
     parser.process_chunk.side_effect = [
         ChunkResult(segments=segments, reasoning_token_count=0)
         for segments in segment_chunks
     ]
-    context = HarmonyContext([], [], frozenset({"get_weather"}), parser)
+    request = ResponsesRequest(input="hi", stream=True, store=False)
+    context = HarmonyContext(
+        [], [], frozenset({"get_weather"}), parser, request=request
+    )
 
     async def result_generator():
         for token_id in range(len(segment_chunks)):
-            context.append_output(_make_request_output("", [token_id]))
+            metrics = (
+                RequestStateStats(
+                    queued_ts=1.0,
+                    scheduled_ts=1.5,
+                    first_token_ts=2.0,
+                    last_token_ts=2.0 + token_id * 0.5,
+                )
+                if enable_per_request_metrics
+                else None
+            )
+            context.append_output(_make_request_output("", [token_id], metrics))
+            context.request_metrics = metrics
             yield context
 
     return [
         event
         async for event in serving.responses_stream_generator(
-            request=ResponsesRequest(input="hi", stream=True, store=False),
+            request=request,
             sampling_params=SamplingParams(max_tokens=16),
             result_generator=result_generator(),
             context=context,
@@ -2437,7 +2528,10 @@ async def test_harmony_stream_completed_response_reuses_streamed_ids():
         _harmony_msg("final", "Sunny"),
     ]
 
-    events = await _harmony_stream_events([_harmony_segments(msg) for msg in messages])
+    events = await _harmony_stream_events(
+        [_harmony_segments(msg) for msg in messages],
+        enable_per_request_metrics=True,
+    )
 
     streamed = [e.item for e in events if e.type == "response.output_item.done"]
     output = events[-1].response.output
@@ -2445,6 +2539,10 @@ async def test_harmony_stream_completed_response_reuses_streamed_ids():
     assert [item.id for item in output] == [item.id for item in streamed]
     assert output[1].call_id == streamed[1].call_id
     assert output[2].content[0].text == "Sunny"
+    assert events[-1].response.metrics is not None
+    assert events[-1].response.metrics.time_to_first_content_token_ms == pytest.approx(
+        1500.0
+    )
 
 
 @pytest.mark.asyncio

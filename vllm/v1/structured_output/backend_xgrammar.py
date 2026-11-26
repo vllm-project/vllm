@@ -53,10 +53,9 @@ class XgrammarBackend(StructuredOutputBackend):
 
             # not self.tokenizer.vocab_size as self.tokenizer.vocab
             # collapses all decoded errors into a single token.
-            self.vocab_size = len(self.tokenizer.vocab)
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
                 encoded_vocab=self.tokenizer.vocab,
-                # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
+                # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43
                 vocab_type=xgr.VocabType.RAW
                 if self.tokenizer.is_tekken
                 else xgr.VocabType.BYTE_FALLBACK,
@@ -131,16 +130,6 @@ class XgrammarBackend(StructuredOutputBackend):
         # but also specify a list of separators after which
         # xgrammar must not insert spaces.
         # This is a requirement of xgrammar's API, so we must comply with it.
-        #
-        # FIXME(arpera):
-        # Currently xgrammar v0.2.8 DOES emit spaces after comma
-        # even if we specify it in separators list.
-        # The bug has been reported to xgrammar team:
-        # https://github.com/mlc-ai/xgrammar/issues/945
-        # Please, track that issue, and once it is resolved remove this comment.
-        # Upd. this bug was fixed in xgrammar main branch on Oct 8, 2026
-        # and will be available in next release.
-        # So, remove this comment once xgrammar updates to v0.2.9
         separators = (",", ":") if self.disable_any_whitespace else None
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
@@ -205,9 +194,6 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx=ctx,
         )
 
-    def allocate_token_bitmask(self, max_num_seqs: int):
-        return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
-
     def destroy(self):
         del self.compiler
         del self.full_vocab_compiler
@@ -270,14 +256,12 @@ class XgrammarGrammar(StructuredOutputGrammar):
         """
         if self._is_terminated:
             return True
-        for token in tokens:
+        for num_accepted, token in enumerate(tokens):
             if not self.matcher.accept_token(token):
-                logger.error(
-                    "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.",
-                    request_id,
-                    token,
-                )
+                if num_accepted:
+                    self.matcher.rollback(num_accepted)
+                    self.num_processed_tokens -= num_accepted
+                    self._is_terminated = self.matcher.is_terminated()
                 return False
             self.num_processed_tokens += 1
             self._is_terminated = self.matcher.is_terminated()

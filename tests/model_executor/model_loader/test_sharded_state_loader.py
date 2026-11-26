@@ -7,11 +7,14 @@ import os
 import shutil
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from vllm import LLM, SamplingParams
+from vllm.config import LoadConfig
 from vllm.model_executor.model_loader import ShardedStateLoader
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -50,6 +53,31 @@ def test_filter_subtensors():
         assert tensor is state_dict[key]
 
 
+def _row_stride_padded(rows: int, cols: int, pad: int) -> torch.Tensor:
+    """A view whose row stride exceeds its width, as ROCm weight padding makes."""
+    return torch.nn.functional.pad(torch.randn(rows, cols), (0, pad))[..., :-pad]
+
+
+def test_filter_subtensors_row_stride_padded():
+    padded = _row_stride_padded(4, 8, 2)
+    assert not padded.is_contiguous()
+    filtered_state_dict = ShardedStateLoader._filter_subtensors({"w": padded})
+    assert filtered_state_dict["w"] is padded
+
+
+def test_save_model_row_stride_padded(monkeypatch, tmp_path):
+    from safetensors.torch import load_file
+
+    _mock_pp_group(monkeypatch, 1)
+    model = torch.nn.Linear(8, 4, bias=False)
+    model.weight.data = _row_stride_padded(4, 8, 2)
+
+    ShardedStateLoader.save_model(model, str(tmp_path))
+
+    saved = load_file(tmp_path / "model-rank-0-part-0.safetensors")
+    torch.testing.assert_close(saved["weight"], model.weight.data, rtol=0, atol=0)
+
+
 def _mock_pp_group(
     monkeypatch: pytest.MonkeyPatch,
     world_size: int,
@@ -74,6 +102,44 @@ def _mock_pp_group(
     monkeypatch.setattr(
         "vllm.distributed.get_pipeline_model_parallel_rank",
         lambda: pp_rank,
+    )
+
+
+@pytest.mark.parametrize(
+    "model,model_weights,repo_id",
+    [("org/model", None, "org/model"), ("local/dir", "org/weights", "org/weights")],
+)
+def test_load_weights_resolves_hf_repo_id(
+    monkeypatch, tmp_path, model, model_weights, repo_id
+):
+    """HF repo IDs are downloaded with the requested revision before loading."""
+    _mock_pp_group(monkeypatch, 1)
+    weights = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    save_file({"weight": weights}, tmp_path / "model-rank-0-part-0.safetensors")
+    download = Mock(return_value=str(tmp_path))
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.sharded_state_loader.download_weights_from_hf",
+        download,
+    )
+    load_config = LoadConfig(
+        load_format="sharded_state",
+        download_dir=str(tmp_path / "cache"),
+        ignore_patterns=["unused/*"],
+    )
+    model_config = SimpleNamespace(
+        model=model, model_weights=model_weights, revision="checkpoint-revision"
+    )
+    linear = torch.nn.Linear(2, 2, bias=False)
+
+    ShardedStateLoader(load_config).load_weights(linear, model_config)
+
+    torch.testing.assert_close(linear.weight, weights)
+    download.assert_called_once_with(
+        repo_id,
+        load_config.download_dir,
+        ["*.safetensors"],
+        "checkpoint-revision",
+        ignore_patterns=load_config.ignore_patterns,
     )
 
 

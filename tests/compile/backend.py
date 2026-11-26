@@ -6,11 +6,11 @@ from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from copy import deepcopy
 
-import depyf
 from torch import fx
 from torch._ops import OpOverload, OpOverloadPacket
 from torch.fx._utils import lazy_format_graph_code
 
+from vllm.compilation import depyf_compat
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.inductor_pass import (
     InductorPass,
@@ -71,7 +71,7 @@ class TestBackend:
 
         if debug_dump_path := vllm_config.compile_debug_dump_path():
             logger.debug("Dumping depyf output to %s", debug_dump_path)
-            self.debug_ctx = depyf.prepare_debug(debug_dump_path.as_posix())
+            self.debug_ctx = depyf_compat.prepare_debug(debug_dump_path.as_posix())
         else:
             self.debug_ctx = nullcontext()
 

@@ -7,7 +7,7 @@ import json
 import os
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
 from uuid import uuid4
@@ -208,6 +208,10 @@ class WorkerProfiler(ABC):
         """Set the output name for the next profiling session."""
         return None
 
+    def set_profiler_kwargs(self, profiler_kwargs: dict | None) -> None:
+        """Set profiler keyword argument overrides for the next profiling session."""
+        return None
+
     def annotate_context_manager(self, name: str):
         """Return a context manager to annotate profiler traces."""
         return nullcontext()
@@ -229,6 +233,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         local_rank: int,
         activities: Sequence[TorchProfilerActivity],
         on_trace_ready: Callable[[torch.profiler.profile], None] | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         super().__init__(profiler_config)
 
@@ -289,7 +294,7 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
-        self._profiler_kwargs = dict(
+        self._base_profiler_kwargs = dict(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             schedule=profiler_schedule,
             record_shapes=profiler_config.torch_profiler_record_shapes,
@@ -298,6 +303,9 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
+        self._profiler_kwargs = dict(self._base_profiler_kwargs)
+        if profiler_kwargs:
+            self._profiler_kwargs.update(profiler_kwargs)
         self.profiler: torch.profiler.profile
 
         # Track if we're using a schedule (need to call step())
@@ -327,6 +335,18 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=self._torch_profiler_use_gzip,
             )
         )
+
+    @override
+    def set_profiler_kwargs(self, profiler_kwargs: dict | None) -> None:
+        if self._active:
+            return
+        on_trace_ready = self._profiler_kwargs["on_trace_ready"]
+        self._profiler_kwargs = {
+            **self._base_profiler_kwargs,
+            "on_trace_ready": on_trace_ready,
+        }
+        if profiler_kwargs:
+            self._profiler_kwargs.update(profiler_kwargs)
 
     def _build_profiler_table(
         self,
@@ -446,7 +466,7 @@ class TorchProfilerWrapper(WorkerProfiler):
 
 
 class ProtonProfilerWrapper(WorkerProfiler):
-    """Worker profiler backed by :mod:`triton.profiler` (Proton)."""
+    """Worker profiler backed by `triton.profiler` (Proton)."""
 
     def __init__(
         self,
@@ -557,7 +577,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
     @override
     @contextmanager
-    def capture_cuda_graphs(self) -> Iterator[None]:
+    def capture_cuda_graphs(self) -> Generator[None]:
         """Keep a Proton session active while vLLM captures CUDA graphs."""
         if not self._graph_attribution:
             yield
@@ -740,6 +760,7 @@ def create_worker_profiler(
     *,
     worker_name: str,
     local_rank: int,
+    profiler_kwargs: dict | None = None,
 ) -> WorkerProfiler:
     """Create a profiler using a validated config and platform defaults."""
     profiler_type = profiler_config.profiler
@@ -754,6 +775,7 @@ def create_worker_profiler(
             worker_name=worker_name,
             local_rank=local_rank,
             activities=default_activities if configured is None else tuple(configured),
+            profiler_kwargs=profiler_kwargs,
         )
     if profiler_type == "cuda":
         logger.debug("Starting CUDA profiler")
@@ -793,7 +815,7 @@ def create_graph_capture_profiler(
     """Create a profiler to observe CUDA graph capture, if configured.
 
     Applies only to backends that attribute graph replay activity which
-    need a session around capture (Proton with ``proton_graph_attribution``).
+    need a session around capture (Proton with `proton_graph_attribution`).
     """
     if (
         profiler_config.profiler == "proton"

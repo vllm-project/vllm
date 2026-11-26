@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 class DotsToolParser(ToolParser):
     """Parse Dots tool calls in their XML wrapper format.
 
-    The canonical body contains one or more ``invoke`` elements::
+    The canonical body contains one or more `invoke` elements::
 
         <dots_function_call>
         <invoke name="search">
@@ -39,7 +39,7 @@ class DotsToolParser(ToolParser):
         </invoke>
         </dots_function_call>
 
-    A JSON object with ``name`` and ``arguments`` is also accepted as a
+    A JSON object with `name` and `arguments` is also accepted as a
     fallback. Multiple wrapper blocks and multiple invokes per block are
     supported.
     """

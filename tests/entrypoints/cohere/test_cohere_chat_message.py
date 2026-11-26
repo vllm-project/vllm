@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for :mod:`vllm.entrypoints.cohere.cohere_chat_message`.
+"""Unit tests for `vllm.entrypoints.cohere.cohere_chat_message`.
 
 The module hosts the citation-carrying subclasses of the OpenAI chat
-completion protocol (``CohereChatMessage`` / ``CohereDeltaMessage``) plus
-the shared ``Citation`` / ``CitationSource`` shapes. These tests pin:
+completion protocol (`CohereChatMessage` / `CohereDeltaMessage`) plus
+the shared `Citation` / `CitationSource` shapes. These tests pin:
 
-1. Serialization behavior we own (empty-``citations`` cleanup on the
-   subclass ``_serialize``, ``exclude_none`` shape, round-trip).
-2. The constraint that ``type`` discriminators reject unknown values.
+1. Serialization behavior we own (empty-`citations` cleanup on the
+   subclass `_serialize`, `exclude_none` shape, round-trip).
+2. The constraint that `type` discriminators reject unknown values.
 """
 
 import pytest

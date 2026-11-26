@@ -154,7 +154,7 @@ guide: |
   ```bash
   vllm serve mistralai/Mistral-Medium-3.5-128B --tensor-parallel-size 8 \
     --tool-call-parser mistral --enable-auto-tool-choice --reasoning-parser mistral \
-    --max-num-batched-tokens 16384 --max-num-seqs 128 --gpu-memory-utilization 0.8 \
+    --max-num-batched-tokens 16384 --max-num-seqs 128 \
     --speculative-config '{"model":"mistralai/Mistral-Medium-3.5-128B-EAGLE","num_speculative_tokens":3,"method":"eagle","max_model_len":"65536"}'
   ```
 
@@ -203,7 +203,7 @@ guide: |
   **Single GPU** - Use `--tensor-parallel-size 1` and limit context, e.g.
   `--max-model-len 131072`. Without that limit, KV-cache allocation fails at the
   default **262144** context even in text-only mode. You can also reduce
-  `--max-num-batched-tokens` or change `--gpu-memory-utilization` if you still hit OOM.
+  `--max-num-batched-tokens` or `--max-num-seqs` if you still hit OOM.
   Here is a text-only example:
 
   ```bash

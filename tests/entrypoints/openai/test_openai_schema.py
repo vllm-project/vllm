@@ -113,7 +113,6 @@ def server():
         "--max-num-seqs",
         "5",
         "--enforce-eager",
-        "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"image": MAXIMUM_IMAGES}),
     ]

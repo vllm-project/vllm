@@ -17,6 +17,16 @@ available to generate structured outputs.
     - `structural_tag` -> `{"structured_outputs": {"structural_tag": ...}}` or `StructuredOutputsParams(structural_tag=...)`
     - `guided_decoding_backend` -> Remove this field from your request
 
+## Migrating from LM Format Enforcer
+
+The `lm-format-enforcer` structured outputs backend was removed in v0.35.0.
+Replace `--structured-outputs-config.backend lm-format-enforcer` (or
+`structured_outputs_config={"backend": "lm-format-enforcer"}`) with `auto`, or
+drop the option to use the default. You can also select `xgrammar` or
+`guidance` explicitly. These backends use Rust-style regex syntax rather than
+Python's `re`, so validate existing regex patterns and JSON schemas before
+migrating.
+
 ## Online Serving (OpenAI API)
 
 You can generate structured outputs using the OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
@@ -61,7 +71,7 @@ Now let's see an example for each of the cases, starting with the `choice`, as i
     print(completion.choices[0].message.content)
     ```
 
-The next example shows how to use the `regex`. The supported regex syntax depends on the structured output backend. For example, `xgrammar`, `guidance`, and `outlines` use Rust-style regex, while `lm-format-enforcer` uses Python's `re` module. The idea is to generate an email address, given a simple regex template:
+The next example shows how to use the `regex`. All structured output backends (`xgrammar`, `guidance`, and `outlines`) use Rust-style regex syntax. The idea is to generate an email address, given a simple regex template:
 
 ??? code
 

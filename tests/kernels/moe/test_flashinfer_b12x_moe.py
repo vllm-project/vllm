@@ -90,19 +90,19 @@ def test_flashinfer_b12x_moe(
 
     The SM12x kernel takes BF16 hidden states directly and fuses token
     dispatch, W1 GEMM, SwiGLU, and W2 GEMM into one call.  We verify
-    correctness against ``torch_moe`` using generous tolerances to account
+    correctness against `torch_moe` using generous tolerances to account
     for the internal FP4 quantization of activations and weights.
 
     Scale convention
     ----------------
-    The SM12x kernel uses ``w1_alpha`` as *both* the activation-quantisation
+    The SM12x kernel uses `w1_alpha` as *both* the activation-quantisation
     global scale and the weight dequantisation factor.  These two roles are
-    conflated into a single parameter in ``launch_sm120_moe``, so they must
-    equal the same value.  We use ``global_scale = 1.0`` for
-    ``fp4_quantize`` so that ``w1_alpha = ones`` satisfies both roles
+    conflated into a single parameter in `launch_sm120_moe`, so they must
+    equal the same value.  We use `global_scale = 1.0` for
+    `fp4_quantize` so that `w1_alpha = ones` satisfies both roles
     simultaneously.  The alternative — vLLM's convention of baking a large
-    ``w_gs`` into block-scale values and compensating with
-    ``g1_alphas = 1/w_gs`` — is incompatible with this kernel.
+    `w_gs` into block-scale values and compensating with
+    `g1_alphas = 1/w_gs` — is incompatible with this kernel.
     """
     set_random_seed(7)
     with set_current_vllm_config(

@@ -3,7 +3,7 @@
 
 import torch
 
-import vllm._custom_ops as ops
+import vllm._cpu_ops as ops
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 

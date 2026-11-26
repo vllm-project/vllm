@@ -54,7 +54,6 @@ torch::stable::Tensor marlin_gemm(
     torch::stable::Tensor& b_q_weight,
     std::optional<torch::stable::Tensor> const& b_bias_or_none,
     torch::stable::Tensor& b_scales,
-    std::optional<torch::stable::Tensor> const& a_scales_or_none,
     std::optional<torch::stable::Tensor> const& global_scale_or_none,
     std::optional<torch::stable::Tensor> const& b_zeros_or_none,
     torch::stable::Tensor& workspace, vllm::ScalarTypeId const& b_type_id,
@@ -115,14 +114,14 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
 int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
                           int prob_m, int prob_n, int prob_k, int num_bits,
                           int group_size, int has_zp, bool is_zp_float,
-                          bool is_a_8bit, int stages) {
+                          int stages) {
   int pack_factor = 32 / num_bits;
 
   // Get B size
   int tb_k = th_config.thread_k;
   int tb_n = th_config.thread_n;
   int tb_m = thread_m_blocks * 16;
-  int sh_a_size = stages * (tb_m * tb_k) * (is_a_8bit ? 1 : 2);
+  int sh_a_size = stages * (tb_m * tb_k) * 2;
   int sh_b_size = stages * (tb_k * tb_n / pack_factor) * 4;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
   int sh_bias_size = tb_n * 2;
@@ -149,8 +148,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
 
 bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
                      int prob_m, int prob_n, int prob_k, int num_bits,
-                     int group_size, int has_zp, bool is_zp_float,
-                     bool is_a_8bit, int stages, int max_shared_mem) {
+                     int group_size, int has_zp, bool is_zp_float, int stages,
+                     int max_shared_mem) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {
@@ -173,9 +172,9 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
   }
 
   // Check that pipeline fits into cache
-  int cache_size = get_kernel_cache_size(
-      th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
-      has_zp, is_zp_float, is_a_8bit, stages);
+  int cache_size =
+      get_kernel_cache_size(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
+                            num_bits, group_size, has_zp, is_zp_float, stages);
   return cache_size <= max_shared_mem;
 }
 
@@ -199,8 +198,8 @@ exec_config_t determine_exec_config(
     const vllm::ScalarType& a_type, const vllm::ScalarType& b_type,
     const vllm::ScalarType& c_type, const vllm::ScalarType& s_type, int prob_m,
     int prob_n, int prob_k, int thread_m_blocks, bool m_block_size_8,
-    int num_bits, int group_size, bool has_zp, bool is_zp_float, int is_a_8bit,
-    int stages, int max_shared_mem, int sms) {
+    int num_bits, int group_size, bool has_zp, bool is_zp_float, int stages,
+    int max_shared_mem, int sms) {
   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
   thread_config_t* thread_configs = thread_m_blocks > 1
                                         ? large_batch_thread_configs
@@ -214,14 +213,14 @@ exec_config_t determine_exec_config(
     thread_config_t th_config = thread_configs[i];
 
     if (!is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
-                         num_bits, group_size, has_zp, is_zp_float, is_a_8bit,
-                         stages, max_shared_mem - 512)) {
+                         num_bits, group_size, has_zp, is_zp_float, stages,
+                         max_shared_mem - 512)) {
       continue;
     }
 
-    int cache_size = get_kernel_cache_size(
-        th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits,
-        group_size, has_zp, is_zp_float, is_a_8bit, stages);
+    int cache_size = get_kernel_cache_size(th_config, thread_m_blocks, prob_m,
+                                           prob_n, prob_k, num_bits, group_size,
+                                           has_zp, is_zp_float, stages);
 
     int group_blocks = group_size == -1 ? -1 : group_size / 16;
 
@@ -239,15 +238,14 @@ exec_config_t determine_exec_config(
 }
 
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
-               void* a_s, void* b_s, void* g_s, void* zp, int prob_m,
-               int prob_n, int prob_k, int lda, void* workspace,
+               void* b_s, void* g_s, void* zp, int prob_m, int prob_n,
+               int prob_k, int lda, void* workspace,
                vllm::ScalarType const& a_type, vllm::ScalarType const& b_type,
                vllm::ScalarType const& c_type, vllm::ScalarType const& s_type,
                bool has_bias, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k_init,
                int thread_n_init, int sms, bool use_atomic_add,
                bool use_fp32_reduce, bool is_zp_float) {
-  bool is_a_8bit = a_type.size_bits() == 8;
   STD_TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [",
                   prob_m, ", ", prob_n, ", ", prob_k, "]");
 
@@ -267,7 +265,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int4* C_tmp_ptr = (int4*)C_tmp;
 
   const int4* bias_ptr = (const int4*)b_bias;
-  const float* a_s_ptr = (const float*)a_s;
   const int4* b_s_ptr = (const int4*)b_s;
   const float* g_s_ptr = (const float*)g_s;
 
@@ -289,17 +286,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int stages = 4;
   if (major_capability == 7 && minor_capability == 5) {
     stages = 2;
-    STD_TORCH_CHECK(a_type == vllm::kFloat16 || a_type == vllm::kS8,
-                    "Turing only support FP16 or INT8 activation.");
-  }
-  if (a_type == vllm::kFE4M3fn) {
-    STD_TORCH_CHECK(major_capability * 10 + minor_capability >= 89,
-                    "FP8 only support Ada Lovelace or newer GPUs.");
-    STD_TORCH_CHECK(
-        major_capability * 10 + minor_capability == 89 ||
-            major_capability == 12,
-        "Marlin W4A8-FP8 only support SM89 or SM12x device (It is slower than "
-        "Marlin W4A16 on other devices).");
+    STD_TORCH_CHECK(a_type == vllm::kFloat16,
+                    "Turing only support FP16 activation.");
   }
 
   int max_par = 16;
@@ -317,7 +305,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     int thread_n = thread_n_init;
 
     int thread_m_blocks = min(div_ceil(prob_m_split, 16), max_thread_m_blocks);
-    int m_block_size_8 = prob_m_split <= 8 && a_type.size_bits() == 16;
+    int m_block_size_8 = prob_m_split <= 8;
 
     // Set thread config
     exec_config_t exec_cfg;
@@ -334,7 +322,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       exec_cfg = determine_exec_config(
           a_type, b_type, c_type, s_type, prob_m_split, prob_n, prob_k,
           thread_m_blocks, m_block_size_8, num_bits, group_size, has_zp,
-          is_zp_float, is_a_8bit, stages, max_shared_mem, sms);
+          is_zp_float, stages, max_shared_mem, sms);
       thread_tfg = exec_cfg.tb_cfg;
       if (thread_tfg.thread_n != -1) {
         if (prob_n / thread_tfg.thread_n *
@@ -342,8 +330,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
             sms) {
           if (is_valid_config({128, 64, 128}, thread_m_blocks, prob_m_split,
                               prob_n, prob_k, num_bits, group_size, has_zp,
-                              is_zp_float, is_a_8bit, stages,
-                              max_shared_mem_new)) {
+                              is_zp_float, stages, max_shared_mem_new)) {
             thread_tfg = {128, 64, 128};
             exec_cfg = {1, thread_tfg};
           }
@@ -369,7 +356,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     STD_TORCH_CHECK(
         is_valid_config(thread_tfg, thread_m_blocks, prob_m_split, prob_n,
                         prob_k, num_bits, group_size, has_zp, is_zp_float,
-                        is_a_8bit, stages, max_shared_mem_new),
+                        stages, max_shared_mem_new),
         "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
         ", thread_k = ", thread_tfg.thread_k,
         ", thread_n = ", thread_tfg.thread_n,
@@ -404,14 +391,12 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     // avoid ">>>" being formatted to "> > >"
     // clang-format off
     kernel<<<blocks, num_threads, max_shared_mem_new, stream>>>(
-        A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr,
+        A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, b_s_ptr, g_s_ptr, zp_ptr,
         prob_m_split, prob_n, prob_k, lda, locks, has_bias, part_use_atomic_add,
         use_fp32_reduce, max_shared_mem_new);
     // clang-format on
 
-    bool is_a_8bit = a_type.size_bits() == 8;
-    A_ptr += prob_m_split * (lda / (is_a_8bit ? 16 : 8));
-    a_s_ptr += prob_m_split;
+    A_ptr += prob_m_split * (lda / 8);
     C_ptr += prob_m_split * (prob_n / 8);
     rest_m -= prob_m_split;
   }
@@ -424,7 +409,6 @@ torch::stable::Tensor marlin_gemm(
     torch::stable::Tensor& b_q_weight,
     std::optional<torch::stable::Tensor> const& b_bias_or_none,
     torch::stable::Tensor& b_scales,
-    std::optional<torch::stable::Tensor> const& a_scales_or_none,
     std::optional<torch::stable::Tensor> const& global_scale_or_none,
     std::optional<torch::stable::Tensor> const& b_zeros_or_none,
     torch::stable::Tensor& workspace, vllm::ScalarTypeId const& b_type_id,
@@ -440,35 +424,7 @@ torch::stable::Tensor marlin_gemm(
     a_type_id = vllm::kBFloat16.id();
     c_type_id = vllm::kBFloat16.id();
   } else {
-    c_scalar_type = b_scales.scalar_type();
-    if (b_scales.scalar_type() == torch::headeronly::ScalarType::Half) {
-      c_type_id = vllm::kFloat16.id();
-    } else if (b_scales.scalar_type() ==
-               torch::headeronly::ScalarType::BFloat16) {
-      c_type_id = vllm::kBFloat16.id();
-    } else {
-      c_type_id = vllm::kBFloat16.id();
-
-      STD_TORCH_CHECK(c_or_none.has_value(), "c must be passed for W4A8-FP4");
-      torch::stable::Tensor c = c_or_none.value();
-      c_scalar_type = c.scalar_type();
-
-      if (c.scalar_type() == torch::headeronly::ScalarType::Half) {
-        c_type_id = vllm::kFloat16.id();
-      } else if (c.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
-        c_type_id = vllm::kBFloat16.id();
-      } else {
-        STD_TORCH_CHECK(false, "unsupported c dtype");
-      }
-    }
-
-    if (a.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn) {
-      a_type_id = vllm::kFE4M3fn.id();
-    } else if (a.scalar_type() == torch::headeronly::ScalarType::Char) {
-      a_type_id = vllm::kS8.id();
-    } else {
-      STD_TORCH_CHECK(false, "unsupported `a` scalar_type");
-    }
+    STD_TORCH_CHECK(false, "`a` must be float16 or bfloat16");
   }
 
   s_type_id = c_type_id;
@@ -537,20 +493,7 @@ torch::stable::Tensor marlin_gemm(
   STD_TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
   STD_TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
 
-  torch::stable::Tensor a_scales;
   const auto device = a.device();
-
-  if (a_scales_or_none.has_value()) {
-    a_scales = a_scales_or_none.value();
-    STD_TORCH_CHECK(a_type.size_bits() == 8,
-                    "a_scales can only be used for 8bit activation.");
-  } else {
-    a_scales = torch::stable::empty({0}, torch::headeronly::ScalarType::Float,
-                                    std::nullopt, device);
-    STD_TORCH_CHECK(
-        a_type.size_bits() != 8,
-        "the a_scales parameter must be passed for 8bit activation.");
-  }
 
   // thread_k: `k` size of a thread_tile in `weights` (can usually be left as
   // auto -1)
@@ -704,24 +647,18 @@ torch::stable::Tensor marlin_gemm(
                   " is below min_workspace_size = ", min_workspace_size);
 
   STD_TORCH_CHECK(
-      a_scales.scalar_type() == torch::headeronly::ScalarType::Float,
-      "scalar type of a_scales must be float");
-  STD_TORCH_CHECK(
       global_scale.scalar_type() == torch::headeronly::ScalarType::Float,
       "scalar type of global_scale must be float");
-  if (a_type.size_bits() == 16) {
-    STD_TORCH_CHECK(
-        a.scalar_type() == c.scalar_type(),
-        "scalar type of a must be the same with c for 16 bit activation");
-  }
+  STD_TORCH_CHECK(a.scalar_type() == c.scalar_type(),
+                  "scalar type of a must be the same with c");
 
   marlin::marlin_mm(
       a.const_data_ptr(), b_q_weight.const_data_ptr(), c.mutable_data_ptr(),
       c_tmp.mutable_data_ptr(), b_bias.mutable_data_ptr(),
-      a_scales.mutable_data_ptr(), b_scales.mutable_data_ptr(),
-      global_scale.mutable_data_ptr(), b_zeros.mutable_data_ptr(), size_m,
-      size_n, size_k, a.stride(0), workspace.mutable_data_ptr(), a_type, b_type,
-      c_type, s_type, has_bias, has_zp, num_groups, group_size, device_index,
+      b_scales.mutable_data_ptr(), global_scale.mutable_data_ptr(),
+      b_zeros.mutable_data_ptr(), size_m, size_n, size_k, a.stride(0),
+      workspace.mutable_data_ptr(), a_type, b_type, c_type, s_type, has_bias,
+      has_zp, num_groups, group_size, device_index,
       get_current_cuda_stream(device_index), thread_k, thread_n, sms,
       use_atomic_add, use_fp32_reduce, is_zp_float);
 
