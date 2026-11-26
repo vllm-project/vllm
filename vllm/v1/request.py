@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -265,6 +266,22 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
         block_hashes: list["BlockHash"] | None = None,
     ) -> "Request":
+        # Engine clients may build placeholder ranges without vLLM's frontends.
+        for feature in request.mm_features or ():
+            position = feature.mm_position
+            mask = position.is_embed
+            mask_ok = mask is None or (
+                isinstance(mask, torch.Tensor)
+                and mask.dtype == torch.bool
+                and mask.shape == (position.length,)
+            )
+            if position.length < 0 or not mask_ok:
+                raise VLLMValidationError(
+                    f"Invalid multimodal placeholder range for item "
+                    f"{feature.identifier!r}: length must be non-negative and "
+                    "is_embed must be None or a 1-D bool tensor of that length.",
+                    parameter="mm_features",
+                )
         return cls(
             request_id=request.request_id,
             client_index=request.client_index,

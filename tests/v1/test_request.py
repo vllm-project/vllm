@@ -6,8 +6,11 @@ from array import array
 
 import numpy as np
 import pytest
+import torch
 
 from vllm import SamplingParams
+from vllm.exceptions import VLLMValidationError
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.request import Request, RequestStatus
@@ -21,11 +24,11 @@ from vllm.v1.token_buffer import (
 )
 
 
-def _engine_core_request(prompt_token_ids) -> EngineCoreRequest:
+def _engine_core_request(prompt_token_ids, mm_features=None) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id="r",
         prompt_token_ids=prompt_token_ids,
-        mm_features=None,
+        mm_features=mm_features,
         sampling_params=SamplingParams(max_tokens=4),
         pooling_params=None,
         arrival_time=0.0,
@@ -67,6 +70,53 @@ def test_mp_client_sends_prompt_as_int32_array():
     decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
     engine_request = Request.from_engine_core_request(decoded, block_hasher=None)
     assert engine_request.prompt_token_ids == ids
+
+
+def _decoded_mm_request(length: int, is_embed: torch.Tensor | None):
+    feature = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="item",
+        mm_position=PlaceholderRange(offset=1, length=length, is_embed=is_embed),
+    )
+    request = _engine_core_request(np.arange(8, dtype=np.int32), [feature])
+    frames = MsgpackEncoder().encode(request)
+    return MsgpackDecoder(EngineCoreRequest).decode(frames)
+
+
+@pytest.mark.parametrize(
+    ("length", "is_embed"),
+    [
+        pytest.param(-1, None, id="negative-length"),
+        pytest.param(4, torch.zeros(0, dtype=torch.bool), id="empty-mask"),
+        pytest.param(4, torch.ones(2, 2, dtype=torch.bool), id="2d-mask"),
+        pytest.param(4, torch.ones(2, dtype=torch.bool), id="wrong-length-mask"),
+        pytest.param(1, torch.tensor([-1000]), id="negative-count-mask"),
+        pytest.param(1, torch.tensor([float("nan")]), id="nan-count-mask"),
+    ],
+)
+def test_request_rejects_malformed_placeholder_range(length, is_embed):
+    """Engine clients can send any placeholder range. The scheduler sizes
+    encoder work and the encoder cache from it, so reject a malformed one
+    as a request error before it reaches the scheduler."""
+    decoded = _decoded_mm_request(length, is_embed)
+    with pytest.raises(VLLMValidationError, match="placeholder range"):
+        Request.from_engine_core_request(decoded, block_hasher=None)
+
+
+@pytest.mark.parametrize(
+    ("length", "is_embed", "num_embeds"),
+    [
+        (4, None, 4),
+        (4, torch.tensor([False, True, True, False]), 2),
+        # Models without placeholder tokens, such as TerraTorch, send length 0.
+        (0, None, 0),
+    ],
+)
+def test_request_accepts_placeholder_range(length, is_embed, num_embeds):
+    decoded = _decoded_mm_request(length, is_embed)
+    request = Request.from_engine_core_request(decoded, block_hasher=None)
+    assert request.get_num_encoder_embeds(0) == num_embeds
 
 
 def test_request_stores_token_ids_as_int32_buffers():

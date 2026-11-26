@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 import torch.cuda
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, RequestOutput, SamplingParams
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
@@ -59,4 +61,47 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     outputs = llm.generate("Hello, my name is", SamplingParams(max_tokens=10))
     assert len(outputs) == 1
     assert len(outputs[0].outputs[0].token_ids) > 0
+    assert outputs[0].outputs[0].finish_reason in ("stop", "length")
+
+
+def test_malformed_placeholder_range_fails_only_its_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An engine client can send a placeholder range that vLLM's frontends would
+    never build. The engine must end that request with an error and keep
+    serving, instead of failing in the scheduler."""
+    # The engine core process runs the validation under test.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    llm = LLM(model=MODEL_NAME)
+
+    empty_mask = torch.zeros(0, dtype=torch.bool)
+    feature = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="item",
+        mm_position=PlaceholderRange(offset=0, length=2, is_embed=empty_mask),
+    )
+    request = EngineCoreRequest(
+        request_id="malformed",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=[feature],
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    engine = llm.llm_engine
+    engine.add_request(request.request_id, request, request.params)
+    finish_reasons: list[str | None] = []
+    while engine.has_unfinished_requests():
+        for output in engine.step():
+            assert isinstance(output, RequestOutput)
+            if output.finished:
+                finish_reasons.append(output.outputs[0].finish_reason)
+    assert finish_reasons == ["error"]
+
+    greedy = SamplingParams(temperature=0.0, max_tokens=10)
+    outputs = llm.generate("Hello, my name is", greedy)
     assert outputs[0].outputs[0].finish_reason in ("stop", "length")
