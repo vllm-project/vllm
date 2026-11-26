@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Decisions API (`POST /v1/decisions`): the probability of each answer to
-//! questions about a text, read from the next-token logprobs of the option
-//! labels.
+//! Decisions APIs (`POST /v1/decisions` and `POST /v1/systemone`): the
+//! probability of each answer to questions about a text, read from the
+//! next-token logprobs of the option labels.
 //!
 //! Only the next-token read strategy is implemented. The Python launcher
 //! passes the strategy Python's `select_read_strategy` picks for the model
@@ -11,6 +11,7 @@
 
 mod next_token;
 mod questions;
+mod structured;
 mod types;
 
 use std::sync::Arc;
@@ -20,18 +21,20 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use indexmap::IndexMap;
 pub(crate) use next_token::NextTokenReads;
 use tracing_futures::Instrument as _;
 
 use self::next_token::{MAX_QUESTIONS, QuestionRead, ReadOptions};
 use self::questions::{Question, QuestionOption, QuestionType, argmax};
+use self::structured::{StructuredDecisionRequest, StructuredDecisionResponse};
 use self::types::{
     ChoiceProbability, DecisionAnswer, DecisionQuestion, DecisionRequest, DecisionResponse,
     DecisionUsage, ScoreProbability,
 };
 use crate::error::{ApiError, bail_invalid_request};
 use crate::state::AppState;
-use crate::utils::resolve_request_context;
+use crate::utils::{resolve_request_context, unix_timestamp};
 
 /// Answer every question of one request, each as its own engine request.
 pub async fn decisions(
@@ -61,11 +64,9 @@ pub async fn decisions(
         request_id,
         chat_template_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
-        // Like Python, a decision runs at the default priority on any rank.
+        // Like Python, a decision runs at the default priority.
         priority: 0,
         cache_salt: request.cache_salt.clone(),
-        data_parallel_rank: None,
-        session_id: None,
     };
     let reads = (reads.read(&state.chat, &questions, None, &request.input.0, options))
         .instrument(span)
@@ -87,6 +88,64 @@ pub async fn decisions(
         model: lora_resolution.response_model(),
         answers,
         usage,
+    })
+    .into_response())
+}
+
+/// Answer the questions of one structured decision, each as its own engine
+/// request. Python's `ServingStructuredDecisions.create_decision`.
+pub async fn systemone(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: Result<Json<StructuredDecisionRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(request) = request?;
+    let reads = (state.decisions()).expect("the route is registered only with a read strategy");
+    let ctx = resolve_request_context(&headers, request.request_id.as_deref())?;
+    let lora_resolution = state.resolve_model_with_loras(request.model.as_deref()).await;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    let (ids, questions): (Vec<_>, Vec<_>) =
+        structured::parse_questions(&request.questions)?.into_iter().unzip();
+    request.check_media(state.chat.supports_multimodal())?;
+    if request.joint {
+        bail_invalid_request!(
+            "joint: this model reads each question on its own; joint reads need DiffusionGemma"
+        );
+    }
+
+    let request_id = format!("decision-{}", ctx.request_id);
+    let span = tracing::info_span!("systemone", request_id = %request_id);
+    let options = ReadOptions {
+        request_id: request_id.clone(),
+        chat_template_kwargs: request.chat_template_kwargs.clone(),
+        lora_request: lora_resolution.lora_request.clone(),
+        priority: request.priority,
+        cache_salt: request.cache_salt.clone(),
+    };
+    let state_text = request.state_text();
+    let instructions = request.instructions.as_deref();
+    let reads = (reads.read(&state.chat, &questions, instructions, &state_text, options))
+        .instrument(span)
+        .await?;
+
+    let mut answers = IndexMap::new();
+    let mut diagnostics = IndexMap::new();
+    let mut usage = structured::DecisionUsage::default();
+    for ((id, question), read) in ids.into_iter().zip(&questions).zip(&reads) {
+        answers.insert(id.clone(), structured::answer(question, read));
+        diagnostics.insert(id, read.into());
+        usage.input_tokens += read.input_tokens;
+        usage.output_tokens += read.output_tokens;
+    }
+    Ok(Json(StructuredDecisionResponse {
+        id: request_id,
+        object: "structured_decision",
+        created: unix_timestamp(),
+        model: lora_resolution.response_model(),
+        answers,
+        usage,
+        diagnostics,
+        joint: (),
     })
     .into_response())
 }
