@@ -29,7 +29,7 @@ pytestmark = pytest.mark.cpu_test
 #: A Mamba backend that saves prefill checkpoints, as FlashInfer GDN does.
 MAMBA = MambaManager.layer_config(
     MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
-    mamba_cache_mode="align",
+    enable_prefix_caching=True,
     num_prefill_checkpoint_blocks=1,
     prefill_checkpoint_alignment=16,
 )

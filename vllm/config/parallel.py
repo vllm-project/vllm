@@ -1151,6 +1151,8 @@ class ParallelConfig:
             "node_rank",
             "nnodes",
             "max_parallel_loading_workers",
+            "distributed_timeout_seconds",
+            "cpu_distributed_timeout_seconds",
             "disable_custom_all_reduce",
             "enable_shm_tensor_arena",
             "ray_workers_use_nsight",

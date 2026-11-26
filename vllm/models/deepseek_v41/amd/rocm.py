@@ -7,7 +7,7 @@ from typing import Any, ClassVar, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -55,6 +55,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+    RocmMxfp4IndexerMetadata,
+)
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
     DeepseekSparseSWAMetadata,
@@ -89,6 +92,18 @@ def _trust_dsv4_extra_cache_nan_free(
         and kv_cache_dtype == "fp8_ds_mla"
         and not has_foreign_kv_writer
         and has_extra_cache
+    )
+
+
+def _indexer_shardq_enabled(vllm_config: VllmConfig) -> bool:
+    parallel = vllm_config.parallel_config
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    return (
+        vllm_config.attention_config.sparse_mla_shard_q
+        and parallel.tensor_parallel_size > 1
+        and parallel.decode_context_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
     )
 
 
@@ -215,13 +230,130 @@ def _pack_global_topk_ragged_kernel(
         written += tl.sum(valid.to(tl.int32), axis=0)
 
 
+_RAGGED_FROM_LENS_MAX_ROWS = 1024
+
+
+@triton.jit
+def _pack_topk_ragged_from_lens_kernel(
+    global_topk_ragged_ptr,
+    topk_indptr_ptr,
+    topk_lens_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    row_lens_ptr,
+    is_valid_token_ptr,
+    token_to_req_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    topk,
+    MAX_ROWS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """One-launch ragged pack of rows filled exactly to min(topk, row_lens[t])."""
+    token_idx = tl.program_id(0)
+
+    rows = tl.arange(0, MAX_ROWS)
+    before = rows < token_idx
+    row_lens = tl.load(row_lens_ptr + rows, mask=before, other=0)
+    row_ok = tl.load(is_valid_token_ptr + rows, mask=before, other=0)
+    row_lens = tl.where(row_ok, tl.minimum(tl.maximum(row_lens, 0), topk), 0)
+    out_start = tl.sum(row_lens, axis=0)
+
+    out_len = tl.load(row_lens_ptr + token_idx)
+    is_valid_token = tl.load(is_valid_token_ptr + token_idx)
+    out_len = tl.where(is_valid_token, tl.minimum(tl.maximum(out_len, 0), topk), 0)
+    tl.store(topk_lens_ptr + token_idx, out_len)
+    tl.store(topk_indptr_ptr + token_idx + 1, out_start + out_len)
+    if token_idx == 0:
+        tl.store(topk_indptr_ptr, 0)
+
+    offset = tl.arange(0, BLOCK_SIZE)
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    mask = offset < out_len
+    local_idx = tl.load(
+        topk_indices_ptr + token_idx * topk_indices_stride + offset,
+        mask=mask,
+        other=-1,
+    )
+    valid = mask & (local_idx >= 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + local_idx // block_size,
+        mask=valid,
+        other=0,
+    )
+    slot_ids = tl.where(valid, block_numbers * block_size + local_idx % block_size, -1)
+    tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+
+
+def _pack_topk_ragged_from_lens(
+    topk_indices: torch.Tensor,
+    row_lens: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    is_valid_token: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    num_tokens, topk = topk_indices.shape
+    if (
+        not 0 < num_tokens <= _RAGGED_FROM_LENS_MAX_ROWS
+        or row_lens.shape[0] != num_tokens
+    ):
+        return None
+    device = topk_indices.device
+    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=device)
+    topk_indptr = torch.empty(num_tokens + 1, dtype=torch.int32, device=device)
+    global_topk_ragged = torch.empty(
+        num_tokens * topk, dtype=torch.int32, device=device
+    )
+    _pack_topk_ragged_from_lens_kernel[(num_tokens,)](
+        global_topk_ragged,
+        topk_indptr,
+        topk_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        row_lens,
+        is_valid_token,
+        token_to_req_indices,
+        block_table,
+        block_table.stride(0),
+        block_size,
+        topk,
+        MAX_ROWS=_RAGGED_FROM_LENS_MAX_ROWS,
+        BLOCK_SIZE=triton.next_power_of_2(topk),
+        num_warps=8,
+    )
+    return global_topk_ragged, topk_indptr, topk_lens
+
+
+def _mxfp4_decode_row_lens(
+    attn_metadata: Any, indexer_prefix: str | None
+) -> torch.Tensor | None:
+    metadata = attn_metadata.get(indexer_prefix)
+    if not isinstance(metadata, RocmMxfp4IndexerMetadata):
+        return None
+    return metadata.decode_step_row_lens
+
+
 def compute_global_topk_ragged_indices_and_indptr(
     topk_indices: torch.Tensor,
     token_to_req_indices: torch.Tensor,
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    row_lens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if row_lens is not None:
+        packed = _pack_topk_ragged_from_lens(
+            topk_indices,
+            row_lens,
+            token_to_req_indices,
+            block_table,
+            block_size,
+            is_valid_token,
+        )
+        if packed is not None:
+            return packed
     # On gfx942 with --monokernel, a decode batch of up to 16
     # rows is packed with one launch instead of 4 (topk_pack.py). Other
     # batches return None there and take the function below.
@@ -627,6 +759,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
         if self._plain_fp8_kv:
             _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla)
+        if self.indexer is not None and _indexer_shardq_enabled(vllm_config):
+            # The indexer scores this rank's ShardQ tokens, then gathers the
+            # top-k back into token order: attention stays head-sharded.
+            k_cache = self.indexer.k_cache
+            k_cache.use_shardq = k_cache.gather_shardq_topk = True
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
@@ -807,9 +944,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 compressor.fused_wkv_wgate.weight.T,
                 out_dtype=torch.float32,
             )
-            latent = compressor(kv_score, positions)
-            compressor.insert_cache(latent, positions, self.rotary_emb)
-            return latent
+            return compressor(kv_score, positions, self.rotary_emb)
 
         def indexer_weights_chain():
             # ReplicatedLinear returns (output, bias); bias is None.
@@ -1147,6 +1282,23 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             self.rope_head_dim,
         )
 
+    @functools.cached_property
+    def _index_k_cache_prefix(self) -> str | None:
+        assert self._index_source_prefix is not None
+        assert self.topk_indices_buffer is not None
+        indexer = getattr(
+            self._static_forward_context[self._index_source_prefix], "indexer", None
+        )
+        topk = self.topk_indices_buffer.shape[1]
+        pool = self.candidate_topk_blocks
+        if (
+            indexer is None
+            or indexer.topk_tokens != topk
+            or (pool > 0 and topk > (pool - 1) * self.candidate_block_size + 1)
+        ):
+            return None
+        return indexer.k_cache.prefix
+
     def _decode_topk_ragged(
         self,
         swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
@@ -1179,6 +1331,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             attn_metadata.block_table[:num_decodes],
             attn_metadata.block_size // self.compress_ratio,
             swa_metadata.is_valid_token[:num_decode_tokens],
+            row_lens=_mxfp4_decode_row_lens(
+                get_forward_context().attn_metadata, self._index_k_cache_prefix
+            ),
         )
         source._topk_ragged_cache[self.compress_ratio] = built
         return built

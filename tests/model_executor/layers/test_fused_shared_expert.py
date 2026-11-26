@@ -22,6 +22,9 @@ from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
+from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
+    AiterSharedRoutedFusedMoERouter,
+)
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
@@ -291,33 +294,6 @@ def get_fse_test_model_config(
         from vllm.models.qwen4_exp.amd.model import Qwen4ExpModel
 
         return config, Qwen4ExpModel
-    if model_type == "AXK1":
-        from transformers import AXK1Config
-
-        from vllm.model_executor.models.AXK1 import AXK1Model
-
-        config = AXK1Config(
-            vocab_size=256,
-            hidden_size=128,
-            intermediate_size=32,
-            moe_intermediate_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=1,
-            num_key_value_heads=1,
-            n_shared_experts=1,
-            n_routed_experts=2,
-            num_experts_per_tok=1,
-            n_group=1,
-            topk_group=1,
-            first_k_dense_replace=0,
-            q_lora_rank=0,
-            kv_lora_rank=0,
-            qk_nope_head_dim=0,
-            qk_rope_head_dim=0,
-            v_head_dim=0,
-            quantization_config=quantization_config,
-        )
-        return config, AXK1Model
     if model_type == "glm4_moe_lite":
         from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
@@ -1349,7 +1325,6 @@ def _load_minimax_m3_weights(
         "alice_ai",
         "glm4_moe",
         "deepseek_v2",
-        "AXK1",
         "glm4_moe_lite",
         "deepseek_v32",
         "glm5_next",
@@ -1389,7 +1364,6 @@ def test_models_fse_init(
             "deepseek_v4",
             "glm4_moe",
             "deepseek_v2",
-            "AXK1",
             "glm4_moe_lite",
             "deepseek_v32",
             "glm5_next",
@@ -1593,6 +1567,11 @@ def test_models_fse_init(
                     moe.experts.moe_config.is_fused_shared_expert_requested
                     is aiter_fse_enabled
                 )
+                router = moe.experts.router
+                if isinstance(router, AiterSharedRoutedFusedMoERouter):
+                    assert router.has_shared_expert_gate is (
+                        shared_name == "shared_expert"
+                    )
                 if not fused and not exclude and model_type != "deepseek_v4":
                     scheme = getattr(moe, shared_name).gate_up_proj.scheme
                     expected_dtype = (

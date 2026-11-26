@@ -5,6 +5,7 @@
 `check_sparse_tensor_invariants_threadsafe()` is a thread-safe wrapper for
 sparse tensor invariant validation. `check_torch_archive_size()` bounds the
 memory `torch.load` allocates for the tensor storages of a payload.
+`load_torch_payload()` maps unreadable client bytes to a validation error.
 `safe_to_dense()` bounds the memory a deserialized tensor may allocate when
 densified.
 
@@ -22,6 +23,7 @@ import contextlib
 import threading
 import zipfile
 from io import BytesIO
+from typing import Final
 
 import torch
 
@@ -30,6 +32,22 @@ from vllm.exceptions import VLLMValidationError
 from vllm.utils.mem_constants import MiB_bytes
 
 _SPARSE_LOAD_LOCK = threading.Lock()
+
+# How much of torch's own reason is repeated back to the caller. The reason is
+# built from bytes the caller sent, so it is bounded rather than echoed whole.
+_MAX_EMBED_ERROR_REASON_CHARS: Final = 200
+
+
+def _truncated_reason(exc: Exception) -> str:
+    """Return `exc`'s message, capped with the omitted character count."""
+    reason: Final = str(exc).strip() or type(exc).__name__
+    omitted: Final = len(reason) - _MAX_EMBED_ERROR_REASON_CHARS
+    if omitted <= 0:
+        return reason
+    return (
+        f"{reason[:_MAX_EMBED_ERROR_REASON_CHARS]}"
+        f"... ({omitted} more characters truncated)"
+    )
 
 
 @contextlib.contextmanager
@@ -74,6 +92,52 @@ def check_torch_archive_size(payload: bytes, *, parameter: str) -> None:
             parameter=parameter,
             value=inflated_bytes,
         )
+
+
+def load_torch_payload(
+    payload: bytes,
+    *,
+    parameter: str,
+) -> torch.Tensor:
+    """Safely deserialize a tensor from client-supplied bytes.
+
+    Payload storages are always mapped to CPU so checkpoint metadata cannot
+    select a server device. Unreadable payloads are client validation errors.
+    Memory exhaustion remains a server error because it can also be caused by
+    server capacity.
+
+    Args:
+        payload: Bytes supplied by the client.
+        parameter: Request parameter used in validation errors.
+
+    Returns:
+        The deserialized dense tensor.
+
+    Raises:
+        VLLMValidationError: If the payload cannot be deserialized as a tensor.
+        MemoryError: If deserialization exhausts host memory.
+        torch.OutOfMemoryError: If deserialization exhausts device memory.
+
+    """
+    check_torch_archive_size(payload, parameter=parameter)
+
+    with check_sparse_tensor_invariants_threadsafe():
+        try:
+            tensor = torch.load(
+                BytesIO(payload),
+                weights_only=True,
+                map_location=torch.device("cpu"),
+            )
+        except (torch.OutOfMemoryError, MemoryError):
+            raise
+        except Exception as exc:
+            raise VLLMValidationError(
+                f"`{parameter}` could not be deserialized as a torch tensor: "
+                f"{_truncated_reason(exc)}",
+                parameter=parameter,
+            ) from exc
+
+        return safe_to_dense(tensor, parameter=parameter)
 
 
 def safe_to_dense(tensor: object, *, parameter: str) -> torch.Tensor:

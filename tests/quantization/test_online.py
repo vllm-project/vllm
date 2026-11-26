@@ -57,6 +57,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     _backend_activation_key,
@@ -89,6 +90,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
     CompressedTensorsW4A4Nvfp4MoEMethod,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptLinearMethod,
@@ -180,10 +182,14 @@ from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
+    _get_original_loader,
+    finalize_layerwise_processing,
     finalize_layerwise_reload,
+    get_layerwise_info,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.granitemoe import (
     GraniteMoeModel,
@@ -207,6 +213,8 @@ else:
 
 
 DEVICE = current_platform.device_type
+
+
 GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
     "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
@@ -266,31 +274,34 @@ def test_online_linear_methods_resolve_activation_quant_key(
 
 
 @pytest.mark.parametrize(
-    ("layer_kind", "layer_cls", "weight_key", "raises"),
+    ("layer_kind", "layer_cls", "weight_key", "accepted", "error"),
     [
-        ("linear", _TestLinear, kFp8StaticTensorSym, True),
-        ("linear", _TestLinear, kFp8Static128BlockSym, True),
-        ("linear", _TestLinear, kMxfp8Static, True),
-        ("linear", _TestLinear, kMxfp4Static, False),
-        ("linear", _TestLinear, kNvfp4Static, True),
-        ("moe", _TestRoutedExperts, kFp8StaticTensorSym, True),
-        ("moe", _TestRoutedExperts, kFp8Static128BlockSym, True),
-        ("moe", _TestRoutedExperts, kFp8StaticChannelSym, True),
-        ("moe", _TestRoutedExperts, kMxfp8Static, True),
-        ("moe", _TestRoutedExperts, kMxfp4Static, False),
+        ("linear", _TestLinear, kFp8StaticTensorSym, (), "activation override"),
+        ("linear", _TestLinear, kFp8Static128BlockSym, (), "activation override"),
+        ("linear", _TestLinear, kMxfp8Static, (), "activation override"),
+        ("linear", _TestLinear, kMxfp4Static, None, None),
+        ("linear", _TestLinear, kNvfp4Static, (), "activation override"),
+        ("moe", _TestRoutedExperts, kFp8StaticTensorSym, (), "activation override"),
+        ("moe", _TestRoutedExperts, kFp8Static128BlockSym, (), "activation override"),
+        ("moe", _TestRoutedExperts, kFp8StaticChannelSym, (), "activation override"),
+        ("moe", _TestRoutedExperts, kMxfp8Static, (kMxfp8Dynamic,), "supports only"),
+        ("moe", _TestRoutedExperts, kMxfp4Static, None, None),
     ],
 )
-@pytest.mark.parametrize("activation_quant_key", [None, kFp8DynamicTensorSym])
+@pytest.mark.parametrize(
+    "activation_quant_key", [None, kFp8DynamicTensorSym, kMxfp8Dynamic]
+)
 def test_online_activation_override(
-    layer_kind, layer_cls, weight_key, activation_quant_key, raises
+    layer_kind, layer_cls, weight_key, accepted, error, activation_quant_key
 ) -> None:
-    """Only MXFP4 online methods honor an activation override, `null` included."""
+    """MXFP4 online methods honor any activation override, `null` included;
+    the MXFP8 MoE method honors only MXFP8 activations; others reject one."""
     args = QuantizationConfigArgs(
         **{layer_kind: QuantSpec(weight=weight_key, activation=activation_quant_key)}
     )
     config = OnlineQuantizationConfig(args)
-    if raises:
-        with pytest.raises(NotImplementedError, match="activation override"):
+    if accepted is not None and activation_quant_key not in accepted:
+        with pytest.raises(NotImplementedError, match=error):
             config.resolve_quant_method_cls(layer_cls, layer_kind)
         return
 
@@ -831,7 +842,7 @@ def test_online_prequantized_compatibility(
 
     if isinstance(checkpoint_config, ModelOptMxFp8Config):
         assert isinstance(layer.quant_method, Mxfp8OnlineLinearMethod)
-        assert not layer.quant_method.uses_meta_device
+        assert layer.quant_method.uses_meta_device
         assert isinstance(
             layer.quant_method.requantization_source, ModelOptLinearMethod
         )
@@ -866,6 +877,9 @@ def test_online_block_fp8_requantization_removes_source_scales(
             prefix="model.layers.0.self_attn.o_proj",
             disable_tp=True,
         )
+        # The serialized weights start on the meta device: without materializing
+        # them, the fills below are no-ops and kernels (deep_gemm) see meta tensors.
+        _materialize_requantization_source(layer)
         with torch.no_grad():
             layer.weight.fill_(1)
             layer.weight_scale.fill_(127)  # E8M0 encoding of scale 1.
@@ -924,7 +938,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
 ):
     """Ignoring online quantization does not replace a checkpoint method (linear)."""
     default_vllm_config.model_config = ModelConfig()
-    quant_config = _fully_quantized_quark_config()
+    quant_config = _fully_quantized_modelopt_config()
     prefix = "model.layers.0.self_attn.o_proj"
     quant_config.online_quantization_config = OnlineQuantizationConfig(
         quant_config_args(linear="mxfp8", ignore=[prefix])
@@ -945,7 +959,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
         disable_tp=True,
     )
 
-    assert isinstance(layer.quant_method, QuarkLinearMethod)
+    assert isinstance(layer.quant_method, ModelOptLinearMethod)
 
 
 @pytest.mark.skip_global_cleanup
@@ -973,6 +987,11 @@ def test_online_quantization_configures_prequantized_moe(
 
     assert isinstance(layer._quant_method, Mxfp4OnlineMoEMethod)
     assert layer._quant_method.requantization_source is not None
+    # Serialized experts are materialized and requantized one layer at a time.
+    assert layer._quant_method.uses_meta_device
+    assert all(
+        p.is_meta for p in layer._quant_method.requantization_source_parameters.values()
+    )
 
 
 def _pack_e2m1(values: torch.Tensor) -> torch.Tensor:
@@ -1006,6 +1025,22 @@ def _serialize_nvfp4_experts(
         torch.stack(block_scales),
         torch.stack(reconstructed_weights),
     )
+
+
+def _materialize_requantization_source(layer: torch.nn.Module) -> None:
+    """Materialize the serialized (meta) weights of an online MoE layer and drop its
+    layerwise tracking, as the layerwise loader does once a layer is fully loaded,
+    for tests that load or process the layer by hand."""
+    for name, parameter in list(layer.named_parameters(recurse=False)):
+        if parameter.is_meta:
+            setattr(layer, name, materialize_meta_tensor(parameter))
+            # Parameters created without a loader were wrapped around the default.
+            original_loader = _get_original_loader(parameter)
+            if original_loader is default_weight_loader:
+                del layer._parameters[name].weight_loader
+            else:
+                layer._parameters[name].weight_loader = original_loader
+    get_layerwise_info(layer).reset()
 
 
 def _make_nvfp4_moe_source(source_format: str, moe, monkeypatch):
@@ -1109,8 +1144,8 @@ def _nvfp4_moe_checkpoint_tensors(
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("tp_rank", [0, 1])
-@pytest.mark.parametrize("projection", ["column", "row", "merged"])
-@pytest.mark.parametrize("source_format", ["modelopt_mxfp8"])
+@pytest.mark.parametrize("projection", ["column", "row", "merged", "merged_unequal"])
+@pytest.mark.parametrize("source_format", ["modelopt_mxfp8", "modelopt_nvfp4"])
 def test_weight_loading_requantization(
     source_format: str,
     projection: str,
@@ -1132,7 +1167,8 @@ def test_weight_loading_requantization(
             lambda **kwargs: Mock(),
         )
         config = _fully_quantized_modelopt_mxfp8_config()
-        expected_source_cls = ModelOptLinearMethod
+    elif source_format == "modelopt_nvfp4":
+        config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True)
     else:
         pytest.fail(f"Unsupported checkpoint source: {source_format}")
     config.online_quantization_config = OnlineQuantizationConfig(
@@ -1145,24 +1181,27 @@ def test_weight_loading_requantization(
         quant_config=config,
         prefix="model.layers.0.self_attn.o_proj",
     )
-    if projection == "merged":
-        layer = MergedColumnParallelLinear(output_sizes=[64, 64], **kwargs)
+    output_sizes = [64, 32, 32] if projection == "merged_unequal" else [64, 64]
+    is_merged = projection.startswith("merged")
+    if is_merged:
+        layer = MergedColumnParallelLinear(output_sizes=output_sizes, **kwargs)
     elif projection == "row":
         layer = RowParallelLinear(output_size=64, **kwargs)
     else:
         layer = ColumnParallelLinear(output_size=64, **kwargs)
+    _materialize_requantization_source(layer)
     target = layer.quant_method
     # Online processing must remain assigned to the requested target.
     assert isinstance(target, Fp8PtpcOnlineLinearMethod)
     source = target.requantization_source
     # Checkpoint parameters must belong to the selected source method.
-    assert isinstance(source, expected_source_cls)
+    assert isinstance(source, ModelOptLinearMethod)
     for name in ("weight", "weight_scale"):
         # Source registration must choose V2 rather than the online target's loader.
         assert getattr(layer, name).weight_loader == layer.weight_loader_v2
 
     torch.manual_seed(11)
-    rows = 128 if projection == "merged" else 64
+    rows = sum(output_sizes) if is_merged else 64
     if source_format == "modelopt_mxfp8":
         checkpoint = {
             "weight": torch.randn(rows, 128, dtype=torch.bfloat16).to(
@@ -1170,16 +1209,32 @@ def test_weight_loading_requantization(
             ),
             "weight_scale": torch.randint(124, 131, (rows, 4), dtype=MXFP8_SCALE_DTYPE),
         }
+    elif source_format == "modelopt_nvfp4":
+        checkpoint = {
+            "weight": torch.full((rows, 64), 0x22, dtype=torch.uint8),
+            "weight_scale": torch.ones(rows, 8, dtype=torch.float8_e4m3fn),
+            "weight_scale_2": torch.tensor(
+                [2.0, 3.0, 5.0][: len(output_sizes)] if is_merged else [2.0]
+            ),
+        }
     else:
         pytest.fail(f"Unsupported checkpoint source: {source_format}")
     expected = {}
     for name, tensor in checkpoint.items():
         param = getattr(layer, name)
-        if projection == "merged":
-            for shard, part in enumerate(tensor.chunk(2, dim=0)):
+        if name == "weight_scale_2":
+            if is_merged:
+                for shard, scale in enumerate(tensor):
+                    param.weight_loader(param, scale, shard)
+            else:
+                param.weight_loader(param, tensor)
+            expected[name] = tensor
+        elif is_merged:
+            parts = tensor.split(output_sizes, dim=0)
+            for shard, part in enumerate(parts):
                 param.weight_loader(param, part, shard)
             expected[name] = torch.cat(
-                [part.chunk(2, dim=0)[tp_rank] for part in tensor.chunk(2, dim=0)]
+                [part.chunk(2, dim=0)[tp_rank] for part in parts]
             )
         else:
             param.weight_loader(param, tensor)
@@ -1187,11 +1242,26 @@ def test_weight_loading_requantization(
                 tp_rank
             ]
         # TP loading must preserve each source weight/scale shard exactly.
-        torch.testing.assert_close(param.cpu(), expected[name], rtol=0, atol=0)
+        torch.testing.assert_close(
+            param.cpu().float(), expected[name].float(), rtol=0, atol=0
+        )
     actual_weight = source.dequantize_weight(layer)
-    reference = source.dequantize_weight(SimpleNamespace(**expected))
+    reference = source.dequantize_weight(
+        SimpleNamespace(**expected, logical_widths=layer.logical_widths)
+    )
     # Loaded source shards must dequantize identically to their checkpoint slices.
     torch.testing.assert_close(actual_weight.cpu(), reference.cpu(), rtol=0, atol=0)
+    if source_format == "modelopt_nvfp4":
+        widths = layer.logical_widths if is_merged else [actual_weight.shape[0]]
+        expected_values = torch.repeat_interleave(
+            checkpoint["weight_scale_2"], torch.tensor(widths)
+        )
+        torch.testing.assert_close(
+            actual_weight.cpu().float(),
+            expected_values[:, None].expand_as(actual_weight),
+            rtol=0,
+            atol=0,
+        )
     # Source loading must leave the online processing method attached.
     assert layer.quant_method is target
 
@@ -1227,21 +1297,26 @@ def test_weight_loading_requantization_moe(
         quant_config_args(moe="fp8_per_tensor")
     )
     prefix = "model.layers.0.mlp.experts"
-    layer = RoutedExperts(
-        prefix,
-        torch.bfloat16,
-        config,
-        quant_config,
-        expert_map_manager=SimpleNamespace(
-            local_num_experts=2,
-            num_fused_shared_experts=0,
-            placement_strategy="linear",
-            expert_map=None,
-            expert_mask=None,
-            routing_tables=None,
-            map_global_to_local=lambda index: index,
-        ),
-    )
+
+    def make_layer() -> RoutedExperts:
+        return RoutedExperts(
+            prefix,
+            torch.bfloat16,
+            config,
+            quant_config,
+            expert_map_manager=SimpleNamespace(
+                local_num_experts=2,
+                num_fused_shared_experts=0,
+                placement_strategy="linear",
+                expert_map=None,
+                expert_mask=None,
+                routing_tables=None,
+                map_global_to_local=lambda index: index,
+            ),
+        )
+
+    layer = make_layer()
+    _materialize_requantization_source(layer)
     target = layer.quant_method
     # Construction must select the override, not execute the checkpoint method.
     assert isinstance(target, Fp8PerTensorOnlineMoEMethod)
@@ -1263,17 +1338,12 @@ def test_weight_loading_requantization_moe(
         torch.tensor([128.0, 56.0]),
     )
     # Distinct input scales expose gate/up overwrites independently of dequantization.
-    # Quark's existing input-scale loader broadcasts each shard across both slots.
     input_name = {
         "compressed_tensors": "w13_input_global_scale",
         "modelopt": "w13_input_scale",
         "quark": "w13_input_scale_2",
     }[source_format]
-    tensors[input_name] = torch.tensor(
-        [[0.25, 0.25], [0.75, 0.75]]
-        if source_format == "quark"
-        else [[0.25, 0.5], [0.75, 1.0]]
-    )
+    tensors[input_name] = torch.tensor([[0.25, 0.5], [0.75, 1.0]])
     checkpoint = []
     for name, tensor in tensors.items():
         stem, suffix = name.split("_", 1)
@@ -1284,6 +1354,18 @@ def test_weight_loading_requantization_moe(
             )
             for projection, part in zip(projections, parts, strict=True):
                 checkpoint.append((f"{expert}.{projection}.{suffix}", part))
+    # Input scales first: a loader counting them more than once would complete
+    # the layerwise element count before the last checkpoint tensor.
+    checkpoint.sort(key=lambda item: "input" not in item[0])
+
+    # Serialized sources are exactly sized: an unmaterialized layer must wait
+    # for its last checkpoint tensor before it is requantized.
+    meta_layer = make_layer()
+    meta_info = get_layerwise_info(meta_layer)
+    list(meta_layer.load_weights(checkpoint[:-1]))
+    assert meta_info.load_numel_total is not None
+    assert 0 < meta_info.load_numel < meta_info.load_numel_total
+
     loaded = set(layer.load_weights(checkpoint))
 
     # Every source parameter must be reached through checkpoint-name mapping.
@@ -1506,6 +1588,7 @@ def test_online_requantized_moe_reload(
             params_dtype=torch.bfloat16,
             weight_loader=default_weight_loader,
         )
+        _materialize_requantization_source(layer)
         record_metadata_for_reloading(layer)
         return layer, method
 
@@ -1791,6 +1874,12 @@ def test_online_overlay_loads_checkpoint_config_file(tmp_path) -> None:
         pytest.param("mxfp4", None, False, id="mxfp4-online"),
         pytest.param("mxfp8", None, False, id="mxfp8-online"),
         pytest.param(
+            "mxfp4",
+            {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+            False,
+            id="modelopt-nvfp4-to-online-mxfp4",
+        ),
+        pytest.param(
             "mxfp8",
             {"quant_method": "mxfp8", "ignored_layers": []},
             False,
@@ -1821,12 +1910,85 @@ def test_online_shorthand_selects_checkpoint_or_online_config(
 
     result = weight_utils.get_quant_config(model_config, LoadConfig())
 
-    if checkpoint_quantization_config is not None:
+    if (
+        checkpoint_quantization_config is not None
+        and checkpoint_quantization_config.get("quant_algo") == "NVFP4"
+    ):
+        assert isinstance(result, ModelOptNvFp4Config)
+        assert model_config.quantization == "modelopt_fp4"
+        assert result.online_quantization_config is not None
+        assert result.online_quantization_config.args == quant_config_args(
+            linear="mxfp4", moe="mxfp4"
+        )
+    elif checkpoint_quantization_config is not None:
         assert isinstance(result, ModelOptMxFp8Config)
         assert result.online_quantization_config is None
     else:
         assert isinstance(result, OnlineQuantizationConfig)
         assert result.online_quantization_config is None
+
+
+@pytest.mark.parametrize("quantization", [None, "mxfp4"])
+@pytest.mark.parametrize("target", ["mxfp4", {"weight": "mxfp4"}])
+def test_modelopt_nvfp4_targets_preserve_checkpoint_and_selection(
+    tmp_path, quantization, target
+) -> None:
+    """Targets keep the NVFP4 loader without quantizing untargeted linears."""
+    _write_minimal_llama_config(
+        tmp_path, {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+    )
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization=quantization,
+        quantization_config=QuantizationConfigArgs(targets={"*mlp*": target}),
+    )
+    result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+    assert isinstance(result, ModelOptNvFp4Config)
+    online_config = result.online_quantization_config
+    assert online_config is not None
+    assert online_config.args.linear is None
+    assert online_config.args.moe is None
+    selected = online_config.resolve_quant_method_cls(
+        ColumnParallelLinear, "model.layers.0.mlp.gate_proj"
+    )
+    assert selected is not None
+    assert selected[3].weight == kMxfp4Static
+    assert (
+        online_config.resolve_quant_method_cls(
+            ColumnParallelLinear, "model.layers.0.self_attn.q_proj"
+        )
+        is None
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_checkpoint_platform_validation_applies_to_untargeted_layers(
+    tmp_path, default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """A converted layer cannot make an unsupported native layer valid."""
+    monkeypatch.setattr(type(current_platform), "supported_quantization", ["online"])
+    _write_minimal_llama_config(
+        tmp_path, {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+    )
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization_config=quant_config_args(targets={"*mlp*": "fp8_per_channel"}),
+    )
+    default_vllm_config.model_config = model_config
+    config = weight_utils.get_quant_config(model_config, LoadConfig())
+    kwargs = dict(
+        input_size=128,
+        output_size=64,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=config,
+        disable_tp=True,
+    )
+    targeted = ColumnParallelLinear(prefix="model.layers.0.mlp.proj", **kwargs)
+    assert isinstance(targeted.quant_method, Fp8PtpcOnlineLinearMethod)
+    with pytest.raises(ValueError, match="modelopt_fp4.*not supported"):
+        ColumnParallelLinear(prefix="model.layers.0.self_attn.proj", **kwargs)
 
 
 def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
@@ -2177,6 +2339,15 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             id="targets_activation_override",
         ),
         pytest.param(
+            GRANITE_MODEL_NAME,
+            "online",
+            {"moe": {"weight": "mxfp8", "activation": "mxfp8"}},
+            UnquantizedLinearMethod,
+            Mxfp8OnlineMoEMethod,
+            {},
+            id="mxfp8_moe_mxfp8_activation",
+        ),
+        pytest.param(
             "vllm-project/Qwen3-0.6B-MXFP8",
             None,
             {"linear": "fp8_per_channel"},
@@ -2242,7 +2413,11 @@ def test_online_quantization(
     if current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         rocm_aiter_ops.refresh_env_variables()
-        if not use_rocm_aiter and "activation" in str(online_quant_args):
+        if (
+            not use_rocm_aiter
+            and expected_moe_cls is Mxfp4OnlineMoEMethod
+            and "activation" in str(online_quant_args)
+        ):
             pytest.skip("Only AITER computes BF16 activations for MXFP4 MoE.")
 
     if current_platform.is_xpu():
@@ -2301,6 +2476,8 @@ def test_online_quantization(
         original_process = Fp8PtpcOnlineLinearMethod.process_weights_after_loading
 
         def assert_source_weights_released(method, layer) -> None:
+            if getattr(layer, "_already_called_process_weights_after_loading", False):
+                return
             source_parameters = dict(method.requantization_source_parameters)
             assert set(source_parameters) == {"weight", "weight_scale"}
 
@@ -2389,10 +2566,14 @@ def test_online_quantization(
     moe_args = (
         online_quant_args.get("moe") if isinstance(online_quant_args, dict) else None
     )
-    if (isinstance(moe_args, dict) and "activation" in moe_args) or isinstance(
-        target_specs.get("*experts*"), dict
-    ):
-        assert moe._quant_method.activation_quant_key is None
+    moe_spec = moe_args if isinstance(moe_args, dict) else target_specs.get("*experts*")
+    if isinstance(moe_spec, dict) and "activation" in moe_spec:
+        activation = moe_spec["activation"]
+        assert moe._quant_method.activation_quant_key == (
+            None if activation is None else QUANT_KEY_NAMES[activation]
+        )
+    if expected_moe_cls is Mxfp8OnlineMoEMethod and on_gfx942() and use_rocm_aiter:
+        assert moe._quant_method.fp8_backend == Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8
 
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME and isinstance(
         o_proj.quant_method.kernel, (MarlinMxfp8LinearKernel, HummingMxfp8LinearKernel)
@@ -3202,6 +3383,376 @@ def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics(
     assert relative_error < 0.2
 
 
+def _fp8_moe_source_method(
+    source: str,
+    block_size: list[int] | None,
+    channel: bool = False,
+    static: bool = False,
+):
+    """A checkpoint FP8 MoE method with only the state `dequantize_weight` reads."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
+        CompressedTensorsW8A8Fp8MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkW8A8Fp8MoEMethod,
+    )
+
+    cls = {
+        "fp8": Fp8MoEMethod,
+        "compressed_tensors": CompressedTensorsW8A8Fp8MoEMethod,
+        "quark": QuarkW8A8Fp8MoEMethod,
+    }[source]
+    method: Any = object.__new__(cls)
+    method.moe = SimpleNamespace(w13_num_shards=2)
+    method.block_quant = block_size is not None
+    method.weight_block_size = block_size
+    if block_size:
+        method.weight_quant_key = quant_utils.QuantKey(
+            quant_utils.FP8_DTYPE,
+            quant_utils.ScaleDesc(
+                torch.float32, True, quant_utils.GroupShape(*block_size)
+            ),
+        )
+    else:
+        method.weight_quant_key = (
+            kFp8StaticChannelSym if channel else kFp8StaticTensorSym
+        )
+    # Only `Fp8MoEMethod` names block scales `weight_scale_inv`.
+    method.scale_name = (
+        "weight_scale_inv" if source == "fp8" and block_size else "weight_scale"
+    )
+    method.weight_scale_name = method.scale_name
+    method.scale_block_size = block_size
+    method.static_input_scales = static
+    method.quant_config = SimpleNamespace(
+        activation_scheme="static" if static else "dynamic"
+    )
+    return method
+
+
+@pytest.mark.parametrize(
+    "source,scheme",
+    [
+        (source, scheme)
+        for source in ("fp8", "compressed_tensors", "quark")
+        for scheme in (
+            "block_partial",
+            "block_small",
+            "per_tensor",
+            "per_channel",
+            "static_activation",
+        )
+        # `Fp8MoEMethod` only supports per-tensor and block scales.
+        if not (source == "fp8" and scheme == "per_channel")
+    ],
+)
+@pytest.mark.parametrize("chunk_experts", [1, 100])
+@pytest.mark.skip_global_cleanup
+def test_fp8_moe_dequantize_weight_numerics(
+    source, scheme, chunk_experts, monkeypatch
+) -> None:
+    """The `dequantize_weight` of FP8 checkpoint MoE methods (the source of
+    FP8 -> MXFP4/... online requantization) matches a reference for block,
+    per-tensor and per-channel scales, whatever the chunking."""
+    import vllm.model_executor.layers.quantization.utils.fp8_utils as fp8_utils
+
+    # Partial trailing blocks: each w13 shard has its own block grid.
+    block_size, inter, hidden = {
+        "block_partial": ([128, 128], 192, 320),
+        "block_small": ([64, 32], 96, 96),
+    }.get(scheme, (None, 64, 96))
+    num_experts = 4
+    expert_bytes = (2 * inter * hidden + hidden * inter) * (4 + 4 + 2)
+    monkeypatch.setattr(fp8_utils, "_DEQUANT_CHUNK_BYTES", chunk_experts * expert_bytes)
+    method = _fp8_moe_source_method(
+        source, block_size, scheme == "per_channel", scheme == "static_activation"
+    )
+
+    torch.manual_seed(5)
+    w13 = torch.randn(num_experts, 2 * inter, hidden).to(torch.float8_e4m3fn)
+    w2 = torch.randn(num_experts, hidden, inter).to(torch.float8_e4m3fn)
+    if block_size:
+        bn, bk = block_size
+        n_w13 = -(-inter // bn)
+        w13_scale = torch.rand(num_experts, 2 * n_w13, -(-hidden // bk)) + 0.5
+        w2_scale = torch.rand(num_experts, -(-hidden // bn), -(-inter // bk)) + 0.5
+        # Each w13 shard (w1, w3) has its own block grid.
+        expected_w13 = torch.cat(
+            [
+                _naive_block_fp8_dequant(
+                    w13[:, s * inter : (s + 1) * inter],
+                    w13_scale[:, s * n_w13 : (s + 1) * n_w13],
+                    block_size,
+                )
+                for s in range(2)
+            ],
+            dim=1,
+        ).float()
+        expected_w2 = _naive_block_fp8_dequant(w2, w2_scale, block_size).float()
+    elif scheme == "per_channel":
+        # compressed-tensors keeps a trailing singleton dim, Quark does not.
+        tail = (1,) if source == "compressed_tensors" else ()
+        w13_scale = torch.rand(num_experts, 2 * inter, *tail) + 0.5
+        w2_scale = torch.rand(num_experts, hidden, *tail) + 0.5
+        expected_w13 = w13.float() * w13_scale.reshape(num_experts, 2 * inter, 1)
+        expected_w2 = w2.float() * w2_scale.reshape(num_experts, hidden, 1)
+    else:
+        w13_scale = torch.rand(num_experts, 2) + 0.5
+        w2_scale = torch.rand(num_experts) + 0.5
+        expected_w13 = (
+            w13.float().reshape(num_experts, 2, inter, hidden)
+            * w13_scale[:, :, None, None]
+        ).reshape(num_experts, 2 * inter, hidden)
+        expected_w2 = w2.float() * w2_scale[:, None, None]
+
+    layer = SimpleNamespace(
+        w13_weight=w13,
+        w2_weight=w2,
+        orig_dtype=torch.bfloat16,
+        **{
+            f"w13_{method.scale_name}": w13_scale,
+            f"w2_{method.scale_name}": w2_scale,
+        },
+    )
+    if scheme == "static_activation":
+        # w1 and w3 share one input-scale slot, which the loader counts twice.
+        with pytest.raises(NotImplementedError, match="static activation"):
+            list(method.dequantize_weight(layer))
+        return
+    chunks = list(method.dequantize_weight(layer))
+
+    assert len(chunks) == -(-num_experts // min(chunk_experts, num_experts))
+    covered = [
+        e for experts, _, _ in chunks for e in range(experts.start, experts.stop)
+    ]
+    assert covered == list(range(num_experts))
+    actual_w13 = torch.cat([w13_chunk for _, w13_chunk, _ in chunks])
+    actual_w2 = torch.cat([w2_chunk for _, _, w2_chunk in chunks])
+    assert actual_w13.dtype == actual_w2.dtype == torch.bfloat16
+    torch.testing.assert_close(
+        actual_w13, expected_w13.to(torch.bfloat16), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        actual_w2, expected_w2.to(torch.bfloat16), rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize("defer_processing", [False, True])
+@pytest.mark.parametrize("requantization_source", [True, False])
+@pytest.mark.skip_global_cleanup
+def test_finalize_rejects_partially_loaded_requantization_source(
+    requantization_source, defer_processing, monkeypatch
+) -> None:
+    """A missing serialized tensor would be materialized as zeros and silently
+    requantized: only padded full-precision weights may be partially loaded."""
+    from vllm.model_executor.model_loader.reload import layerwise
+
+    processed = []
+    monkeypatch.setattr(
+        layerwise, "_layerwise_process", lambda layer, info: processed.append(layer)
+    )
+    layer = torch.nn.Linear(2, 2)
+    layer.quant_method = SimpleNamespace(
+        requantization_source=object() if requantization_source else None
+    )
+    info = get_layerwise_info(layer)
+    info.load_numel_total = 10
+    info.load_numel = 4
+    info.defer_processing = defer_processing
+    model = torch.nn.Sequential(layer)
+
+    if requantization_source:
+        with pytest.raises(ValueError, match="missing weights to requantize"):
+            finalize_layerwise_processing(model, SimpleNamespace())
+        assert not processed
+    else:
+        finalize_layerwise_processing(model, SimpleNamespace())
+        assert processed == [layer]
+
+
+def _naive_block_fp8_dequant(
+    weight: torch.Tensor, scale_inv: torch.Tensor, block: list[int]
+) -> torch.Tensor:
+    """Reference `[E, N, K]` block-FP8 -> bf16, one block at a time."""
+    bn, bk = block
+    out = torch.empty(weight.shape, dtype=torch.float32, device=weight.device)
+    for e in range(weight.shape[0]):
+        for i in range(0, weight.shape[1], bn):
+            for j in range(0, weight.shape[2], bk):
+                out[e, i : i + bn, j : j + bk] = (
+                    weight[e, i : i + bn, j : j + bk].float()
+                    * scale_inv[e, i // bn, j // bk]
+                )
+    return out.to(torch.bfloat16)
+
+
+def _enable_aiter_mxfp4_moe(monkeypatch) -> None:
+    """Make the MoE oracle pick the AITER MXFP4 backends (as on gfx950)."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize("moe_backend", ["aiter", "aiter_mxfp4_mxfp4"])
+@pytest.mark.skip_global_cleanup
+def test_block_fp8_source_layout_ignores_pinned_moe_backend(moe_backend) -> None:
+    """A pinned --moe-backend (an FP8 one rejecting the refined block key, or the
+    target's) must not decide the layout of a block-FP8 source: the unaligned TP4
+    shard 352 refines to [32, 32] instead of being padded or raising."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        resolve_fp8_moe_weight_block_shape,
+    )
+
+    config = SimpleNamespace(
+        moe_backend=moe_backend,
+        tp_size=4,
+        ep_size=1,
+        intermediate_size=1408,
+        intermediate_size_per_partition=352,
+        hidden_dim=2048,
+        is_lora_enabled=False,
+        has_bias=False,
+        tp_shard_with_padding=False,
+    )
+    with skip_checkpoint_backend_selection():
+        shape, refine = resolve_fp8_moe_weight_block_shape(
+            config, [128, 128], kFp8Dynamic128Sym, True
+        )
+    assert (shape, refine) == ([32, 32], (4, 4))
+    assert not config.tp_shard_with_padding
+    assert config.intermediate_size_per_partition == 352
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm AITER.")
+# 192 is not a multiple of the 128 block: the source then allocates its scales on a
+# refined block grid, which `dequantize_weight` must follow.
+@pytest.mark.parametrize("intermediate_size", [256, 192])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
+    intermediate_size, default_vllm_config, monkeypatch
+) -> None:
+    """A block-FP8 checkpoint requantized to MXFP4 by online quantization
+    (`--quantization-config.moe mxfp4`, which replaces
+    `VLLM_FP8_MOE_REQUANT=mxfp4`) yields the same MXFP4 weights as online
+    quantization of the dequantized bf16 experts."""
+    from tests.quantization.test_online_mxfp4 import assert_quantized_weights_equal
+    from vllm.model_executor.utils import replace_parameter
+
+    activation_key = kMxfp4Dynamic
+    _enable_aiter_mxfp4_moe(monkeypatch)
+    default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.model_config.quantization_config = quant_config_args(
+        moe="mxfp4"
+    )
+
+    num_experts, hidden_size = 4, 256
+    block = [128, 128]
+    device = current_platform.device_type
+
+    def make_layer(prefix: str):
+        layer = FusedMoEFactory(
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            prefix=prefix,
+        ).routed_experts
+        layer.moe_config.moe_backend = "aiter"
+        return layer
+
+    torch.manual_seed(0)
+    with torch.device(device):
+        source_layer = make_layer("fp8_source_layer")
+        reference_layer = make_layer("bf16_layer")
+
+        # The FP8 checkpoint method only creates and loads the FP8 parameters.
+        with skip_checkpoint_backend_selection():
+            fp8_method = Fp8MoEMethod(Fp8Config(weight_block_size=block), source_layer)
+        online_method = Mxfp4OnlineMoEMethod(
+            moe=source_layer.moe_config, activation_quant_key=activation_key
+        )
+        online_method.set_requantization_source(fp8_method)
+        online_method.create_weights(
+            layer=source_layer,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size,
+            params_dtype=torch.bfloat16,
+        )
+        assert online_method.uses_meta_device
+        # The block size the FP8 source sets on the layer describes the serialized
+        # weights: the target must not inherit it in its kernel selection.
+        assert source_layer.weight_block_size != block
+        _materialize_requantization_source(source_layer)
+        assert source_layer.w13_weight.dtype == torch.float8_e4m3fn
+
+        w13_fp8 = (
+            torch.randn(
+                num_experts, 2 * intermediate_size, hidden_size, dtype=torch.bfloat16
+            )
+            .clamp(-4, 4)
+            .to(torch.float8_e4m3fn)
+        )
+        w2_fp8 = (
+            torch.randn(
+                num_experts, hidden_size, intermediate_size, dtype=torch.bfloat16
+            )
+            .clamp(-4, 4)
+            .to(torch.float8_e4m3fn)
+        )
+        # Distinct scales per expert and block expose block/shard mix-ups.
+        w13_scale, w2_scale = (
+            torch.exp2(torch.randint(-6, 3, p.shape, dtype=torch.float32))
+            * (1 + torch.rand(p.shape))
+            for p in (
+                source_layer.w13_weight_scale_inv,
+                source_layer.w2_weight_scale_inv,
+            )
+        )
+        w13_scale, w2_scale = w13_scale.contiguous(), w2_scale.contiguous()
+        source_layer.w13_weight.data.copy_(w13_fp8)
+        source_layer.w2_weight.data.copy_(w2_fp8)
+        source_layer.w13_weight_scale_inv.data.copy_(w13_scale)
+        source_layer.w2_weight_scale_inv.data.copy_(w2_scale)
+        online_method.process_weights_after_loading(source_layer)
+
+        # The source parameters are released once requantized.
+        assert not hasattr(source_layer, "w13_weight_scale_inv")
+        assert not hasattr(source_layer, "w2_weight_scale_inv")
+
+        reference_method = Mxfp4OnlineMoEMethod(
+            moe=reference_layer.moe_config, activation_quant_key=activation_key
+        )
+        reference_method.create_weights(
+            layer=reference_layer,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size,
+            params_dtype=torch.bfloat16,
+        )
+        replace_parameter(
+            reference_layer,
+            "w13_weight",
+            _naive_block_fp8_dequant(w13_fp8, w13_scale, fp8_method.scale_block_size),
+        )
+        replace_parameter(
+            reference_layer,
+            "w2_weight",
+            _naive_block_fp8_dequant(w2_fp8, w2_scale, fp8_method.scale_block_size),
+        )
+        reference_method.process_weights_after_loading(reference_layer)
+
+    assert online_method.mxfp4_backend == reference_method.mxfp4_backend
+    assert_quantized_weights_equal(
+        reference_layer,
+        source_layer,
+        keys=("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"),
+        packed_weight_keys=("w13_weight", "w2_weight"),
+    )
+
+
 @pytest.mark.parametrize("scheme", ["per_tensor", "per_channel", "nvfp4"])
 def test_online_moe_tp_weight_quant_matches_ep(monkeypatch, scheme: str) -> None:
     """TP shards of w2 pack the same values and scales as full experts."""
@@ -3313,13 +3864,25 @@ def test_online_nvfp4_quantizes_original_expert_weights(staging_device: str) -> 
     reason="FP8 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize(
-    "model_name, expected_model_memory_gib",
+    "model_name, expected_model_memory_gib, quantization_kwargs",
     [
         # MoE models covering both linear and MoE paths, one per modeling backend
-        (GRANITE_MODEL_NAME, 1.35),
-        ("allenai/OLMoE-1B-7B-0125-Instruct", 6.7),
+        (GRANITE_MODEL_NAME, 1.35, {"quantization": "fp8_per_tensor"}),
+        (
+            "allenai/OLMoE-1B-7B-0125-Instruct",
+            6.7,
+            {"quantization": "fp8_per_tensor"},
+        ),
+        # Requantization: the serialized weights are materialized one layer at a
+        # time, so the peak stays close to the model memory instead of holding the
+        # whole serialized model next to the requantized one.
+        (
+            "vllm-project/Qwen3-0.6B-MXFP8",
+            0.76,
+            {"quantization_config": {"linear": "fp8_per_channel"}},
+        ),
     ],
-    ids=["moe", "moe_transformers"],
+    ids=["moe", "moe_transformers", "requantization"],
 )
 def test_online_quant_peak_mem(
     vllm_runner,
@@ -3327,9 +3890,10 @@ def test_online_quant_peak_mem(
     monkeypatch,
     model_name,
     expected_model_memory_gib,
+    quantization_kwargs,
 ) -> None:
     _test_online_quant_peak_mem_impl(
-        "fp8_per_tensor",
+        quantization_kwargs,
         model_name,
         expected_model_memory_gib,
         vllm_runner,
@@ -3513,10 +4077,10 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
             intermediate_size_per_partition=256,
             params_dtype=torch.bfloat16,
             global_num_experts=8,
-            weight_loader=Mock(),
+            weight_loader=default_weight_loader,
         )
     assert target.requantization_source_parameters
-    assert all(not parameter.is_meta for parameter in layer.parameters())
+    assert all(parameter.is_meta for parameter in layer.parameters())
     target_dispatch.assert_called_once()
     assert not is_requantization_source()
 
@@ -3595,11 +4159,11 @@ def test_linear_dispatch_skipped_for_requantization_source(
                 input_size=128,
                 output_size=64,
                 params_dtype=torch.bfloat16,
-                weight_loader=Mock(),
+                weight_loader=default_weight_loader,
             )
         assert target.requantization_source_parameters
         assert layer.weight.shape == (64, 128)
-        assert not layer.weight.is_meta
+        assert layer.weight.is_meta
         if source_format == "modelopt":
             assert isinstance(source, ModelOptLinearMethod)
             kernel = source.kernel
