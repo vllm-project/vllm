@@ -863,28 +863,17 @@ async fn unary_generate_with_token_ids_prompt() {
 }
 
 fn grpc_llm_request() -> GenerateRequest {
-    GenerateRequest {
-        request_id: "proof".into(),
-        prompt_token_ids: vec![21, 43],
-        sampling_params: EngineCoreSamplingParams {
+    GenerateRequest::new(
+        "proof".into(),
+        vec![21, 43],
+        EngineCoreSamplingParams {
             temperature: 0.75,
             max_tokens: 8,
             stop_token_ids: vec![99],
             seed: Some(9_007_199_254_740_993),
             ..Default::default()
         },
-        arrival_time: None,
-        cache_salt: None,
-        trace_headers: None,
-        priority: 0,
-        data_parallel_rank: None,
-        session_id: None,
-        mm_features: None,
-        kv_hints: None,
-        reasoning_parser_kwargs: None,
-        reasoning_ended: None,
-        lora_request: None,
-    }
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
