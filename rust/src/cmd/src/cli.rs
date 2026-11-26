@@ -887,17 +887,37 @@ pub struct SharedRuntimeArgs {
     pub unsupported: UnsupportedArgs,
 }
 
-/// The server and engine-core settings of one Rust frontend.
+/// Server settings and the source of its LLM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontendConfig {
     pub server: ServerConfig,
-    pub engine_core: EngineCoreConfig,
+    llm_source: LlmSourceConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one config per server startup; boxing would add an allocation"
+)]
+enum LlmSourceConfig {
+    EngineCore(EngineCoreConfig),
+    RemoteGrpc {
+        url: String,
+        max_model_len: NonZeroU32,
+    },
 }
 
 impl FrontendConfig {
-    /// Build the server that serves this engine-core engine.
-    pub fn into_server(self) -> Server {
-        Server::new(self.server, LlmSource::EngineCore(self.engine_core))
+    pub fn into_server(self) -> anyhow::Result<Server> {
+        let llm_source = match self.llm_source {
+            LlmSourceConfig::EngineCore(config) => LlmSource::EngineCore(config),
+            LlmSourceConfig::RemoteGrpc { url, max_model_len } => {
+                let model = self.server.served_model_name.first().unwrap_or(&self.server.model);
+                let llm = GrpcLlm::new(&url, model.clone(), max_model_len)?;
+                LlmSource::Provided(Box::new(llm))
+            }
+        };
+        Ok(Server::new(self.server, llm_source))
     }
 }
 
@@ -1090,7 +1110,7 @@ impl SharedRuntimeArgs {
                 keep_alive_on_engine_death: self.keep_alive_on_engine_death,
                 keep_alive_timeout,
             },
-            engine_core: EngineCoreConfig {
+            llm_source: LlmSourceConfig::EngineCore(EngineCoreConfig {
                 transport_mode: TransportMode::Bootstrapped {
                     input_listener_fd,
                     output_listener_fd,
@@ -1114,7 +1134,7 @@ impl SharedRuntimeArgs {
                 // The engine is launched and supervised by another process.
                 manages_engine: false,
                 profiler,
-            },
+            }),
         }
     }
 
@@ -1439,8 +1459,7 @@ impl FrontendArgs {
     }
 }
 
-/// Arguments for the managed-engine mode that spawns Python on behalf of the
-/// user.
+/// Command-line arguments for `vllm-rs serve`.
 #[derive(Educe, Clone, Args, PartialEq, Eq)]
 #[educe(Debug)]
 #[command(override_usage = "vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]")]
@@ -1492,7 +1511,64 @@ pub struct ServeArgs {
     pub data_parallel_lb: DataParallelLbArgs,
 }
 
+/// Processes and settings for one `vllm-rs serve` invocation.
+pub(super) enum ServeConfig {
+    Frontend(FrontendConfig),
+    ManagedEngine {
+        engine: ManagedEngineConfig,
+        frontend: Option<FrontendConfig>,
+        shutdown_timeout: Duration,
+    },
+}
+
 impl ServeArgs {
+    pub(super) fn resolve_config(&self) -> anyhow::Result<ServeConfig> {
+        if let Some(url) = self.remote_generation_url.as_deref() {
+            return Ok(ServeConfig::Frontend(
+                self.to_remote_generation_config(url)?,
+            ));
+        }
+        let topology = self.data_parallel_lb.resolve(&self.managed_engine, self.headless)?;
+        let handshake_port = self.managed_engine.resolve_handshake_port()?;
+
+        if self.managed_engine.data_parallel_size_local == Some(0) {
+            if self.headless {
+                anyhow::bail!("cannot combine `--headless` with `--data-parallel-size-local 0`");
+            }
+
+            let handshake_address = self.managed_engine.handshake_address(handshake_port);
+            tracing::info!(
+                %handshake_address,
+                engine_count = self.managed_engine.data_parallel_size,
+                "running Rust frontend without a managed local Python engine"
+            );
+            let config = self.to_frontend_config(handshake_address, &topology);
+            return Ok(ServeConfig::Frontend(config));
+        }
+
+        // The frontend owning rank 0 hosts the deployment's handshake. In hybrid or
+        // external DP LB, another node's frontend serves only its engines' second
+        // handshake, on a local IPC endpoint.
+        let client_handshake_address = (!self.headless
+            && topology.frontend_engine_start_index() != 0)
+            .then(frontend_ipc_handshake_address);
+        let engine_config = self.to_managed_engine_config(
+            handshake_port,
+            &topology,
+            client_handshake_address.clone(),
+        );
+        let frontend = (!self.headless).then(|| {
+            let address =
+                client_handshake_address.unwrap_or_else(|| engine_config.handshake_address());
+            self.to_frontend_config(address, &topology)
+        });
+        Ok(ServeConfig::ManagedEngine {
+            engine: engine_config,
+            frontend,
+            shutdown_timeout: self.runtime.shutdown_timeout(),
+        })
+    }
+
     /// Build the server and engine-core settings for `serve` when the frontend
     /// owns the handshake, whether the engines are launched locally or externally.
     pub fn to_frontend_config(
@@ -1502,7 +1578,9 @@ impl ServeArgs {
     ) -> FrontendConfig {
         FrontendConfig {
             server: self.to_server_config(),
-            engine_core: self.to_engine_core_config(handshake_address, topology),
+            llm_source: LlmSourceConfig::EngineCore(
+                self.to_engine_core_config(handshake_address, topology),
+            ),
         }
     }
 
@@ -1541,7 +1619,7 @@ impl ServeArgs {
         }
     }
 
-    pub(super) fn grpc_llm(&self, url: &str) -> anyhow::Result<GrpcLlm> {
+    fn to_remote_generation_config(&self, url: &str) -> anyhow::Result<FrontendConfig> {
         let Some(limit) = self
             .managed_engine
             .max_model_len
@@ -1554,11 +1632,16 @@ impl ServeArgs {
                 "--remote-generation-url requires a positive --max-model-len such as 512 or 1K"
             );
         };
-        let model = self.runtime.served_model_name.first().unwrap_or(&self.runtime.model.id);
-        GrpcLlm::new(url, model.clone(), limit)
+        Ok(FrontendConfig {
+            server: self.to_server_config(),
+            llm_source: LlmSourceConfig::RemoteGrpc {
+                url: url.to_owned(),
+                max_model_len: limit,
+            },
+        })
     }
 
-    pub(super) fn to_server_config(&self) -> ServerConfig {
+    fn to_server_config(&self) -> ServerConfig {
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -1696,7 +1779,7 @@ fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -
 
 /// Allocate a fresh IPC handshake endpoint for a frontend that serves only its
 /// node's engines (hybrid or external DP LB).
-pub fn frontend_ipc_handshake_address() -> String {
+fn frontend_ipc_handshake_address() -> String {
     let preferred_base_path = std::env::var_os("VLLM_RPC_BASE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
