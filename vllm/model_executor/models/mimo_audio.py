@@ -980,12 +980,6 @@ class AudioEncoder(nn.Module):
         hidden_states = torch.where(attention_mask, hidden_states, 0)
         return hidden_states, hidden_states_packed, output_length, codes
 
-    @torch.no_grad()
-    def decode_vq(self, codes):
-        assert self.quantizer is not None
-        self.quantizer.float()
-        return self.quantizer.decode(codes)
-
 
 class MiMoAudioTokenizer(PreTrainedModel):
     config_class = MiMoAudioTokenizerConfig

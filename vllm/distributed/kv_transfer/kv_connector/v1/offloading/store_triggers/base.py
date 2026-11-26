@@ -39,6 +39,10 @@ class StoreJobSink(Protocol):
         """Offer keys to the manager, with the trigger of this handler."""
         ...
 
+    def record_allocation_failure(self) -> None:
+        """Count a store attempt whose keys are not offered again."""
+        ...
+
     def add_job(
         self,
         req_id: ReqId,
@@ -116,7 +120,7 @@ class StoreTriggerHandler(ABC):
 
     @abstractmethod
     def first_live_chunk_idx(
-        self, req_status: RequestOffloadState, config_idx: int
+        self, req_status: RequestOffloadState, config_group_idx: int
     ) -> int | None:
         """The first chunk of a group whose GPU block ids this handler may
         still read.
@@ -126,7 +130,7 @@ class StoreTriggerHandler(ABC):
 
         Args:
             req_status: the request that holds the group.
-            config_idx: the index of the group in the offloading config.
+            config_group_idx: the index of the group in the offloading config.
 
         Returns:
             The first live chunk, or None if this handler reads no chunks of

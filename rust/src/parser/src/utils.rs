@@ -183,26 +183,32 @@ pub fn take_until_marker<'i, 'a, I: MarkerStream<'i>, M: MarkerLike + 'a>(
     marker: M,
     state: &'a mut MarkerScanState,
 ) -> impl Parser<I, &'i str, ErrMode<ContextError>> + 'a {
-    move |input: &mut I| take_until_marker_(input, &marker, state)
+    move |input: &mut I| take_until_marker_(input, std::slice::from_ref(&marker), state)
+}
+
+/// Parse text until the earliest of `markers`, resuming from the last safe
+/// scan checkpoint.
+/// This is the multi-marker variant of [`take_until_marker`].
+pub fn take_until_marker_mul<'i, 'a, I: MarkerStream<'i>, M: MarkerLike + 'a>(
+    markers: &'a [M],
+    state: &'a mut MarkerScanState,
+) -> impl Parser<I, &'i str, ErrMode<ContextError>> + 'a {
+    move |input: &mut I| take_until_marker_(input, markers, state)
 }
 
 fn take_until_marker_<'i, I: MarkerStream<'i>, M: MarkerLike>(
     input: &mut I,
-    marker: &M,
+    markers: &[M],
     state: &mut MarkerScanState,
 ) -> ModalResult<&'i str> {
-    debug_assert!(!marker.as_marker().as_str().is_empty());
+    debug_assert!(markers.iter().all(|marker| !marker.as_marker().as_str().is_empty()));
 
     if input.eof_offset() == 0 {
         return incomplete();
     }
 
     let start = input.offset();
-    match scan_markers(
-        input,
-        std::slice::from_ref(marker),
-        start + state.scan_start,
-    )? {
+    match scan_markers(input, markers, start + state.scan_start)? {
         Scan::Found { at, .. } => {
             state.reset();
             Ok(input.next_slice(at - start))
@@ -484,7 +490,7 @@ mod tests {
     use super::{
         JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str, parse_buffered_event,
         partial_prefix_len, safe_text_len, safe_text_len_mul, take_json_object, take_json_string,
-        take_until_marker,
+        take_until_marker, take_until_marker_mul,
     };
 
     #[test]
@@ -631,6 +637,18 @@ mod tests {
         assert_eq!(body, "body");
         assert_eq!(*input, "</tool_call>tail");
         assert_eq!(state, MarkerScanState::default());
+    }
+
+    #[test]
+    fn take_until_marker_mul_stops_before_earliest_marker() {
+        let mut state = MarkerScanState::default();
+        let markers = ["</b>", "</a>"];
+        let mut input = Partial::new("body</a></b>");
+
+        let body = take_until_marker_mul(&markers, &mut state).parse_next(&mut input).unwrap();
+
+        assert_eq!(body, "body");
+        assert_eq!(*input, "</a></b>");
     }
 
     #[test]

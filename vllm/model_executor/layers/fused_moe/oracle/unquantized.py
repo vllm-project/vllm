@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.oracle.base import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    interleave_w13_up_gate_for_flashinfer_cutedsl_sm90,
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
@@ -37,6 +38,7 @@ logger = init_logger(__name__)
 class UnquantizedMoeBackend(Enum):
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
+    FLASHINFER_CUTEDSL = "FlashInfer CuTeDSL"
     AITER = "ROCm AITER"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
@@ -75,9 +77,10 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
 
-        # On Hopper (SM90), the FlashInfer unquantized MoE kernels are slower
-        # than Triton, so prefer Triton by default.
+        # On Hopper (SM90), prefer the FlashInfer CuTe-DSL kernels. The other
+        # FlashInfer unquantized MoE kernels are slower than Triton there.
         if current_platform.is_device_capability_family(90):
+            _AVAILABLE_BACKENDS.insert(0, UnquantizedMoeBackend.FLASHINFER_CUTEDSL)
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
@@ -134,6 +137,13 @@ def backend_to_kernel_cls(
         )
 
         return [FlashInferExperts]
+
+    elif backend == UnquantizedMoeBackend.FLASHINFER_CUTEDSL:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_sm90_moe import (  # noqa: E501
+            FlashInferCuteDSLSm90Experts,
+        )
+
+        return [FlashInferCuteDSLSm90Experts]
 
     elif backend == UnquantizedMoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
@@ -195,6 +205,7 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
         "batched_triton": UnquantizedMoeBackend.BATCHED_TRITON,
         "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+        "flashinfer_cutedsl": UnquantizedMoeBackend.FLASHINFER_CUTEDSL,
         "aiter": UnquantizedMoeBackend.AITER,
     }
     if backend := mapping.get(runner_backend):
@@ -276,6 +287,16 @@ def select_unquantized_moe_backend(
             )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
 
+        # On XPU, TRITON stays the fallback (e.g. for batch invariance) and is
+        # forced by --moe-backend triton.
+        if current_platform.is_xpu() and moe_config.moe_backend != "triton":
+            backend = UnquantizedMoeBackend.XPU
+            oracle = UnquantizedMoEKernelOracle(moe_config, None, None)
+            kernel_cls, _ = oracle.try_backend(backend)
+            if kernel_cls is not None:
+                logger.debug_once(oracle.make_log_backend(backend, is_lora=True))
+                return backend, kernel_cls
+
         return UnquantizedMoEKernelOracle(moe_config, None, None).return_or_raise(
             UnquantizedMoeBackend.TRITON,
             [UnquantizedMoeBackend.TRITON],
@@ -296,10 +317,11 @@ def select_unquantized_moe_backend(
         return oracle.return_or_raise(UnquantizedMoeBackend.MOONEP, AVAILABLE_BACKENDS)
 
     runner_backend = moe_config.moe_backend
-    # 'humming' and 'marlin' are quantization-only; an unquantized layer (e.g.
-    # excluded via modules_to_not_convert, or an unquantized MTP draft of a
-    # quantized model) falls through to auto instead of erroring.
-    if runner_backend not in ["auto", "humming", "marlin"]:
+    # 'humming', 'marlin' and the RDNA3 int4 backends are quantization-only; an
+    # unquantized layer (e.g. excluded via modules_to_not_convert, or an
+    # unquantized MTP draft of a quantized model) falls through to auto instead
+    # of erroring.
+    if runner_backend not in ["auto", "humming", "marlin", "rdna3", "rdna3_int4_int8"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             moe_config.activation_format.is_batched
@@ -323,7 +345,7 @@ def select_unquantized_moe_backend(
             backend = UnquantizedMoeBackend.AITER
             kernel_cls, rejected = oracle.try_backend(backend)
             if kernel_cls is not None:
-                logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+                logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
                 return backend, kernel_cls
             # AITER was explicitly requested but does not support this
             # deployment configuration (e.g. a non-gated MoE activation,
@@ -350,7 +372,7 @@ def select_unquantized_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
 
     raise NotImplementedError(
@@ -376,6 +398,8 @@ def unquantized_round_up_hidden_size_and_intermediate_size(
     """Round up dimensions before allocation to satisfy the selected kernel."""
     if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         intermediate_size = round_up(intermediate_size, 128)
+    elif backend == UnquantizedMoeBackend.FLASHINFER_CUTEDSL:
+        intermediate_size = round_up(intermediate_size, 32)
     elif backend == UnquantizedMoeBackend.AITER:
         intermediate_size = round_up(
             intermediate_size, aiter_moe_intermediate_alignment(intermediate_size)
@@ -453,6 +477,15 @@ def convert_to_unquantized_kernel_format(
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             # Non-gated MoE: w13 is a single projection, no need to swap.
             w13_weight = swap_w13_to_w31(w13_weight)
+
+    elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTEDSL:
+        if moe_config.activation == MoEActivation.SWIGLUOAI:
+            # gpt-oss interleaves the gate/up rows; unpack to `[gate; up]`.
+            w13_weight = torch.cat([w13_weight[:, 0::2], w13_weight[:, 1::2]], dim=1)
+        _zero_intermediate_padding(moe_config, w13_weight, w2_weight)
+        if moe_config.is_act_and_mul:
+            w13_weight = interleave_w13_up_gate_for_flashinfer_cutedsl_sm90(w13_weight)
+        return w13_weight.contiguous(), w2_weight.contiguous()
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         is_act_and_mul = moe_config.is_act_and_mul

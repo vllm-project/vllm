@@ -459,7 +459,7 @@ guide: |
 
   ## Troubleshooting
 
-  - **FP8 performance:** DeepGEMM is required — install via `install_deepgemm.sh`.
+  - **FP8 performance:** DeepGEMM is required — it is bundled in vLLM wheels, so no separate install is needed.
   - **MTP performance:** We fixed some MTP acceptance rate issue in [This PR](https://github.com/vllm-project/vllm/pull/45895). If you encounter MTP acceptance rate issue, please update your branch or refer to [GLM-5.2 Docker Image](https://hub.docker.com/r/vllm/vllm-openai/tags?name=glm52).
 
   ## References

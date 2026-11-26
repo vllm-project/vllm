@@ -39,8 +39,9 @@ _WORKSPACE: dict[torch.device, torch.Tensor] = {}
 # own buffer, so the stock decode's shared workspace is never regrown under a
 # captured graph.
 CAKE_WORKSPACE_BYTES = 256 << 20
-# Decode shapes whose CAKE plan needs more workspace than CAKE_WORKSPACE_BYTES.
-_CAKE_WORKSPACE_TOO_SMALL: set[tuple[int, int, int, int]] = set()
+# Decode shapes (rows, heads, plan length, block table width, query length) CAKE
+# rejects: a short workspace, or a causal block's unsupported tile.
+_CAKE_WORKSPACE_TOO_SMALL: set[tuple[int, int, int, int, int]] = set()
 
 
 # The most the workspace is sized to at init; larger plans run the trtllm-gen fold.
@@ -60,19 +61,10 @@ def cake_workspace_bytes(
 ) -> int:
     """The largest CAKE split-KV workspace any folded draft batch of up to
     `max_reqs` requests needs (CUDA graphs plan at `max_seq_len`)."""
-    from flashinfer.mla.cake_kimi_k3_mla import plan_attention, workspace_bytes
-
-    need = 0
-    for batch in range(1, max_reqs + 1):
-        plan = plan_attention(
-            batch=batch,
-            max_q_len=1,
-            num_heads=k * heads,
-            max_seq_len=max_seq_len,
-            sm_count=sm_count,
-        )
-        need = max(need, workspace_bytes(plan.rows_max, plan.num_split))
-    return need
+    return max(
+        _cake_tier_bytes(batch, 1, k * heads, max_seq_len, sm_count)
+        for batch in range(1, max_reqs + 1)
+    )
 
 
 def reserve_cake_workspace(
@@ -80,13 +72,14 @@ def reserve_cake_workspace(
 ) -> int:
     """Allocate the CAKE workspace for the deployment's largest draft batch now,
     at model load (before the KV-cache memory profile and every graph capture,
-    which bind its address), at most `CAKE_WORKSPACE_MAX_BYTES`. Returns its
-    size. (GB300, 1M plan length: TP8 64 x k5 6 MiB; DEP 128 x k4 324 MiB,
-    128 x k5 589 MiB, 256 x k5 4.9 GiB -> capped, its largest batches fold on
-    trtllm-gen.) An eager batch planned at a shorter length can need more; the
-    call then takes the same trtllm-gen fold. Without FlashInfer's CAKE planner
-    (capability fallback) nothing is reserved and the default buffer is used."""
-    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    which bind its address), at most `CAKE_WORKSPACE_MAX_BYTES`, plus the
+    length-balanced launches' (`cake_balance`). Returns their size. (GB300, 1M
+    plan length: TP8 64 x k5 6 MiB; DEP 128 x k4 324 MiB, 128 x k5 589 MiB,
+    256 x k5 4.9 GiB -> capped, its largest batches fold on trtllm-gen.) An eager
+    batch planned at a shorter length can need more; the call then takes the same
+    trtllm-gen fold. Without FlashInfer's CAKE planner (capability fallback)
+    nothing is reserved and the default buffer is used."""
+    sms = _sm_count(device)
     try:
         need = cake_workspace_bytes(max_reqs, k, heads, max_seq_len, sms)
     except ImportError:
@@ -95,14 +88,21 @@ def reserve_cake_workspace(
     buf = _WORKSPACE.get(device)
     if buf is None or buf.numel() < nbytes:
         _WORKSPACE[device] = torch.zeros(nbytes, dtype=torch.int8, device=device)
-    return nbytes
+    tiers = sum(
+        _aligned(_cake_tier_bytes(m, 1, k * heads, max_seq_len, sms)) for m in TIERS
+    )
+    ws = _TIER_WORKSPACE.get(device)
+    if ws is None or ws.numel() < tiers:
+        _TIER_WORKSPACE[device] = torch.empty(tiers, dtype=torch.int8, device=device)
+    return nbytes + tiers
 
 
 def foldable(attn_metadata, num_rows: int, causal_ok: bool = False) -> int:
     """Query tokens per request when the decode batch can be folded, else 0.
 
-    Folding needs a non-causal decode batch in which every request has the same
-    number of query tokens (a DSpark draft block always does)."""
+    Folding needs a decode batch (non-causal unless `causal_ok`) in which every
+    request has the same number of query tokens (a DSpark draft block always
+    does)."""
     if getattr(attn_metadata, "causal", True) and not causal_ok:
         return 0
     decode = attn_metadata.decode
@@ -148,6 +148,10 @@ def _counter_buffer(max_reqs: int, num_heads: int, device: torch.device):
 # FlashInfer's cute-dsl MLA decode (the LSE-returning DCP kernel) tiles at most 128
 # query heads per decode row.
 CUTE_DSL_MAX_HEADS = 128
+# Causal TP blocks with more than this many k * H query rows run on CAKE; narrower
+# ones keep `causal_folded_decode`, which already reads the context once per
+# request there and splits long contexts better.
+CAKE_CAUSAL_MIN_HEADS = 64
 
 
 def fold_plan(k: int, heads: int, need_lse: bool, cake_ok: bool) -> tuple[int, str]:
@@ -324,16 +328,18 @@ def _plan_kernel():
     return plan
 
 
-def _balanced_tables(cache: dict | None, bt, sl, tot, split_rows, pairs):
+def _balanced_tables(
+    cache: dict | None, bt, sl, tot, split_rows, pairs, move_num=MOVE[0]
+):
     """Which rows the split tiers take, cached per batch like `_group_tables`
     (every draft layer of a step sees the same lengths): of the `split_rows`
-    longest (longest first), those longer than `MOVE` of a pair's share of the
-    batch's keys (`sum / pairs`). Returns (each tier row's batch row, or
+    longest (longest first), those longer than `move_num / MOVE[1]` of a pair's
+    share of the batch's keys (`sum / pairs`). Returns (each tier row's batch row, or
     `rows` when it stays in the unsplit launch; every row's length in the
     unsplit launch, 0 for the moved ones; the tier rows' block table, lengths
     (0 when not moved) and global lengths)."""
     rows = sl.shape[0]
-    key = ("draft_balanced", rows, split_rows)
+    key = ("draft_balanced", rows, split_rows, move_num)
     if cache is not None and key in cache:
         return cache[key]
     i32 = dict(dtype=torch.int32, device=sl.device)
@@ -344,7 +350,7 @@ def _balanced_tables(cache: dict | None, bt, sl, tot, split_rows, pairs):
     block = max(32, 1 << (rows - 1).bit_length())
     _plan_kernel()[(1,)](
         sl, tot, rest, dst, tier_sl, tier_tot, rows, split_rows, pairs,
-        MOVE[0], MOVE[1], block,
+        move_num, MOVE[1], block,
     )  # fmt: skip
     tier_bt = bt.new_empty((split_rows, bt.shape[1]))
     _row_copy(bt, tier_bt, dst, rows, gather=True)  # (unmoved rows: unread)
@@ -354,22 +360,87 @@ def _balanced_tables(cache: dict | None, bt, sl, tot, split_rows, pairs):
     return out
 
 
+def _aligned(nbytes: int) -> int:
+    """`nbytes` rounded up to 256 (one workspace slice per concurrent launch)."""
+    return -(-nbytes // 256) * 256
+
+
+# CAKE balancing (cake_balance): when the plan splits the long item at most this
+# many ways, within this many waves of items (measured, GB300, R = 8..256).
+BALANCE_SPLIT = 2
+BALANCE_WAVES = 4
+
+
+def cake_balance(
+    device: torch.device, rows: int, q_len: int, heads: int, max_seq_len: int
+) -> tuple[tuple[int, ...], int]:
+    """The length-balanced launch policy of a CAKE draft decode of `rows`
+    requests x `q_len` x `heads`: (`TIERS` keeping at least half the rows in the
+    one launch, the move threshold in pairs' shares of the batch's keys).
+
+    CAKE plans its KV split from the batch shape alone and, over bands of batch
+    sizes, leaves items unsplit (96 heads x k=4 at the 1M plan length: 22-24, 50,
+    224 requests; whole waves from 44), so one long request holds the launch.
+    Balanced when the long item gets at most `BALANCE_SPLIT` splits within
+    `BALANCE_WAVES` waves of items: a request then moves to its own launch when
+    it is longer than that split times a pair's share of the batch's keys.
+    Otherwise one launch (the balanced launches cost 3-16% when nothing moves)."""
+    from flashinfer.mla.cake_kimi_k3_mla import plan_attention
+
+    plan = plan_attention(
+        batch=rows,
+        max_q_len=q_len,
+        num_heads=heads,
+        max_seq_len=max_seq_len,
+        sm_count=_sm_count(device),
+    )
+    split = 1 if plan.n_full_items > 0 else plan.num_split
+    if split > BALANCE_SPLIT or plan.m_tiles * rows > BALANCE_WAVES * (
+        _sm_count(device) // 2
+    ):
+        return (), MOVE[0]
+    tiers: list[int] = []
+    for size in TIERS:
+        if sum(tiers) + size > rows // 2:
+            break
+        tiers.append(size)
+    return tuple(tiers), split * MOVE[0]
+
+
+def _cake_tier_bytes(m: int, q_len: int, heads: int, max_seq_len: int, sms: int):
+    """CAKE's split-KV workspace for a launch of `m` rows of `q_len` x
+    `heads` (its own plan of that launch)."""
+    from flashinfer.mla.cake_kimi_k3_mla import plan_attention, workspace_bytes
+
+    plan = plan_attention(
+        batch=m,
+        max_q_len=q_len,
+        num_heads=heads,
+        max_seq_len=max_seq_len,
+        sm_count=sms,
+    )
+    return workspace_bytes(plan.rows_max, plan.num_split)
+
+
 def balanced_decode(
     common: dict[str, Any],
     table_cache: dict | None,
     kv_lora_rank: int,
     tiers: tuple[int, ...],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """The cute-dsl LSE decode of `common` (`folded_decode`'s FlashInfer
-    arguments) as the split `tiers` of the longest rows and one unsplit launch
-    of the rest (see `TIERS`). Returns `[rows, 1, heads, kv_lora_rank]` BF16
-    and `[rows, heads]` FP32, as the one launch."""
+    move_num: int = MOVE[0],
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """The decode of `common` (`folded_decode`'s FlashInfer arguments: cute-dsl
+    with an LSE, or CAKE) as the split `tiers` of the longest rows and one launch
+    of the rest (see `TIERS`). Returns `[rows, q_len, heads, kv_lora_rank]` BF16
+    and, with `return_lse` (`q_len` 1), `[rows, heads]` FP32, as the one launch."""
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     query = common["query"]
-    rows, _, heads, _ = query.shape
+    rows, q_len, heads, _ = query.shape
     device = query.device
     tot = common.get("causal_seqlens_kv_global")
+    need_lse = bool(common.get("return_lse"))
+    cake = common.get("backend") == "cake"
     split_rows = sum(tiers)
     sms = _sm_count(device)
     dst, rest, bt, sl, tot_s = _balanced_tables(
@@ -379,10 +450,15 @@ def balanced_decode(
         common["seq_lens"] if tot is None else tot,
         split_rows,
         sms // 2,
+        move_num,
     )
     # One workspace slice per concurrent split launch.
     sizes = [
-        tier_workspace_bytes(m, max(1, sms // (2 * m)), heads, kv_lora_rank)
+        _aligned(
+            _cake_tier_bytes(m, q_len, heads, common["max_seq_len"], sms)
+            if cake
+            else tier_workspace_bytes(m, max(1, sms // (2 * m)), heads, kv_lora_rank)
+        )
         for m in tiers
     ]
     ws = _TIER_WORKSPACE.get(device)
@@ -391,12 +467,20 @@ def balanced_decode(
             sum(sizes), dtype=torch.int8, device=device
         )
     out = torch.empty(
-        (rows, 1, heads, kv_lora_rank), dtype=torch.bfloat16, device=device
+        (rows, q_len, heads, kv_lora_rank), dtype=torch.bfloat16, device=device
     )
-    lse = torch.empty((rows, heads), dtype=torch.float32, device=device)
+    lse = (
+        torch.empty((rows, heads), dtype=torch.float32, device=device)
+        if need_lse
+        else None
+    )
     q = query.new_empty((split_rows, *query.shape[1:]))
     out_s = out.new_empty((split_rows, *out.shape[1:]))
-    lse_s = lse.new_empty((split_rows, heads))
+    lse_s = None if lse is None else lse.new_empty((split_rows, heads))
+
+    def lse_args(dst):
+        return dict(lse=dst, return_lse=True) if need_lse else {}
+
     main = torch.cuda.current_stream(device)
     streams = _streams(device, len(tiers) + 1)
     # The rest in place, in the batch's order (the split rows' lengths zeroed:
@@ -405,7 +489,7 @@ def balanced_decode(
     first.wait_stream(main)
     with torch.cuda.stream(first):
         trtllm_batch_decode_with_kv_cache_mla(
-            **dict(common, seq_lens=rest, out=out, lse=lse, return_lse=True)
+            **dict(common, seq_lens=rest, out=out, **lse_args(lse))
         )
     # The moved rows' queries (the others' tier rows are empty).
     _row_copy(query, q, dst, rows, gather=True)
@@ -423,9 +507,8 @@ def balanced_decode(
             block_tables=bt[rows_],
             seq_lens=sl[rows_],
             out=out_s[rows_],
-            lse=lse_s[rows_],
-            return_lse=True,
             workspace_buffer=workspace,
+            **lse_args(None if lse_s is None else lse_s[rows_]),
         )
         if tot is not None:
             args["causal_seqlens_kv_global"] = tot_s[rows_]
@@ -434,7 +517,8 @@ def balanced_decode(
     for stream in streams:
         main.wait_stream(stream)
     _row_copy(out_s, out, dst, rows, gather=False)
-    _row_copy(lse_s, lse, dst, rows, gather=False)
+    if need_lse:
+        _row_copy(lse_s, lse, dst, rows, gather=False)
     return out, lse
 
 
@@ -482,14 +566,18 @@ def folded_decode(
     max_reqs: int = 0,
     backend: str | None = None,
     table_cache: dict | None = None,
+    causal: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Non-causal dense MLA decode of `R` requests x `k` query tokens.
+    """Dense MLA decode of `R` requests x `k` query tokens.
 
     `q`: `[R * k, H, kv_lora_rank + rope]` (token-major per request);
     `kv_cache`: `[pages, page_size, kv_lora_rank + rope]`; `block_table` /
     `seq_lens` (/ `dcp_tot_seq_lens`): per request. Returns `[R * k, H,
     kv_lora_rank]` and, with `return_lse`, `[R * k, H]`. `backend` forces
-    a FlashInfer backend (benchmarks); by default `fold_plan` picks."""
+    a FlashInfer backend (benchmarks); by default `fold_plan` picks.
+
+    `causal` (CAKE, no LSE): one `[k, H]` row per request under the kernel's
+    bottom-right mask, so each KV tile is read once per 128 (token, head) rows."""
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     rows, heads, dim = q.shape
@@ -505,8 +593,13 @@ def folded_decode(
     )
     if backend is not None and not need_lse:
         fold, planned = k, backend
-    groups = k // fold
-    query = q.reshape(num_reqs * groups, 1, fold * heads, dim)
+    if causal:
+        assert not need_lse, "causal folding runs on CAKE: TP / DEP only"
+        groups, q_len, row_heads = 1, k, heads
+        query = q.reshape(num_reqs, k, heads, dim)
+    else:
+        groups, q_len, row_heads = k // fold, 1, fold * heads
+        query = q.reshape(num_reqs * groups, 1, row_heads, dim)
     bt, sl, tot = _group_tables(
         table_cache, block_table, seq_lens, dcp_tot_seq_lens, num_reqs, groups
     )
@@ -532,29 +625,48 @@ def folded_decode(
             cp_rank=dcp_rank,
             causal_seqlens_kv_global=tot,
         )
-    cake_key = (num_reqs * groups, fold * heads, max_seq_len, bt.shape[1])
+    cake_key = (num_reqs * groups, row_heads, max_seq_len, bt.shape[1], q_len)
     if planned == "cake" and cake_key in _CAKE_WORKSPACE_TOO_SMALL:
         planned = "auto"
-    tiers = balanced_tiers(q.device, num_reqs * groups) if return_lse else ()
-    if planned == "cute-dsl" and tiers:
-        common["backend"] = planned
-        o, lse = balanced_decode(common, table_cache, kv_lora_rank, tiers)
-        return o.reshape(rows, heads, o.shape[-1]), lse.reshape(rows, heads)
+    # Length-balanced launches, so a step does not wait on its longest context.
+    move_num = MOVE[0]
+    if planned == "cute-dsl" and return_lse:
+        tiers = balanced_tiers(q.device, num_reqs * groups)
+    elif planned == "cake":
+        tiers, move_num = cake_balance(
+            q.device, num_reqs * groups, q_len, row_heads, max_seq_len
+        )
+    else:
+        tiers = ()
     out = None
     if planned == "cake":
+        # CAKE carves its split-KV partials (rows x splits x ~1 KiB) out of the
+        # fixed workspace and validates the size on the host before it launches
+        # anything. Large batches (e.g. 128 requests x 5 tokens x 64 heads) can
+        # need more than the buffer holds; growing it would free memory that
+        # earlier captured graphs still point at, so such shapes run the
+        # trtllm-gen fold instead. A causal block can also hit CAKE's generic-tail
+        # limit (64 heads x 4 tokens at long contexts), likewise checked first.
+        # The balanced launches' main launch plans as the one launch, so it is
+        # rejected alike.
         try:
+            if tiers:
+                o, _ = balanced_decode(
+                    dict(common, backend="cake"), table_cache, kv_lora_rank,
+                    tiers, move_num,
+                )  # fmt: skip
+                return o.reshape(rows, heads, o.shape[-1]), None
             out = trtllm_batch_decode_with_kv_cache_mla(backend="cake", **common)
         except ValueError as e:
-            # CAKE carves its split-KV partials (rows x splits x ~1 KiB) out of
-            # the fixed workspace and validates the size on the host before it
-            # launches anything. Large batches (e.g. 128 requests x 5 tokens x 64
-            # heads) can need more than the buffer holds; growing it would free
-            # memory that earlier captured graphs still point at, so such shapes
-            # run the trtllm-gen fold instead.
-            if "workspace_buffer needs" not in str(e):
+            if "workspace_buffer needs" not in str(e) and q_len == 1:
                 raise
             _CAKE_WORKSPACE_TOO_SMALL.add(cake_key)
             planned = "auto"
+    elif tiers:
+        common["backend"] = planned
+        o, lse = balanced_decode(common, table_cache, kv_lora_rank, tiers, move_num)
+        o = o.reshape(rows, heads, o.shape[-1])
+        return o, None if lse is None else lse.reshape(rows, heads)
     if out is None:
         extra: dict[str, Any] = {}
         if planned == "auto":
@@ -562,12 +674,12 @@ def folded_decode(
                 _select_mla_decode_backend,
             )
 
-            sel = _select_mla_decode_backend(fold * heads)
+            sel = _select_mla_decode_backend(row_heads)
             if sel is not None:
                 extra["backend"] = sel
             elif kv_cache.shape[-2] in (32, 64):
                 extra["multi_ctas_kv_counter_buffer"] = _counter_buffer(
-                    max(max_reqs, num_reqs * groups), fold * heads, q.device
+                    max(max_reqs, num_reqs * groups), row_heads, q.device
                 )
         else:
             extra["backend"] = planned
@@ -611,7 +723,10 @@ def draft_forward_mqa(
             impl.bmm2_scale *= layer._k_scale_float
     return_lse = impl.need_to_return_lse_for_decode
     decode = attn_metadata.decode
-    if causal:
+    cake = not return_lse and cake_supported(
+        q, kv_cache, impl.kv_lora_rank, impl.qk_rope_head_dim
+    )
+    if causal and not (cake and k * q.shape[1] > CAKE_CAUSAL_MIN_HEADS):
         return causal_folded_decode(
             q,
             kv_cache,
@@ -626,9 +741,6 @@ def draft_forward_mqa(
             bmm2_scale=impl.bmm2_scale,
             max_reqs=impl._mla_counter_max_batch,
         )
-    cake = not return_lse and cake_supported(
-        q, kv_cache, impl.kv_lora_rank, impl.qk_rope_head_dim
-    )
     return folded_decode(
         q,
         kv_cache,
@@ -650,6 +762,7 @@ def draft_forward_mqa(
         dcp_tot_seq_lens=decode.dcp_tot_seq_lens,
         max_reqs=impl._mla_counter_max_batch,
         table_cache=decode.__dict__.setdefault("_draft_fold_tables", {}),
+        causal=causal,
     )
 
 

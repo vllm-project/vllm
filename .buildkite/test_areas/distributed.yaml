@@ -11,11 +11,13 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed
+  - vllm/v1/attention/ops/cp_common.py
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_nvlink_fabric.py
   - pytest -v -s distributed/test_cpu_all_reduce.py
   - pytest -v -s distributed/test_flashinfer_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
@@ -25,9 +27,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Comm Ops'
+      label: ':amd: (MI300 DPX) Distributed Comm Ops'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 30
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -101,6 +103,8 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
+  - tests/entrypoints/serve/instrumentator/readiness/
+  - vllm/entrypoints/serve/instrumentator/health.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/v1/e2e/general/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/test_sharded_sampling.py
@@ -109,6 +113,7 @@ steps:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - pytest -v -s entrypoints/serve/instrumentator/readiness/test_ready_multi_gpu.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
@@ -216,9 +221,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Torchrun + Shutdown'
+      label: ':amd: (MI300 DPX) Distributed Torchrun + Shutdown'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -558,14 +563,22 @@ steps:
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
 
-- label: ":nvidia: (H100) DeepSeek ShardQ Sequence Parallel"
+- label: ":nvidia: (H100) ShardQ Sequence Parallel"
   key: deepseek-shardq-sequence-parallel
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   working_dir: "/vllm-workspace/"
   num_devices: 2
   source_file_dependencies:
   - vllm/models/deepseek_v32/
+  - vllm/models/hy_v4/nvidia/attention.py
+  - vllm/models/hy_v4/nvidia/flashmla_sparse.py
+  - vllm/models/hy_v4/nvidia/model.py
+  - vllm/models/hy_v4/nvidia/moe.py
+  - vllm/models/hy_v4/common/mrope.py
+  - vllm/models/hy_v4/common/sequence_parallel.py
+  - vllm/models/hy_v4/weight_utils.py
   - vllm/models/common/ops/sequence_parallel.py
   - vllm/model_executor/layers/attention/
   - vllm/model_executor/models/deepseek_v2.py
@@ -576,8 +589,47 @@ steps:
   - vllm/config/speculative.py
   - vllm/config/attention.py
   - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  - tests/models/hy_v4/test_shardq_sinks.py
+  - tests/models/hy_v4/test_sequence_parallel.py
   commands:
-  - pytest -v -s tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  - >-
+    pytest -v -s
+    tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+    tests/models/hy_v4/test_shardq_sinks.py
+    tests/models/hy_v4/test_sequence_parallel.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) HY4 Distributed"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      optional: true
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      working_dir: "/vllm-workspace/tests"
+      source_file_dependencies:
+      - vllm/models/hy_v4/
+      - vllm/models/hy_v4_flash/
+      - vllm/model_executor/layers/attention/
+      - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/backends/mla/indexer.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/ops/shardq.py
+      - vllm/v1/worker/gpu/spec_decode/dfly/
+      - vllm/models/common/ops/sequence_parallel.py
+      - vllm/config/attention.py
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/utils.py
+      - tests/models/hy_v4/test_shardq_sinks.py
+      - tests/models/hy_v4/test_sequence_parallel.py
+      - tests/models/test_hyv4_rocm.py
+      commands:
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/hy_v4/test_shardq_sinks.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/hy_v4/test_sequence_parallel.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
@@ -628,6 +680,11 @@ steps:
       - tests/distributed/test_rocm_quick_reduce.py
       - tests/distributed/test_quick_all_reduce.py
       - tests/distributed/test_aiter_rms_fallback.py
+      - tests/distributed/test_muse_spark_token_shard.py
+      - tests/distributed/test_muse_spark_decode_moe.py
+      - vllm/models/muse_spark/amd/model.py
+      - vllm/models/muse_spark/amd/
+      - tests/models/test_muse_spark_rocm_mono.py
       - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - tests/utils.py
       - tests/distributed/test_weight_transfer.py
@@ -648,6 +705,8 @@ steps:
       - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
+      - pytest -v -s tests/distributed/test_muse_spark_token_shard.py
+      - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
 
 - label: ":nvidia: (B200) [Nightly] Distributed"
   key: distributed-tests-2xb200
@@ -755,11 +814,11 @@ steps:
       ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG
       "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' &&
       NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' &&
-      python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code &&
+      python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager &&
       VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py"
       "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' &&
       NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' &&
-      python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
+      python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager"
 
 - label: ":nvidia: (L4) [Nightly] Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
@@ -870,7 +929,8 @@ steps:
 - label: ":nvidia: (L4) Distributed Preload"
   key: preload-2-gpus
   automatic_shard: true
-  timeout_in_minutes: 15
+  # The d2d weight-seeding tests (#64641) took this from ~10 to ~15 minutes.
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 2
@@ -880,7 +940,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
-  - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=1) or distributed(num_gpus=2)'
   mirror:
     amd:
       automatic_shard: true
@@ -901,7 +961,7 @@ steps:
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200
   automatic_shard: true
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: b200-k8s
   num_devices: 2
@@ -912,9 +972,10 @@ steps:
   - vllm/distributed/mooncake_store.py
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
-  env:
-    VLLM_HOST_IP: "127.0.0.1"
   commands:
   # Mooncake ships in the CI image (hash-locked); verify, never install.
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-  - pytest -v -s model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
+  - >-
+    pytest -v -s
+    model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
+    model_executor/model_loader/test_weight_cache.py::test_d2d_weight_seeding_cross_host

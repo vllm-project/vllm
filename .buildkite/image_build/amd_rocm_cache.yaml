@@ -1,0 +1,44 @@
+group: Hardware - AMD ROCm Image Cache
+
+# rocm-base-image-cache: a bot-created main build copies a PR's ROCm images into rocm/vllm-ci
+# (build.sh promote). rocm-image-cache-check: fails a PR that changes the stack until then.
+# Both optional; only the main CI pipeline renders image_build/.
+steps:
+  - label: ":docker: Cache a PR's ROCm images for main"
+    key: rocm-base-image-cache
+    depends_on: []
+    device: amd_cpu
+    no_plugin: true
+    optional: true
+    commands:
+      - bash .buildkite/scripts/rocm/build.sh rocm promote
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: 75  # Registry error (build.sh)
+          limit: 1
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+
+  - label: "ROCm image cache"
+    key: rocm-image-cache-check
+    depends_on:
+      - refresh-rocm-base-amd
+    device: amd_cpu
+    no_plugin: true
+    optional: true
+    commands:
+      - bash .buildkite/scripts/rocm/build.sh rocm check
+    timeout_in_minutes: 20
+    retry:
+      manual:
+        permit_on_passed: true  # the bot retries it when main changes the stack
+      automatic:
+        - exit_status: 75  # Registry error (build.sh)
+          limit: 1
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1

@@ -41,9 +41,7 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
     # First, try to load from file if specified
     logging_config = getattr(args, "logging_config", None)
     log_config_file = (
-        logging_config.pylogging_config_file
-        if logging_config is not None
-        else getattr(args, "log_config_file", None)
+        logging_config.pylogging_config_file if logging_config is not None else None
     )
     log_config = load_log_config(log_config_file)
     if log_config is not None:

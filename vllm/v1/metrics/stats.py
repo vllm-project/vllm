@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.logger import init_logger
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.iteration_workload import QueuedWorkload, ScheduledWorkload
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -203,10 +204,13 @@ class SchedulerIterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
-    elapsed_ms: float
+    # GPU time, measured by the output worker; None where it does not time.
+    elapsed_ms: float | None = None
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
+    # Only with --enable-logging-iteration-details; None for dummy iterations.
+    scheduled_workload: ScheduledWorkload | None = None
 
 
 KV_FETCH_WAITING_TO_START = "waiting_to_start"
@@ -228,6 +232,8 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # waiting requests not deferred
     # waiting requests deferred by transient constraints or a blocked status
     num_skipped_waiting_reqs: int = 0
+    # requests preempted since the previous stats, counted at preemption time
+    num_preempted_reqs: int = 0
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
@@ -236,7 +242,13 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
-    iteration_details: SchedulerIterationDetails | None = None
+    # Iterations to report: timed on the GPU by the output worker, or untimed
+    # from EngineCore.
+    iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
+    # The waiting requests when these stats were made, which is later than the
+    # iterations in iteration_records ran. Only with
+    # --enable-logging-iteration-details.
+    queued_workload: QueuedWorkload | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -496,7 +508,6 @@ class IterationStats:
         self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
-        self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
@@ -596,7 +607,6 @@ class IterationStats:
                     req_stats.scheduled_ts = event.timestamp
                 lora_states.request_running(req_id, lora_name)
             elif event.type == EngineCoreEventType.PREEMPTED:
-                self.num_preempted_reqs += 1
                 req_stats.num_preemptions += 1
                 lora_states.request_waiting(req_id, lora_name)
 
@@ -690,14 +700,14 @@ class LoRAStats:
 class LoRARequestStates:
     """A per-LoRA count of running and waiting requests."""
 
-    def __init__(self, log_stats: bool = False):
-        self.log_stats = log_stats
+    def __init__(self, collect_stats: bool = False):
+        self.collect_stats = collect_stats
         self.requests: defaultdict[str, LoRAStats] = defaultdict(LoRAStats)
 
     def _request_update(
         self, req_id: str, lora_name: str | None, waiting: bool, running: bool
     ):
-        if not self.log_stats or lora_name is None:
+        if not self.collect_stats or lora_name is None:
             return
 
         lora_stats = self.requests[lora_name]
@@ -715,7 +725,7 @@ class LoRARequestStates:
         self._request_update(req_id, lora_name, waiting=False, running=False)
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
-        if not self.log_stats or scheduler_stats is None:
+        if not self.collect_stats or scheduler_stats is None:
             return
         for lora_name, stats in self.requests.items():
             scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)

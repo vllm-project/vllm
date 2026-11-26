@@ -3,6 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Callable, Iterable
+from functools import partial
 from typing import Any
 
 import torch
@@ -23,6 +24,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -216,17 +218,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
-        elif current_platform.is_xpu():
-            # Opt-in: F.linear on XPU is faster with an N-contiguous (N, K) weight
-            # when K > N, but oneDNN's ab-weights matmul is not run-to-run bitwise
-            # bitwise reproducible. Off by default.
-            weight = layer.weight.data
-            if (
-                envs.VLLM_XPU_FORCE_N_CONTIG_WEIGHT
-                and weight.ndim == 2
-                and weight.stride(0) != 1
-            ):
-                layer.weight.data = weight.t().contiguous().t()
         elif current_platform.is_rocm():
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
         elif self._gemm_impl is cuda_unquantized_gemm:
@@ -243,6 +234,23 @@ class UnquantizedLinearMethod(LinearMethodBase):
         ):
             return linear_batch_invariant(x, layer.weight, bias)
         return self._gemm_impl(layer, x, layer.weight, bias)
+
+
+def apply_flattened(
+    fn: Callable[[Any], torch.Tensor], x: torch.Tensor | QuantizedActivation
+) -> torch.Tensor:
+    """Call `fn` on `x` flattened to 2D, if that can be done without a copy.
+
+    Linear methods and kernels may assume 2D activations, but callers such as
+    the Transformers modeling backend pass `[batch, seq, hidden]` activations.
+    """
+    if isinstance(x, QuantizedActivation):
+        if len(x.orig_shape) <= 2:
+            return fn(x)
+        return fn(x.flatten()).view(*x.orig_shape[:-1], -1)
+    if x.ndim <= 2 or not x.is_contiguous():
+        return fn(x)
+    return fn(x.view(-1, x.shape[-1])).view(*x.shape[:-1], -1)
 
 
 class LinearBase(PluggableLayer):
@@ -420,7 +428,7 @@ class ReplicatedLinear(LinearBase):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
-        output = self.quant_method.apply(self, x, bias)
+        output = apply_flattened(partial(self.quant_method.apply, self, bias=bias), x)
 
         if not self.return_bias:
             return output
@@ -623,7 +631,8 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        apply = partial(self.quant_method.apply, self, bias=bias)
+        output_parallel = apply_flattened(apply, input_)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -807,17 +816,17 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
-        for name in self.padding_fill_params():
-            param = getattr(self, name)
-            self._zero_output_padding(param)
-            set_weight_attrs(
-                param, {"weight_loader_numel": param[:-padding_size].numel()}
-            )
-
-    def padding_fill_params(self) -> list[str]:
-        if not self.padding_size:
-            return []
-        return ["weight"] + (["bias"] if self.bias is not None else [])
+        if padding_size:
+            for param in (self.weight, self.bias):
+                if param is None:
+                    continue
+                self._zero_output_padding(param)
+                set_weight_attrs(
+                    param, {"weight_loader_numel": param[:-padding_size].numel()}
+                )
+                # The loader zeroes the padding too, but a load plan skips loader
+                # fills: direct reload zero-fills it at begin instead.
+                param.fill_on_reload = True
 
     def _zero_output_padding(self, param: torch.Tensor) -> None:
         if self.padding_size and (param is self.weight or param is self.bias):
@@ -1872,7 +1881,8 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+        apply = partial(self.quant_method.apply, self, bias=bias_)
+        output_parallel = apply_flattened(apply, input_parallel)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
