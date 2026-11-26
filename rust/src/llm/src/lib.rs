@@ -67,9 +67,8 @@ pub struct LlmInfo {
     pub allow_missing_mm_embeddings: bool,
     /// vLLM version of the engine.
     pub vllm_version: String,
-    /// The engine configuration that the `system_fingerprint` of responses
-    /// describes.
-    pub fingerprint: LlmFingerprint,
+    /// Engine configuration used for `system_fingerprint`, when available.
+    pub fingerprint: Option<LlmFingerprint>,
 }
 
 /// Token-level generation: a [`GenerateRequest`] in, a [`GenerateOutput`]
@@ -173,10 +172,10 @@ impl EngineCoreLlm {
             supports_lora: client.ready_response().supports_lora,
             allow_missing_mm_embeddings: client.ready_response().allow_missing_mm_embeddings,
             vllm_version: client.vllm_version().to_string(),
-            fingerprint: LlmFingerprint::from_engines(
+            fingerprint: Some(LlmFingerprint::from_engines(
                 &client.ready_responses(),
                 client.data_parallel_size(),
-            ),
+            )),
         };
         let admission = Admission::new(client.model_name(), AdmissionLimits::default());
         Self {

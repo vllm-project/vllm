@@ -61,7 +61,7 @@ pub use vllm_chat::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 pub use vllm_llm::AdmissionLimits;
-use vllm_llm::{EngineCoreLlm, Llm, LlmFingerprint, LlmInfo};
+use vllm_llm::{EngineCoreLlm, Llm, LlmInfo};
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
@@ -188,7 +188,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         }
         LlmSource::Provided(llm) => (llm, None),
     };
-    let system_fingerprint = config.fingerprint_mode.fingerprint(&llm.info().fingerprint);
+    let system_fingerprint = config.fingerprint_mode.fingerprint(llm.info().fingerprint.as_ref());
     let text = TextLlm::from_boxed(llm, text_backend)
         .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)
@@ -283,14 +283,7 @@ fn remote_llm_info(max_model_len: u32) -> LlmInfo {
         supports_lora: false,
         allow_missing_mm_embeddings: false,
         vllm_version: "unknown".to_owned(),
-        fingerprint: LlmFingerprint {
-            vllm_version: "unknown".to_owned(),
-            config_hash: None,
-            tensor_parallel_size: 1,
-            pipeline_parallel_size: 1,
-            data_parallel_size: 1,
-            enable_expert_parallel: false,
-        },
+        fingerprint: None,
     }
 }
 
