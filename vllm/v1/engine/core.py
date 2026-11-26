@@ -1295,6 +1295,7 @@ class EngineCore:
         model_config = self.vllm_config.model_config
         if (
             params is not None
+            and model_config is not None
             and model_config.architecture == "DiffusionGemmaForBlockDiffusion"
         ):
             diffusion_config = self.vllm_config.diffusion_config
