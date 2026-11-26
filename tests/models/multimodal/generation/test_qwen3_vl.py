@@ -10,6 +10,7 @@ from vllm import SamplingParams
 from vllm.outputs import CompletionOutput
 from vllm.platforms import current_platform
 
+from ...utils import check_logprobs_close
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 MODEL = "Qwen/Qwen3-VL-2B-Instruct"
@@ -122,6 +123,47 @@ def test_qwen3_vl_pruned_video_prefix_cache_hit(
     assert gap < MAX_LOGPROB_GAP, (
         f"logprob gap {gap:.3f} between cache miss and cache hit\n"
         f"cache_miss:\t{miss.text!r}\ncache_hit:\t{hit.text!r}"
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Decode graphs require CUDA or ROCm"
+)
+def test_qwen3_vl_full_decode_graph_matches_eager(vllm_runner, image_assets):
+    """Full decode graphs preserve results for a batch with text and images."""
+    prompts = [
+        qwen3_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>",
+            "Describe the image in one sentence.",
+        ),
+        qwen3_vl_chat_template("What are some common uses for a bicycle?"),
+    ]
+    images = [image_assets[0].pil_image, None]
+    params = SamplingParams(temperature=0.0, min_tokens=4, max_tokens=12, logprobs=5)
+    outputs = []
+    for enforce_eager in (True, False):
+        with vllm_runner(
+            MODEL,
+            dtype="bfloat16",
+            max_model_len=4096,
+            max_num_seqs=2,
+            enforce_eager=enforce_eager,
+            compilation_config={
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [1, 2],
+            },
+            limit_mm_per_prompt={"image": 1, "video": 0},
+            enable_prefix_caching=False,
+        ) as model:
+            config = model.llm.llm_engine.vllm_config.compilation_config
+            assert config.cudagraph_mode.has_full_cudagraphs() is not enforce_eager
+            outputs.append(model.generate_w_logprobs(prompts, params, images=images))
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="eager",
+        name_1="full decode graph",
     )
 
 

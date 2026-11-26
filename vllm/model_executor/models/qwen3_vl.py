@@ -129,6 +129,7 @@ from vllm.utils.cache import LRUCache
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed
 from ...utils.torch_utils import async_tensor_h2d
@@ -2090,14 +2091,15 @@ class Qwen3VLForConditionalGeneration(
     ) -> IntermediateTensors | None:
         if not getattr(self, "deepstack_input_embeds", None):
             return None  # If vision tower is skipped
-        if num_tokens > self.deepstack_input_embeds[0].size(0):
-            self._resize_deepstack_input_embeds(num_tokens)
+        start = dbo_current_ubatch_token_offset()
+        end = start + num_tokens
+        if end > self.deepstack_input_embeds[0].size(0):
+            self._resize_deepstack_input_embeds(end)
 
-        # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
             {
                 f"deepstack_input_embeds_{idx}": self.deepstack_input_embeds[idx][
-                    :num_tokens
+                    start:end
                 ]
                 for idx in range(self.deepstack_num_level)
             }
@@ -2122,22 +2124,17 @@ class Qwen3VLForConditionalGeneration(
         num_tokens = deepstack_input_embeds.size(1)
         if num_tokens > self.deepstack_input_embeds[0].size(0):
             self._resize_deepstack_input_embeds(num_tokens)
+        self.deepstack_input_embeds_num_tokens = num_tokens
         for idx in range(self.deepstack_num_level):
             self.deepstack_input_embeds[idx][:num_tokens].copy_(
                 deepstack_input_embeds[idx]
             )
-        self.deepstack_input_embeds_num_tokens = num_tokens
 
-    def _clear_deepstack_input_embeds(self, num_tokens: int) -> None:
-        if not getattr(self, "deepstack_input_embeds", None):
-            return
-        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
-            return
-
-        # clear deepstack_input_embeds in buffer
-        if num_tokens > 0:
-            for idx in range(self.deepstack_num_level):
-                self.deepstack_input_embeds[idx][:num_tokens].zero_()
+    def _clear_deepstack_input_embeds(self) -> None:
+        num_tokens = getattr(self, "deepstack_input_embeds_num_tokens", 0)
+        if num_tokens:
+            for buf in self.deepstack_input_embeds:
+                buf[:num_tokens].zero_()
             self.deepstack_input_embeds_num_tokens = 0
 
     # -- SupportsEncoderCudaGraph protocol methods --
@@ -2902,6 +2899,8 @@ class Qwen3VLForConditionalGeneration(
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Reset the previous batch's scratch outside CUDA graph replay.
+        self._clear_deepstack_input_embeds()
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
@@ -2986,9 +2985,6 @@ class Qwen3VLForConditionalGeneration(
             # args for deepstack
             deepstack_input_embeds=deepstack_input_embeds,
         )
-
-        if inputs_embeds is not None and get_pp_group().is_first_rank:
-            self._clear_deepstack_input_embeds(inputs_embeds.size(0))
 
         return hidden_states
 
