@@ -887,6 +887,9 @@ async fn load_roundtrip_backends(case: &RoundtripCase) -> Result<vllm_chat::Load
         case.model_id,
         LoadModelBackendsOptions {
             renderer: RendererSelection::Auto,
+            // Roundtrips render and parse text only; some cases are multimodal
+            // checkpoints the Rust frontend serves only as text.
+            language_model_only: true,
             ..Default::default()
         },
     )
@@ -1179,6 +1182,7 @@ fn decoded_completion_stream(
             events.push(DecodedTextEvent::TextDelta {
                 decoded: chunk.delta,
                 sampled: vllm_text::SampledDelta {
+                    timestamp: 0.0,
                     token_ids: chunk.token_ids,
                     logprobs: None,
                     sampling_mask: None,

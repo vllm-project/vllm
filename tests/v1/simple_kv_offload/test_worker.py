@@ -710,9 +710,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 
     pages = [spec.page_size_bytes for spec in specs.values()]
     num_blocks = 4
-    kv_cache_config = get_kv_cache_config_from_groups(
-        vllm_config, [group], sum(pages) * num_blocks
-    )
+    kv_cache_config = get_kv_cache_config_from_groups(vllm_config, [group], num_blocks)
     assert kv_cache_config.num_blocks == num_blocks
     assert len(set(pages)) > 1, "the mixed page sizes are what this test covers"
 
@@ -765,9 +763,7 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     vllm_config.kv_transfer_config = None
 
     pages = [spec.page_size_bytes for spec in specs.values()]
-    kv_cache_config = get_kv_cache_config_from_groups(
-        vllm_config, [group], sum(pages) * rank_blocks
-    )
+    kv_cache_config = get_kv_cache_config_from_groups(vllm_config, [group], rank_blocks)
     assert kv_cache_config.num_blocks == rank_blocks
 
     kv_caches = allocate_kv_cache(kv_cache_config, torch.device("cuda"), layout)
@@ -811,8 +807,7 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         vllm_config.attention_config.hisparse_config = None
         vllm_config.kv_transfer_config = None
 
-        page_bytes = sum(spec.page_size_bytes for spec in specs.values())
-        config = get_kv_cache_config_from_groups(vllm_config, [group], page_bytes * 4)
+        config = get_kv_cache_config_from_groups(vllm_config, [group], num_blocks=4)
         scheduler_block_size, _ = resolve_kv_cache_block_sizes(config, vllm_config)
         assert scheduler_block_size == 128 * dcp_size
         placements.append(

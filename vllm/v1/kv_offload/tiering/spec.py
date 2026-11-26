@@ -567,7 +567,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         if self.secondary_tier_configs and self.config.parallel.world_size > 1:
             _reject_workers_across_nodes()
-        world_size = self.config.parallel.world_size
         worker_index = self.config.parallel.rank
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
@@ -576,11 +575,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
             num_segments=REGION_SEGMENTS,
-            # Every worker maps the same bytes in the replicated layout, so
-            # each pre-faults only its share.
-            populate_shard=(
-                (worker_index, world_size) if self.replicated_layout else None
-            ),
+            populate_shard=self._replicated_prefault_shard,
         )
         try:
             if self.config.canonical_layout:
