@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import os
+import platform
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,6 +17,9 @@ from setuptools_scm import get_version
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 VLLM_RS_BUILD_VERSION = "VLLM_RS_BUILD_VERSION"
+# Must match `vllm-build-info`, which reads the slot at run time.
+VERSION_SLOT_MAGIC = b"@@VLLM_RS_VERSION_SLOT@@"
+VERSION_SLOT_LEN = 128
 
 # Select vLLM release tags, excluding crate tags such as "proto-v0.3.0".
 VLLM_GIT_DESCRIBE_COMMAND = [
@@ -91,8 +96,32 @@ def build_binary(build_rust_args: list[str]) -> None:
     )
 
 
+def stamp_version(binary: Path, version: str) -> None:
+    """Write `version` into the version slot of a linked Rust binary, so a
+    cached build can take a new version without relinking."""
+    payload = version.encode()
+    if len(payload) > VERSION_SLOT_LEN:
+        raise ValueError(f"Version does not fit the version slot: {version!r}")
+    data = bytearray(binary.read_bytes())
+    count = data.count(VERSION_SLOT_MAGIC)
+    if count != 1:
+        raise ValueError(f"Expected 1 version slot in {binary}, found {count}")
+    start = data.index(VERSION_SLOT_MAGIC) + len(VERSION_SLOT_MAGIC)
+    data[start : start + VERSION_SLOT_LEN] = payload.ljust(VERSION_SLOT_LEN, b"\0")
+    binary.write_bytes(data)
+    if platform.system() == "Darwin":
+        # Patching invalidates the linker's ad hoc signature on arm64.
+        subprocess.run(["codesign", "--force", "--sign", "-", binary], check=True)
+
+
 def main() -> None:
-    prepare_build_environment()
+    version = prepare_build_environment()
+    if sys.argv[1:2] == ["--stamp"]:
+        if version is None:
+            sys.exit("No vLLM version to stamp: no Git metadata found")
+        for binary in sys.argv[2:]:
+            stamp_version(Path(binary), version)
+        return
     build_binary(sys.argv[1:])
 
 

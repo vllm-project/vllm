@@ -344,7 +344,7 @@ ENV CARGO_BUILD_JOBS=4
 ENV SCCACHE_SERVER_PORT=4227
 
 # Build with a stable version so this target snapshot is keyed only by Rust
-# inputs. The child stage below relinks the crates that embed the exact version.
+# inputs. The child stage below stamps the exact version into the binary.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
@@ -358,13 +358,12 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
         sccache --show-stats; \
     fi
 
-# Relink with the exact Git-derived package version.
+# Stamp the exact Git-derived package version into the cached binary.
 FROM rust-build-cache AS rust-build
 
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
-    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
-    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
+RUN --mount=type=bind,source=.git,target=.git \
+    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" \
+    python3 tools/build_rust.py --stamp vllm/vllm-rs
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################

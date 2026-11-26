@@ -237,7 +237,7 @@ COPY tools/build_rust.sh tools/build_rust.sh
 ENV CARGO_BUILD_JOBS=4
 
 # Build with a stable version so this target snapshot is keyed only by Rust
-# inputs. The child stage below relinks the crates that embed the exact version.
+# inputs. The child stage below stamps the exact version into the binary.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
@@ -255,17 +255,12 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash tools/build_rust.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
-# tools/build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
-# child stage below finds it on disk instead of re-downloading it.
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Relink with the exact Git-derived package version.
+# Stamp the exact Git-derived package version into the cached binary.
 FROM rust-build-cache AS rust-build
 
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
-    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
-    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
+RUN --mount=type=bind,source=.git,target=.git \
+    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" \
+    python3 tools/build_rust.py --stamp vllm/vllm-rs
 
 ######################### SOURCE PREP IMAGE #########################
 # Shared prep (source, rust artifacts, build deps) for both vllm-build and
