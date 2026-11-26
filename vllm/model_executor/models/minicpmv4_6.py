@@ -780,17 +780,28 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         )
         if self._fits_size_hint("video", largest[0]):
             return largest
-        canvas = super().get_video_frame_size_with_most_features()
-        if self._hint_keeps_canvas("video", canvas):
-            return self._get_video_size_and_frames(
-                seq_len // num_videos, _MAX_FRAMES_PER_VIDEO, [canvas]
-            )
-        return self._get_video_size_and_frames(
+        hinted = self._get_video_size_and_frames(
             max_tokens,
             max_frames,
             self._hinted_video_sizes_by_tokens.values(),
             padded=True,
         )
+        canvas = super().get_video_frame_size_with_most_features()
+        if not self._hint_keeps_canvas("video", canvas):
+            return hinted
+        kept = self._get_video_size_and_frames(
+            seq_len // num_videos, _MAX_FRAMES_PER_VIDEO, [canvas]
+        )
+
+        def profiled_cost(candidate: tuple[ImageSize, int]) -> tuple[int, int]:
+            size = self._clip_to_size_hint("video", candidate[0])
+            num_frames = min(candidate[1], max_frames)
+            return (
+                num_frames * self._get_padded_tokens(size, "video"),
+                num_frames * self._get_frame_tokens(size, "video"),
+            )
+
+        return max(kept, hinted, key=profiled_cost)
 
     def get_dummy_seq_len(
         self,
@@ -930,14 +941,17 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         options = self.ctx.get_mm_config().limit_per_prompt.get(modality)
         return getattr(options, "width", None), getattr(options, "height", None)
 
-    def _hint_keeps_canvas(self, modality: str, canvas: ImageSize) -> bool:
+    def _clip_to_size_hint(self, modality: str, size: ImageSize) -> ImageSize:
         width, height = self._get_size_hint(modality)
-        if width is None and height is None:
-            return False
-        clipped = ImageSize(
-            width=min(canvas.width, width or canvas.width),
-            height=min(canvas.height, height or canvas.height),
+        return ImageSize(
+            width=min(size.width, width or size.width),
+            height=min(size.height, height or size.height),
         )
+
+    def _hint_keeps_canvas(self, modality: str, canvas: ImageSize) -> bool:
+        if self._get_size_hint(modality) == (None, None):
+            return False
+        clipped = self._clip_to_size_hint(modality, canvas)
         return _fit_aspect_ratio(clipped, modality) == clipped
 
     def _get_sizes_by_tokens(
@@ -948,20 +962,27 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         max_width, max_height = (
             self._get_size_hint(modality) if within_hint else (None, None)
         )
-        scale_resolution = self.get_image_processor().scale_resolution
+        image_processor = self.get_image_processor()
+        scale_resolution = image_processor.scale_resolution
         area = scale_resolution * scale_resolution
         heights = range(
             max(math.ceil(scale_resolution / math.sqrt(max_ratio)), 1),
             min(math.floor(scale_resolution * math.sqrt(max_ratio)), area) + 1,
         )
+        slice_counts = (
+            range(1, max(max_slice_nums, 1) + 1)
+            if modality == "video"
+            else sorted({max(max_slice_nums - 1, 1), max_slice_nums})
+        )
         sizes = [
             ImageSize(width=num_slices // rows * (area // height), height=rows * height)
-            for num_slices in sorted({max(max_slice_nums - 1, 1), max_slice_nums})
+            for num_slices in slice_counts
             for rows in range(1, num_slices + 1)
             if num_slices % rows == 0
             for height in heights
         ]
         if max_width or max_height:
+            sizes += [ImageSize(width=size.height, height=size.width) for size in sizes]
             sizes += [
                 size
                 for short in range(1, 9)
@@ -970,18 +991,26 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             ]
         if max_width and max_height:
             extra_sizes = (ImageSize(width=max_width, height=max_height), *extra_sizes)
-        sizes_by_tokens: dict[int, ImageSize] = {}
-        padded_by_tokens: dict[int, int] = {}
-        for size in [*extra_sizes, *sizes] if within_hint else [*sizes, *extra_sizes]:
-            size = _fit_aspect_ratio(
+        fitted_sizes = dict.fromkeys(
+            _fit_aspect_ratio(
                 ImageSize(
                     width=min(size.width, max_width or size.width),
                     height=min(size.height, max_height or size.height),
                 ),
                 modality,
             )
+            for size in (
+                [*extra_sizes, *sizes] if within_hint else [*sizes, *extra_sizes]
+            )
+        )
+        sizes_by_tokens: dict[int, ImageSize] = {}
+        padded_by_tokens: dict[int, int] = {}
+        for size in fitted_sizes:
             grids, source_tokens, patch_tokens = self._compute_visual_tokens(
-                size, max_slice_nums, downsample_mode=downsample_mode
+                size,
+                max_slice_nums,
+                downsample_mode=downsample_mode,
+                image_processor=image_processor,
             )
             tokens = source_tokens + grids[0] * grids[1] * patch_tokens
             padded = (1 + grids[0] * grids[1]) * max(source_tokens, patch_tokens)
@@ -1017,6 +1046,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         image_size: ImageSize,
         max_slice_nums: int | None = None,
         downsample_mode: str | None = None,
+        image_processor: Any = None,
     ) -> tuple[list[int], int, int]:
         """Compute grid, source_image_visual_tokens and patch_visual_tokens.
 
@@ -1025,13 +1055,15 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             max_slice_nums: Maximum number of slices, or None for the default.
             downsample_mode: `"16x"` (default, full merge) or `"4x"`
                 (skip vit_merger, 4x more visual tokens).
+            image_processor: Image processor to use, or None to look it up.
 
         Returns:
             (grids, source_image_visual_tokens, patch_visual_tokens)
             grids is [0, 0] when no slicing occurs.
 
         """
-        image_processor = self.get_image_processor()
+        if image_processor is None:
+            image_processor = self.get_image_processor()
         if max_slice_nums is None:
             max_slice_nums = image_processor.max_slice_nums
 

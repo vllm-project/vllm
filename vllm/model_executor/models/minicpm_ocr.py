@@ -27,6 +27,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import replace as dataclass_replace
 from functools import cached_property
+from typing import Any
 
 import torch
 
@@ -61,7 +62,9 @@ _VIDEO_PINNED_UPSIZE_KWARGS = {"small_image_upsize": "always"}
 
 
 class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
-    def _pinned_image_processor(self, downsample_mode: str | None = None):
+    def _pinned_image_processor(
+        self, downsample_mode: str | None = None, image_processor: Any = None
+    ):
         """Image processor view pinned to the mode resolved for this request.
 
         `MiniCPMOcrImageProcessor.find_best_resize` reads `downsample_mode`
@@ -70,7 +73,8 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         the token count on a copy pinned the same way, otherwise the pixels are
         aligned to one grid and the placeholder is counted on another.
         """
-        image_processor = self.get_image_processor()
+        if image_processor is None:
+            image_processor = self.get_image_processor()
         resolved = self._get_downsample_mode(downsample_mode)
         if getattr(image_processor, "downsample_mode", None) == resolved:
             return image_processor
@@ -84,6 +88,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         image_size: ImageSize,
         max_slice_nums: int | None = None,
         downsample_mode: str | None = None,
+        image_processor: Any = None,
     ) -> tuple[list[int], int, int]:
         """Grid, source tokens and per-slice tokens for one image.
 
@@ -97,7 +102,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         images the placeholder is taken from `target_sizes` instead; see
         `MiniCPMOcrMultiModalProcessor._ocr_image_prompt_text`.
         """
-        image_processor = self._pinned_image_processor(downsample_mode)
+        image_processor = self._pinned_image_processor(downsample_mode, image_processor)
         if max_slice_nums is None:
             max_slice_nums = image_processor.max_slice_nums
 

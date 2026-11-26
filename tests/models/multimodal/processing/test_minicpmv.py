@@ -170,6 +170,21 @@ def _padded_patches(inputs, modality: str) -> int:
     return pixel_values.shape[-4] * pixel_values.shape[-1] // pixel_values.shape[-2]
 
 
+def _profiled_video_patches(budget: MultiModalBudget) -> int:
+    split_input = budget.get_dummy_encoder_profile_inputs()
+    profiles = [split_input, budget.get_dummy_encoder_profile_single_input(split_input)]
+    totals = []
+    for profile in profiles:
+        total = 0
+        for _, item in profile:
+            pixel_values = item.get_data()["video_pixel_values"]
+            assert isinstance(pixel_values, torch.Tensor)
+            num_slices, _, patch, width = pixel_values.shape
+            total += num_slices * width // patch
+        totals.append(total)
+    return max(totals)
+
+
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "image_size", "num_tokens"),
     [
@@ -263,20 +278,7 @@ def test_minicpmv4_6_video_profile_covers_largest_scheduled_video(
     processor = budget.processor
     assert isinstance(processor.info, MiniCPMV4_6ProcessingInfo)
 
-    def padded_patches(inputs) -> int:
-        total = 0
-        for _, item in inputs:
-            pixel_values = item.get_data()["video_pixel_values"]
-            assert isinstance(pixel_values, torch.Tensor)
-            num_slices, _, patch, width = pixel_values.shape
-            total += num_slices * width // patch
-        return total
-
-    split_input = budget.get_dummy_encoder_profile_inputs()
-    profiled = max(
-        padded_patches(split_input),
-        padded_patches(budget.get_dummy_encoder_profile_single_input(split_input)),
-    )
+    profiled = _profiled_video_patches(budget)
 
     assert budget.mm_max_toks_per_item["video"] == _num_video_embeds(
         processor, _video_item(16, 1265, 1112)
@@ -312,6 +314,46 @@ def test_minicpmv4_6_image_dummy_keeps_most_padded_shape_per_token_count():
         info.get_max_image_tokens()
     )
     assert _padded_patches(dummy, "image") >= _padded_patches(processed, "image")
+
+
+@pytest.mark.parametrize(
+    ("hint", "num_frames", "size"),
+    [
+        ({}, 8, (98, 3796)),
+        ({}, 8, (85, 3363)),
+        ({}, 8, (3796, 98)),
+        ({"height": 300}, 8, (3796, 98)),
+        ({"height": 300}, 3, (7944, 202)),
+        ({"height": 500}, 8, (3796, 98)),
+        ({"width": 8000, "height": 300}, 8, (3796, 98)),
+        ({"width": 300}, 8, (98, 3796)),
+    ],
+)
+def test_minicpmv4_6_4x_video_profile_covers_thin_videos(hint, num_frames, size):
+    ctx = build_model_context(
+        "openbmb/MiniCPM-V-4_6",
+        model_config_kwargs={"max_model_len": 8192},
+        mm_processor_kwargs={"videos_kwargs": {"downsample_mode": "4x"}},
+        limit_mm_per_prompt={"image": 0, "video": {"count": 1, **hint}},
+    )
+    budget = MultiModalBudget(
+        VllmConfig(
+            model_config=ctx.model_config,
+            scheduler_config=SchedulerConfig(
+                max_model_len=8192,
+                max_num_batched_tokens=8192,
+                is_encoder_decoder=False,
+            ),
+        ),
+        MULTIMODAL_REGISTRY,
+        enable_cache=False,
+    )
+    video = _process_video(budget.processor, _video_item(num_frames, *size))
+    num_embeds = sum(p.get_num_embeds() for p in video["mm_placeholders"]["video"])
+
+    assert len(video["prompt_token_ids"]) < 8192
+    assert num_embeds <= budget.get_encoder_budget()
+    assert _profiled_video_patches(budget) >= _padded_patches(video, "video")
 
 
 @pytest.mark.parametrize(
