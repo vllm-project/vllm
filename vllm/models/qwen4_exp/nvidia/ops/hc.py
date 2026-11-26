@@ -189,6 +189,39 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
 MIN_FUSED_UP_M = 48
 
 
+def hc_down_silu_sm100_supported(
+    w_down: torch.Tensor, rank: int, hc_count: int
+) -> bool:
+    return (
+        hasattr(torch.ops._C, "qwen4_exp_hc_down_silu")
+        and current_platform.is_device_capability_family(100)
+        and hc_count == 4
+        and rank == 320
+        and w_down.dtype == torch.bfloat16
+        and w_down.ndim == 2
+        and w_down.shape[0] >= rank + hc_count
+        and w_down.shape[1] == 4 * 2560
+    )
+
+
+def hc_down_silu_sm100(
+    xn: torch.Tensor, w_down: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused down+inject GEMM + SiLU on SM100 (tcgen05).
+
+    SiLU reads the fp32 accumulator (no bf16 rounding of the GEMM output
+    first), so results match the unfused path only at bf16 noise.
+    Only hc_count 4, hidden size 2560 and rank 320 are supported.
+    `w_down` must be a static weight: it is loaded before the kernel's PDL
+    wait, so no in-flight earlier kernel may write it.
+    """
+    M = xn.shape[0]
+    lowrank = xn.new_empty(M, 320)
+    inj_out = xn.new_empty(M, 4)
+    torch.ops._C.qwen4_exp_hc_down_silu(lowrank, inj_out, xn, w_down)
+    return lowrank, inj_out
+
+
 @triton.jit(do_not_specialize=["num_tokens"])
 def _hc_up_gate_mix_sm90_kernel(
     lowrank,
@@ -529,6 +562,8 @@ __all__ = [
     "grouped_gemma_rmsnorm",
     "hc_combine",
     "hc_combine_norm",
+    "hc_down_silu_sm100",
+    "hc_down_silu_sm100_supported",
     "hc_gate_mix",
     "hc_silu",
 ]
