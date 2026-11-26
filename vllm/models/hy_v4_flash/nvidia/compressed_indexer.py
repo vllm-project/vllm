@@ -25,7 +25,7 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 
-from .indexpool_cache import POOL_PAGE_SIZE, IndexPoolCache, IndexPoolMetadata
+from ..common.indexpool_cache import POOL_PAGE_SIZE, IndexPoolCache, IndexPoolMetadata
 from .indexpool_ops import pool_quantize_write, quantize_query, select_expand_groups
 from .indexpool_prepare import prepare_groups, write_tails
 

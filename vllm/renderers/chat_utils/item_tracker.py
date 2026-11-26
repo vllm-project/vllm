@@ -367,7 +367,11 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             # Embeddings bypass limit when enable_mm_embeds=True
             skip_validation = mm_config.get_limit_per_prompt(input_modality) == 0
         if not skip_validation:
-            self.mm_processor.info.validate_num_items(input_modality, num_items)
+            self.mm_processor.info.validate_num_input_items(
+                input_modality,
+                num_items,
+                is_embedding=original_modality.endswith("_embeds"),
+            )
 
         return input_modality, original_modality, use_vision_chunk, num_items
 

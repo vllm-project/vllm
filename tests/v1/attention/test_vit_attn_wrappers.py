@@ -35,6 +35,9 @@ def test_registered_attention_wrapper_fake_layouts():
             torch.ops.vllm.triton_attn_wrapper(
                 q, q, q, 1, None, cu_seqlens, max_seqlen
             ),
+            torch.ops.vllm.triton_attn_wrapper(
+                q, q, q, 1, None, cu_seqlens, max_seqlen, sequence_lengths
+            ),
             torch.ops.vllm.torch_sdpa_wrapper(q, q, q, None, None, False),
             torch.ops.vllm.flashinfer_wrapper(
                 q,
