@@ -879,3 +879,77 @@ def test_object_evicted_after_lookup_follows_failure_policy(
     _, num_cached, _ = scheduler.kv_cache_manager.get_computed_blocks(same_prompt())
     assert num_cached == (0 if policy == "fail" else num_hit_tokens)
     worker.shutdown()
+
+
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, load_fails):
+    """New blocks are zeroed on the forward stream, which a transfer is not
+    ordered behind. Blocks a synchronous load fills must skip that zeroing, and
+    blocks a failed load left unfilled must be zeroed when they are reused."""
+    runtime = install_memory_runtime(monkeypatch)
+    kv_cache_config = _kv_cache_config()
+    (group,) = kv_cache_config.kv_cache_groups
+    spec = group.kv_cache_specs["layer2"]
+    assert isinstance(spec, AttentionSpec)
+    # Mixed precision makes core zero new blocks.
+    mixed_specs = {
+        "layer1": group.kv_cache_specs["layer1"],
+        "layer2": replace(spec, dtype=torch.bfloat16),
+    }
+    kv_cache_config = replace(
+        kv_cache_config, kv_cache_groups=[replace(group, kv_cache_specs=mixed_specs)]
+    )
+    vllm_config = create_vllm_config(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "mode": "embedded",
+            "lookup_dir": socket_dir,
+            "load_async": False,
+        },
+        kv_load_failure_policy="fail",
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=kv_cache_config.num_blocks,
+        kv_cache_config=kv_cache_config,
+    )
+    worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    kv_caches = make_kv_caches()
+    worker.register_kv_caches(kv_caches)
+    handshake(scheduler.connector, worker)
+    num_tokens = 3 * scheduler.block_size + 1
+
+    def same_prompt():
+        return create_request(
+            num_tokens=num_tokens, common_prefix_len=num_tokens, max_tokens=1
+        )
+
+    scheduler.add_request(same_prompt())
+    _run_to_completion(scheduler, worker)
+    assert scheduler.reset_prefix_cache()
+
+    request = same_prompt()
+    scheduler.add_request(request)
+    output = _engine_step(
+        scheduler,
+        worker,
+        before_load=runtime.evict_all if load_fails else lambda: None,
+    )
+    (block_ids,) = output.scheduled_new_reqs[0].block_ids
+    loaded = output.kv_connector_metadata.load_requests[request.request_id].block_ids
+    assert loaded == block_ids[:3]
+    # The block the request computes itself is still zeroed.
+    assert output.new_block_ids_to_zero == block_ids[3:]
+
+    if load_fails:
+        assert request.status == RequestStatus.FINISHED_ERROR
+        scheduler.add_request(create_request(num_tokens=num_tokens, max_tokens=1))
+        reused = _engine_step(scheduler, worker)
+        (reused_ids,) = reused.scheduled_new_reqs[0].block_ids
+        assert set(loaded) <= set(reused_ids)
+        # Only the step that reallocates them zeroes them: a zeroing queued in
+        # any other step is not ordered against a later load into them.
+        assert reused.new_block_ids_to_zero == reused_ids
+    _run_to_completion(scheduler, worker)
+    worker.shutdown()

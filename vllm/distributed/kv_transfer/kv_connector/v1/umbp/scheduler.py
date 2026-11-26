@@ -836,6 +836,28 @@ class UMBPStoreConnectorScheduler:
             if load_plans:
                 meta.load_requests[request_id] = load_plans
 
+        if not self.load_async and scheduler_output.new_block_ids_to_zero:
+            # Zeroing is queued on the forward stream, which a transfer is not
+            # ordered behind, so it could wipe a synchronous load. The load
+            # overwrites its blocks whole, as core relies on for async loads.
+            # Blocks a load fails to fill need no zeroing either: core zeroes
+            # them when it reallocates them, and with one cache group (the only
+            # layout loaded synchronously) their bytes never change precision.
+            loaded = {
+                block_id
+                for plans in meta.load_requests.values()
+                for block_id in (
+                    plans.block_ids
+                    if isinstance(plans, BlockLoadBatch)
+                    else (plan.block_id for plan in plans)
+                )
+            }
+            scheduler_output.new_block_ids_to_zero = [
+                block_id
+                for block_id in scheduler_output.new_block_ids_to_zero
+                if block_id not in loaded
+            ]
+
         for request_id in scheduler_output.preempted_req_ids or set():
             meta.preempted_request_ids.add(request_id)
             self._load_specs.pop(request_id, None)

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{StreamExt as _, future};
@@ -24,6 +25,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
+use vllm_text::DecodedLogprobs;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
@@ -47,7 +49,6 @@ use crate::routes::openai::utils::types::{
     ToolCallDelta, Usage,
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
@@ -70,8 +71,9 @@ pub(crate) fn lower_chat_request(
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    body: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Json(body) = body?;
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
@@ -265,10 +267,19 @@ async fn collect_chat_completion(
         })
         .collect::<Vec<_>>();
     let logprobs = if requested_logprobs && include_output_metadata {
+        let logprobs = match logprobs {
+            Some(logprobs) => logprobs,
+            // A request that generated nothing, such as one aborted during
+            // prefill, has no positions to report.
+            None if token_ids.is_empty() => DecodedLogprobs {
+                positions: Vec::new(),
+            },
+            None => {
+                bail_server_error!("chat response requested logprobs but generation returned none")
+            }
+        };
         Some(decoded_logprobs_to_openai_chat(
-            logprobs.as_ref().ok_or_else(|| {
-                server_error!("chat response requested logprobs but generation returned none")
-            })?,
+            &logprobs,
             output_top_logprobs,
             return_tokens_as_token_ids,
         )?)
