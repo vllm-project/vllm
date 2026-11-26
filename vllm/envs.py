@@ -148,6 +148,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
+    VLLM_ROCM_USE_AITER_LINEAR_HIPB_W4A16: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_FP8_MOE_REQUANT: Literal["none", "mxfp4"] = "none"
     VLLM_FP8_MOE_REQUANT_ACT: Literal["a8w4", "a4w4", "a16w4"] = "a8w4"
@@ -1350,6 +1351,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "False").lower() in ("true", "1")
+    ),
+    # Whether to use aiter's hipBLASLt W4A16 GEMM (aiter.hipb_w4a16_mm: int4
+    # weights, fp16/bf16 activations) for the linear layers it supports, when
+    # aiter linear ops are enabled (VLLM_ROCM_USE_AITER and
+    # VLLM_ROCM_USE_AITER_LINEAR).
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_LINEAR_HIPB_W4A16": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPB_W4A16", "True").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.

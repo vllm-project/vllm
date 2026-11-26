@@ -28,6 +28,8 @@ _HYBRID_GROUP_SIZES = (32, 64, 128)
 def _expected_rocm_kernel(weight_type, group_size: int) -> str:
     """Mirror the ROCm priority order in `_POSSIBLE_KERNELS[ROCM]`:
     RDNA3 (gfx1100, symmetric uint4b8) -> Hybrid (gfx11/gfx12) -> Triton.
+    AiterHipbW4A16LinearKernel comes first only with VLLM_ROCM_USE_AITER=1,
+    which these tests leave off.
     """
     if on_gfx1100() and weight_type == scalar_types.uint4b8:
         return "RDNA3W4A16LinearKernel"

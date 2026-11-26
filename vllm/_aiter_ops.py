@@ -2403,6 +2403,7 @@ class rocm_aiter_ops:
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
+    _LINEAR_HIPB_W4A16_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPB_W4A16
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
@@ -2438,6 +2439,7 @@ class rocm_aiter_ops:
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
+        cls._LINEAR_HIPB_W4A16_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPB_W4A16
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
         cls._FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
@@ -3886,6 +3888,74 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_hipb_mm_fp8(A, B, As, Bs, bias, output_dtype)
+
+    @classmethod
+    def is_linear_hipb_w4a16_enabled(cls) -> bool:
+        """AITER's hipBLASLt W4A16 GEMM is enabled and installed. No arch
+        check: whether it has kernels for a layer on this GPU is
+        `hipb_w4a16_is_supported`'s question."""
+        return (
+            cls._AITER_ENABLED
+            and cls._LINEAR_ENABLED
+            and cls._LINEAR_HIPB_W4A16_ENABLED
+            and cls.has_hipb_w4a16()
+        )
+
+    @staticmethod
+    @functools.cache
+    def has_hipb_w4a16() -> bool:
+        """Whether the installed AITER exposes hipBLASLt's W4A16 GEMM."""
+        if not (current_platform.is_rocm() and IS_AITER_FOUND):
+            return False
+        import aiter
+
+        return hasattr(aiter, "hipb_w4a16_mm")
+
+    @staticmethod
+    def hipb_w4a16_is_supported(
+        dtype: torch.dtype,
+        n: int,
+        k: int,
+        group_size: int,
+        has_zp: bool,
+        lda: int,
+        batch_sizes: tuple[int, ...],
+    ) -> bool:
+        """Whether AITER has a W4A16 kernel on this GPU for an [N, K] int4
+        weight with row stride `lda` (in int4 elements) at every batch size in
+        `batch_sizes`."""
+        import aiter
+
+        _ensure_hipb_mm_extension_initialized()
+        return aiter.hipb_w4a16_is_supported(
+            dtype, n, k, group_size, has_zp, lda=lda, batch_sizes=batch_sizes
+        )
+
+    @staticmethod
+    def hipb_w4a16_scale_buffer(
+        w_s: torch.Tensor, w_zp: torch.Tensor | None
+    ) -> torch.Tensor:
+        """The scale argument of `hipb_w4a16_mm`: `w_s` [N, K//G] when
+        symmetric, else one uint8 buffer holding `w_s` and, at the next 256 B
+        boundary, the [ceil(N/8), K//G] int32 zero-points."""
+        from aiter import hipb_w4a16_scale_buffer
+
+        return hipb_w4a16_scale_buffer(w_s, w_zp)
+
+    @staticmethod
+    def hipb_w4a16_mm(
+        x: torch.Tensor,
+        w_q: torch.Tensor,
+        scale: torch.Tensor,
+        group_size: int,
+        has_zp: bool,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """`x @ dequant(w_q).T + bias` for [N, K//2] int4 weights in K order."""
+        from aiter import hipb_w4a16_mm
+
+        _ensure_hipb_mm_extension_initialized()
+        return hipb_w4a16_mm(x, w_q, scale, group_size, has_zp, bias=bias)
 
     @staticmethod
     def triton_gemm_a8w8_blockscale(
