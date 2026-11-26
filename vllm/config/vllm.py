@@ -2292,22 +2292,13 @@ class VllmConfig:
             and self.parallel_config.dbo_schedule != "all-reduce-overlap"
         ):
             a2a_backend = self.parallel_config.all2all_backend
-            if current_platform.is_rocm():
-                supported_backends = [
-                    "deepep_low_latency",
-                    "deepep_high_throughput",
-                    "nixl_ep",
-                    # The naive DP/EP prepare/finalize runs its all-gather /
-                    # reduce-scatter on the comm stream under DBO.
-                    "allgather_reducescatter",
-                ]
-            else:
-                # CUDA and other platforms.
-                supported_backends = [
-                    "deepep_low_latency",
-                    "deepep_high_throughput",
-                    "nixl_ep",
-                ]
+            supported_backends = [
+                "deepep_low_latency",
+                "deepep_high_throughput",
+                "nixl_ep",
+            ]
+            if current_platform.is_cuda_alike():
+                supported_backends.append("allgather_reducescatter")
             assert a2a_backend in supported_backends, (
                 "Microbatching currently only supports the "
                 f"{', '.join(supported_backends)} all2all backends on this "
@@ -2315,6 +2306,32 @@ class VllmConfig:
                 f"{', '.join('--all2all-backend=' + b for b in supported_backends)}"
                 " and install the matching kernels."
             )
+            if current_platform.is_cuda() and a2a_backend == "allgather_reducescatter":
+                parallel_config = self.parallel_config
+                if (
+                    not parallel_config.enable_dbo
+                    or not parallel_config.enable_expert_parallel
+                    or parallel_config.data_parallel_size <= 1
+                    or parallel_config.tensor_parallel_size != 1
+                ):
+                    raise ValueError(
+                        "CUDA allgather_reducescatter microbatching requires "
+                        "--enable-dbo, --enable-expert-parallel, "
+                        "--data-parallel-size greater than 1 and "
+                        "--tensor-parallel-size 1."
+                    )
+                if self.speculative_config is not None:
+                    raise ValueError(
+                        "CUDA DBO with allgather_reducescatter does not support "
+                        "speculative decoding."
+                    )
+                if envs.VLLM_USE_NCCL_SYMM_MEM and not envs.VLLM_BATCH_INVARIANT:
+                    # Cross-stream buffer reuse can differ across ranks, while
+                    # symmetric window registration is collective.
+                    raise ValueError(
+                        "CUDA DBO with allgather_reducescatter requires "
+                        "VLLM_USE_NCCL_SYMM_MEM=0."
+                    )
 
             self._raise_dbo_thresholds_for_spec_decode()
 

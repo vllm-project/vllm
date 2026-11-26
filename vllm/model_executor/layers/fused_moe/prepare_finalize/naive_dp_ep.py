@@ -16,11 +16,18 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_switch_to_compute_sync,
     dbo_yield_and_switch_from_compute_to_comm,
 )
+
+
+def _record_stream(*tensors: torch.Tensor) -> None:
+    stream = current_stream()
+    for tensor in tensors:
+        tensor.record_stream(stream)
 
 
 def _quantize_and_setup_dispatch(
@@ -146,27 +153,33 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         # prepare()/finalize() hand the collective to the comm stream
         # themselves (see _comm_region), so the synchronous path is DBO-safe.
         # supports_async() stays False: it also selects MK-internal
-        # shared-expert overlap. Only validated on ROCm so far.
-        return current_platform.is_rocm()
+        # shared-expert overlap.
+        return current_platform.is_cuda_alike()
 
     @contextmanager
-    def _comm_region(self) -> Generator[None]:
+    def _comm_region(self, *tensors: torch.Tensor) -> Generator[bool]:
         """Scope the dispatch/combine collective runs in.
 
         Without DBO the collective runs on the calling stream. Under DBO it
         runs on the comm stream so the peer ubatch can compute while it is in
         flight, using the same compute/comm handoff as DeepEP-HT. Graph
-        capture keeps every collective on the capture stream, so overlap is
-        limited to eager steps (prefill).
+        capture keeps every collective on the capture stream. Yields whether
+        the returned tensors need to be recorded on the compute stream.
         """
-        if not dbo_enabled() or torch.cuda.is_current_stream_capturing():
-            yield
+        if (
+            not dbo_enabled("dispatch-combine-overlap")
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            yield False
             return
         # Release the CPU to the peer ubatch so it can enqueue compute while
         # this ubatch's collective runs; the compute stream waits on exit.
         dbo_yield_and_switch_from_compute_to_comm()
         try:
-            yield
+            record_stream = current_platform.is_cuda()
+            if record_stream:
+                _record_stream(*tensors)
+            yield record_stream
         finally:
             dbo_switch_to_compute_sync()
 
@@ -215,7 +228,9 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 extra_tensors = []
             extra_tensors.append(local_token_lora_mapping)
 
-        with self._comm_region():
+        with self._comm_region(
+            a1q, topk_weights, topk_ids, *(extra_tensors or ())
+        ) as record_stream:
             res = get_ep_group().dispatch(
                 a1q,
                 topk_weights,
@@ -223,6 +238,12 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 is_sequence_parallel=self.is_sequence_parallel,
                 extra_tensors=extra_tensors,
             )
+        if record_stream:
+            # PyNCCL allocates gathered tensors on the comm stream. Keep
+            # their storage live until expert compute has consumed it.
+            _record_stream(*res[:3])
+            if len(res) == 4:
+                _record_stream(*res[3])
 
         if extra_tensors is None:
             assert len(res) == 3
@@ -276,7 +297,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-        with self._comm_region():
+        with self._comm_region(out, output):
             get_ep_group().combine_into_output(
                 out,
                 output,

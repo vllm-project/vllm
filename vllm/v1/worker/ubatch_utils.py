@@ -94,6 +94,14 @@ def create_sm_control_context(
         # corrupts DP+EP generation accuracy. Keep the backend active, but
         # leave all CUs visible to the compute and communication kernels.
         comm_sms = 0
+    if (
+        current_platform.is_cuda()
+        and parallel_config.enable_expert_parallel
+        and parallel_config.all2all_backend == "allgather_reducescatter"
+    ):
+        # NCCL schedules its own CTAs. Reserving SMs via DeepGEMM would
+        # also initialize its JIT on GPUs that only need NCCL and Triton.
+        comm_sms = 0
 
     set_comm_sms = lambda sms: None
     if parallel_config.enable_expert_parallel:
