@@ -900,6 +900,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         hf_inputs: "BatchFeature",
         mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
         num_images: int,
     ) -> torch.Tensor:
         """How many rows of the image fields belong to each image.
@@ -909,7 +910,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         """
         if (grid := hf_inputs.get("image_grid_thw")) is not None:
             num_patches = grid.prod(-1)
-        elif (counts := self._get_num_patches_per_image(mm_data)) is not None:
+        elif (
+            counts := self._get_num_patches_per_image(mm_data, mm_kwargs)
+        ) is not None:
             num_patches = torch.tensor(counts)
         else:
             num_patches = torch.ones(num_images, dtype=torch.long)
@@ -930,7 +933,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         return num_patches
 
     def _get_num_patches_per_image(
-        self, mm_data: Mapping[str, object]
+        self, mm_data: Mapping[str, object], mm_kwargs: Mapping[str, object]
     ) -> list[int] | None:
         """Ask the HF processor how many rows of image data each image produces."""
         images = mm_data.get("images")
@@ -939,7 +942,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         try:
             sizes = [(image.height, image.width) for image in images]
             mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
-                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
+                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
             )
             return list(mm_tokens["num_image_patches"])
         except (AttributeError, KeyError, TypeError):
@@ -1074,7 +1077,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
             if modality == "image":
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
-                    hf_inputs, hf_data, len(seqs)
+                    hf_inputs, hf_data, hf_kwargs, len(seqs)
                 )
             elif modality == "audio":
                 hf_inputs["num_audio_tokens"] = _count_embed_tokens(

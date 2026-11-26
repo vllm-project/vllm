@@ -18,6 +18,10 @@ TEXT_PROMPT = (
 MAX_TOKENS = 16
 # Keeps the image prefill within the default CUDA graph capture sizes
 MAX_IMAGE_SIDE = 384
+SMOLVLM_ID = "HuggingFaceTB/SmolVLM-256M-Instruct"
+SMOLVLM_PROMPT = (
+    "<|im_start|>User:<image>Describe this image.<end_of_utterance>\nAssistant:"
+)
 
 
 @pytest.mark.core_model
@@ -65,3 +69,33 @@ def test_transformers_image_deepstack(
         assert vllm_ids[-MAX_TOKENS:] == hf_ids[-MAX_TOKENS:], (
             f"hf: {hf_text!r}\nvllm: {vllm_text!r}"
         )
+
+
+@pytest.mark.core_model
+def test_transformers_image_request_kwargs(
+    vllm_runner: type[VllmRunner], image_assets: ImageTestAssets
+):
+    """Processor kwargs given per request produce the same prompt and output as the
+    same kwargs set for the server."""
+    kwargs = {"size": {"longest_edge": 1024}}
+    prompts = [
+        {"prompt": SMOLVLM_PROMPT, "multi_modal_data": {"image": asset.pil_image}}
+        for asset in image_assets
+    ]
+
+    with vllm_runner(
+        SMOLVLM_ID, model_impl="transformers", max_model_len=8192
+    ) as vllm_model:
+        request_outputs = vllm_model.generate_greedy(
+            [{**prompt, "mm_processor_kwargs": kwargs} for prompt in prompts],
+            MAX_TOKENS,
+        )
+    with vllm_runner(
+        SMOLVLM_ID,
+        model_impl="transformers",
+        max_model_len=8192,
+        mm_processor_kwargs=kwargs,
+    ) as vllm_model:
+        server_outputs = vllm_model.generate_greedy(prompts, MAX_TOKENS)
+
+    assert request_outputs == server_outputs
