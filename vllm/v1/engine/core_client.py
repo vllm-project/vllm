@@ -649,6 +649,11 @@ class MPClient(EngineCoreClient):
         renderer: BaseRenderer | None = None,
     ):
         self.vllm_config = vllm_config
+        self.lora_dp_sync = vllm_config.is_dp_ep_lora
+        if self.lora_dp_sync and not asyncio_mode:
+            raise ValueError(
+                "DP LoRA synchronization requires AsyncLLM or the API server"
+            )
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
         self._kv_event_sources: dict[int, KVEventsConfig] = {}
@@ -1462,15 +1467,36 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_consensus_async("get_weight_version")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        if self.lora_dp_sync:
+            return await self.call_utility_consensus_async(
+                "update_dp_lora",
+                uuid.uuid4().hex,
+                "add",
+                msgspec.msgpack.encode(lora_request),
+            )
         return await self.call_utility_async("add_lora", lora_request)
 
     async def remove_lora_async(self, lora_id: int) -> bool:
+        if self.lora_dp_sync:
+            return await self.call_utility_consensus_async(
+                "update_dp_lora",
+                uuid.uuid4().hex,
+                "remove",
+                msgspec.msgpack.encode(lora_id),
+            )
         return await self.call_utility_async("remove_lora", lora_id)
 
     async def list_loras_async(self) -> set[int]:
         return await self.call_utility_async("list_loras")
 
     async def pin_lora_async(self, lora_id: int) -> bool:
+        if self.lora_dp_sync:
+            return await self.call_utility_consensus_async(
+                "update_dp_lora",
+                uuid.uuid4().hex,
+                "pin",
+                msgspec.msgpack.encode(lora_id),
+            )
         return await self.call_utility_async("pin_lora", lora_id)
 
     async def save_sharded_state_async(

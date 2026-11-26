@@ -242,7 +242,20 @@ class OpenAIServingModels:
             if error_check_ret is not None:
                 return error_check_ret
 
-            # Safe to delete now since we hold the lock
+            config = getattr(self.engine_client, "vllm_config", None)
+            if config is not None and config.is_dp_ep_lora:
+                try:
+                    await self.engine_client.remove_lora(
+                        self.lora_requests[lora_name].lora_int_id
+                    )
+                except Exception as exc:
+                    return create_error_response(
+                        message=str(exc),
+                        err_type="InternalServerError",
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+
+            # Keep the name registered if coordinated removal failed.
             del self.lora_requests[lora_name]
             logger.info("Removed LoRA adapter: name '%s'", lora_name)
             return f"Success: LoRA adapter '{lora_name}' removed successfully."

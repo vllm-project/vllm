@@ -476,7 +476,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         type=int,
         default=None,
         help="How many API server processes to run. "
-        "Defaults to data_parallel_size if not specified.",
+        "Defaults to data_parallel_size, or 1 for MoE LoRA with DP and EP.",
     )
     parser.add_argument(
         "--config",

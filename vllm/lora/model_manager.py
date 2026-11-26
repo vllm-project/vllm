@@ -355,6 +355,7 @@ class LoRAModelManager:
     def activate_adapter(
         self,
         lora_id: int,
+        slot_index: int | None = None,
     ) -> bool:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
@@ -370,6 +371,12 @@ class LoRAModelManager:
         if first_free_slot is None:
             raise ValueError("No free lora slots")
         index, _ = first_free_slot
+        if slot_index is not None:
+            if not 0 <= slot_index < self.lora_slots:
+                raise ValueError("Invalid LoRA slot index")
+            if self.lora_index_to_id[slot_index] is not None:
+                raise ValueError("Requested LoRA slot is occupied")
+            index = slot_index
         lora_model = self._registered_adapters[lora_id]
         logger.debug(
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
@@ -1462,13 +1469,14 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
     def activate_adapter(
         self,
         lora_id: int,
+        slot_index: int | None = None,
     ) -> bool:
         if (
             lora_id not in self._active_adapters
             and len(self._active_adapters) >= self.lora_slots
         ):
             self._active_adapters.remove_oldest()
-        result = super().activate_adapter(lora_id)
+        result = super().activate_adapter(lora_id, slot_index)
         # We always touch to update the LRU cache order
         self._active_adapters.touch(lora_id)
         return result
