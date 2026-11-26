@@ -988,3 +988,34 @@ def test_unquantized_linear_auto_uses_cutedsl_where_supported(
         linear.UnquantizedLinearMethod()
 
     dispatch.assert_called_once_with(expected)
+
+
+@pytest.mark.parametrize("auto", [True, False])
+@pytest.mark.parametrize("lm_head", [True, False])
+def test_unquantized_lm_head_keeps_the_default_gemm(monkeypatch, lm_head, auto):
+    from vllm.model_executor.layers import linear
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    monkeypatch.setattr(
+        linear,
+        "current_platform",
+        SimpleNamespace(
+            is_cpu=lambda: False, is_rocm=lambda: False, is_cuda=lambda: True
+        ),
+    )
+    skinny = Mock()
+    monkeypatch.setattr(linear, "maybe_use_skinny_gemm", skinny)
+    method = linear.UnquantizedLinearMethod.__new__(linear.UnquantizedLinearMethod)
+    flashinfer_gemm = object()
+    method._gemm_impl = flashinfer_gemm
+    method._auto_cutedsl = auto
+    layer = ParallelLMHead.__new__(ParallelLMHead) if lm_head else torch.nn.Module()
+
+    method.process_weights_after_loading(layer)
+
+    if lm_head and auto:
+        assert method._gemm_impl is linear.cuda_unquantized_gemm
+        skinny.assert_called_once_with(layer)
+    else:
+        assert method._gemm_impl is flashinfer_gemm
+        skinny.assert_not_called()
