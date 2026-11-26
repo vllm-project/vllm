@@ -110,6 +110,7 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
         if input_ids is None:
             raise ValueError("Flash Engram requires original input token IDs")
         set_token_rope(self.rotary_embs[0], positions, hidden)
+
         hashes = input_ids.new_empty(
             (
                 len(self.config.engram_layer_ids),
@@ -118,12 +119,14 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
             ),
             dtype=torch.int32,
         )
+
         self.engram_hash.prepare_hashes_with_output(
             input_ids,
             lookback_token_ids,
             self.layers[0].self_attn.mla_attn.layer_name,
             hashes,
         )
+        self.prepare_engram_lookups(hashes, hidden.dtype)
         hash_indices = {
             layer_id - 1: index
             for index, layer_id in enumerate(self.config.engram_layer_ids)

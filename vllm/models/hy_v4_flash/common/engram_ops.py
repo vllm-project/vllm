@@ -56,6 +56,7 @@ def lookup_norm(
     vocab_end: int,
     gamma: torch.Tensor,
     dtype: torch.dtype,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Gather, dequantize and RMS-normalize Engram table rows per head.
 
@@ -71,6 +72,7 @@ def lookup_norm(
         vocab_end: End of the global buckets of `table`.
         gamma: `[heads, dim]` per-head norm weights.
         dtype: output dtype.
+        out: Optional preallocated `[T, heads * dim]` output buffer.
 
     Returns:
         `[T, heads * dim]` normalized rows.
@@ -80,7 +82,12 @@ def lookup_norm(
     dim = table.shape[1]
     assert table.is_contiguous() and gamma.shape == (heads, dim)
     assert gamma.is_contiguous() and hashes.stride(1) == 1
-    out = torch.empty(num_tokens, heads * dim, dtype=dtype, device=hashes.device)
+    if out is None:
+        out = torch.empty(num_tokens, heads * dim, dtype=dtype, device=hashes.device)
+    else:
+        assert out.shape == (num_tokens, heads * dim)
+        assert out.dtype == dtype and out.device == hashes.device
+        assert out.is_contiguous()
     if num_tokens == 0 or heads == 0:
         return out.zero_()
     _lookup_norm_kernel[(num_tokens,)](

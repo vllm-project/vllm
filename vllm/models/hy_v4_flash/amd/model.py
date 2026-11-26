@@ -112,6 +112,7 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
             self.layers[0].self_attn.mla_attn.layer_name,
             hashes,
         )
+        self.prepare_engram_lookups(hashes, hidden.dtype)
         hash_indices = {
             layer_id - 1: index
             for index, layer_id in enumerate(self.config.engram_layer_ids)
