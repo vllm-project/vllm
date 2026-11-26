@@ -234,8 +234,6 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             hooks = self._lora_hooks(
                 self._lora_context,
                 hidden_states,
-                w1,
-                w2,
                 topk_weights,
                 topk_ids,
                 expert_map,
@@ -253,8 +251,6 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self,
         ctx: MoELoRAContext,
         hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         expert_map: torch.Tensor | None,
@@ -272,13 +268,14 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # The LoRA config lookup only reads the logical [E, N, K] shapes. The
         # stored weights cannot provide them for every recipe (XpuFusedMoe
         # relayouts bf16 to [E, K, N]; int4 is packed), so pass shape-only
-        # meta tensors.
+        # meta tensors. They allocate no memory, and the real weights held by
+        # fused_moe_impl are untouched.
         inter_size = impl.inter_size * impl.inter_size_scale
         hidden_size = hidden_states.shape[-1]
-        w1 = torch.empty(
+        w1_shape = torch.empty(
             (ctx.local_num_experts, 2 * impl.inter_size, hidden_size), device="meta"
         )
-        w2 = torch.empty(
+        w2_shape = torch.empty(
             (ctx.local_num_experts, hidden_size, inter_size), device="meta"
         )
         # moe_gather applies the routing weights to base and LoRA outputs.
@@ -296,8 +293,8 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 topk_ids=topk_ids,
                 topk_weights=unweighted,
                 expert_map=expert_map,
-                w1=w1,
-                w2=w2,
+                w1=w1_shape,
+                w2=w2_shape,
                 num_tokens=num_tokens,
                 top_k_num=top_k,
                 row_map=row_map.view(-1),
@@ -321,8 +318,8 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 num_tokens_post_padded_lora=num_tokens_post_padded,
                 token_lora_mapping=token_lora_map,
                 num_tokens=num_tokens,
-                w1=w1,
-                w2=w2,
+                w1=w1_shape,
+                w2=w2_shape,
                 top_k_num=top_k,
                 row_map=row_map.view(-1),
             )
