@@ -180,7 +180,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.fuse_allreduce_rms:
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
-                else:
+                elif current_platform.is_cuda():
                     self.passes += [AllReduceFusionPass(config)]
 
             if enable_transformers_norm_canonicalization:

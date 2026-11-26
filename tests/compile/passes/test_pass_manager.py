@@ -5,14 +5,16 @@ import copy
 import pytest
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.inductor_pass import (
     CallableInductorPass,
     InductorPass,
     pass_context,
 )
 from vllm.compilation.passes.pass_manager import PostGradPassManager
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import CompilationMode, CUDAGraphMode, ModelConfig, VllmConfig
 from vllm.config.utils import Range
+from vllm.platforms import current_platform
 
 
 # dummy custom pass that doesn't inherit
@@ -81,3 +83,26 @@ def test_pass_manager_uuid(callable):
         pass_manager3.configure(config2)
         pass_manager3.add(callable)
         assert uuid1 != pass_manager3.uuid()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or rocm_aiter_ops.is_enabled(),
+    reason="Exercises ROCm without AITER",
+)
+def test_allreduce_fusion_without_aiter(vllm_runner):
+    """An unavailable fusion must not prevent ordinary ROCm inference."""
+    outputs = []
+    for fuse_allreduce_rms in (False, True):
+        with vllm_runner(
+            "vllm-project/tiny-random-LlamaForCausalLM",
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "pass_config": {"fuse_allreduce_rms": fuse_allreduce_rms},
+                "cudagraph_mode": CUDAGraphMode.NONE,
+            },
+            max_model_len=256,
+            gpu_memory_utilization=0.4,
+        ) as runner:
+            outputs.append(runner.generate_greedy(["Hello, my name is"], max_tokens=5))
+    assert outputs[0][0][0]
+    assert outputs[1] == outputs[0]
