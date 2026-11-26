@@ -68,6 +68,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
+    MambaManager,
 )
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVPageTransfer
@@ -7186,9 +7187,9 @@ def _run_mamba_finished_request(
 
 def test_mamba_deprioritize_superseded_state():
     """States two or more turns behind the latest tip are deprioritized across
-    all Mamba groups sharing one tracker (evicted after uncached blocks but
-    before normal LRU-cached blocks), while the immediate predecessor stays in
-    normal LRU as a rollback fallback."""
+    all Mamba groups (evicted after uncached blocks but before normal
+    LRU-cached blocks), while the immediate predecessor stays in normal LRU as
+    a rollback fallback."""
     block_size = 16
     manager = make_kv_cache_manager(
         _make_hybrid_kv_cache_config(block_size, 60, ["full", "mamba", "mamba"]),
@@ -7197,7 +7198,6 @@ def test_mamba_deprioritize_superseded_state():
         hash_block_size=block_size,
         retention_interval=0,
     )
-    assert manager._mamba_group_ids == [1, 2]
     older = make_request("o", [9] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
     turn1 = make_request("t1", [1] * 40, block_size, sha256)
@@ -7326,7 +7326,9 @@ def test_mamba_deprioritize_preempted_request_keeps_old_state():
     # Preempted (not finished): free without deprioritizing turn1's state.
     turn3.status = RequestStatus.PREEMPTED
     manager.free(turn3)
-    assert turn3.request_id not in manager._req_mamba_hit
+    mamba_mgr = manager.coordinator.single_type_managers[1]
+    assert isinstance(mamba_mgr, MambaManager)
+    assert turn3.request_id not in mamba_mgr._req_hit
 
     pool = manager.block_pool
     num_uncached = sum(
