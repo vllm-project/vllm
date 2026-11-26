@@ -16,15 +16,20 @@ This is a fork of VLLM
     --build-arg VLLM_MERGE_BASE_COMMIT="2e6888ee879a29d511c81bd45f8265d92d0bafd9a5e52a6ceec6c0e25801475f" \
     --tag vllm-fips:v0.2
 
-## To test if cv2 is removed:
-docker run --rm --entrypoint python3 vllm-fips:v0.2 -c "
-import av, vllm
+## To test if cv2 is removed and OpenSSL FIPS provider works:
+docker run --rm --entrypoint bash vllm-fips:v0.2 -c '
+echo "1" > /tmp/fips_enabled
+OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/fips_enabled openssl list -providers
+OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/fips_enabled python3 -c "
+import ssl, aiohttp, av, vllm
+ctx = ssl.create_default_context()
 try:
     import cv2
-    raise SystemExit('ERROR: cv2 is still installed!')
+    raise SystemExit(\"ERROR: cv2 is still installed!\")
 except ImportError:
-    print('SUCCESS: cv2 is not installed; PyAV version:', av.__version__)
+    print(\"SUCCESS: FIPS SSL/aiohttp initialized; cv2 is not installed; PyAV version:\", av.__version__)
 "
+'
 
 ## Running Container {example}
 - docker run --rm --gpus all \

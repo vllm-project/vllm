@@ -830,6 +830,58 @@ RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ] \
 
 ENV CRIU_CUDA_PLUGIN_DIR=/usr/local/lib/criu
 
+# Build, install, and register the OpenSSL 3 FIPS provider module (`fips.so` +
+# `fipsmodule.cnf`) so that running on a FIPS-enabled host kernel
+# (`/proc/sys/crypto/fips_enabled = 1`) succeeds instead of failing in
+# `libcrypto.so.3` / Python `ssl` / `aiohttp` due to a missing `fips.so`.
+RUN set -eux; \
+    OPENSSL_VER="$(openssl version | awk '{print $2}')"; \
+    MULTIARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || uname -m | sed 's/x86_64/x86_64-linux-gnu/;s/aarch64/aarch64-linux-gnu/')"; \
+    MODULES_DIR="/usr/lib/${MULTIARCH}/ossl-modules"; \
+    if [ ! -f "${MODULES_DIR}/fips.so" ]; then \
+        NEED_PURGE=""; \
+        if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then \
+            apt-get update -y && apt-get install -y --no-install-recommends build-essential; \
+            NEED_PURGE="build-essential"; \
+        fi; \
+        FIPS_BUILD_DIR="$(mktemp -d)"; \
+        curl -fsSL --retry 3 --retry-all-errors \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz" \
+            -o "${FIPS_BUILD_DIR}/openssl.tar.gz" \
+        || curl -fsSL --retry 3 --retry-all-errors \
+            "https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz" \
+            -o "${FIPS_BUILD_DIR}/openssl.tar.gz"; \
+        tar -xzf "${FIPS_BUILD_DIR}/openssl.tar.gz" --strip-components=1 -C "${FIPS_BUILD_DIR}"; \
+        ( \
+            cd "${FIPS_BUILD_DIR}" \
+            && ./Configure enable-fips --prefix=/usr --openssldir=/usr/lib/ssl --libdir="lib/${MULTIARCH}" \
+            && make build_generated \
+            && make -j"${max_jobs:-$(nproc)}" providers/fips.so \
+            && install -D -m 0644 providers/fips.so "${MODULES_DIR}/fips.so" \
+        ); \
+        rm -rf "${FIPS_BUILD_DIR}"; \
+        if [ -n "${NEED_PURGE}" ]; then \
+            apt-get purge -y --auto-remove ${NEED_PURGE}; \
+            rm -rf /var/lib/apt/lists/*; \
+        fi; \
+    fi; \
+    openssl fipsinstall -out /usr/lib/ssl/fipsmodule.cnf -module "${MODULES_DIR}/fips.so"; \
+    cp /usr/lib/ssl/fipsmodule.cnf /etc/ssl/fipsmodule.cnf; \
+    sed -i 's|^# *\.include fipsmodule\.cnf|.include /usr/lib/ssl/fipsmodule.cnf|' /etc/ssl/openssl.cnf; \
+    if ! grep -q '^\.include /usr/lib/ssl/fipsmodule\.cnf' /etc/ssl/openssl.cnf; then \
+        sed -i 's|^\[openssl_init\]|.include /usr/lib/ssl/fipsmodule.cnf\n[openssl_init]|' /etc/ssl/openssl.cnf; \
+    fi; \
+    if ! grep -q '^fips = fips_sect' /etc/ssl/openssl.cnf; then \
+        sed -i 's|^\[provider_sect\]|[provider_sect]\nfips = fips_sect|' /etc/ssl/openssl.cnf; \
+    fi; \
+    if ! grep -q '^activate = 1' /etc/ssl/openssl.cnf; then \
+        sed -i 's|^\[default_sect\]|[default_sect]\nactivate = 1|' /etc/ssl/openssl.cnf; \
+    fi; \
+    echo "1" > /tmp/fips_test_switch; \
+    OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/fips_test_switch openssl list -providers | grep -q "OpenSSL FIPS Provider"; \
+    OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/fips_test_switch python3 -c "import ssl; ctx = ssl.create_default_context()"; \
+    rm -f /tmp/fips_test_switch
+
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
 
