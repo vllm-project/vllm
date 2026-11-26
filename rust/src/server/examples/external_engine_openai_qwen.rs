@@ -54,7 +54,6 @@ async fn main() -> Result<()> {
     let port = unique_local_port()?;
     let config = ServerConfig {
         model: args.model,
-        max_model_len: None,
         revision: None,
         tokenizer: None,
         hf_config: None,
