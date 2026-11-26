@@ -911,9 +911,11 @@ def compile_sparse(
     latent = fake((batch, padded, LATENT))
     lse = fake((batch, padded), None, torch.float32, 4)
     owners = None if push is None else (*push, cap)
-    kernel = SparseDcpDecode(batch, heads, padded, width, owners, tiles, bulk)
+    kernel: SparseDcpDecode
     if px:
         kernel = SparseDcpDecodePx(batch, heads, padded, width, owners)
+    else:
+        kernel = SparseDcpDecode(batch, heads, padded, width, owners, tiles, bulk)
     args: tuple = (query, kv, rows, valid, latent, lse, Float32(1.0), Float32(1.0))
     if push is not None:
         peers = fake((push[1],), None, torch.int64, 8)
