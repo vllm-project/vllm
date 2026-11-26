@@ -154,7 +154,6 @@ impl HfSpecialTokens {
 pub struct ModelConfig {
     model_type: Option<String>,
     vocab_size: Option<u32>,
-    // Validate these when selecting a context limit for remote generation.
     model_max_length: Option<Value>,
     max_position_embeddings: Option<Value>,
     /// Real vocabulary size when `vocab_size` is the padded embedding size
@@ -276,7 +275,8 @@ impl ModelConfig {
         self.text_config.as_deref().map_or(self, Self::effective_text_config)
     }
 
-    /// Return the context length declared by the checkpoint.
+    /// Return the checkpoint's declared context length. Prefer `model_max_length`
+    /// over `max_position_embeddings` when both are present, as for Command R.
     pub(super) fn max_model_len(&self) -> Result<Option<u32>> {
         let text = self.effective_text_config();
         text.model_max_length
