@@ -1101,3 +1101,18 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
     assert layouts
     assert all(layout.is_block_compact for layout in layouts)
+
+
+def test_ultraquant_starts_with_automatic_backend_selection(vllm_runner):
+    """ultraquant_4bit without --attention-backend: the boundary layers must get a
+    backend whose KV layout UltraQuant can share, so the engine starts and answers.
+    Before the fix startup failed with "No KV cache layout satisfies every
+    supported set"."""
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        kv_cache_dtype="ultraquant_4bit",
+        max_model_len=1024,
+        enforce_eager=True,
+    ) as llm:
+        outputs = llm.generate_greedy(["The capital of France is"], max_tokens=8)
+    assert "Paris" in outputs[0][1]
