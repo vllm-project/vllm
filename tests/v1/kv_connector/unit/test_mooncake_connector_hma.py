@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import torch
 
-from vllm.config import set_current_vllm_config
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -612,6 +612,18 @@ _hisparse_producer_cases = pytest.mark.parametrize(
 )
 
 
+def _hisparse_decoder_config(tp_size: int, nnodes: int = 1):
+    config = create_vllm_config(
+        kv_connector="MooncakeConnector", block_size=maybe_update_block_size(16)
+    )
+    config.parallel_config = ParallelConfig(
+        tensor_parallel_size=tp_size,
+        nnodes=nnodes,
+        distributed_executor_backend="mp",
+    )
+    return config
+
+
 @pytest.fixture
 def hisparse_producer(request):
     packed, tp, rank = request.param
@@ -636,11 +648,20 @@ def hisparse_producer(request):
 
 @pytest.mark.cpu_test
 @_hisparse_producer_cases
-@pytest.mark.parametrize("decoder_tp", [1, 2, 4, 8])
+@pytest.mark.parametrize(
+    "decoder_tp, decoder_nnodes", [(1, 1), (2, 1), (4, 1), (8, 1), (2, 2), (8, 2)]
+)
 @pytest.mark.parametrize("shared", [False, True])
-def test_hisparse_import_copies_uncached_pages(hisparse_producer, decoder_tp, shared):
-    """Only the elected P rank copies each D rank's GPU and owned host suffixes."""
+def test_hisparse_import_copies_uncached_pages(
+    hisparse_producer, decoder_tp, decoder_nnodes, shared
+):
+    """Only the elected P rank copies each D rank's GPU and owned host suffixes.
+
+    A shared host pool is owned by its node's lowest TP rank, so with D spanning
+    nodes every node's pool must be filled, not only TP rank 0's."""
     producer, caches, page = hisparse_producer
+    decoder_config = _hisparse_decoder_config(decoder_tp, decoder_nnodes)
+    ranks_per_node = decoder_tp // decoder_nnodes
     config = _make_packed_mla_kv_cache_config(8, num_groups=2)
     config.kv_cache_groups[0].host_resident = True
     config.hisparse_host_num_blocks = 8
@@ -649,7 +670,7 @@ def test_hisparse_import_copies_uncached_pages(hisparse_producer, decoder_tp, sh
     for rank in producer.transfer_topo.handshake_target_ranks(decoder_tp):
         host = torch.full((8, page), 0xCC, dtype=torch.uint8)
         gpu = torch.full((8, page + 64), 0xCC, dtype=torch.uint8)
-        host_owner = rank == 0 or not shared
+        host_owner = rank % ranks_per_node == 0 or not shared
         sends_bytes = producer.tp_rank == rank * producer.tp_size // decoder_tp
         expected_host, expected_gpu = host.clone(), gpu.clone()
         if sends_bytes:
@@ -658,10 +679,9 @@ def test_hisparse_import_copies_uncached_pages(hisparse_producer, decoder_tp, sh
             expected_gpu[[7, 2, 6], 32 : 32 + page] = indexer[[3, 2, 1]]
         pull = _make_pull_meta("d", [[6, 5], [7, 2, 6]])
         send = SendBlockMeta("p", pull.transfer_id, [[4, 3, 2, 1]], asyncio.Event())
-        with mooncake_register_worker(config, tp_size=decoder_tp, tp_rank=rank) as (
-            decoder,
-            reg,
-        ):
+        with mooncake_register_worker(
+            config, vllm_config=decoder_config, tp_size=decoder_tp, tp_rank=rank
+        ) as (decoder, reg):
             assert producer.tp_rank in decoder.transfer_topo.handshake_target_ranks(
                 producer.tp_size
             )
@@ -714,10 +734,12 @@ async def test_hisparse_full_prefix_hit_completes_without_writes(
             gpu = torch.full((8, page), 0xDD, dtype=torch.uint8)
             pull = _make_pull_meta("d", [[], []])
             pull.pull_tasks_count = 1
-            with mooncake_register_worker(config, tp_size=4, tp_rank=rank) as (
-                decoder,
-                reg,
-            ):
+            with mooncake_register_worker(
+                config,
+                vllm_config=_hisparse_decoder_config(4),
+                tp_size=4,
+                tp_rank=rank,
+            ) as (decoder, reg):
                 decoder.register_kv_caches(dict(zip(caches, (host, gpu))))
                 assert (host.data_ptr() in reg.call_args.args[0]) == (
                     rank == 0 or not shared

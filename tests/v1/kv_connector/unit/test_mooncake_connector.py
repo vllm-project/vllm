@@ -1338,6 +1338,10 @@ def mooncake_register_worker(
             f"{connector_mod}.get_tensor_model_parallel_rank",
             return_value=tp_rank,
         ),
+        patch(
+            "vllm.v1.hisparse.runtime.get_tensor_model_parallel_rank",
+            return_value=tp_rank,
+        ),
         patch(f"{connector_mod}.threading.Event"),
         patch(f"{connector_mod}.threading.Thread") as mock_thread,
     ):

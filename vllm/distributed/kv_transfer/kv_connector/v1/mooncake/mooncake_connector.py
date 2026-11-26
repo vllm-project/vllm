@@ -90,6 +90,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     SlidingWindowManager,
 )
+from vllm.v1.hisparse.runtime import get_hisparse_host_leader_rank
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
@@ -2456,7 +2457,9 @@ class MooncakeConnectorWorker:
         num_blocks = (
             self.kv_cache_config.num_blocks * self._physical_blocks_per_logical_kv_block
         )
-        skip_host = self.kv_cache_config.hisparse_shared_host_pool and self.tp_rank != 0
+        skip_host = self.kv_cache_config.hisparse_shared_host_pool and (
+            self.tp_rank != get_hisparse_host_leader_rank(self.vllm_config)
+        )
 
         for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
@@ -3400,7 +3403,9 @@ class MooncakeConnectorWorker:
         *,
         include_layout: bool,
     ) -> MooncakeXferMetadata:
-        skip_host = self.kv_cache_config.hisparse_shared_host_pool and self.tp_rank != 0
+        skip_host = self.kv_cache_config.hisparse_shared_host_pool and (
+            self.tp_rank != get_hisparse_host_leader_rank(self.vllm_config)
+        )
         # Filter the wire request only; all ranks retain their completion state.
         req_blocks = {}
         for req_id, pull_meta in pull_metas.items():
