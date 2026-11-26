@@ -498,47 +498,69 @@ class TestChatPath:
         assert prompt_kw == {"video": {"num_frames": 16}}
 
 
-@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
-def test_chat_media_io_kwargs_scope_uuid_cache_key(is_async):
-    """Same video UUID with different frame counts must not share a cache key."""
-    video_data_url = encode_video_url(VideoAsset("baby_reading").np_ndarrays)
-    model_config = ModelConfig(
-        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-        max_model_len=4096,
-        mm_processor_cache_gb=4.0,
-    )
-    renderer = HfRenderer(
-        VllmConfig(model_config=model_config),
-        cached_tokenizer_from_config(model_config),
-    )
-    messages: list[ChatCompletionMessageParam] = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "video_url",
-                    "video_url": {"url": video_data_url},
-                    "uuid": "shared-video-uuid",
-                },
-                {"type": "text", "text": "Describe the video."},
-            ],
-        }
-    ]
-    chat_params_8 = ChatParams(media_io_kwargs={"video": {"num_frames": 8}})
-    chat_params_16 = ChatParams(media_io_kwargs={"video": {"num_frames": 16}})
+# =========================================================================
+# Chat media I/O cache keys
+# =========================================================================
+class TestChatMediaIOCacheKey:
+    """Chat media I/O kwargs contribute to UUID-backed multimodal cache keys.
 
-    if is_async:
+    Changing a video frame count must produce a different hash even when the
+    request reuses the same video UUID. The behavior is identical for sync and
+    async rendering.
+    """
 
-        async def get_hash(chat_params):
-            _, inputs = await renderer.render_chat_async([[*messages]], chat_params)
-            return inputs[0]["mm_hashes"]["video"][0]
+    @staticmethod
+    def _make_renderer() -> HfRenderer:
+        model_config = ModelConfig(
+            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            max_model_len=4096,
+            mm_processor_cache_gb=4.0,
+        )
+        return HfRenderer(
+            VllmConfig(model_config=model_config),
+            cached_tokenizer_from_config(model_config),
+        )
 
-        hash_8 = asyncio.run(get_hash(chat_params_8))
-        hash_16 = asyncio.run(get_hash(chat_params_16))
-    else:
-        _, inputs_8 = renderer.render_chat([[*messages]], chat_params_8)
-        _, inputs_16 = renderer.render_chat([[*messages]], chat_params_16)
-        hash_8 = inputs_8[0]["mm_hashes"]["video"][0]
-        hash_16 = inputs_16[0]["mm_hashes"]["video"][0]
+    @staticmethod
+    def _make_messages() -> list[ChatCompletionMessageParam]:
+        video_data_url = encode_video_url(VideoAsset("baby_reading").np_ndarrays)
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": video_data_url},
+                        "uuid": "shared-video-uuid",
+                    },
+                    {"type": "text", "text": "Describe the video."},
+                ],
+            }
+        ]
 
-    assert hash_8 != hash_16
+    @staticmethod
+    async def _get_hash_async(renderer, messages, chat_params):
+        _, inputs = await renderer.render_chat_async([[*messages]], chat_params)
+        return inputs[0]["mm_hashes"]["video"][0]
+
+    @classmethod
+    def _get_hash(cls, renderer, messages, chat_params, is_async):
+        if is_async:
+            return asyncio.run(cls._get_hash_async(renderer, messages, chat_params))
+
+        _, inputs = renderer.render_chat([[*messages]], chat_params)
+        return inputs[0]["mm_hashes"]["video"][0]
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_same_video_uuid_different_frame_counts_produce_distinct_hashes(
+        self, is_async
+    ):
+        renderer = self._make_renderer()
+        messages = self._make_messages()
+        chat_params_8 = ChatParams(media_io_kwargs={"video": {"num_frames": 8}})
+        chat_params_16 = ChatParams(media_io_kwargs={"video": {"num_frames": 16}})
+
+        hash_8 = self._get_hash(renderer, messages, chat_params_8, is_async)
+        hash_16 = self._get_hash(renderer, messages, chat_params_16, is_async)
+
+        assert hash_8 != hash_16
