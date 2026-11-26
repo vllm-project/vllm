@@ -76,7 +76,7 @@ def _check_tensors(owner, tag: str, want: dict, lds: dict | None = None) -> None
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class AttnWeights:
     """One layer's attention tensors on this rank, in vLLM's loaded layout."""
 
@@ -113,7 +113,7 @@ class AttnWeights:
         assert self.cos_sin.dtype == torch.float32 and self.cos_sin.shape[-1] == 64
 
 
-@dataclass
+@dataclass(slots=True)
 class MonoLayerWeights:
     """One layer's tensors on this rank, in vLLM's loaded layout."""
 

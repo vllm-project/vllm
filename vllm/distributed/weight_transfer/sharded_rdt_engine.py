@@ -45,7 +45,7 @@ The RUN pair stays split on purpose: it is the thread boundary, and only
 `targets` should outlive the get -- carrying the Ray ref and the whole-buffer
 blob into the queue would keep both alive for the scatter's lifetime.
 
-See docs/training/weight_transfer/sharded_rdt.md for the design and the measured
+See docs/training/weight_updates/engines/sharded_rdt.md for the design and the measured
 results behind the choices here.
 """
 
@@ -164,7 +164,7 @@ def _host_alloc_request(pool: "_InitState", nbytes: int, pool_total: int | None)
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ReceivePoolConfig:
     """Validated receive-pool settings recorded before the plan is known."""
 
@@ -174,7 +174,7 @@ class _ReceivePoolConfig:
     buffer_presize: int
 
 
-@dataclass
+@dataclass(slots=True)
 class _InitCandidate:
     """The state one `init_transfer_engine` attempt builds, under the engine's
     own attribute names: `_commit_init` copies every field onto the engine on
@@ -220,7 +220,7 @@ class _InitCandidate:
 _InitState: TypeAlias = "_InitCandidate | ShardedRDTWeightTransferEngine"
 
 
-@dataclass
+@dataclass(slots=True)
 class _Chunk:
     """One packed pull plus its post-processing (see Data flow).
 
@@ -253,7 +253,7 @@ class _Chunk:
     stream: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _CallPlan:
     """The static plan for one sync (see Data flow). Pure, so it is built once
     and reused; runtime is then execution only.
@@ -270,7 +270,7 @@ class _CallPlan:
     num_streams: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingPull:
     """A dispatched pull whose blocking `ray.get` has not run (see Data flow).
 
@@ -285,7 +285,7 @@ class _PendingPull:
     slot: int
 
 
-@dataclass
+@dataclass(slots=True)
 class _PullHooks:
     """Operations injected into the pure `_run_lanes` scheduler."""
 
@@ -302,7 +302,7 @@ class _PullHooks:
     signal: "Callable[[int], None]"
 
 
-@dataclass
+@dataclass(slots=True)
 class _ProcItem:
     """A landed pull handed to the background scatter thread (see Data flow).
 
@@ -1400,8 +1400,6 @@ class ShardedRDTWeightTransferEngine(
                     # The stamp was ATTACHED to a param that had no loader
                     # (see _install_recording_stamps); leave none behind.
                     del tensor.weight_loader
-        if hasattr(model, "_original_do_torchao_reload"):
-            model._do_torchao_reload = model._original_do_torchao_reload
 
     # ---------------- Background post-processing (pull/process pipeline) -------
 
@@ -1564,9 +1562,9 @@ class ShardedRDTWeightTransferEngine(
              pulls nothing from it). Every group is signaled exactly once by
              construction. The stream has no per-group call boundaries, so group
              L+1's first chunk issues while L's still stream.
-          2. Per leaf module, find its FIRST and LAST chunk — materialize on the
-             first, quant/kernel/reset on the last, correct by construction
-             instead of by runtime counters.
+          2. For modules using layerwise reload, materialize on their FIRST
+             chunk and quant/kernel/reset on their LAST. Modules that opt out
+             receive their slices directly in their existing storage.
           3. Assemble `_Chunk`s: dedup keys and precompute the packed layout.
         """
         baked: _InitState = self if state is None else state
@@ -1618,6 +1616,8 @@ class ShardedRDTWeightTransferEngine(
         layer_by_id: dict[int, Any] = {}
         for ci, scatters in enumerate(raw_chunks):
             for sc in scatters:
+                if getattr(sc.layer, "_skip_layerwise_reload", False):
+                    continue
                 lid = id(sc.layer)
                 layer_by_id[lid] = sc.layer
                 first_at.setdefault(lid, ci)

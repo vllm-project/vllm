@@ -28,6 +28,8 @@ from vllm.entrypoints.generate.base.serving import (
 )
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     assemble_chat_message_fields,
+    get_chat_response_role,
+    get_echo_content,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -55,7 +57,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     resolve_finish_reason,
 )
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -67,6 +69,7 @@ from vllm.renderers.chat_utils import (
     ConversationMessage,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.params import TokenizeParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
@@ -263,8 +266,7 @@ class OpenAIServingChat(GenerateBaseServing):
         }
 
     async def render_chat_request(
-        self,
-        request: ChatCompletionRequest,
+        self, request: ChatCompletionRequest, tok_params: TokenizeParams | None = None
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -283,7 +285,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_chat(request)
+        return await self.online_renderer.render_chat(request, tok_params=tok_params)
 
     async def create_chat_completion(
         self,
@@ -296,6 +298,17 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        # An empty `messages` list would otherwise pass validation and only
+        # raise an IndexError in get_chat_request_role() after a full
+        # generation. Reject it before any work is scheduled. This is checked
+        # here rather than on the request model because internal callers
+        # (renderers, adapters) construct ChatCompletionRequest directly.
+        if not request.messages:
+            return self.create_error_response(
+                VLLMValidationError(
+                    "messages must be a non-empty list.", parameter="messages"
+                )
+            )
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )
@@ -392,6 +405,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     trace_headers=trace_headers,
                     session_id=session_id,
                     priority=self._get_priority(request, raw_request),
+                    data_parallel_rank=data_parallel_rank,
                 )
             else:
                 generator = self.engine_client.generate(
@@ -439,9 +453,7 @@ class OpenAIServingChat(GenerateBaseServing):
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
-        if request.add_generation_prompt:
-            return self.response_role
-        return request.messages[-1]["role"]
+        return get_chat_response_role(request, self.response_role)
 
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
         """Construct the response `ChatMessage` for the non-streaming path.
@@ -537,6 +549,7 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cache_creation_tokens = None
 
         previous_texts = [""] * num_choices
+        first_content_token_ts: float | None = None
 
         try:
             if self.parser_cls is not None:
@@ -649,14 +662,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: str | list[dict[str, str]] = ""
-                        if (
-                            conversation
-                            and "content" in conversation[-1]
-                            and conversation[-1].get("role") == role
-                        ):
-                            last_msg_content = conversation[-1]["content"] or ""
-
+                        last_msg_content = get_echo_content(conversation, role)
                         if last_msg_content:
                             for i in range(num_choices):
                                 choice_data = ChatCompletionResponseStreamChoice(
@@ -726,6 +732,17 @@ class OpenAIServingChat(GenerateBaseServing):
                         output.finish_reason,
                         res.prompt_token_ids,
                     )
+
+                    if (
+                        self.enable_per_request_metrics
+                        and num_choices == 1
+                        and first_content_token_ts is None
+                        and delta_message is not None
+                        and delta_message.content
+                        and res.metrics is not None
+                        and res.metrics.last_token_ts > 0
+                    ):
+                        first_content_token_ts = res.metrics.last_token_ts
 
                     previous_texts[i] += delta_text
 
@@ -903,7 +920,9 @@ class OpenAIServingChat(GenerateBaseServing):
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
-                            last_metrics, completion_tokens
+                            last_metrics,
+                            completion_tokens,
+                            first_content_token_ts=first_content_token_ts,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
@@ -1089,16 +1108,7 @@ class OpenAIServingChat(GenerateBaseServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: str | list[dict[str, str]] = ""
-            if (
-                conversation
-                and "content" in conversation[-1]
-                and conversation[-1].get("role") == role
-            ):
-                last_msg_content = conversation[-1]["content"] or ""
-            if isinstance(last_msg_content, list):
-                last_msg_content = "\n".join(msg["text"] for msg in last_msg_content)
-
+            last_msg_content = get_echo_content(conversation, role)
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content or "")
                 choice.message.content = full_message

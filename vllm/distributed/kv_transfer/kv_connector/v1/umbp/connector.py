@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -101,6 +102,11 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """vLLM connector lifecycle shared by every UMBP runtime mode."""
 
     @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Registers the device KV cache with an RDMA engine.
+        return KVCacheAccess.REGISTERS
+
+    @classmethod
     def only_restores_canonical_kv(cls, kv_transfer_config: KVTransferConfig) -> bool:
         # Objects are whole blocks this cache layout stored. The derived
         # namespace fingerprints every per-layer spec, and engines whose other
@@ -109,6 +115,17 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # foreign bytes.
         extra = kv_transfer_config.kv_connector_extra_config
         return extra.get("key_namespace", "auto") == "auto"
+
+    @classmethod
+    def requests_sliding_window_replay(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        # Opt-in: store only compressed KV (e.g. DeepSeek-V4's C4/C128 latents
+        # and indexer) and rebuild the SWA cache and compressor states, which
+        # would otherwise be many tiny objects, by recomputing the hit's last
+        # window. The rebuilt window state is approximate, so off by default.
+        extra = kv_transfer_config.kv_connector_extra_config
+        return bool(extra.get("rebuild_sliding_window", False))
 
     def __init__(
         self,
@@ -124,19 +141,6 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if topology.pp_size > 1:
             raise NotImplementedError(
                 f"{runtime_config.mode} UMBP does not support pipeline parallelism"
-            )
-        # A restored prefix skips the draft model's prefill too, so its KV must
-        # come from the pool along with the target's.
-        cacheable = set(kv_cache_config.prefix_cacheable_group_ids)
-        skipped_drafts = [
-            group_id
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if getattr(group, "is_eagle_group", False) and group_id not in cacheable
-        ]
-        if skipped_drafts:
-            raise NotImplementedError(
-                f"{runtime_config.mode} UMBP cannot restore draft-model KV cache "
-                f"groups {skipped_drafts}: they are not prefix-cacheable"
             )
         runtime = UMBPRuntimeFactory.build(runtime_config)
         self._runtime = runtime

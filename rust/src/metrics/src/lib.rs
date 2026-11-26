@@ -31,6 +31,7 @@ pub use scheduler::*;
 // encoding counters, so all counter family registration names in this crate
 // must use the base metric name without a trailing `_total`.
 pub type U64Counter = Counter<u64, AtomicU64>;
+pub type F64Counter = Counter<f64, AtomicU64>;
 pub type U64Gauge = Gauge<u64, AtomicU64>;
 pub type F64Gauge = Gauge<f64, AtomicU64>;
 /// Histogram metric handle cloned out of a Prometheus family.

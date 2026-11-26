@@ -30,7 +30,7 @@ P = ParamSpec("P")
 LAUNCH_TIMEOUT_S = 1800 if current_platform.is_rocm() else 900
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class ProcessGroupInfo:
     world_size: int
     world_local_size: int

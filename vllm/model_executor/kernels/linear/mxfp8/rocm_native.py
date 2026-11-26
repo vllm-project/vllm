@@ -9,11 +9,16 @@ E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. `dot_scaled`
 tiles K by 128; a weight whose K is not a multiple of that is dequantized to
 BF16 once at load and served by a plain linear instead, since `can_implement`
 does not filter on K.
+
+Weights with 32x32 scale blocks (DeepSeek V4.1) run a block-scaled Triton GEMM,
+or AITER's tuned FlyDSL GEMMs on gfx950, on a weight preshuffled at load.
 """
 
 import torch
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -32,6 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 from .rocm_block32_gemm import (
@@ -39,6 +45,8 @@ from .rocm_block32_gemm import (
     rocm_mxfp8_block32_gemm,
     rocm_mxfp8_block32_gemm_quant,
 )
+
+logger = init_logger(__name__)
 
 _FP8_MAX = float(torch.finfo(MXFP8_VALUE_DTYPE).max)
 _TINY = float(torch.finfo(torch.float32).tiny)
@@ -342,6 +350,14 @@ _M31_TILES = {
 }
 
 
+def _wide_prefill_tile_pays(M, N):
+    """Whether the 256x256x128 large-prefill tile beats the 128x128 one."""
+    cus = num_compute_units()
+    waves_128 = triton.cdiv(triton.cdiv(M, 128) * triton.cdiv(N, 128), cus)
+    waves_256 = triton.cdiv(triton.cdiv(M, 256) * triton.cdiv(N, 256), cus)
+    return 3 * waves_128 >= 10 * waves_256
+
+
 def _select_m31_cfg(M, N, K):
     for max_m, cfg in _M31_TILES.get((N, K), ()):
         if max_m >= M:
@@ -411,6 +427,9 @@ def _select_cfg(M, N, K):
         return (64, 64, 256, 8, 2) if K % 256 == 0 else (64, 64, 128, 8, 2)
     if M <= 1024:  # medium prefill chunk: BN=64 keeps small-N occupied
         return (128, 64, 256, 8, 3) if K % 256 == 0 else (128, 64, 128, 8, 3)
+    # BLOCK_K=128 keeps the 256x256 tile within the LDS footprint of 128x128x256.
+    if _ON_GFX950 and N > 1024 and _wide_prefill_tile_pays(M, N):
+        return 256, 256, 128, 4, 2
     # large prefill (M > 1024). The previously graph-tuned tall 256x128x256 and deep
     # 128x128x512 tiles won only on triton 3.6; on triton 3.7 their larger BLOCK_M /
     # BLOCK_K register+LDS footprint spills (or hits "out of resources" on stricter
@@ -447,6 +466,31 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
 
     supports_pre_processed_weights = True
 
+    def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
+        super().__init__(c)
+        from vllm.platforms.rocm import on_gfx950
+
+        # AITER's FlyDSL MXFP8 GEMMs are gfx950-only and write bf16 only.
+        self.flydsl_enabled = bool(
+            on_gfx950()
+            and rocm_aiter_ops.is_linear_enabled()
+            and torch.get_default_dtype() == torch.bfloat16
+        )
+
+    @staticmethod
+    def _flydsl_fallback(layer: torch.nn.Module) -> str | None:
+        """Why a 32x32 block-scaled layer cannot run AITER's tuned FlyDSL GEMMs
+        (batched wo_a as [G, N / G, K]), or None if it can."""
+        n, k = layer.weight.shape
+        batch = getattr(layer, "bmm_batch_size", None)
+        if k % 64 or n % (batch or 1):
+            return "K % 64 != 0"
+        if not rocm_aiter_ops.is_mxfp8_block32_bpreshuffle_gemm_tuned(
+            n // (batch or 1), k, batch
+        ):
+            return "no AITER tuned rows for this shape and CU count"
+        return None
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -463,6 +507,10 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K] fp8
@@ -482,6 +530,23 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale)
+        layer.weight_preshuffled = None
+        if block_scale is None or not self.flydsl_enabled:
+            return
+        why = self._flydsl_fallback(layer)
+        logger.info_once(
+            "MXFP8 32x32 block-scaled linear [%d, %d]: %s",
+            N,
+            K,
+            "AITER FlyDSL GEMM" if why is None else f"Triton GEMM ({why})",
+        )
+        if why is None:
+            # In place, unless other code reads the row-major weight (mono decode).
+            shuffled = rocm_aiter_ops.shuffle_weight(layer.weight.data, (16, 16))
+            if not getattr(layer, "keep_row_major_weight", False):
+                replace_parameter(layer, "weight", shuffled)
+                shuffled = layer.weight.data
+            layer.weight_preshuffled = shuffled
 
     def input_quant_key(self) -> QuantKey:
         # Row-major [M, K // 32] E8M0 scales, unlike FlashInfer's swizzled ones
@@ -525,7 +590,12 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             # One scale row per 32 weight rows (see process_weights_after_loading).
             if qa is not None:
                 out = rocm_mxfp8_block32_gemm(
-                    x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
+                    x_q,
+                    x_scale,
+                    layer.weight,
+                    layer.weight_scale,
+                    out_dtype,
+                    getattr(layer, "weight_preshuffled", None),
                 )
             else:
                 # The op quantizes the activation itself: at tiny M (the
@@ -537,7 +607,11 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
                 # opaque op so a compiled caller cannot freeze the
                 # token-count decision.
                 out = rocm_mxfp8_block32_gemm_quant(
-                    x2d, layer.weight, layer.weight_scale, out_dtype
+                    x2d,
+                    layer.weight,
+                    layer.weight_scale,
+                    out_dtype,
+                    getattr(layer, "weight_preshuffled", None),
                 )
         elif qa is not None:
             out = _mxfp8_dot_scaled_gemm(

@@ -10,6 +10,9 @@ from http import HTTPStatus
 from fastapi import Request
 
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.chat_completion.message_assembly import (
+    get_echo_content,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -30,6 +33,10 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import ConversationMessage
+from vllm.renderers.chat_utils.item_tracker import (
+    MediaRequestBudgets,
+    use_media_request_budgets,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
@@ -135,7 +142,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
-        render_result = await self.render_batch_chat_request(request)
+        with use_media_request_budgets(MediaRequestBudgets()):
+            render_result = await self.render_batch_chat_request(request)
         if isinstance(render_result, ErrorResponse):
             return render_result
         single_requests, all_conversations, engine_prompts = render_result
@@ -327,18 +335,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
                 if request.echo:
-                    conversation = all_conversations[prompt_idx]
-                    last_msg_content: str | list[dict[str, str]] = ""
-                    if (
-                        conversation
-                        and "content" in conversation[-1]
-                        and conversation[-1].get("role") == role
-                    ):
-                        last_msg_content = conversation[-1]["content"] or ""
-                    if isinstance(last_msg_content, list):
-                        last_msg_content = "\n".join(
-                            msg["text"] for msg in last_msg_content
-                        )
+                    last_msg_content = get_echo_content(
+                        all_conversations[prompt_idx], role
+                    )
                     message.content = last_msg_content + (message.content or "")
 
                 choice_data = ChatCompletionResponseChoice(
@@ -354,6 +353,16 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     ),
                 )
                 choices.append(choice_data)
+
+                if self.enable_log_outputs and self.request_logger and message.content:
+                    self.request_logger.log_outputs(
+                        request_id=f"{request_id}_{prompt_idx}",
+                        outputs=message.content,
+                        output_token_ids=output.token_ids,
+                        finish_reason=choice_data.finish_reason,
+                        is_streaming=False,
+                        delta=False,
+                    )
 
         mm_total: Counter[str] = Counter()
         for counts in mm_token_counts or ():

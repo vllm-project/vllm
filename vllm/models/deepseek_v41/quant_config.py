@@ -12,6 +12,7 @@ import regex as re
 from vllm.config import get_current_vllm_config
 from vllm.config.quantization import QuantSpec
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEConfig,
     RoutedExperts,
     UnquantizedFusedMoEMethod,
 )
@@ -24,14 +25,38 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 _EXPERTS_LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.ffn\.experts$")
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptLinearMethod,
         ModelOptNvFp4Config,
     )
+
+
+def _mxfp8_linear_method_cls() -> type[ModelOptLinearMethod]:
+    """The method of the MXFP8 linear layers; NVIDIA GPUs choose it in
+    `nvidia/quantization.py`."""
+    if current_platform.is_cuda():
+        from .nvidia.quantization import mxfp8_linear_method_cls
+
+        return mxfp8_linear_method_cls()
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
+
+    return ModelOptLinearMethod
+
+
+def _mxfp4_moe_method(moe: FusedMoEConfig) -> Mxfp4MoEMethod:
+    """The method of the MXFP4 routed experts; NVIDIA GPUs choose it in
+    `nvidia/quantization.py`."""
+    if current_platform.is_cuda():
+        from .nvidia.quantization import mxfp4_moe_method
+
+        return mxfp4_moe_method(moe)
+    return Mxfp4MoEMethod(moe, activation_key=kMxfp8Dynamic)
 
 
 class DeepseekV4FP8Config(Fp8Config):
@@ -231,13 +256,10 @@ class DeepseekV4FP8Config(Fp8Config):
                 match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedLinearMethod()
-            from vllm.model_executor.layers.quantization.modelopt import (
-                CkptCtx,
-                ModelOptLinearMethod,
-            )
+            from vllm.model_executor.layers.quantization.modelopt import CkptCtx
 
             rows, cols = self.weight_block_size
-            return ModelOptLinearMethod(
+            return _mxfp8_linear_method_cls()(
                 QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic),
                 CkptCtx(scale_block_size=(rows, cols)),
             )
@@ -258,7 +280,7 @@ class DeepseekV4FP8Config(Fp8Config):
                         quant_config=self._get_nvfp4_config(),
                         moe_config=layer.moe_config,
                     )
-                return Mxfp4MoEMethod(layer.moe_config, activation_key=kMxfp8Dynamic)
+                return _mxfp4_moe_method(layer.moe_config)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)

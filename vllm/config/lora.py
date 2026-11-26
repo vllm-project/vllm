@@ -153,7 +153,10 @@ class LoRAConfig:
             self.lora_dtype = getattr(torch, self.lora_dtype)
 
         architectures = getattr(model_config, "architectures", None) or []
-        is_inkling = any("Inkling" in arch for arch in architectures)
+        # Inkling2 has no Lamport fused-collective path.
+        is_inkling = any(
+            "Inkling" in arch and "Inkling2" not in arch for arch in architectures
+        )
         if is_inkling and os.environ.get("INKLING_MULTIMEM_AR", "1") != "0":
             raise ValueError(
                 "Inkling LoRA requires INKLING_MULTIMEM_AR=0: the Lamport "

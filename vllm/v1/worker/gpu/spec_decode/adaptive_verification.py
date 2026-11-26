@@ -214,7 +214,7 @@ def build_cost_tables_from_curves(
 class AdmittedDraftCounts:
     """Per-request admitted draft counts, in flight to the host."""
 
-    def __init__(self, cpu: torch.Tensor, event: torch.cuda.Event):
+    def __init__(self, cpu: torch.Tensor, event: torch.Event):
         self._cpu = cpu
         self._event = event
 
@@ -232,6 +232,7 @@ class AdaptiveVerificationManager:
         num_bonus_tokens: int,
         max_total_logits: int,
         copy_admitted_drafts_to_host: bool = False,
+        max_concurrent_batches: int = 2,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -271,9 +272,11 @@ class AdaptiveVerificationManager:
             self._admitted_drafts_cpu = torch.empty(
                 max_num_reqs, dtype=torch.int32, pin_memory=True
             )
-            self._admitted_drafts_event = torch.cuda.Event(blocking=True)
+            self._admitted_drafts_event = torch.Event(blocking=True, device=device)
 
-        # Two D2H slots preserve stale inputs for budget selection.
+        # A ring of D2H slots, one per in-flight step, preserves stale inputs for
+        # budget selection; budgets read the oldest, so its copy rarely blocks.
+        num_slots = max(2, max_concurrent_batches)
         self._stale_confidences = [
             CpuGpuBuffer(
                 max_num_reqs,
@@ -281,10 +284,13 @@ class AdaptiveVerificationManager:
                 dtype=torch.float32,
                 device=device,
             )
-            for _ in range(2)
+            for _ in range(num_slots)
         ]
-        self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
-        self._pending_resets: list[int] = []
+        self._copy_events = [
+            torch.Event(blocking=True, device=device) for _ in range(num_slots)
+        ]
+        # Per slot, rows of requests added since its last copy was issued.
+        self._pending_resets: list[list[int]] = [[] for _ in range(num_slots)]
         self._stale_idx = 0
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
@@ -299,7 +305,9 @@ class AdaptiveVerificationManager:
 
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
-        self._pending_resets.append(req_idx)
+        for i, resets in enumerate(self._pending_resets):
+            if i != self._stale_idx:
+                resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
 
     def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
@@ -376,21 +384,21 @@ class AdaptiveVerificationManager:
         """Publish this step's raw confidences for the ranking kernel and start
         copying them to the CPU, where a later step's budget reads them."""
         num_reqs = input_batch.num_reqs
-        ready_idx = self._stale_idx ^ 1
+        ready_idx = (self._stale_idx + 1) % len(self._stale_confidences)
         with gpu_sync_allowed():
             self._copy_events[ready_idx].synchronize()
-        if self._pending_resets:
-            self._stale_confidences[ready_idx].np[self._pending_resets] = 1.0
-            self._pending_resets.clear()
-        # Last step's copy has landed: budgets read it, this step overwrites the
-        # slot they were reading before.
+        if resets := self._pending_resets[ready_idx]:
+            self._stale_confidences[ready_idx].np[resets] = 1.0
+            resets.clear()
+        # The oldest step's copy has landed: budgets read it, this step
+        # overwrites the slot they were reading before.
         self._stale_idx, write_idx = ready_idx, self._stale_idx
 
         self._confidence_probs[input_batch.idx_mapping] = confidence_probs[:num_reqs]
         write_slot = self._stale_confidences[write_idx]
         write_slot.gpu.copy_(self._confidence_probs)
 
-        current_stream = torch.cuda.current_stream(self.req_states.device)
+        current_stream = torch.accelerator.current_stream(self.req_states.device)
         self._copy_stream.wait_stream(current_stream)
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
@@ -459,6 +467,8 @@ class AdaptiveVerificationManager:
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
         draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        # Rank-local confidences must not select different TP execution sizes.
+        draft_budget = get_tp_group().broadcast_object(draft_budget, src=0)
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -544,6 +554,8 @@ class AdaptiveVerificationManager:
                     draft_budget,
                     self._draft_survival,
                 )
+                # Equal totals alone do not ensure identical request boundaries.
+                get_tp_group().broadcast(capacities, src=0)
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
         async_tensor_h2d(num_non_draft_tokens, out=num_non_draft_tokens_gpu)
@@ -566,7 +578,7 @@ class AdaptiveVerificationManager:
             0 < draft_budget < int(scheduled_drafts.sum())
         ):
             admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
-            current_stream = torch.cuda.current_stream(self.req_states.device)
+            current_stream = torch.accelerator.current_stream(self.req_states.device)
             self._copy_stream.wait_stream(current_stream)
             with stream(self._copy_stream, current_stream):
                 admitted_cpu.copy_(capacities, non_blocking=True)
@@ -643,4 +655,5 @@ def maybe_create_adaptive_verification_manager(
         num_bonus_tokens,
         max_total_logits=max_total_logits,
         copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
+        max_concurrent_batches=vllm_config.max_concurrent_batches,
     )
