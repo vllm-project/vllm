@@ -99,10 +99,9 @@ def model_options(
         ValueError: If the question type is not one Drex answers.
 
     """
+    order = list(range(len(options)))
     if question_type == "choice":
-        return [option_text(name, desc) for name, desc in options], list(
-            range(len(options))
-        )
+        return [option_text(name, desc) for name, desc in options], order
     if question_type == "noul":
         if len(options) != 2:
             raise ValueError("a noul question needs a true and a false description")
@@ -110,7 +109,7 @@ def model_options(
         yes, no = options
         return [option_text(*no), option_text(*yes)], [1, 0]
     if question_type == "score":
-        return [name for name, _ in options], list(range(len(options)))
+        return [name for name, _ in options], order
     raise ValueError(f"Drex does not answer {question_type!r} questions")
 
 
@@ -179,16 +178,15 @@ def pack(
         branch += [opt_id] + user_tokens(tokenizer, option) + [end_id]
     branch.append(decide_id)
 
-    if len(branch) > max_branch - len(state_ids):
+    room = max_branch - len(state_ids)
+    total = len(state_ids) + len(branch)
+    if len(branch) > room:
         raise ValueError(
             f"question branch has {len(branch)} tokens; the row limit leaves "
-            f"{max_branch - len(state_ids)} after a {len(state_ids)}-token state"
+            f"{room} after a {len(state_ids)}-token state"
         )
-    if len(state_ids) + len(branch) > max_packed:
-        raise ValueError(
-            f"packed row has {len(state_ids) + len(branch)} tokens; "
-            f"limit is {max_packed}"
-        )
+    if total > max_packed:
+        raise ValueError(f"packed row has {total} tokens; limit is {max_packed}")
     return state_ids + branch
 
 

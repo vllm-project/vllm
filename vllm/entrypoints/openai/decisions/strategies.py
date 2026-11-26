@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -1461,6 +1461,16 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+class _DrexRow(NamedTuple):
+    """One packed question: the row, its marker positions, and option order."""
+
+    texts: list[str]
+    order: list[int]
+    ids: list[int]
+    opt_positions: list[int]
+    decide_position: int
+
+
 class DrexStrategy(ReadStrategy):
     """Drex v1.5 pointer-readout models.
 
@@ -1481,9 +1491,6 @@ class DrexStrategy(ReadStrategy):
         super().__init__(context)
         model_config = context.engine_client.model_config
         self.max_model_len = model_config.max_model_len
-        # The reference server reads a packed row up to its context window, so
-        # serving uses the model's window rather than the training caps.
-        self.max_state = self.max_branch = self.max_packed = self.max_model_len
         self.tokenizer = context.online_renderer.renderer.get_tokenizer()
 
     def limits(self) -> DecisionLimits:
@@ -1529,7 +1536,9 @@ class DrexStrategy(ReadStrategy):
             )
         state = self.render_state(state)
 
-        rows: list[tuple[list[str], list[int], list[int], tuple[list[int], int]]] = []
+        # The reference server reads a packed row up to its context window, so
+        # serving passes the model window rather than the training caps.
+        rows: list[_DrexRow] = []
         for q in questions:
             texts, order = self._options(q)
             try:
@@ -1538,9 +1547,9 @@ class DrexStrategy(ReadStrategy):
                     state,
                     q.instructions or "",
                     texts,
-                    max_state=self.max_state,
-                    max_branch=self.max_branch,
-                    max_packed=self.max_packed,
+                    max_state=self.max_model_len,
+                    max_branch=self.max_model_len,
+                    max_packed=self.max_model_len,
                 )
             except ValueError as e:
                 raise StructuredDecisionError(f"question {q.id!r}: {e}") from e
@@ -1552,24 +1561,23 @@ class DrexStrategy(ReadStrategy):
             opt_positions, decide_position = drex_prompt.find_positions(
                 ids, self.tokenizer
             )
-            rows.append((texts, order, ids, (opt_positions, decide_position)))
+            rows.append(_DrexRow(texts, order, ids, opt_positions, decide_position))
 
         try:
-            drex_prompt.check_budget([ids for _, _, ids, _ in rows], self.max_model_len)
+            drex_prompt.check_budget([row.ids for row in rows], self.max_model_len)
         except ValueError as e:
             raise StructuredDecisionError(str(e)) from e
 
-        async def read_one(n: int) -> list[float]:
-            _, _, ids, (opt_positions, decide_position) = rows[n]
+        async def read_one(n: int, row: _DrexRow) -> list[float]:
             result = None
             async for result in self.context.engine_client.encode(  # noqa: B007
-                tokens_input(ids, cache_salt=cache_salt),
+                tokens_input(row.ids, cache_salt=cache_salt),
                 PoolingParams(
                     task="classify",
                     use_activation=False,
                     extra_kwargs={
-                        "opt_positions": opt_positions,
-                        "decide_position": decide_position,
+                        "opt_positions": row.opt_positions,
+                        "decide_position": row.decide_position,
                     },
                 ),
                 f"{request_id}-{n}",
@@ -1586,22 +1594,22 @@ class DrexStrategy(ReadStrategy):
                 )
             return result.outputs.data.tolist()
 
-        logits = await asyncio.gather(*(read_one(n) for n in range(len(rows))))
+        logits = await asyncio.gather(*(read_one(n, row) for n, row in enumerate(rows)))
 
         reads = []
-        for (texts, order, ids, _), scores in zip(rows, logits):
-            if len(scores) != len(texts):
+        for row, scores in zip(rows, logits):
+            if len(scores) != len(row.texts):
                 raise ValueError(
                     f"the pointer head returned {len(scores)} scores for "
-                    f"{len(texts)} options"
+                    f"{len(row.texts)} options"
                 )
             probs = label_softmax(scores)
             reads.append(
                 QuestionRead(
-                    probs=drex_prompt.apply_order(probs, order),
+                    probs=drex_prompt.apply_order(probs, row.order),
                     label_mass=1.0,
                     argmax_is_label=True,
-                    input_tokens=len(ids),
+                    input_tokens=len(row.ids),
                     output_tokens=0,
                 )
             )

@@ -10,7 +10,7 @@ scores the options from the row's hidden states.
 
 import torch
 
-from vllm.model_executor.layers.pooler import Pooler, PoolingParamsUpdate
+from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise.methods import AllPool
 from vllm.tasks import PoolingTask
 from vllm.v1.outputs import PoolerOutput
@@ -29,11 +29,6 @@ class DrexPointerPooler(Pooler):
 
     def get_supported_tasks(self) -> set[PoolingTask]:
         return {"classify"}
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        # Marker positions arrive through `extra_kwargs`, so the pooler does
-        # not need the prompt token ids.
-        return PoolingParamsUpdate()
 
     def forward(
         self,
