@@ -124,7 +124,7 @@ Example: [examples/rl/routed_experts_e2e.py](../../../examples/rl/routed_experts
 
 With inline return the client must hold every row it received and hand it to each request or trainer worker that needs the same prefix. With a namespace the engine writes the rows once to a shared object store and the response lists object keys; any process that can reach the store reads them. Requests without a namespace keep the inline behavior above. The design, its guarantees and its limits are in [Aux Outputs for RL](../../design/rl_aux_output.md).
 
-Start the server with an object store and a new key prefix per start. The default store is Mooncake in standalone-store mode, separate from any Mooncake KV store; `object_store` names another implementation of `AuxObjectStore` ([the store](../../design/rl_aux_output.md#the-store)):
+Start the server with an object store and a new key prefix per start. The default store is Mooncake in standalone-store mode (`"mode": "standalone-store"` and `"global_segment_size": 0` in its configuration file), separate from any Mooncake KV store; `object_store` names another implementation of `AuxObjectStore` ([the store](../../design/rl_aux_output.md#the-store)):
 
 ```bash
 vllm serve <model> --aux-output-config \

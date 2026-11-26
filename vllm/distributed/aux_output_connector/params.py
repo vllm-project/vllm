@@ -62,11 +62,8 @@ def prepare_aux_request(
 
 
 def verify_aux_namespace(params: SamplingParams) -> None:
-    """Check `aux_namespace` and the rules of a request with one. Called
-    once the request's parameters are final. Its objects are under
-    `AuxOutputConfig.object_key_prefix`; `/` separates the segments of a
-    namespace nested in the namespace of its leading segments, whose release
-    also removes it."""
+    """Check that `aux_namespace`, if set, is non-empty and that the request
+    has no stop strings and `n == 1`."""
     if (namespace := params.aux_namespace) is None:
         return
     if not namespace:
