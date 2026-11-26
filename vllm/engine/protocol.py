@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingInput:
     """Input data for a streaming generation request.
 
@@ -253,11 +253,11 @@ class EngineClient(ABC):
 
         Args:
             mode: How to handle in-flight requests:
-                - ``"abort"``: Abort all in-flight requests immediately
+                - `"abort"`: Abort all in-flight requests immediately
                   and return partial results with "abort" reason (default).
-                - ``"wait"``: Wait for in-flight requests to complete.
-                - ``"keep"``: Freeze requests in queue; they resume on
-                  :meth:`resume_generation`.
+                - `"wait"`: Wait for in-flight requests to complete.
+                - `"keep"`: Freeze requests in queue; they resume on
+                  `resume_generation`.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
 

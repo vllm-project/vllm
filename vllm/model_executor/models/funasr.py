@@ -870,6 +870,10 @@ class FunASRForConditionalGeneration(
         cls,
         stt_params: SpeechToTextParams,
     ) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'FunASR only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language

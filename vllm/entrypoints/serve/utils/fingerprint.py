@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Build the ``system_fingerprint`` string returned by the OpenAI-compatible
+"""Build the `system_fingerprint` string returned by the OpenAI-compatible
 server.
 
-Four modes, configured via ``--fingerprint-mode``:
+Four modes, configured via `--fingerprint-mode`:
 
-* ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>`` — encodes
+* `full` (default): `vllm-<version>[-<parallelism>]-<hash8>` — encodes
   server version, any non-trivial parallelism degree (tp/pp/dp/ep), and an
-  8-char prefix of ``hash_config(vllm_config)`` (covers model identity,
+  8-char prefix of `hash_config(vllm_config)` (covers model identity,
   quant config, speculative, attention backend, etc.).
-* ``hash``: ``vllm-<version>-<hash8>`` — parallelism stripped.
-* ``custom``: user-provided literal via ``--fingerprint-value``.
-* ``none``: the field is omitted (serialized as ``null``).
+* `hash`: `vllm-<version>-<hash8>` — parallelism stripped.
+* `custom`: user-provided literal via `--fingerprint-value`.
+* `none`: the field is omitted (serialized as `null`).
 
-``get_system_fingerprint`` is only called at serving-class init (a handful
+`get_system_fingerprint` is only called at serving-class init (a handful
 of times per server); each subclass caches the returned string on
-``self.system_fingerprint``, so per-request cost is one attribute read.
+`self.system_fingerprint`, so per-request cost is one attribute read.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def set_default_fingerprint_mode(
     mode: FingerprintMode,
     custom_value: str | None = None,
 ) -> None:
-    """Configure the fingerprint mode for subsequent ``get_system_fingerprint``
+    """Configure the fingerprint mode for subsequent `get_system_fingerprint`
     calls. Called once at server startup."""
     global _DEFAULT_MODE, _CUSTOM_VALUE
     _DEFAULT_MODE = mode
@@ -40,8 +40,8 @@ def set_default_fingerprint_mode(
 
 
 def get_system_fingerprint(vllm_config: Any) -> str | None:
-    """Return the fingerprint for ``vllm_config`` using the mode configured by
-    ``set_default_fingerprint_mode``."""
+    """Return the fingerprint for `vllm_config` using the mode configured by
+    `set_default_fingerprint_mode`."""
     return build_system_fingerprint(vllm_config, _DEFAULT_MODE, _CUSTOM_VALUE)
 
 

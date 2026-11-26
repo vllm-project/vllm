@@ -2,27 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import Gemma3Config
 
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
+    ModelConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
 )
 from vllm.distributed.device_communicators import pynccl_allocator
+from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.autoregressive import (
     cudagraph_utils as spec_cudagraph_utils,
@@ -54,6 +59,7 @@ def _create_vllm_config() -> MagicMock:
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
+    vllm_config.model_config.max_model_len = 8192
     vllm_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=4)
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.speculative_config = None
@@ -313,6 +319,231 @@ def test_speculator_capture_preserves_decode_query_bounds(
         assert call.args[0].max_query_len == expected_max_query_len
 
 
+@pytest.mark.parametrize(
+    (
+        "supports_mm",
+        "enable_prompt_embeds",
+        "state_embeds",
+        "self_supplies_embeds",
+        "raw_tokens",
+        "is_first_pp_rank",
+        "expects_input_ids",
+        "expects_inputs_embeds",
+        "expects_dummy_embeds_calls",
+    ),
+    [
+        (True, False, True, False, False, True, False, True, 1),
+        (False, True, True, False, False, True, False, True, 1),
+        (True, False, True, False, True, True, True, True, 1),
+        (True, False, False, True, False, True, True, True, 1),
+        (False, False, False, True, False, True, True, True, 0),
+        (True, False, True, False, False, False, False, False, 0),
+    ],
+)
+def test_capture_inputs_match_execute_model(
+    monkeypatch,
+    supports_mm,
+    enable_prompt_embeds,
+    state_embeds,
+    self_supplies_embeds,
+    raw_tokens,
+    is_first_pp_rank,
+    expects_input_ids,
+    expects_inputs_embeds,
+    expects_dummy_embeds_calls,
+):
+    """Capture must match execute_model's input_ids / inputs_embeds selection."""
+    num_tokens = 4
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=is_first_pp_rank, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "prepare_inputs_to_capture", lambda *a, **kw: ({}, {})
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "set_forward_context", lambda *a, **kw: nullcontext()
+    )
+    desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, num_tokens, num_tokens)
+
+    def capture(self, create_forward_fn, progress_bar_desc):
+        create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+
+    monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
+
+    embeds = torch.zeros(num_tokens, 8)
+
+    class _RecordingModelState:
+        def __init__(self):
+            self.dummy_embeds_calls = 0
+
+        def dummy_inputs_embeds(self, n: int) -> torch.Tensor | None:
+            self.dummy_embeds_calls += 1
+            return embeds[:n] if state_embeds else None
+
+        def prepare_dummy_inputs(
+            self, num_reqs: int, n: int
+        ) -> dict[str, torch.Tensor]:
+            if self_supplies_embeds:
+                return {"inputs_embeds": embeds[:n]}
+            return {}
+
+    model_state = _RecordingModelState()
+    calls = []
+
+    class Model:
+        requires_raw_input_tokens = raw_tokens
+
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            return torch.zeros(num_tokens, 8)
+
+    vllm_config = _create_vllm_config()
+    vllm_config.model_config.supports_multimodal_inputs = supports_mm
+    vllm_config.model_config.enable_prompt_embeds = enable_prompt_embeds
+    intermediate = (
+        None
+        if is_first_pp_rank
+        else IntermediateTensors({"hidden_states": torch.zeros(num_tokens, 8)})
+    )
+
+    manager = gpu_cudagraph_utils.ModelCudaGraphManager(
+        vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, {1: num_tokens}
+    )
+    manager.capture(
+        Model(),
+        model_state,
+        InputBuffers(num_tokens, num_tokens, torch.device("cpu")),
+        intermediate,
+        MagicMock(),
+        [],
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    assert len(calls) == 1
+    assert (calls[0]["input_ids"] is not None) == expects_input_ids
+    assert (calls[0]["inputs_embeds"] is not None) == expects_inputs_embeds
+    assert model_state.dummy_embeds_calls == expects_dummy_embeds_calls
+    assert list(calls[0].keys())[:4] == [
+        "input_ids",
+        "positions",
+        "inputs_embeds",
+        "intermediate_tensors",
+    ]
+
+
+def test_capture_default_model_state_clears_input_ids(monkeypatch, tmp_path):
+    """Real DefaultModelState + ModelCudaGraphManager clears input_ids at capture."""
+    num_tokens = 4
+    Gemma3Config(
+        architectures=["Gemma3ForConditionalGeneration"],
+        text_config={
+            "model_type": "gemma3_text",
+            "hidden_size": 128,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "num_hidden_layers": 1,
+            "intermediate_size": 256,
+            "head_dim": 32,
+        },
+        vision_config={
+            "model_type": "siglip_vision_model",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "image_size": 28,
+            "patch_size": 14,
+        },
+    ).save_pretrained(tmp_path)
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), max_model_len=32, dtype="float32"
+        ),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_num_seqs=num_tokens,
+            max_num_batched_tokens=16,
+            max_model_len=32,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL,
+            prefill_cudagraph_capture_token_sizes=[num_tokens],
+            decode_cudagraph_capture_request_sizes=[num_tokens],
+        ),
+    )
+    assert vllm_config.model_config.supports_multimodal_inputs
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "prepare_inputs_to_capture", lambda *a, **kw: ({}, {})
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "set_forward_context", lambda *a, **kw: nullcontext()
+    )
+    desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, num_tokens, num_tokens)
+
+    def capture(self, create_forward_fn, progress_bar_desc):
+        create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+
+    monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
+
+    calls = []
+
+    class _Model(torch.nn.Module):
+        def forward(self, **kwargs):
+            calls.append(kwargs)
+            return torch.zeros(num_tokens, 128)
+
+    model = _Model()
+    model_state = DefaultModelState(
+        vllm_config, model, EncoderCache(), torch.device("cpu")
+    )
+    assert model_state.rope_state is None
+    manager = gpu_cudagraph_utils.ModelCudaGraphManager(
+        vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, {1: num_tokens}
+    )
+    manager.capture(
+        model,
+        model_state,
+        InputBuffers(num_tokens, num_tokens, torch.device("cpu")),
+        None,
+        MagicMock(),
+        [],
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["input_ids"] is None
+    assert calls[0]["inputs_embeds"] is not None
+    assert (
+        calls[0]["inputs_embeds"].data_ptr()
+        == model_state.encoder_runner.inputs_embeds[:num_tokens].data_ptr()
+    )
+    assert list(calls[0].keys())[:4] == [
+        "input_ids",
+        "positions",
+        "inputs_embeds",
+        "intermediate_tensors",
+    ]
+
+
 _DECODE_QUERY_LEN = 3
 
 
@@ -324,6 +555,7 @@ def _create_decode_vllm_config(
     use_kda_recoverssm: bool = False,
     decode_sizes: list[int] | None = None,
     max_decode_tokens: int | None = None,
+    max_model_len: int = 8192,
 ) -> MagicMock:
     if decode_sizes is None:
         # The deprecated shared sizes set both kinds of graphs.
@@ -342,6 +574,7 @@ def _create_decode_vllm_config(
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
+    vllm_config.model_config.max_model_len = max_model_len
     vllm_config.scheduler_config = SchedulerConfig.default_factory(
         max_num_seqs=max_num_seqs
     )
@@ -464,6 +697,22 @@ def test_decode_capture_sizes_are_request_counts(monkeypatch, decode_query_len):
     )
     assert capture_plan([], [8]) == ([], [8])
     assert capture_plan([2], []) == ([(2, 2 * q)], [])
+
+
+def test_recoverssm_keeps_mixed_graphs_past_the_decode_token_cap(monkeypatch):
+    """KDA RecoverSSM keeps the mixed graphs above max_num_seqs * (num_spec + 1)
+    tokens."""
+
+    def mixed_sizes(use_kda_recoverssm: bool) -> list[int]:
+        manager = _make_spec_decode_manager(
+            monkeypatch, max_num_seqs=2, use_kda_recoverssm=use_kda_recoverssm
+        )
+        return sorted(
+            d.num_tokens for d in manager._capture_descs[CUDAGraphMode.PIECEWISE]
+        )
+
+    assert max(mixed_sizes(True)) > 2 * _DECODE_QUERY_LEN
+    assert mixed_sizes(True) == mixed_sizes(False)
 
 
 def test_varlen_decode_graphs_take_the_decode_cap_as_a_token_budget(monkeypatch):
@@ -807,13 +1056,13 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):
     """A mixed batch must not fall to eager where only decode graphs are staged.
 
-    ``round_up(size, decode_query_len)`` lands FULL decode graphs on token counts
+    `round_up(size, decode_query_len)` lands FULL decode graphs on token counts
     the PIECEWISE ladder never uses -- with capture sizes [1, 2, 4, 8, 16, 24]
     and query length 3, FULL covers 3, 6, 9 and 18 while PIECEWISE has only
     1, 2, 4, 8, 16, 24. Building each mode's candidate ranges independently keeps
     a PIECEWISE graph reachable there. Deriving the ranges from the staged sizes
     instead offers a mixed batch nothing but decode descriptors, whose
-    ``uniform_token_count`` it can never match, so it runs fully eager.
+    `uniform_token_count` it can never match, so it runs fully eager.
     """
     manager = _make_spec_decode_manager(monkeypatch)
 
@@ -852,10 +1101,10 @@ def test_uniform_decode_beyond_capture_ladder_falls_back(monkeypatch):
 def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
     """Every captured decode graph must remain reachable from dispatch().
 
-    Under dynamic speculative decoding ``decode_query_lens`` is a list, and the
+    Under dynamic speculative decoding `decode_query_lens` is a list, and the
     staging loop rounds each capture size up to *every* query length. Several
-    decode graphs therefore land on the same ``num_tokens`` -- e.g. capture size
-    2 stages both ``round_up(2, 1) == 2`` and ``round_up(2, 2) == 2``. Building
+    decode graphs therefore land on the same `num_tokens` -- e.g. capture size
+    2 stages both `round_up(2, 1) == 2` and `round_up(2, 2) == 2`. Building
     the candidate ranges one descriptor at a time would give all but the first
     of those an empty range, so they would never enter a candidate list and
     their batches would silently fall through to PIECEWISE.
@@ -910,7 +1159,7 @@ def test_speculator_replays_graph_for_runtime_width(monkeypatch, specialize):
 
     def capture(manager, create_forward_fn, progress_bar_desc):
         for desc in manager._capture_descs[CUDAGraphMode.FULL]:
-            create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+            create_forward_fn(desc, warmup=False)(CUDAGraphMode.FULL)
             k = forward.call_args.kwargs["num_speculative_steps"]
             graph = MagicMock()
             graph.replay.side_effect = lambda k=k: replayed_widths.append(k)
@@ -989,3 +1238,37 @@ def test_divisor_query_len_dispatch_is_unchanged(
         assert desc.cg_mode == CUDAGraphMode.FULL, num_tokens
         assert desc.num_tokens == expected, num_tokens
         assert desc.num_reqs == expected // decode_query_len, num_tokens
+
+
+def test_cudagraph_candidates_skip_sizes_exceeding_max_model_len(monkeypatch):
+    """Full/mixed CUDA graph candidates must not exceed max_num_reqs * max_model_len."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: object(),
+    )
+    vllm_config = _create_decode_vllm_config(
+        [1, 8, 512],
+        num_speculative_tokens=0,
+        max_num_seqs=1,
+        max_model_len=448,
+    )
+
+    with patch.object(gpu_cudagraph_utils.logger, "warning") as warning:
+        manager = gpu_cudagraph_utils.CudaGraphManager(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            decode_query_lens={1: 1},
+        )
+    warning.assert_called_once()
+    assert warning.call_args.args[1:] == ([512], 448)
+
+    all_descs = [desc for descs in manager._capture_descs.values() for desc in descs]
+    assert all(desc.num_tokens <= 448 for desc in all_descs)
+    assert any(desc.num_tokens == 8 for desc in all_descs)

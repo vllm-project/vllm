@@ -27,7 +27,7 @@ def simulate_tool_streaming(
     request,
     chunks: list[str],
 ) -> list[tuple[DeltaMessage | None, str]]:
-    """Feed text chunks through ``extract_tool_calls_streaming()``."""
+    """Feed text chunks through `extract_tool_calls_streaming()`."""
     token_id_map = _build_token_id_map(parser)
 
     results: list[tuple[Any, str]] = []
@@ -100,9 +100,9 @@ def simulate_reasoning_streaming(
     chunks: list[str],
     delta_token_ids_per_chunk: list[tuple[int, ...]] | None = None,
 ) -> tuple[str, str]:
-    """Feed chunks through ``extract_reasoning_streaming()``.
+    """Feed chunks through `extract_reasoning_streaming()`.
 
-    Returns ``(reasoning_text, content_text)`` tuple.
+    Returns `(reasoning_text, content_text)` tuple.
     """
     token_id_map = (
         _build_token_id_map(parser) if delta_token_ids_per_chunk is None else {}

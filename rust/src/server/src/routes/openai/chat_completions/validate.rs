@@ -81,12 +81,6 @@ pub(super) fn validate_request_compat(
         "length_penalty",
         "length_penalty is not supported.",
     )?;
-    if !request.spaces_between_special_tokens {
-        bail_invalid_request!(
-            param = "spaces_between_special_tokens",
-            "spaces_between_special_tokens is not supported."
-        );
-    }
     validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
@@ -136,7 +130,8 @@ mod tests {
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
-        ChatMessage, Function, MessageContent, StringOrArray, Tool, ToolChoice, ToolChoiceValue,
+        ChatMessage, Function, MessageContent, Normalizable as _, StringOrArray, Tool, ToolChoice,
+        ToolChoiceValue,
     };
 
     fn served(names: &[&str]) -> ServedModelNames {
@@ -330,6 +325,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_request_compat_accepts_spaces_between_special_tokens_false() {
+        let request = ChatCompletionRequest {
+            spaces_between_special_tokens: false,
+            ..base_request()
+        };
+
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("spaces_between_special_tokens=false should be accepted");
+    }
+
+    #[test]
     fn validate_request_compat_accepts_include_reasoning_false() {
         let request = ChatCompletionRequest {
             include_reasoning: false,
@@ -417,5 +423,34 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("tool_choice=none is ok");
+    }
+
+    #[test]
+    #[expect(deprecated, reason = "Local type still mirrors legacy upstream field")]
+    fn validate_checks_min_tokens_against_the_effective_max_tokens() {
+        let cases = [
+            (Some(2), Some(1), Some(8), true),
+            (Some(2), None, Some(8), true),
+            (Some(2), Some(8), None, true),
+            (Some(2), Some(1), None, false),
+            (Some(2), None, Some(1), false),
+            (Some(2), Some(8), Some(1), false),
+        ];
+        for (min_tokens, max_tokens, max_completion_tokens, valid) in cases {
+            let mut request = ChatCompletionRequest {
+                min_tokens,
+                max_tokens,
+                max_completion_tokens,
+                ..base_request()
+            };
+            // `ValidatedJson` normalizes before validating.
+            request.normalize();
+            assert_eq!(
+                request.validate().is_ok(),
+                valid,
+                "min_tokens={min_tokens:?} max_tokens={max_tokens:?} \
+                 max_completion_tokens={max_completion_tokens:?}"
+            );
+        }
     }
 }

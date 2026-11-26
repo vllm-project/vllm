@@ -19,7 +19,12 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 
 from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import compare_two_settings, create_new_process_for_each_test
+from ..models.utils import check_logprobs_close
+from ..utils import (
+    compare_two_settings,
+    create_new_process_for_each_test,
+    multi_gpu_only,
+)
 
 logger = init_logger("test_pipeline_parallel")
 
@@ -37,7 +42,7 @@ class PPTestOptions(NamedTuple):
     load_format: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]
@@ -126,7 +131,6 @@ TEXT_GENERATION_MODELS = {
     "ibm/PowerLM-3b": PPTestSettings.fast(),
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
-    "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
@@ -135,7 +139,6 @@ TEXT_GENERATION_MODELS = {
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
-    "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
@@ -202,8 +205,6 @@ TEST_MODELS = [
     "OpenGVLab/InternVL3-1B",
     "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
-    # [LANGUAGE GENERATION - HYBRID ARCH]
-    "ai21labs/Jamba-tiny-dev",
 ]
 
 
@@ -455,4 +456,97 @@ def test_pp_mixed_precision_kv_cache():
         [*common_args, "--pipeline-parallel-size", "2"],
         common_args,
         method="generate_close",
+    )
+
+
+@create_new_process_for_each_test()
+def test_pp_granite4_vision_deepstack(num_gpus_available):
+    """A later PP stage must receive the deepstack features of its layers."""
+    if num_gpus_available < 2:
+        pytest.skip("Need at least 2 GPUs")
+    # With 4 layers, deepstack layers 0 and 3 land on different PP stages.
+    text_config = {
+        "num_hidden_layers": 4,
+        "hidden_size": 512,
+        "intermediate_size": 800,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,
+    }
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--load-format",
+        "dummy",
+        "--hf-overrides",
+        json.dumps({"text_config": text_config}),
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "4",
+        "--enforce-eager",
+        "--distributed-executor-backend",
+        "mp",
+    ]
+    compare_two_settings(
+        "ibm-granite/granite-vision-4.1-4b",
+        [*common_args, "--pipeline-parallel-size", "2"],
+        common_args,
+        method="generate_with_image",
+    )
+
+
+@multi_gpu_only(num_gpus=2)
+@pytest.mark.parametrize(
+    ("model_id", "model_kwargs"),
+    [
+        pytest.param("tiiuae/Falcon-H1-Tiny-90M-Instruct", {}, id="falcon_h1"),
+        pytest.param("Qwen/Qwen3.5-0.8B", {}, id="qwen3_5"),
+        pytest.param("google/gemma-3-1b-it", {}, id="gemma3"),
+        pytest.param("ibm-granite/granite-4.0-h-350m", {}, id="granite4_h"),
+        # Startup check only: dummy weights give near-uniform logits.
+        pytest.param(
+            "baidu/ERNIE-4.5-21B-A3B-PT",
+            {
+                "load_format": "dummy",
+                "hf_overrides": {
+                    "num_hidden_layers": 2,
+                    "hidden_size": 512,
+                    "intermediate_size": 1024,
+                    "num_attention_heads": 4,
+                    "num_key_value_heads": 1,
+                    "moe_num_experts": 4,
+                    "moe_k": 2,
+                    "moe_intermediate_size": 256,
+                    "moe_num_shared_experts": 1,
+                },
+            },
+            id="ernie45_moe",
+        ),
+    ],
+)
+@create_new_process_for_each_test()
+def test_pp_tied_word_embeddings(
+    vllm_runner, example_prompts, model_id: str, model_kwargs: dict
+):
+    """The last PP stage needs its own embedding to tie lm_head to it."""
+    outputs = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            model_id,
+            max_model_len=512,
+            enable_chunked_prefill=True,
+            enforce_eager=True,
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+            **model_kwargs,
+        ) as vllm_model:
+            outputs[pp_size] = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens=8, num_logprobs=5
+            )
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[1],
+        outputs_1_lst=outputs[2],
+        name_0="pp1",
+        name_1="pp2",
     )

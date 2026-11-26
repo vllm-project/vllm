@@ -42,7 +42,7 @@ def by_expert(ids, weights):
 
 
 def route_logits(batch, kind, gen):
-    """Router logits and bias. ``near_tie``: 48 experts per token whose biased
+    """Router logits and bias. `near_tie`: 48 experts per token whose biased
     sigmoids straddle the 16th place within a few ULPs (exact ties included)."""
     logits = torch.randn(batch, EXPERTS, generator=gen, device="cuda") * 2
     bias = torch.randn(EXPERTS, generator=gen, device="cuda") * 0.1
@@ -103,7 +103,7 @@ def test_route_matches_flashinfer_routing(batch, kind, scale):
 @pytest.mark.parametrize("batch", [5, 8])
 def test_route_early_release_is_exact(batch):
     """TP8 B5-8 routing releases the persistent experts at entry
-    (``front.EARLY_ROUTE``): only the PDL trigger moves, so ids and BF16 weights equal
+    (`front.EARLY_ROUTE`): only the PDL trigger moves, so ids and BF16 weights equal
     the late-release kernel's and the stock routing's."""
     import cutlass
 
@@ -184,7 +184,7 @@ SITU_PARAMS = [(BETA, LINEAR_BETA), (BETA, None), (2.5, 7.0), (3.0, None)]
 
 
 def stock_situ(x, beta=BETA, linear_beta=LINEAR_BETA):
-    """The ``_C`` situ_and_mul kernel, which SituAndMul runs in the deployment (the
+    """The `_C` situ_and_mul kernel, which SituAndMul runs in the deployment (the
     custom op enabled: custom_ops "all" under compilation mode NONE)."""
     import vllm._custom_ops  # noqa: F401  (registers torch.ops._C)
 
@@ -301,7 +301,7 @@ E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 def mxfp4(w):
-    """(packed E2M1, UE8M0 bytes) of BF16 ``w``, asserting the values are exact."""
+    """(packed E2M1, UE8M0 bytes) of BF16 `w`, asserting the values are exact."""
     from flashinfer import fp4_quantize
 
     one = torch.tensor(1.0, device="cuda")
@@ -319,11 +319,11 @@ _WEIGHTS: dict = {}
 
 
 def selection_experts(intermediate, real, paired=False):
-    """Stock trtllm-gen weights of 896 identical experts whose first ``real`` FC1
+    """Stock trtllm-gen weights of 896 identical experts whose first `real` FC1
     gate/up rows each tap two latent elements (the rest are the TP padding: zero) and
     whose FC2 row o takes hidden element o % real with weight 1. Random taps carry
-    E2M1 x 2^k weights; ``paired``: gate row j sums latent 2j and 2j + 1, up row j
-    latent 768 + 2j and 769 + 2j. With ``exact_latent`` / ``paired_latent`` inputs
+    E2M1 x 2^k weights; `paired`: gate row j sums latent 2j and 2j + 1, up row j
+    latent 768 + 2j and 769 + 2j. With `exact_latent` / `paired_latent` inputs
     gate/up are exact in FP32 and the unweighted expert output is the
     MXFP8-dequantized SiTU hidden, exactly, in any accumulation order."""
     key = intermediate, paired
@@ -385,8 +385,8 @@ def exact_latent(batch, gen):
 
 
 def paired_latent(gate, up):
-    """Latent rows whose ``paired`` FC1 outputs are exactly the BF16 ``gate`` and
-    ``up`` [B, I]: each value split into its top four significant bits and the rest,
+    """Latent rows whose `paired` FC1 outputs are exactly the BF16 `gate` and
+    `up` [B, I]: each value split into its top four significant bits and the rest,
     both exact in MXFP8 when a 32-element block spans few binades."""
 
     def split(v):
@@ -523,9 +523,45 @@ def test_routed_experts_match_trtllm_gen(tp, batch):
     assert mismatches == 0, f"{mismatches} of {total} expert outputs differ"
 
 
+@pytest.mark.parametrize("batch,grid", [(80, 144), (200, 132)])
+def test_wide_experts_on_fewer_ctas_match_trtllm_gen(batch, grid, monkeypatch):
+    """The wide engine runs one CTA per SM, at most `WIDE_GRID` (every CTA must be
+    resident). On a smaller grid, as on GPUs with fewer SMs, every expert row still
+    equals the stock trtllm-gen row bit for bit, over consecutive calls."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.moe import (
+        experts_runtime as er,
+    )
+
+    monkeypatch.setattr(er, "WIDE_GRID", grid)
+    intermediate = real = 384
+    weights = selection_experts(intermediate, real)
+    w13, w2, s13, s2 = weights
+    experts = er.PersistentExperts(w13.view(torch.uint8), s13, w2.view(torch.uint8), s2)
+    dev = torch.device("cuda", torch.accelerator.current_device_index())
+    sms = torch.cuda.get_device_properties(dev).multi_processor_count
+    assert experts.grid_for(batch) == min(grid, sms)
+    out = torch.empty(batch * TOPK, HIDDEN, dtype=torch.bfloat16, device=dev)
+    experts.prepare(batch, er.scratch(8, dev, wide=True), out)
+    gen = torch.Generator(device="cuda").manual_seed(900 + batch)
+    for _ in range(2):
+        x = exact_latent(batch, gen)
+        ids = torch.stack(
+            [
+                torch.randperm(EXPERTS, generator=gen, device="cuda")[:TOPK]
+                for _ in range(batch)
+            ]
+        ).int()
+        experts.run(x, ids)
+        want = stock_expert_rows(weights, x, intermediate)
+        got = out.view(batch, TOPK, HIDDEN)
+        assert torch.equal(
+            got.view(torch.int16), want.unsqueeze(1).expand_as(got).view(torch.int16)
+        )
+
+
 @pytest.mark.parametrize("batch", [5, 8, 20, 60])
 def test_routed_experts_prefetch_ahead_is_exact(batch):
-    """Experts prepared ``ahead`` (their producers L2-prefetch a table of next
+    """Experts prepared `ahead` (their producers L2-prefetch a table of next
     weights after the last weight stage) give the same rows, bit for bit, as the
     stock trtllm-gen kernel; the table mixes real ranges, an unaligned tail and
     zero (skipped) rows."""
@@ -568,7 +604,7 @@ def test_routed_experts_prefetch_ahead_is_exact(batch):
 
 def random_experts(seed):
     """Random MXFP4 expert bytes (E8M0 scales near 2^-4) in the kernel's layout: every
-    weight bit and scale reaches the MMAs, unlike ``selection_experts``."""
+    weight bit and scale reaches the MMAs, unlike `selection_experts`."""
     gen = torch.Generator(device="cuda").manual_seed(seed)
 
     def u8(shape, lo=0, hi=256):
@@ -585,7 +621,7 @@ def random_experts(seed):
 @pytest.mark.parametrize("batch", [4, 5, 8])
 def test_routed_experts_static_consumer_is_exact(batch, monkeypatch):
     """The streamed B<=8 engine's MMA warp walking the producer's schedule
-    (``consume_static``), with static or claimed FC2 pairs, gives the
+    (`consume_static`), with static or claimed FC2 pairs, gives the
     slot-metadata consumer's rows bit for bit, on
     random weights and activations (every weight bit, scale and FP32 accumulation
     order reaches the outputs), over several calls of one prepared engine."""

@@ -7,7 +7,7 @@ Setting `ec_enable_nixl: true` in `ec_connector_extra_config` additionally enabl
 
 ## Prerequisites
 
-- Local CPU-tier offload (`ec_enable_nixl` unset or `false`) needs no extra packages — the gate-off code path (`cpu/connector.py`, `cpu/scheduler/`, `cpu/worker/`, `cpu/common.py`) imports no `nixl`/`zmq`/`msgspec`, enforced by a repo test (`tests/v1/ec_connector/unit/test_no_nixl_imports.py`).
+- Local CPU-tier offload (`ec_enable_nixl` unset or `false`) needs no extra packages — the gate-off code path (`cpu/connector.py`, `cpu/scheduler/`, `cpu/worker/`, `cpu/common.py`) imports neither `nixl` nor the P2P transport modules, enforced by a repo test (`tests/v1/ec_connector/unit/test_no_nixl_imports.py`).
 - P2P NIXL mode (`ec_enable_nixl: true`) requires the `nixl` package: `uv pip install nixl` (pinned to `nixl==1.3.2` in `requirements/kv_connectors.txt`, shared with `NixlConnector`). Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for platform-specific installation. If `nixl` isn't importable, the connector raises `RuntimeError: ec_enable_nixl requires NIXL; install the nixl package or remove ec_enable_nixl from ec_connector_extra_config.`
 
 ## Basic Usage
@@ -25,6 +25,7 @@ vllm serve <model> --ec-transfer-config '{
 - `ec_role="ec_both"`: the same process offloads to and reloads from the CPU tier.
 - The tier is one mmap region (`/dev/shm/vllm_ec_{instance_id}_dp{dp_rank}.mmap`) shared by every TP/PCP worker of the instance; only TP rank 0 / PCP rank 0 writes on save, since all ranks hold identical encoder output.
 - Entries are keyed by `mm_hash`; `EmbeddingCache` evicts ready+unpinned entries FIFO when space is needed.
+- The runner cache and CPU tier can evict independently. When a scheduled chunk uses a runner-cached output that is missing from the CPU tier, the producer saves the existing tensor again without rerunning the encoder. The scheduler pins the step's CPU loads before reserving blocks for these saves. If no blocks are available, the existing missing-entry behavior still applies.
 - Each batched save/load runs on a pooled CUDA stream; completion is reported to the scheduler once the transfer's end event fires (`ECCPUWorker.build_connector_worker_meta` → `ECCPUScheduler.update_connector_output`), which marks saved entries ready and unpins loaded ones.
 - The region is unlinked from `/dev/shm` in `shutdown()`.
 
@@ -64,7 +65,7 @@ vllm serve <model> --ec-transfer-config '{
 
    The two halves are published together or not at all. An `mm_hash` the producer cannot serve — never saved because the region was full, or evicted since — is reported with empty `metadata` and no address, so an orchestrator leaves the media on the request and the consumer encodes it locally.
 2. The orchestrator issues a follow-up request with the same `mm_hash` to a consumer instance, passing the producer's `ec_transfer_params` through `SamplingParams.extra_args["ec_transfer_params"]`.
-3. On the consumer, `ECCPUScheduler.ensure_cache_available()` reads `request.ec_transfer_params`. For each `mm_hash` not already cached locally, it opens a ZMQ session to `(peer_host, peer_port)`, sends an `XferReq`, and on an `OK` `XferAck` issues a NIXL READ that pulls the blocks straight from the producer's mmap into its own. The request is deferred until the READ completes.
+3. On the consumer, `ECCPUScheduler.ensure_cache_available()` checks `request.ec_transfer_params`. A ready CPU-tier entry or a runner encoder-cache entry with a matching embedding count avoids a remote transfer. For each announced `mm_hash` without either cache hit, it opens a ZMQ session to `(peer_host, peer_port)`, sends an `XferReq`, and on an `OK` `XferAck` issues a NIXL READ that pulls the blocks straight from the producer's mmap into its own. The request is deferred until the READ completes.
 4. A `NACK_NOT_READY` means the producer announced the encoding but its GPU→mmap save has not landed yet. The consumer releases the in-flight entry without recording a failure and re-requests the read on a later step, so a save that lands a few steps late costs latency rather than a recompute.
 5. On any other NACK (`NACK_MISSING`, `NACK_INCOMPAT`, `NACK_VERSION`, `NACK_INTERNAL`), ack timeout, read timeout, or peer disconnect, the consumer discards the in-flight entry and falls back to local encoding for that `mm_hash` — a P2P failure never blocks the request indefinitely.
 

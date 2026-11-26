@@ -605,7 +605,7 @@ class precompiled_wheel_utils:
     def detect_system_cuda_variant() -> str:
         """Auto-detect CUDA variant from torch, nvidia-smi, or env default."""
         # Map CUDA major version to hosted wheel variants on wheels.vllm.ai
-        supported = {12: "cu129", 13: "cu130"}
+        supported = {12: "cu129", 13: "cu132"}
 
         # Respect explicitly set VLLM_MAIN_CUDA_VERSION
         if envs.is_set("VLLM_MAIN_CUDA_VERSION"):
@@ -1528,12 +1528,21 @@ def get_requirements() -> list[str]:
     return requirements
 
 
+def get_cvcuda_requirements() -> list[str]:
+    """CV-CUDA for Nemotron VL `device_resize`, built for this wheel's CUDA."""
+    if not _is_cuda():
+        return []
+    if torch.version.cuda.startswith("12."):
+        return ["cvcuda-cu12==0.19.0"]
+    return ["cvcuda-cu13==0.19.0"]
+
+
 def get_rocm_device_requirements() -> list[str]:
     """GPU kernel packages for TheRock builds.
 
     TheRock ships GPU kernels as separate per-arch wheels selected through
-    ``[device-<arch>]`` extras on torch, torchvision and rocm. Require them for
-    every arch this wheel was compiled for, so ``pip install vllm`` works on
+    `[device-<arch>]` extras on torch, torchvision and rocm. Require them for
+    every arch this wheel was compiled for, so `pip install vllm` works on
     any supported GPU.
     """
     if not _is_hip() or importlib.util.find_spec("rocm_sdk") is None:
@@ -1633,6 +1642,8 @@ package_data = {
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        # Inkling2 TRT-LLM-gen expert GEMM binding (FlashInfer JIT)
+        "models/inkling2/nvidia/ops/*.cu",
         # Built-in multimodal chat template fallbacks (registry.py)
         "transformers_utils/chat_templates/*.jinja",
         "third_party/flash_linear_attention/LICENSE",
@@ -1718,7 +1729,7 @@ setup(
         # AMD Zen CPU optimizations via zentorch
         "zen": ["zentorch==2.14.0.2"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
-        "tensorizer": ["tensorizer==2.10.1"],
+        "tensorizer": ["tensorizer==2.12.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.17.1"],
@@ -1733,8 +1744,10 @@ setup(
         # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
         # only; also needs system GStreamer + libv4l (see docs).
         "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
+        # Nemotron VL image and video frame resize on the GPU (device_resize)
+        "cvcuda": get_cvcuda_requirements(),
         "flashinfer": [],  # Kept for backwards compatibility
-        "b12x": ["b12x==1.5.1"],
+        "b12x": [],  # Kept for backwards compatibility
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml

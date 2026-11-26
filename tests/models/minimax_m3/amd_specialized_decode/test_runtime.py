@@ -38,7 +38,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 
 
 def _metadata(rows, *, decode_tokens=None, prefills=0, query_len=1, padded=0):
-    """A decode-first step: ``decode_tokens`` rows of requests ``query_len``
+    """A decode-first step: `decode_tokens` rows of requests `query_len`
     rows each (an EAGLE3 verify step: 1 + num_speculative_tokens)."""
     decode_tokens = rows if decode_tokens is None else decode_tokens
     requests = decode_tokens // query_len

@@ -1951,10 +1951,6 @@ class CohereASRDummyInputsBuilder(BaseDummyInputsBuilder[CohereASRProcessingInfo
 class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessingInfo]):
     skip_decoder_start_token: bool = True
 
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return True
-
     def create_encoder_prompt(
         self,
         prompt: list[int],
@@ -2076,6 +2072,10 @@ class CohereAsrForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'Cohere ASR only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language

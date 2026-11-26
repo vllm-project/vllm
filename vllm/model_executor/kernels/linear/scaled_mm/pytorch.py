@@ -29,9 +29,15 @@ def _get_num_tokens(output_shape: list) -> int:
 
 
 def _rocm_torch_fp8_scaled_mm_supported() -> bool:
-    from vllm.platforms.rocm import on_gfx12x, on_gfx942, on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import (
+        on_gfx12x,
+        on_gfx117x,
+        on_gfx942,
+        on_gfx950,
+        on_gfx1250,
+    )
 
-    return on_gfx942() or on_gfx950() or on_gfx12x() or on_gfx1250()
+    return on_gfx942() or on_gfx950() or on_gfx117x() or on_gfx12x() or on_gfx1250()
 
 
 def _supports_torch_fp8_scaled_mm() -> bool:
@@ -267,14 +273,14 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 
 
 class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
-    """FP8 block-scaled linear kernel using ``torch._scaled_mm``.
+    """FP8 block-scaled linear kernel using `torch._scaled_mm`.
 
-    Implements the block-scaled path of ``torch._scaled_mm``, which
-    dispatches on the shapes of the scale tensors. For ``A = [M, K]`` and
-    ``B = [K, N]`` (both fp8) the op's block path requires, with float32
+    Implements the block-scaled path of `torch._scaled_mm`, which
+    dispatches on the shapes of the scale tensors. For `A = [M, K]` and
+    `B = [K, N]` (both fp8) the op's block path requires, with float32
     scales:
-      * 1x128 activation: ``scale_a = [M, ceil(K / 128)]``
-      * 128x128 weight:   ``scale_b = [ceil(K / 128), ceil(N / 128)]``
+      * 1x128 activation: `scale_a = [M, ceil(K / 128)]`
+      * 128x128 weight:   `scale_b = [ceil(K / 128), ceil(N / 128)]`
     """
 
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:

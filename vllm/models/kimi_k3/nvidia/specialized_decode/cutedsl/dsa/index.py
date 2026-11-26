@@ -8,13 +8,13 @@
   BF16 SM100's MQA logits take (mqa_logits_mx_inputs);
 - the shared indexer key: LayerNorm (FP32) of the wk projection, BF16, then FP8 with
   a power-of-two scale into the indexer cache, as indexer_k_norm_quant_insert writes
-  it: per block, the FP8 keys of its tokens, then their scales: FP32, or (``mx``: the
+  it: per block, the FP8 keys of its tokens, then their scales: FP32, or (`mx`: the
   SM100 MQA logits kernels' MX scales, mqa_logits_use_mx_scales) the scale's
   exponent as four equal packed UE8M0 bytes.
 
 A half-warp owns one head (8 columns per lane); warp 0's low half also owns the key.
 
-MXFP4 indexer cache (68 B/token: ``cache.shape[2] == FP4_ENTRY``, configured with
+MXFP4 indexer cache (68 B/token: `cache.shape[2] == FP4_ENTRY`, configured with
 indexer_kv_dtype='mxfp4', kimi_k3_indexer_uses_fp4): the query and the key are MXFP4
 as the writers of nvidia/ops/dsa_indexer_mxfp4.py make them (_mxfp4_quant: one
 UE8M0 scale per 32 values, E2M1 round to nearest even with saturation), the head
@@ -53,7 +53,7 @@ def is_fp4_cache(cache) -> bool:
 
 
 def fp4_query_views(q_rows: torch.Tensor, rows: int):
-    """The MXFP4 query in the FP8 query buffer ``q_rows`` [>= rows, 32, 128] uint8:
+    """The MXFP4 query in the FP8 query buffer `q_rows` [>= rows, 32, 128] uint8:
     (E2M1 [rows, 32, 64] uint8, UE8M0 x4 [rows, 32] int32), row stride 4 KiB."""
     pitch = HEADS * DIM
     base = q_rows.reshape(-1)
@@ -70,7 +70,7 @@ def fp4_query_views(q_rows: torch.Tensor, rows: int):
 
 @asm((Float32, Uint32), pure=True)
 def mxfp4_scale(amax: Float32):
-    """(1 / scale, UE8M0 byte) of an MXFP4 block with absolute maximum ``amax``:
+    """(1 / scale, UE8M0 byte) of an MXFP4 block with absolute maximum `amax`:
     scale = 2^clamp(ceil(log2(max(amax, 6 * 2^-126) / 6)), -127, 127), by the
     instructions Triton emits for the MXFP4 writer (ops/dsa_indexer_mxfp4._mxfp4_quant):
     div.full, libdevice log2f, cvt.rpi, ex2.approx, div.full. Bit-exact with it,
@@ -101,7 +101,7 @@ def mxfp4_scale(amax: Float32):
 
 @asm(Uint32, pure=True)
 def e2m1x2(low: Float32, high: Float32):
-    """One byte of two E2M1 (round to nearest even, satfinite), ``low`` in the low
+    """One byte of two E2M1 (round to nearest even, satfinite), `low` in the low
     nibble."""
     code = "{ .reg .b8 t; cvt.rn.satfinite.e2m1x2.f32 t, $2, $1; cvt.u32.u8 $0, t; }"
     return code, "=r,f,f", (low, high)
@@ -121,7 +121,7 @@ def store_b8(pointer, value):
 
 @cute.jit
 def group_max(value: Float32, lanes: cutlass.Constexpr[int]):
-    """Max over aligned groups of ``lanes`` lanes."""
+    """Max over aligned groups of `lanes` lanes."""
     for shift in cutlass.range_constexpr(lanes.bit_length() - 2, -1, -1):
         value = cute.arch.fmax(value, cute.arch.shuffle_sync_bfly(value, 1 << shift))
     return value
@@ -145,8 +145,8 @@ def half_warp_sum(value: Float32):
 
 
 class DsaIndex:
-    """``key``/``weight``: column offsets of the wk and wv projections in the packed
-    projection row; ``mx``: key scales as packed UE8M0 (MX) bytes."""
+    """`key`/`weight`: column offsets of the wk and wv projections in the packed
+    projection row; `mx`: key scales as packed UE8M0 (MX) bytes."""
 
     def __init__(self, key: int, weight: int, mx: bool = False):
         self.key, self.weight, self.mx = key, weight, mx
@@ -205,8 +205,8 @@ class DsaIndex:
 
 @cute.jit
 def quantize_fp4_query(values, per_lane: cutlass.Constexpr[int], row, head, part, lane):
-    """MXFP4 of ``per_lane`` (4 or 8) consecutive columns of one head, columns
-    ``part * per_lane`` on, into the FP4 query row at pointer ``row``: E2M1 at
+    """MXFP4 of `per_lane` (4 or 8) consecutive columns of one head, columns
+    `part * per_lane` on, into the FP4 query row at pointer `row`: E2M1 at
     head * 64, the head's four UE8M0 bytes at FP4_SCALES + head * 4 (written by
     the lane of part 0; the head's parts are consecutive aligned lanes)."""
     group = 32 // per_lane  # lanes of one 32-value block
@@ -241,9 +241,9 @@ def insert_key(
     mx: cutlass.Constexpr[bool],
     lane,
 ):
-    """One warp: LayerNorm (FP32) of row ``token``'s wk projection (at column
-    ``key``), BF16, FP8 with a power-of-two scale into its indexer cache slot (the
-    low half-warp writes; ``mx``: packed UE8M0 scales). Nothing for a slot < 0."""
+    """One warp: LayerNorm (FP32) of row `token`'s wk projection (at column
+    `key`), BF16, FP8 with a power-of-two scale into its indexer cache slot (the
+    low half-warp writes; `mx`: packed UE8M0 scales). Nothing for a slot < 0."""
     column = (lane % 16) * 8
     slot = slots[token]
     if slot >= 0:

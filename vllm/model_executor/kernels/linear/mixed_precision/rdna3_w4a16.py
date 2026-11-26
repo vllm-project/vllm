@@ -3,8 +3,8 @@
 """W4A16 GPTQ kernel for AMD RDNA3 (gfx1100) — fp16 + bf16.
 
 Drop-in replacement for ExllamaLinearKernel on RDNA3 that adds native bf16
-support. The HIP kernel lives in ``csrc/rocm/q_gemm_rdna3.cu``
-and is exposed via ``torch.ops._rocm_C.gptq_gemm_rdna3``.
+support. The HIP kernel lives in `csrc/rocm/q_gemm_rdna3.cu`
+and is exposed via `torch.ops._rocm_C.gptq_gemm_rdna3`.
 
 Registered ahead of TritonW4A16LinearKernel for the ROCm-RDNA3 path; falls
 through to the Triton kernel on non-RDNA3 ROCm devices (e.g. CDNA/MI300).

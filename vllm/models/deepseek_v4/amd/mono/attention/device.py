@@ -4,7 +4,7 @@
 
 Wave reductions and shuffles, hardware math, bf16 / fp8 / MX packing, the
 scaled MFMA, buffer and 64-bit global accesses, and the tagged-pair mailbox.
-Adapted from ATOM's mono decode framework (``atom/mono/device``), itself ported
+Adapted from ATOM's mono decode framework (`atom/mono/device`), itself ported
 from the FlyDSL GLM-5 layer kernel.
 """
 
@@ -38,19 +38,19 @@ POLL_MAX = 12  # mailbox pairs polled a batch
 
 
 def traced(fn):
-    """FlyDSL's AST rewrite for a helper, so its ``if`` / ``while`` / ``for`` on
+    """FlyDSL's AST rewrite for a helper, so its `if` / `while` / `for` on
     traced values lower to scf ops (kernels rewrite only their own body)."""
     return ASTRewriter.transform(fn)
 
 
 def kernel_symbol(stem, **params):
-    """Kernel symbol that profilers demangle to ``aiter::<stem>_<params>``."""
+    """Kernel symbol that profilers demangle to `aiter::<stem>_<params>`."""
     name = f"{stem}_{kernel_signature(**params)}"
     return f"_ZN5aiter{len(name)}{name}E"
 
 
 def first_task(bid, base):
-    """CTA ``bid``'s first task of a stage placed from CTA ``base``, then every
+    """CTA `bid`'s first task of a stage placed from CTA `base`, then every
     BLOCKS-th."""
     return (bid - base % BLOCKS + BLOCKS) % BLOCKS
 
@@ -91,7 +91,7 @@ def _gptr(addr):
 
 
 def gload(addr, words=4, nt=False):
-    """``words`` i32 (1, 2 or 4) at a 64-bit global address: a cache past 4 GiB is
+    """`words` i32 (1, 2 or 4) at a 64-bit global address: a cache past 4 GiB is
     reachable only this way (a buffer offset is 32 bits)."""
     i32 = ir.IntegerType.get_signless(32)
     ty = i32 if words == 1 else ir.VectorType.get([words], i32)
@@ -100,7 +100,7 @@ def gload(addr, words=4, nt=False):
 
 
 def gstore(addr, value, words=4):
-    """Store ``words`` i32 (an Int32 or a Vector) at a 64-bit global address."""
+    """Store `words` i32 (an Int32 or a Vector) at a 64-bit global address."""
     v = as_ir_value(fx.Int32(value) if words == 1 else value)
     llvm.StoreOp(v, _gptr(addr), alignment=4 * words)
 
@@ -109,7 +109,7 @@ def gstore(addr, value, words=4):
 
 
 def fresh(v):
-    """``v`` through an opaque move, so the lane math built on it is computed at
+    """`v` through an opaque move, so the lane math built on it is computed at
     its use instead of being hoisted out of a task loop and held in registers."""
     return fx.Int32(
         llvm.inline_asm(
@@ -161,7 +161,7 @@ def fma(a, b, c):
 
 
 def div_rn(x, d, r):
-    """``x / d`` rounded to nearest (IEEE), given ``r = RN(1 / d)``."""
+    """`x / d` rounded to nearest (IEEE), given `r = RN(1 / d)`."""
     q = x * r
     return fma(fma(-q, d, x), r, q)
 
@@ -179,7 +179,7 @@ def permlane_swap(off, x, y):
 
 
 def lane_gather(v, src_lane):
-    """Lane ``src_lane``'s value of v (ds_bpermute)."""
+    """Lane `src_lane`'s value of v (ds_bpermute)."""
     return fx.Int32(
         rocdl.ds_bpermute(T.i32, fx.Int32(src_lane) * 4, fx.Int32(v).ir_value())
     )
@@ -196,7 +196,7 @@ def readlane(v, src_lane):
 
 
 def xshfl(v, off):
-    """Value of lane ``lane ^ off`` (DPP in a row, permlane swaps across)."""
+    """Value of lane `lane ^ off` (DPP in a row, permlane swaps across)."""
     assert off in (1, 2, 4, 8, 16, 32), off
     if off >= 16:
         return v.shuffle_xor(off, 64)
@@ -231,7 +231,7 @@ def _add(a, b):
 
 
 def butterfly(v, offsets, op=_add):
-    """Butterfly reduction over the xor ``offsets``, in that order."""
+    """Butterfly reduction over the xor `offsets`, in that order."""
     for off in offsets:
         v = xred(v, off, op)
     return v
@@ -282,7 +282,7 @@ def fp8_pack4(a, b, c, d):
 
 
 def fp8x8_bf16(w0, w1, scale):
-    """Eight E4M3 of two dwords times an f32 ``scale`` -> eight bf16 as a
+    """Eight E4M3 of two dwords times an f32 `scale` -> eight bf16 as a
     4-dword Vector (exact for a power-of-two scale in range)."""
     out = []
     for w in (w0, w1):
@@ -304,7 +304,7 @@ def pow2(code):
 
 
 def rcp_pow2(code):
-    """1 / ``pow2(code)``, exact for code in [1, 253]."""
+    """1 / `pow2(code)`, exact for code in [1, 253]."""
     return ((254 - code) << 23).bitcast(fx.Float32)
 
 
@@ -364,7 +364,7 @@ def _spin(load_all, pending):
 
 
 def spin_until(load, pending):
-    """``load()`` again (s_sleep between) while ``pending(value)``; the value."""
+    """`load()` again (s_sleep between) while `pending(value)`; the value."""
     return _spin(load, pending)
 
 
@@ -373,7 +373,7 @@ class Mailbox:
 
     Every 32-bit value is stored next to the launch's tag in one 8-byte store; a
     consumer polls until every tag matches, so a hand-off is one round trip with
-    no separate flag. The tag is ``epoch * 64 + layer + 1`` (``epoch`` a device
+    no separate flag. The tag is `epoch * 64 + layer + 1` (`epoch` a device
     counter bumped once a step): a pair from an earlier layer or step never
     carries a live tag, and nothing is cleared between launches."""
 
@@ -414,7 +414,7 @@ class Mailbox:
         )
 
     def poll(self, specs, batch=POLL_MAX):
-        """Batched poll of ``specs`` = [(base, pair index, npairs in {1, 2})]: all
+        """Batched poll of `specs` = [(base, pair index, npairs in {1, 2})]: all
         re-loaded while any tag is stale. Returns the value words."""
         if const_expr(len(specs) == 0):
             return []
@@ -458,7 +458,7 @@ LOAD_BATCH = 4
 
 @traced
 def batched_rounds(tid, n, load, use, batch=LOAD_BATCH):
-    """A CTA's strided loop over v = tid + THREADS i < n: ``batch`` rounds' loads
+    """A CTA's strided loop over v = tid + THREADS i < n: `batch` rounds' loads
     issued before their uses; a round past n loads element n - 1, uses nothing."""
     rounds = -(-n // THREADS)
     for b0 in range_constexpr(0, rounds, batch):
@@ -485,7 +485,7 @@ def memrealtime():
 @traced
 def stamp(c, point):
     """A timeline build's stamp: thread 0 of the CTA stores the clock at
-    ``point`` (``c["tl"]`` [BLOCKS, points] i64; None: not a timeline build)."""
+    `point` (`c["tl"]` [BLOCKS, points] i64; None: not a timeline build)."""
     if const_expr(c.get("tl") is None):
         return
     if c["tid"] == 0:

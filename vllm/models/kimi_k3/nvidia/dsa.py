@@ -3,12 +3,12 @@
 """Kimi K3.1 DSA (DeepSeek Sparse Attention) for the kimi_k3 stack.
 
 The DSA indexer uses the native upstream facilities
-(``DeepseekV32IndexerCache`` + ``torch.ops.vllm.sparse_attn_indexer``); the
-sparse MLA layers go through ``MultiHeadLatentAttentionWrapper`` with
-``MLAModules(is_sparse=True)``. Checkpoints name indexer weights
-``self_attn.indexer.{wq_b,wk,weights_proj,k_norm}``; the module tree keeps
-``self_attn.dsa_indexer.*``; load_weights renames into it and stacks ``wk``
-and ``weights_proj`` into the merged ``wkv_index``.
+(`DeepseekV32IndexerCache` + `torch.ops.vllm.sparse_attn_indexer`); the
+sparse MLA layers go through `MultiHeadLatentAttentionWrapper` with
+`MLAModules(is_sparse=True)`. Checkpoints name indexer weights
+`self_attn.indexer.{wq_b,wk,weights_proj,k_norm}`; the module tree keeps
+`self_attn.dsa_indexer.*`; load_weights renames into it and stacks `wk`
+and `weights_proj` into the merged `wkv_index`.
 """
 
 import math
@@ -36,6 +36,7 @@ from vllm.model_executor.layers.mla import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sparse_attn_indexer import dcp_shardq_context
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.models.kimi_k3.common.dsa_cache import (
     KimiK3IndexerCache,
@@ -67,6 +68,10 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 logger = init_logger(__name__)
 
@@ -80,11 +85,11 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
 class KimiK3DSAIndexerKNorm(nn.Module):
     """Bias-full fp32 LayerNorm for the DSA indexer shared key.
 
-    ``F.layer_norm(x.float(), (dim,), weight.float(), bias.float(),
-    eps).type_as(x)`` -- fp32 compute with a cast back to the input dtype.
+    `F.layer_norm(x.float(), (dim,), weight.float(), bias.float(),
+    eps).type_as(x)` -- fp32 compute with a cast back to the input dtype.
     weight/bias are stored in fp32 directly (numerically equivalent to
     casting per forward), keeping only the input/output dtype casts.
-    Selected via ``dsa_config.index_k_norm_type == "layernorm"``; legacy
+    Selected via `dsa_config.index_k_norm_type == "layernorm"`; legacy
     checkpoints keep the RMSNorm path untouched.
     """
 
@@ -102,10 +107,10 @@ class KimiK3DSAIndexerKNorm(nn.Module):
 
 
 class KimiK3DSAIndexer(nn.Module):
-    """wq / wkv indexer projections + native ``DeepseekV32IndexerCache``.
+    """wq / wkv indexer projections + native `DeepseekV32IndexerCache`.
 
     Forward quantizes the indexer query, folds the scales into the per-head
-    weights and drives ``torch.ops.vllm.sparse_attn_indexer`` directly (the
+    weights and drives `torch.ops.vllm.sparse_attn_indexer` directly (the
     upstream deepseek_v2.Indexer pattern).
     """
 
@@ -290,7 +295,11 @@ class KimiK3DSAIndexer(nn.Module):
         prefill = getattr(attn_metadata.get(self.k_cache.prefix), "prefill", None)
         if prefill is None:
             return None
-        return prefill.shardq_gather_indices
+        if prefill.shardq_gather_indices is not None:
+            return prefill.shardq_gather_indices
+        # Under DCP the MLA layer's gathered context plans the tokens.
+        dcp_shardq = dcp_shardq_context(forward_context, self.k_cache.prefix)
+        return None if dcp_shardq is None else dcp_shardq[1].gather_indices
 
     def _fused_k_insert(self, index_k: torch.Tensor, num_tokens: int) -> None:
         attn_metadata = get_forward_context().attn_metadata
@@ -364,8 +373,8 @@ class KimiK3DSAIndexer(nn.Module):
         index_weights: torch.Tensor,
         index_k: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Top-k of the current rows into ``topk_indices_buffer``; ``index_k`` is
-        None when the key was already inserted (``use_fused_k_insert``)."""
+        """Top-k of the current rows into `topk_indices_buffer`; `index_k` is
+        None when the key was already inserted (`use_fused_k_insert`)."""
         weight_scale = self.index_softmax_scale * self.indexer_weight_scale
         q_scale: torch.Tensor | None = None
         if self.use_fp4_cache:
@@ -413,7 +422,7 @@ class KimiK3DSAAttention(nn.Module):
     """Kimi K3.1 DSA (DeepSeek Sparse Attention) inference path.
 
     Same MLA projections as the dense Kimi-K3 MLA path, plus the DSA indexer
-    wired through ``MLAModules(is_sparse=True)`` so the FlashMLA sparse
+    wired through `MLAModules(is_sparse=True)` so the FlashMLA sparse
     backend consumes the top-k indices.
     """
 
@@ -520,16 +529,12 @@ class KimiK3DSAAttention(nn.Module):
         rope_parameters: dict = dict(getattr(config, "rope_parameters", None) or {})
         if "rope_theta" not in rope_parameters:
             rope_parameters["rope_theta"] = 10000.0
-        rope_scaling = (
-            rope_parameters
-            if rope_parameters.get("rope_type") not in (None, "default")
-            else None
-        )
+        is_scaled_rope = rope_parameters.get("rope_type") not in (None, "default")
         self.use_nope = bool(config.mla_use_nope)
         if self.use_nope:
             self.rotary_emb = None
         else:
-            if rope_scaling:
+            if is_scaled_rope:
                 rope_parameters["rope_type"] = "deepseek_yarn"
             self.rotary_emb = get_rope(
                 qk_rope_head_dim,
@@ -537,8 +542,8 @@ class KimiK3DSAAttention(nn.Module):
                 is_neox_style=False,
                 rope_parameters=rope_parameters,
             )
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
+        if is_scaled_rope:
+            mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
             scaling_factor = rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
@@ -649,6 +654,10 @@ class KimiK3DSAAttention(nn.Module):
             indexer_rotary_emb=self.rotary_emb,
             is_sparse=True,
             topk_indices_buffer=self.topk_indices_buffer,
+            index_group_builder=SparseMLAIndexGroupBuilder(
+                self.topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            ),
         )
         self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,
@@ -675,6 +684,9 @@ class KimiK3DSAAttention(nn.Module):
         # its cache follows the MLA layer's split here.
         if self.mla_attn.mla_attn.use_shardq:
             indexer.k_cache.use_shardq = True
+            # Under DCP the indexer gathers the MLA layer's context too.
+            indexer.k_cache.shardq_layer_name = self.mla_attn.mla_attn.layer_name
+            self.mla_attn.mla_attn.shardq_index_entry_bytes = indexer.k_cache.head_dim
 
         offload = vllm_config.offload_config
         self.weights_offloaded = (
@@ -687,7 +699,7 @@ class KimiK3DSAAttention(nn.Module):
 
     def pack_projections(self) -> None:
         """Enable the fused forward (as DeepseekV32Attention): pack
-        ``[q_a | kv_a | wk | weights_proj]`` and ``[q_b | wq_index]`` into one
+        `[q_a | kv_a | wk | weights_proj]` and `[q_b | wq_index]` into one
         weight each, the linears becoming views. Other configurations keep the
         wrapper forward."""
         if self._packed is not None:

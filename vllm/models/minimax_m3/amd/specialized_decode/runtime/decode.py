@@ -35,7 +35,7 @@ def tp_agree(ok: bool) -> bool:
     return tp_agree(ok, get_tp_group().cpu_group)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Step:
     first_layer: int
     kernels: tuple[LayerKernel | None, ...]
@@ -130,7 +130,7 @@ class SpecializedDecode:
         positions: torch.Tensor,
         intermediate_tensors: object | None,
     ) -> Step | None:
-        """Mono for a plain-decode step of at most ``max_rows`` rows, eager or
+        """Mono for a plain-decode step of at most `max_rows` rows, eager or
         inside a FULL graph capture (padded rows are inert in the kernel);
         stock otherwise. Every predicate reads metadata every TP rank holds
         alike."""

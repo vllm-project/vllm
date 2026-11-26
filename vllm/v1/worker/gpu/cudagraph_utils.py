@@ -236,9 +236,9 @@ class CudaGraphManager:
     def _build_lora_dispatch_map(self) -> tuple[dict[int, int], int]:
         """Precompute actual num_active_loras -> effective captured case.
 
-        Mirrors the num_tokens candidate expansion in ``_init_candidates``:
+        Mirrors the num_tokens candidate expansion in `_init_candidates`:
         every possible active-LoRA count is mapped ahead of time to the
-        smallest captured case that can serve it, so ``dispatch`` is a plain
+        smallest captured case that can serve it, so `dispatch` is a plain
         dict lookup instead of a per-call bisect.
         """
         captured_with_lora = sorted(c for c in self.lora_capture_cases if c > 0)
@@ -295,13 +295,20 @@ class CudaGraphManager:
         prefill_sizes = sorted(
             compilation_config.prefill_cudagraph_capture_token_sizes or []
         )
+        # A batch never holds more than max_num_reqs * max_model_len tokens.
+        max_num_tokens = self.max_num_reqs * self.vllm_config.model_config.max_model_len
+        if prefill_sizes and prefill_sizes[-1] > max_num_tokens:
+            logger.warning(
+                "Dropping %s from CUDA graph capture sizes: above "
+                "max_num_seqs * max_model_len = %d.",
+                [n for n in prefill_sizes if n > max_num_tokens],
+                max_num_tokens,
+            )
+            prefill_sizes = [n for n in prefill_sizes if n <= max_num_tokens]
         decode_sizes = self.decode_request_sizes
         if decode_sizes is None:
             decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
         decode_sizes = decode_sizes or []
-        max_decode_tokens = (
-            self.max_num_reqs * self.vllm_config.uniform_decode_query_len
-        )
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
@@ -357,11 +364,7 @@ class CudaGraphManager:
         for num_tokens, num_active_loras in product(
             prefill_sizes, self.lora_capture_cases
         ):
-            # recoverSSM cannot capture a dummy query wider than its workspace.
-            if mixed_mode and (
-                not self.vllm_config.cache_config.use_kda_recoverssm
-                or num_tokens <= max_decode_tokens
-            ):
+            if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
                 # For breakable PW graphs, break-point kernels read the real batch
@@ -534,7 +537,7 @@ class CudaGraphManager:
                                 graph, pool, stream=self._capture_stream(desc)
                             ),
                         ):
-                            forward_fn(CUDAGraphMode.NONE)
+                            forward_fn(CUDAGraphMode.FULL)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
                             # forks copy_stream, but wait_prefetch only happens in
@@ -621,7 +624,10 @@ class CudaGraphManager:
     ) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableCUDAGraphWrapper(
-                model, self.vllm_config, key_fn=key_fn
+                model,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.PIECEWISE,
+                key_fn=key_fn,
             )
 
     def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
@@ -694,6 +700,10 @@ class ModelCudaGraphManager(CudaGraphManager):
             (d.num_tokens for descs in self._capture_descs.values() for d in descs),
             default=0,
         )
+        model_config = self.vllm_config.model_config
+        uses_inputs_embeds = (
+            model_config.supports_multimodal_inputs or model_config.enable_prompt_embeds
+        )
 
         def persistent_like(x: torch.Tensor) -> torch.Tensor:
             return x.new_empty((max(max_tokens, x.shape[0]), *x.shape[1:]))
@@ -701,10 +711,14 @@ class ModelCudaGraphManager(CudaGraphManager):
         def store_capture_output(num_tokens: int, model_output: Any) -> None:
             """Copy outputs to persistent buffers, allocating on first use."""
             if self.is_last_pp_rank:
-                # Last PP rank (common case).
-                if self.use_aux_hidden_state_outputs:
+                # Last PP rank (common case). Under PP it may take no aux
+                # hidden states itself and return a bare tensor.
+                if isinstance(model_output, tuple):
                     hidden_states, aux_hidden_states = model_output
                 else:
+                    assert not (
+                        self.use_aux_hidden_state_outputs and self.is_first_pp_rank
+                    ), "The model returned no aux hidden states."
                     hidden_states = model_output
                     aux_hidden_states = []
                 if self.hidden_states is None:
@@ -746,9 +760,17 @@ class ModelCudaGraphManager(CudaGraphManager):
                 else None
             )
 
+            input_ids: torch.Tensor | None = input_buffers.input_ids[:num_tokens]
+            inputs_embeds: torch.Tensor | None = None
+            if uses_inputs_embeds and self.is_first_pp_rank:
+                inputs_embeds = model_state.dummy_inputs_embeds(num_tokens)
+                if inputs_embeds is not None and not requires_raw_input_tokens(model):
+                    input_ids = None
+
             model_inputs = {
-                "input_ids": input_buffers.input_ids[:num_tokens],
+                "input_ids": input_ids,
                 "positions": input_buffers.positions[:num_tokens],
+                "inputs_embeds": inputs_embeds,
                 "intermediate_tensors": None,
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
@@ -770,7 +792,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model_state,
                     block_tables,
                     input_block_tables,
-                    kv_cache_config,
                 )
                 ubatch_state = self.ubatch_runner.prepare(
                     input_batch,
@@ -789,6 +810,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                     assert cg_mode != CUDAGraphMode.PIECEWISE, (
                         "DBO does not support PIECEWISE cudagraphs"
                     )
+                    for context in ubatch_state.forward_contexts:
+                        context.cudagraph_runtime_mode = cg_mode
                     store_capture_output(num_tokens, finish())
 
                 return ubatch_forward_fn
@@ -868,7 +891,6 @@ def set_dcp_capture_context(
     model_state: ModelState,
     block_tables: BlockTables,
     input_block_tables: Sequence[torch.Tensor],
-    kv_cache_config: KVCacheConfig,
 ) -> None:
     # Capture FULL graphs with KV context so a host-side skip of DCP context
     # attention is not baked into the graph.
@@ -878,7 +900,9 @@ def set_dcp_capture_context(
         input_batch,
         block_tables,
         block_tables.cp_size * block_tables.cp_interleave,
-        kv_cache_config.num_blocks,
+        # Replays read the real block tables, so the context can sit in the
+        # null block: the one an extensible KV cache keeps mapped for capture.
+        1,
         model_state.max_model_len,
         input_block_tables=input_block_tables,
     )
@@ -928,7 +952,6 @@ def prepare_inputs_to_capture(
                 model_state,
                 block_tables,
                 input_block_tables,
-                kv_cache_config,
             )
         input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
             input_buffers.dcp_local_seq_lens,
@@ -991,8 +1014,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     """Estimate the GPU memory needed for CUDA graph capture.
 
     Called during memory profiling, *before* the real KV cache is allocated,
-    so that ``Worker.determine_available_memory`` can reserve headroom for
-    graph capture. Bootstraps a minimal KV cache, runs ``capture_model()``
+    so that `Worker.determine_available_memory` can reserve headroom for
+    graph capture. Bootstraps a minimal KV cache, runs `capture_model()`
     once, then releases everything so the real init/capture path starts clean.
 
     FULL graphs bake in KV cache pointers, so only the largest few are
@@ -1112,10 +1135,9 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
-    kv_cache_spec = runner.get_kv_cache_spec()
     builder = get_kv_cache_config_builder(runner.vllm_config)
     kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, runner.vllm_config, kv_cache_spec
+        builder, runner.vllm_config, runner.get_kv_cache_layer_configs()
     )
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
@@ -1132,18 +1154,10 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
 
 def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     """Release the profiling KV cache and captured graphs while keeping model
-    weights, so the real ``initialize_kv_cache`` starts from a clean slate."""
+    weights, so the real `initialize_kv_cache` starts from a clean slate."""
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
-    # Invalidate the align-mode Mamba group metadata cached from the
-    # profiling KVCacheConfig: the real (e.g. PP-projected) config may
-    # place Mamba layers into a different group layout, so it must be
-    # re-derived from the real config.
-    if hasattr(runner.model_state, "_mamba_group_ids"):
-        runner.model_state._mamba_group_ids = []
-    if hasattr(runner.model_state, "_mamba_spec"):
-        runner.model_state._mamba_spec = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):

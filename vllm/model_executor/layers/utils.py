@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
+    is_flashinfer_bf16_gemm_supported,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
@@ -49,17 +50,20 @@ def apply_penalties(
     frequency_penalties: torch.Tensor,
     repetition_penalties: torch.Tensor,
 ) -> torch.Tensor:
-    """Applies penalties in place to the logits tensor
-    logits : The input logits tensor of shape [num_seqs, vocab_size]
-    prompt_tokens_tensor: A tensor containing the prompt tokens. The prompts
-        are padded to the maximum prompt length within the batch using
-        `vocab_size` as the padding value. The value `vocab_size` is used
-        for padding because it does not correspond to any valid token ID
-        in the vocabulary.
-    output_tokens_tensor: The output tokens tensor.
-    presence_penalties: The presence penalties of shape (num_seqs, )
-    frequency_penalties: The frequency penalties of shape (num_seqs, )
-    repetition_penalties: The repetition penalties of shape (num_seqs, )
+    """Applies penalties in place to the logits tensor.
+
+    Args:
+        logits: The input logits tensor of shape [num_seqs, vocab_size].
+        prompt_tokens_tensor: A tensor containing the prompt tokens. The prompts
+            are padded to the maximum prompt length within the batch using
+            `vocab_size` as the padding value. The value `vocab_size` is used
+            for padding because it does not correspond to any valid token ID
+            in the vocabulary.
+        output_tokens_tensor: The output tokens tensor.
+        presence_penalties: The presence penalties of shape (num_seqs, ).
+        frequency_penalties: The frequency penalties of shape (num_seqs, ).
+        repetition_penalties: The repetition penalties of shape (num_seqs, ).
+
     """
     num_seqs, vocab_size = logits.shape
     _, prompt_mask = get_token_bin_counts_and_mask(
@@ -95,22 +99,19 @@ _FlashInferBf16RuntimeCheck = Callable[
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FlashInferBf16Backend:
     flashinfer_backend: str
     is_supported: Callable[[], bool]
     can_implement: _FlashInferBf16RuntimeCheck
 
 
-def _can_use_flashinfer_cutedsl_bf16(
+def _bf16_mm_shape_supported(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> bool:
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ):
-        return False
+    """Shape and layout constraints shared by every FlashInfer BF16 mm backend."""
     if x.ndim < 1 or weight.ndim != 2:
         return False
     if (
@@ -146,11 +147,57 @@ def _can_use_flashinfer_cutedsl_bf16(
     )
 
 
+# FlashInfer's cute-dsl BF16 mm only has low-M kernels; larger M goes to cuBLAS.
+_FLASHINFER_CUTEDSL_BF16_MAX_M = 32
+
+
+def _can_use_flashinfer_cutedsl_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        return False
+    return (
+        _bf16_mm_shape_supported(x, weight, bias)
+        and x.numel() <= _FLASHINFER_CUTEDSL_BF16_MAX_M * x.shape[-1]
+    )
+
+
+# Output width below which flashinfer beats cuBLAS (swept on GB10, K=5120);
+# by N=512 flashinfer is 2-4x slower.
+_FLASHINFER_BF16_MAX_N = 128
+
+
+def _can_use_flashinfer_cudnn_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    # sm_10x showed no benefit in the same regime (measured 0.90-1.13x).
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ):
+        return False
+    if weight.shape[0] > _FLASHINFER_BF16_MAX_N:
+        return False
+    return _bf16_mm_shape_supported(x, weight, bias)
+
+
 _FLASHINFER_BF16_BACKENDS = {
     "flashinfer_cutedsl": _FlashInferBf16Backend(
         flashinfer_backend="cute-dsl",
         is_supported=is_flashinfer_cutedsl_bf16_gemm_supported,
         can_implement=_can_use_flashinfer_cutedsl_bf16,
+    ),
+    # cute-dsl is sm_10x only, but the cudnn backend also covers sm_12x, where
+    # cuBLAS drops to a 16x16-tiled kernel for narrow N at 2-4 tokens.
+    "flashinfer_cudnn": _FlashInferBf16Backend(
+        flashinfer_backend="cudnn",
+        is_supported=lambda: is_flashinfer_bf16_gemm_supported("cudnn"),
+        can_implement=_can_use_flashinfer_cudnn_bf16,
     ),
 }
 
@@ -298,7 +345,7 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
 # loads of a GEMM collide on the L2/MALL channel hash. Offsetting the stride by one
 # 128 B cache line dodges the collision and keeps each row cache-line aligned.
 def cache_aliasing_pad_elems(k: int, element_size: int) -> int:
-    """Row-stride pad, in elements, that stops an ``[n, k]`` weight aliasing on gfx11,
+    """Row-stride pad, in elements, that stops an `[n, k]` weight aliasing on gfx11,
     or 0 when the stride does not alias.
 
     Args:
@@ -318,7 +365,7 @@ def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
     """Offset a dense weight's row stride so it stops aliasing.
 
     Returns a view with the original shape whose row stride is one cache line
-    wider, or ``weight`` unchanged when the pad does not apply.
+    wider, or `weight` unchanged when the pad does not apply.
     """
     from vllm.platforms.rocm import on_gfx11
 
@@ -440,7 +487,7 @@ def rocm_unquantized_gemm_impl(
 
         return linear_batch_invariant(x, weight, bias)
 
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950, on_rdna4
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -452,6 +499,13 @@ def rocm_unquantized_gemm_impl(
 
     skinny_operands_compatible = weight.is_contiguous() and (
         bias is None or bias.is_contiguous()
+    )
+    swmmac_bias_compatible = bias is None or (
+        bias.dtype == x.dtype
+        and (
+            (bias.dim() == 1 and bias.shape[0] in (1, m))
+            or (bias.dim() == 2 and bias.shape[0] in (1, n) and bias.shape[1] in (1, m))
+        )
     )
 
     use_skinny_reduce_counting = (
@@ -477,6 +531,23 @@ def rocm_unquantized_gemm_impl(
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
+
+    use_skinny_n5to8 = (
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and on_rdna4()
+        and x.dtype in [torch.float16, torch.bfloat16]
+        and x.dtype == weight.dtype
+        and x.dim() == 2
+        and 5 <= n <= 8
+        and k % 32 == 0
+        and skinny_operands_compatible
+        and swmmac_bias_compatible
+    )
+
+    if use_skinny_n5to8:
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        out = ops.swmmac_gemm(x_view, weight, m, cu_count, bias)
+        return out.reshape(*x.shape[:-1], out.shape[-1])
 
     skinny_gemm_enabled = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
@@ -601,7 +672,7 @@ direct_register_custom_op(
 
 
 def maybe_use_skinny_gemm(layer: torch.nn.Module) -> None:
-    """Mark ``layer`` for the skinny GEMM if its weight shape has a plan."""
+    """Mark `layer` for the skinny GEMM if its weight shape has a plan."""
     from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
         get_skinny_gemm_plan,
     )
@@ -641,7 +712,7 @@ def cuda_unquantized_gemm(
 def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
     """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
 
-    wvSplitKrc partitions one per-device allocation into ``kWvSlots`` slots
+    wvSplitKrc partitions one per-device allocation into `kWvSlots` slots
     (csrc/rocm/skinny_gemms_wvsplitkrc.cu) and hands each stream one on first
     use, so that two streams never share the split-K partials and counters.
 

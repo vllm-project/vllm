@@ -150,8 +150,8 @@ def shard_sequence_parallel_mlp(
 ) -> bool:
     """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
 
-    Opt-in via ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT``; see :class:`KimiMLP` for
-    the trade-off and :mod:`vllm.envs` for when it is worth enabling.
+    Opt-in via `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT`; see `KimiMLP` for
+    the trade-off and `vllm.envs` for when it is worth enabling.
     """
     enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
     if not (use_sequence_parallel and eligible and enabled):
@@ -166,7 +166,7 @@ def can_shard_sequence_parallel_shared_expert(vllm_config: VllmConfig) -> bool:
     """Whether the active MoE backend preserves the SP shared-expert contract.
 
     MegaMoE invokes the shared expert directly. DeepEP v2 invokes it through
-    ``MoERunner``, but its EP combine returns the routed output in the local
+    `MoERunner`, but its EP combine returns the routed output in the local
     sequence-sharded layout, so the shared expert can use the same
     all-gather/partial-GEMM/reduce-scatter implementation.
     """
@@ -205,13 +205,13 @@ class KimiMLP(nn.Module):
     """Dense / shared-expert MLP, optionally TP-sharded under sequence parallel.
 
     Under sequence parallelism each rank owns a distinct slice of the tokens, so
-    by default both projections are replicated (``disable_tp``) and the block
+    by default both projections are replicated (`disable_tp`) and the block
     needs no collective. That makes every rank stream the entire weight to serve
     its own token shard.
 
-    With ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT`` the weights are TP-sharded
+    With `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT` the weights are TP-sharded
     instead. A rank then holds only a slice of the intermediate dim, so it
-    cannot finish its own tokens alone: ``forward`` all-gathers the full token
+    cannot finish its own tokens alone: `forward` all-gathers the full token
     set, computes this rank's partial, and reduce-scatters. The reduce-scatter
     sums across TP and restores the sequence sharding in one collective, so the
     block still ends with one collective per direction.
@@ -456,7 +456,9 @@ class KimiMoE(nn.Module):
                 intermediate_size=shared_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                # MegaMoE adds the shared output locally, so without sequence
+                # parallelism (PP > 1) the TP-sharded partials must be reduced.
+                reduce_results=self.use_mega_moe and not use_sequence_parallel,
                 use_sequence_parallel=use_sequence_parallel,
                 # MegaMoE calls the shared expert directly. DeepEP v2 hands it
                 # to MoERunner, but preserves the local SP output layout needed
@@ -554,6 +556,7 @@ class KimiMoE(nn.Module):
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
+                intermediate_size_unpadded=moe_intermediate_size,
                 activation=config.hidden_act,
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -577,19 +580,11 @@ class KimiMoE(nn.Module):
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
-            w13_weight = getattr(self.experts, "w13_weight", None)
-            if w13_weight is None:
-                w13_weight = getattr(self.experts, "w13_weight_packed", None)
-            w2_weight = getattr(self.experts, "w2_weight", None)
-            if w2_weight is None:
-                w2_weight = getattr(self.experts, "w2_weight_packed", None)
-            if w13_weight is not None:
-                w13_weight.data.zero_()
-            if w2_weight is not None:
-                w2_weight.data.zero_()
-            self.experts.moe_config.intermediate_size_per_partition_unpadded = (
-                moe_intermediate_size // self.tp_size
-            )
+            # Zero what a direct reload zero-fills at begin (weights and scales,
+            # whatever their names), so a cold start matches a reload.
+            for param in self.experts.routed_experts.parameters(recurse=False):
+                if getattr(param, "fill_on_reload", False):
+                    param.data.zero_()
 
     def _maybe_overlap_router_and_down_proj(
         self, hidden_states: torch.Tensor
@@ -597,19 +592,19 @@ class KimiMoE(nn.Module):
         """Compute the routed-expert down projection alongside the router,
         overlapping them on separate CUDA streams when latent MoE is enabled.
 
-        The router gate and the down projection both read ``hidden_states``, so
+        The router gate and the down projection both read `hidden_states`, so
         the gate runs on the default stream and the down projection on the aux
-        stream, joined via ``maybe_execute_in_parallel``. For MegaMoE the
+        stream, joined via `maybe_execute_in_parallel`. For MegaMoE the
         grouped top-k selection consumes only the gate logits, so it also runs
         on the default stream and overlaps the down projection.
 
         Returns:
-            ``(routed_hidden_states, router_output, topk_ids)``.
-            ``routed_hidden_states`` is the down-projected latent (or the
-            original ``hidden_states`` when latent MoE is disabled). For MegaMoE
-            ``router_output`` holds the grouped top-k weights and ``topk_ids``
-            the selected experts; otherwise ``router_output`` holds the raw gate
-            logits and ``topk_ids`` is ``None``.
+            `(routed_hidden_states, router_output, topk_ids)`.
+            `routed_hidden_states` is the down-projected latent (or the
+            original `hidden_states` when latent MoE is disabled). For MegaMoE
+            `router_output` holds the grouped top-k weights and `topk_ids`
+            the selected experts; otherwise `router_output` holds the raw gate
+            logits and `topk_ids` is `None`.
 
         """
 
@@ -1161,7 +1156,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         pending_mlp_out: torch.Tensor | None,
         block_residual: torch.Tensor,
     ) -> torch.Tensor:
-        """Return the AttnRes stream after ``layer_idx``."""
+        """Return the AttnRes stream after `layer_idx`."""
         prefix = prefix_sum if pending_mlp_out is None else prefix_sum + pending_mlp_out
         if not (self._aux_attn_res_stream and self.use_attn_res):
             return prefix
@@ -1223,8 +1218,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 )
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
-
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
@@ -1323,7 +1316,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1704,7 +1696,7 @@ class KimiK3ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality in ("image", "image_embeds"):
             return "<|kimi_image_placeholder|>"
         raise ValueError(f"Unsupported modality: {modality}")
 
@@ -1817,16 +1809,6 @@ class KimiK3ForConditionalGeneration(
             ],
             out_hidden_size=self.hidden_size,
         )
-
-    def get_encoder_cudagraph_budget_range(
-        self, vllm_config: VllmConfig
-    ) -> tuple[int, int]:
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
-        )
-        return min_budget, max_budget
 
     @staticmethod
     def _get_grid_thws(mm_kwargs: dict[str, Any]) -> list[list[int]]:
@@ -2050,6 +2032,10 @@ class KimiK3ForConditionalGeneration(
         return media_features
 
     def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
+        if (image_embeds := kwargs.get("image_embeds")) is not None:
+            assert isinstance(image_embeds, torch.Tensor)
+            num_tokens = cast(torch.Tensor, kwargs["image_num_tokens"])
+            return image_embeds.split(num_tokens.flatten().tolist())
         media_input = self._parse_and_validate_media_input(**kwargs)
         if media_input is None:
             return None

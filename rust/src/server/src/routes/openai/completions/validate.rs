@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use serde_json::Value;
+
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
@@ -31,11 +33,11 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.suffix.is_some() {
-        bail_invalid_request!(param = "suffix", "suffix is not supported.");
-    }
-
-    if request.prompt_embeds.is_some() {
+    // Python's prompt-presence validator treats an empty `prompt_embeds` list
+    // like an absent one; lowering ignores it.
+    if (request.prompt_embeds.as_ref())
+        .is_some_and(|embeds| !matches!(embeds, Value::Array(embeds) if embeds.is_empty()))
+    {
         bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
     }
 
@@ -95,12 +97,6 @@ pub(super) fn validate_request_compat(
     if request.length_penalty.is_some_and(|penalty| penalty != 1.0) {
         bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
     }
-    if !request.spaces_between_special_tokens {
-        bail_invalid_request!(
-            param = "spaces_between_special_tokens",
-            "spaces_between_special_tokens is not supported."
-        );
-    }
     validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
 
     Ok(())
@@ -158,6 +154,17 @@ mod tests {
                 "{stream_options}"
             );
         }
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_spaces_between_special_tokens_false() {
+        let request = CompletionRequest {
+            spaces_between_special_tokens: false,
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
     }
 
     #[test]

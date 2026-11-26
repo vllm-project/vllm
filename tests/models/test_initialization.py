@@ -3,6 +3,7 @@
 
 import gc
 from collections.abc import Generator
+from contextlib import nullcontext
 from functools import partial
 from unittest.mock import patch
 
@@ -77,11 +78,11 @@ def cleanup_gpu_memory_between_tests() -> Generator[None, None, None]:
     """Reclaim GPU memory left over by each test's forked subprocess.
 
     These tests are known to leave behind GPU memory (see the comment at
-    ``gpu_memory_utilization=0.80`` below). Each parametrized case builds an
+    `gpu_memory_utilization=0.80` below). Each parametrized case builds an
     LLM in a forked subprocess whose VRAM is only reclaimed asynchronously
     when the subprocess exits, so the leftovers can OOM a later test in this
     module (observed with the heavier multimodal archs, e.g.
-    InternVLChatModel). Mirrors ``clean_gpu_memory_between_tests`` in the
+    InternVLChatModel). Mirrors `clean_gpu_memory_between_tests` in the
     top-level conftest, but unconditionally for this module.
     """
     yield
@@ -125,20 +126,20 @@ def can_initialize(
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v1(self, vllm_config):
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        layer_configs = self.model_executor.get_kv_cache_layer_configs()
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
-            [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
+            [lc for layers in layer_configs for lc in layers.values()],
         )
-        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, layer_configs)
         vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
         self.model_executor.set_kv_cache_layout(
             layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
         )
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
-            kv_cache_specs,
+            layer_configs,
             [10 * GiB_bytes],
             global_kv_cache_groups,
         )
@@ -147,7 +148,7 @@ def can_initialize(
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
             vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
+                g.block_size for g in kv_cache_groups
             )
 
         vllm_config.validate_block_size()
@@ -199,15 +200,53 @@ def can_initialize(
         ):
             pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
 
+    if model_arch in (
+        "Inkling2ForConditionalGeneration",
+        "Inkling2LoopForConditionalGeneration",
+        "Inkling2DSparkModel",
+    ):
+        from vllm.platforms import current_platform
+
+        if not (
+            current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(120)
+            )
+        ):
+            pytest.skip("Inkling2 requires Hopper or Blackwell")
+
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform
 
         if not (current_platform.is_cuda() or current_platform.is_rocm()):
             pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
+    from vllm.platforms import current_platform
+
+    # Flash runs on CUDA and on ROCm gfx950; other platforms must reject it.
+    initialization_result = nullcontext()
+    if model_arch in (
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+        "HYV4DFlyModel",
+    ):
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                initialization_result = pytest.raises(
+                    NotImplementedError, match="gfx950"
+                )
+        elif not current_platform.is_cuda():
+            initialization_result = pytest.raises(
+                NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA"
+            )
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
+        initialization_result,
     ):
         if requires_spawn_multiprocessing() or model_arch == "Glm5NextForCausalLM":
             # The EngineCore subprocess re-imports the class and does not
@@ -230,6 +269,12 @@ def can_initialize(
         kwargs = {}
         if not model_info.enable_prefix_caching:
             kwargs["enable_prefix_caching"] = False
+        if model_arch in (
+            "Glm5NextForCausalLM",
+            "Glm5NextForConditionalGeneration",
+            "Glm5NextMTPModel",
+        ):
+            kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
 
         LLM(
             model_info.default,
@@ -244,7 +289,7 @@ def can_initialize(
             speculative_config={
                 "model": model_info.speculative_model,
                 "method": model_info.speculative_method,
-                "num_speculative_tokens": 1,
+                "num_speculative_tokens": model_info.num_speculative_tokens,
             }
             if model_info.speculative_model
             else None,

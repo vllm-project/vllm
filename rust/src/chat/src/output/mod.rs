@@ -8,6 +8,7 @@ use futures::Stream;
 use trait_set::trait_set;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{RequestTimestamps, WeightVersionSpan};
 use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
@@ -55,18 +56,32 @@ pub(crate) enum AssistantEvent {
     Done {
         usage: ChatTokenUsage,
         timestamps: RequestTimestamps,
-        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+        first_content_token_ts: Option<f64>,
+        spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
-        /// Boxed, like `ec_transfer_params`, to keep the per-token variants of
-        /// this enum small.
         kv_transfer_params: Option<Box<serde_json::Value>>,
         /// Connector-specific encoder cache transfer parameters for
         /// disaggregated serving.
         ec_transfer_params: Option<Box<serde_json::Value>>,
         /// Weight-version spans over all generated token positions.
         weight_versions: Option<Vec<WeightVersionSpan>>,
+        /// Routed-expert rows for the whole request, when the engine returned
+        /// any.
+        routed_experts: Option<Box<WireNdArray>>,
     },
+}
+
+impl AssistantEvent {
+    /// Record the first batch that produces text, excluding reasoning and tools.
+    fn record_first_content_token(&self, timestamp: f64, first: &mut Option<f64>) {
+        if first.is_none()
+            && timestamp > 0.0
+            && matches!(self, Self::TextDelta { kind: AssistantBlockKind::Text, delta, .. } if !delta.is_empty())
+        {
+            *first = Some(timestamp);
+        }
+    }
 }
 
 /// Boxed stream of decoded text events coming from [`vllm_text`].

@@ -302,6 +302,36 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
     assert metadata_sync == metadata_async
 
 
+@pytest.mark.asyncio
+async def test_fetch_video_io_defaults_yield_to_media_io_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.multimodal.media import connector as connector_module
+
+    seen: list[dict] = []
+
+    class _RecordingVideoIO:
+        def __init__(self, image_io, **kwargs):
+            seen.append(kwargs)
+
+    monkeypatch.setattr(connector_module, "VideoMediaIO", _RecordingVideoIO)
+    connector = MediaConnector(media_io_kwargs={"video": {"max_frames": 16}})
+    monkeypatch.setattr(connector, "load_from_url", lambda *a, **k: None)
+
+    async def _load_async(*a, **k):
+        return None
+
+    monkeypatch.setattr(connector, "load_from_url_async", _load_async)
+    defaults = {"max_frames": 384, "min_frames": 4}
+
+    connector.fetch_video("data:video/mp4;base64,", video_io_defaults=defaults)
+    await connector.fetch_video_async(
+        "data:video/mp4;base64,", video_io_defaults=defaults
+    )
+
+    assert seen == [{"max_frames": 16, "min_frames": 4}] * 2
+
+
 @pytest.mark.flaky(reruns=3, reruns_delay=5)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
@@ -425,8 +455,8 @@ async def test_ssrf_bypass_backslash_in_url(local_asset_server):
     allowed_media_domains check (GHSA-v359-jj2v-j536).
 
     urllib3.parse_url() and aiohttp/yarl disagree on how to parse a
-    backslash before ``@``.  urllib3 treats ``\\`` as part of the path
-    (encoding it as ``%5C``), while yarl treats it as a userinfo
+    backslash before `@`.  urllib3 treats `\\` as part of the path
+    (encoding it as `%5C`), while yarl treats it as a userinfo
     separator, changing the effective host.  The fix normalises the URL
     through urllib3 *before* handing it to aiohttp so both layers agree.
     """

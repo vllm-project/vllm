@@ -53,7 +53,7 @@ def step5_dsa_warmup(worker: "Worker") -> None:
 
 
 def run_step5_scored_prefill_warmup(worker: "Worker", topk: int) -> bool:
-    """Run one mixed step whose prefill row scores more than ``topk`` regions."""
+    """Run one mixed step whose prefill row scores more than `topk` regions."""
     runner = worker.model_runner
     # One region past "select every region" (top-k x 8 tokens), plus the
     # decode token of the mixed step. The 16-token margin also covers one

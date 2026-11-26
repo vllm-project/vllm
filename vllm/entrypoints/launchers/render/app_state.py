@@ -26,10 +26,10 @@ async def init_render_app_state(
 ) -> None:
     """Initialise FastAPI app state for a CPU-only render server.
 
-    Unlike :func:`init_app_state` this function does not require an
-    :class:`~vllm.engine.protocol.EngineClient`; it bootstraps the
+    Unlike `init_app_state` this function does not require an
+    `EngineClient`; it bootstraps the
     preprocessing pipeline (renderer, input_processor)
-    directly from the :class:`~vllm.config.VllmConfig`.
+    directly from the `VllmConfig`.
     """
     served_model_names = args.served_model_name or [args.model]
     model_registry = OpenAIModelRegistry(
@@ -47,7 +47,9 @@ async def init_render_app_state(
 
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
-    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(
+        args, tokenizer_mode=vllm_config.model_config.tokenizer_mode
+    )
     state.tool_server = await init_tool_server(args)
 
     # The config-resolved reasoning parser carries both the CLI flag (merged
@@ -86,6 +88,7 @@ async def init_render_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
+        response_role=args.response_role,
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
@@ -106,6 +109,7 @@ async def init_render_app_state(
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
+        max_tokenize_tokens=args.max_tokenize_tokens,
     )
 
     init_render_state(

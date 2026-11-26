@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4 parser: ``<think>``/``</think>``
+"""DeepSeek V4 parser: `<think>`/`</think>`
 reasoning plus DSML tool calls in a single state machine.
 
 DeepSeek V4 output format::
@@ -63,10 +63,10 @@ def _param_patterns(
 ) -> tuple[re.Pattern, re.Pattern]:
     """Complete and trailing-partial parameter regexes for one DSML dialect.
 
-    The ``string`` attribute is optional: the model sometimes omits it, and
+    The `string` attribute is optional: the model sometimes omits it, and
     dropping such a parameter hands the client a tool call with no arguments.
     The trailing-partial regex captures the open value up to the end of the
-    text; ``_match_open_param`` holds back an unfinished next parameter tag
+    text; `_match_open_param` holds back an unfinished next parameter tag
     so a streamed string value never includes it.
     """
     start, close = re.escape(param_start), re.escape(param_close)
@@ -85,8 +85,8 @@ def _match_open_param(
 ) -> tuple[str, str | None, str, bool] | None:
     """Return (name, is_str, value, held_back) for the trailing open param.
 
-    An unfinished next parameter tag (``param_start`` with no ``>`` after it)
-    is cut from the value; ``held_back`` reports whether that happened.
+    An unfinished next parameter tag (`param_start` with no `>` after it)
+    is cut from the value; `held_back` reports whether that happened.
     """
     pm = partial_param_re.search(raw_args, pos)
     if pm is None:
@@ -137,6 +137,14 @@ def _dsml_arg_converter(
     return json.dumps(params, ensure_ascii=False)
 
 
+_JSON_VALUE_START = frozenset('{["-0123456789tfnNI')
+
+
+def _cannot_start_json(value: str) -> bool:
+    stripped = value.lstrip(" \t\r\n")
+    return bool(stripped) and stripped[0] not in _JSON_VALUE_START
+
+
 def _dsml_arg_value_extender(
     raw_args: str,
     *,
@@ -147,8 +155,11 @@ def _dsml_arg_value_extender(
 ) -> ArgValueExtender | None:
     # ``arg_structural_chars`` skips every delta without ``>``, so a long
     # string value would wait for its closing tag. Extend the open trailing
-    # ``string="true"`` value instead. The lexer can flush a held partial
-    # tag as text, so keep a tail to catch a tag split across deltas.
+    # value instead. A non-string value that cannot start JSON never parses,
+    # so the converter already drops it until its tag closes: extend it with
+    # no output rather than reconverting on every ``>``. The lexer can flush
+    # a held partial tag as text, so keep a tail to catch a tag split across
+    # deltas.
     names = set()
     last_end = 0
     for m in param_re.finditer(raw_args):
@@ -157,8 +168,11 @@ def _dsml_arg_value_extender(
     open_param = _match_open_param(raw_args, last_end, partial_param_re, param_start)
     if open_param is None:
         return None
-    name, is_str, _, held_back = open_param
-    if is_str != "true" or name in names or held_back:
+    name, is_str, value, held_back = open_param
+    if name in names or held_back:
+        return None
+    streams = is_str == "true"
+    if not streams and not _cannot_start_json(value):
         return None
 
     keep = max(len(param_start), len(param_close)) - 1
@@ -170,6 +184,8 @@ def _dsml_arg_value_extender(
         if param_start in text or param_close in text:
             return None
         tail = text[-keep:]
+        if not streams:
+            return ""
         return json.dumps(delta, ensure_ascii=False)[1:-1]
 
     return extend

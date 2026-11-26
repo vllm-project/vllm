@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax M3 MTP (multi-token prediction) draft model -- ROCm/AMD variant.
 
-Byte-identical to ``nvidia/mtp.py`` except this file lives under ``amd/`` so its
-``from .model import ...`` resolves to the self-contained AMD model (native Gemma
+Byte-identical to `nvidia/mtp.py` except this file lives under `amd/` so its
+`from .model import ...` resolves to the self-contained AMD model (native Gemma
 RMSNorm, native MXFP8 MoE, Triton sparse attention). The MTP logic is
-platform-agnostic. (Mirrors ``vllm.models.deepseek_v4.amd.mtp``.)
+platform-agnostic. (Mirrors `vllm.models.deepseek_v4.amd.mtp`.)
 
-TODO(future, separate diff): since this is byte-identical to ``nvidia/mtp.py``,
-both copies could be consolidated into a single ``common/mtp.py`` that dispatches
-its model import (``..amd.model`` vs ``..nvidia.model``) via
-``current_platform.is_rocm()`` -- the same dispatch ``minimax_m3/__init__.py``
-uses. This was prototyped and VERIFIED working (``MiniMaxM3MTP`` resolves through
-``common.mtp`` to the AMD decoder layer / RMSNorm on ROCm), but it deletes the
-upstream ``nvidia/mtp.py`` and touches the NVIDIA load path, so it is deferred to
+TODO(future, separate diff): since this is byte-identical to `nvidia/mtp.py`,
+both copies could be consolidated into a single `common/mtp.py` that dispatches
+its model import (`..amd.model` vs `..nvidia.model`) via
+`current_platform.is_rocm()` -- the same dispatch `minimax_m3/__init__.py`
+uses. This was prototyped and VERIFIED working (`MiniMaxM3MTP` resolves through
+`common.mtp` to the AMD decoder layer / RMSNorm on ROCm), but it deletes the
+upstream `nvidia/mtp.py` and touches the NVIDIA load path, so it is deferred to
 a dedicated refactor diff to keep this AMD-enablement change NVIDIA-untouched.
 """
 
@@ -25,7 +25,10 @@ import torch.nn as nn
 from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    in_single_pp_stage,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -266,7 +269,7 @@ class MiniMaxM3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        self._tracks_own_embed = get_pp_group().world_size > 1
+        self._tracks_own_embed = in_single_pp_stage()
         if self._tracks_own_embed:
             # Preserve embeddings from loaders that bypass load_weights.
             self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"

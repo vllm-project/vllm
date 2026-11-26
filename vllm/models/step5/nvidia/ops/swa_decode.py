@@ -245,10 +245,10 @@ def swa_decode_gated(
     splits: int,
     pack: int = 1,
 ) -> None:
-    """Decode rows of ``query_len`` tokens per request over a causal window.
+    """Decode rows of `query_len` tokens per request over a causal window.
 
-    ``query``/``output``: [tokens, heads, 192]; ``key_cache``/``value_cache``:
-    [pages, block, kv_heads, 192] views; ``gate``: [tokens, heads]. Rows of
+    `query`/`output`: [tokens, heads, 192]; `key_cache`/`value_cache`:
+    [pages, block, kv_heads, 192] views; `gate`: [tokens, heads]. Rows of
     requests with no visible keys (padding) produce zeros.
     """
     tokens, heads, dim = query.shape

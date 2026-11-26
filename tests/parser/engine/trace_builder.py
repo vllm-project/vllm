@@ -43,6 +43,7 @@ from vllm.parser.engine.registered_adapters import (
     MiMoParser,
     MinimaxM2Parser,
     MinimaxM3Parser,
+    MuseParser,
     NemotronV3Parser,
     Plamo3Parser,
     Qwen3Parser,
@@ -55,13 +56,13 @@ from vllm.parser.engine.registered_adapters import (
 # ── Data structures ──────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ToolCallSpec:
     name: str
     arguments: dict[str, Any]
 
 
-@dataclass
+@dataclass(slots=True)
 class Scenario:
     id: str
     description: str
@@ -195,7 +196,7 @@ def _tokenize(
 ) -> list[tuple[int, str]]:
     """Build token list from segments.
 
-    Each segment is ``(text, is_special)``.  Special segments use vocab
+    Each segment is `(text, is_special)`.  Special segments use vocab
     IDs; content segments are word-split with sequential IDs.
     """
     tokens: list[tuple[int, str]] = []
@@ -467,7 +468,7 @@ def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
 
 
 def _build_zaya(scenario: Scenario, validate: bool = True) -> Sample:
-    """ZAYA1: the Qwen3 grammar with ``<zyphra_tool_call>`` tags."""
+    """ZAYA1: the Qwen3 grammar with `<zyphra_tool_call>` tags."""
     sample = _build_qwen3(scenario, name="zaya", validate=False)
     rename = {"<tool_call>": ZayaParser.TOOL_START, "</tool_call>": ZayaParser.TOOL_END}
     sample = replace(
@@ -564,7 +565,7 @@ _MINIMAX_M3_NS = "]<]minimax[>["
 
 
 def _minimax_m3_value(value: Any) -> str:
-    """Render a value the way the M3 chat template's ``to_xml`` does."""
+    """Render a value the way the M3 chat template's `to_xml` does."""
     ns = _MINIMAX_M3_NS
     if isinstance(value, dict):
         return "".join(
@@ -727,7 +728,7 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
 
 def _build_granite_thinking(scenario: Scenario, validate: bool = True) -> Sample:
     """Granite 4.2: the Nemotron V3 grammar plus leading-newline stripping on
-    content after ``</think>``."""
+    content after `</think>`."""
     sample = _build_qwen3(
         scenario,
         name="granite_thinking_parser",
@@ -1147,7 +1148,7 @@ def _inkling_block(
     body: str,
 ) -> None:
     """Append one Inkling content block; blocks after the first start with
-    the ``<|message_model|>`` role token (the first block continues the
+    the `<|message_model|>` role token (the first block continues the
     generation prompt directly)."""
     if segs:
         segs.append(("<|message_model|>", True))
@@ -1195,6 +1196,86 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
     )
     if validate:
         _validate_sample(sample, InklingParser)
+    return sample
+
+
+# ── Muse Spark (recipient-routed messages, ATEM tool calls) ──────────
+
+_MUSE_VOCAB: dict[str, int] = {
+    "<|eom|>": 200007,
+    "<|eot|>": 200008,
+    "<|start|>": 200022,
+    "<|message|>": 200023,
+}
+
+
+def _muse_atem_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _muse_message(
+    segs: list[tuple[str, bool]], recipient: str, body: str, end: str
+) -> None:
+    if segs:
+        segs.extend([("<|start|>", True), ("assistant", False)])
+    segs.extend([(f" to={recipient}", False), ("<|message|>", True)])
+    if body:
+        segs.append((body, False))
+    segs.append((end, True))
+
+
+def _muse_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    tool_calls = scenario.tool_calls
+    if scenario.reasoning is not None:
+        _muse_message(segs, "self", scenario.reasoning, "<|eom|>")
+    if tool_calls is not None and not tool_calls:
+        _muse_message(
+            segs,
+            "functions",
+            "<atem:function_calls>\n</atem:function_calls>",
+            "<|eom|>",
+        )
+    if scenario.content is not None:
+        if tool_calls:
+            _muse_message(segs, "commentary", scenario.content, "<|eom|>")
+        else:
+            _muse_message(segs, "user", scenario.content, "<|eot|>")
+    for i, tc in enumerate(tool_calls or []):
+        parameters = "".join(
+            f'<atem:parameter name="{key}">{_muse_atem_value(value)}</atem:parameter>\n'
+            for key, value in tc.arguments.items()
+        )
+        body = (
+            f'<atem:function_calls>\n<atem:invoke name="{tc.name}">\n'
+            f"{parameters}</atem:invoke>\n</atem:function_calls>"
+        )
+        end = "<|eot|>" if i == len(tool_calls) - 1 else "<|eom|>"
+        _muse_message(segs, tc.name, body, end)
+    return segs
+
+
+def _build_muse(scenario: Scenario, validate: bool = True) -> Sample:
+    prompt_token_ids = None
+    if scenario.after_tool_response:
+        prompt_token_ids = [_MUSE_VOCAB["<|eot|>"], _MUSE_VOCAB["<|start|>"]]
+    sample = _make_sample(
+        sample_id=f"muse-{scenario.id}",
+        description=scenario.description,
+        vocab=_MUSE_VOCAB,
+        segments=_muse_segments(scenario),
+        expected_reasoning=scenario.reasoning,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+        prompt_token_ids=prompt_token_ids,
+    )
+    if validate:
+        _validate_sample(sample, MuseParser)
     return sample
 
 
@@ -1403,6 +1484,7 @@ _BUILDERS: dict[str, Any] = {
     "plamo3": _build_plamo3,
     "ripple": _build_ripple,
     "zaya": _build_zaya,
+    "muse": _build_muse,
 }
 
 

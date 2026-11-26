@@ -45,7 +45,7 @@ def _embed(fill: float | None = None) -> nn.Embedding:
 
 @pytest.mark.parametrize("draft_embed", ["loaded", "unset"])
 def test_drafter_without_own_embedding_gets_the_targets(monkeypatch, draft_embed):
-    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: True)
     target_embed = _embed()
     draft_inner = _inner(_embed() if draft_embed == "loaded" else None)
     if draft_embed == "unset":
@@ -58,7 +58,7 @@ def test_drafter_without_own_embedding_gets_the_targets(monkeypatch, draft_embed
 
 
 def test_missing_target_embedding_raises_instead_of_running_on_garbage(monkeypatch):
-    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: True)
     draft_inner = _inner(_embed())
     draft = SimpleNamespace(has_own_embed_tokens=False)
 
@@ -69,7 +69,7 @@ def test_missing_target_embedding_raises_instead_of_running_on_garbage(monkeypat
 
 
 def test_drafter_with_distinct_weights_keeps_them(monkeypatch):
-    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: True)
     draft_embed = _embed(fill=1.0)
     draft_inner = _inner(draft_embed)
     draft = SimpleNamespace(has_own_embed_tokens=True)
@@ -80,7 +80,7 @@ def test_drafter_with_distinct_weights_keeps_them(monkeypatch):
 
 
 def test_mtp_style_drafter_is_left_alone_under_pp(monkeypatch):
-    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: True)
     draft_embed = _embed()
     draft_inner = _inner(draft_embed)
 
@@ -177,8 +177,8 @@ def make_m3_draft(monkeypatch, m3_modules, m3_config):
     monkeypatch.setattr(
         mtp, "fused_moe_make_expert_params_mapping", lambda *_, **kw: []
     )
-    monkeypatch.setattr(mtp, "get_pp_group", _fake_pp(2))
-    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    monkeypatch.setattr(mtp, "in_single_pp_stage", lambda: True)
+    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: True)
     return lambda: mtp.MiniMaxM3MTP(vllm_config=m3_config)
 
 
@@ -236,7 +236,7 @@ def test_m3_direct_loader_embedding_ownership(
 
 def test_m3_preserves_legacy_embedding_sharing(monkeypatch, m3_modules, make_m3_draft):
     mtp, _ = m3_modules
-    monkeypatch.setattr(mtp, "get_pp_group", _fake_pp(1))
+    monkeypatch.setattr(mtp, "in_single_pp_stage", lambda: False)
     draft = make_m3_draft()
     draft.load_weights(
         [
@@ -355,7 +355,7 @@ def test_nemotron_shares_target_embedding_and_refit(
     monkeypatch, nemotron_draft, pp_size
 ):
     """PP must preserve the target's embedding identity through a refit."""
-    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(pp_size))
+    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: pp_size > 1)
     target = _inner(_embed(fill=2.0))
     eagle_utils.maybe_share_target_embed(nemotron_draft, nemotron_draft.model, target)
     assert nemotron_draft.model.embed_tokens is target.embed_tokens

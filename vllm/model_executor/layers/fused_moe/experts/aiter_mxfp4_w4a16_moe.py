@@ -43,7 +43,7 @@ def _aiter_w4a16_silu_via_a8w4(
     unpadded_N_w2,
     unpadded_K_w2,
 ) -> torch.Tensor:
-    """MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation."""
+    """MXFP4 w4a16 MoE with a SILU (concatenated `[gate | up]`) activation."""
     from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
     from aiter.ops.triton.quant import dynamic_mxfp8_quant
 
@@ -346,6 +346,34 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        from vllm.platforms.rocm import on_gfx1250
+
+        parallel_config = moe_config.moe_parallel_config
+        if moe_config.has_hash_routing and parallel_config.dp_size > 1:
+            return False, (
+                "kernel does not support hash routing with data parallelism: "
+                "the naive DP prepare/finalize all-gathers router logits across "
+                "DP ranks but not input_ids, so hash routing would index "
+                "out of range"
+            )
+        if (
+            parallel_config.use_ep
+            and moe_config.activation == MoEActivation.SILU
+            and on_gfx1250()
+        ):
+            return False, (
+                "kernel does not support expert parallelism with SILU on "
+                "gfx1250: SILU falls back to the a8w4 kernel there, which "
+                "takes no expert_map"
+            )
+        return super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
+    @staticmethod
     def _supports_current_device() -> bool:
         if not rocm_aiter_ops.is_enabled():
             return False
@@ -372,11 +400,11 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
+        # DP+EP unsupported unless using the naive all-gather/reduce-scatter all2all
         return (
             not moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.enable_eplb
-            and moe_parallel_config.dp_size <= 1
-        )
+            or moe_parallel_config.use_ag_rs_all2all_kernels
+        ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
     def _supports_routing_method(

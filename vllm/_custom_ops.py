@@ -74,7 +74,7 @@ def create_fp4_output_tensors(
     (quantized_output, output_scale).
 
     Must match the C++ scaled_fp4_quant_func allocation exactly when
-    ``padded_n`` is ``None``. When ``padded_n`` is provided, allocate a larger
+    `padded_n` is `None`. When `padded_n` is provided, allocate a larger
     packed-FP4 output/scale buffer so the quantization kernel can write
     CUTLASS-compatible K padding directly
     """
@@ -197,6 +197,21 @@ def rotary_embedding(
         )
 
 
+def rotary_embedding_out(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor | None,
+    query_out: torch.Tensor,
+    key_out: torch.Tensor | None,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    torch.ops._C.rotary_embedding_out(
+        positions, query, key, query_out, key_out, head_size, cos_sin_cache, is_neox
+    )
+
+
 # layer norm ops
 def rms_norm(
     out: torch.Tensor,
@@ -225,8 +240,8 @@ def vocab_parallel_embedding(
     so an all-reduce over the ranks yields the full embedding.
 
     Args:
-        input_ids: ``[num_tokens]`` int32 or int64 token ids.
-        weight: ``[num_embeddings_per_partition, embedding_dim]`` shard.
+        input_ids: `[num_tokens]` int32 or int64 token ids.
+        weight: `[num_embeddings_per_partition, embedding_dim]` shard.
         org_vocab_start_index: First original vocab id owned by this rank.
         org_vocab_end_index: One past the last original vocab id owned by
             this rank.
@@ -237,7 +252,7 @@ def vocab_parallel_embedding(
             this rank.
 
     Returns:
-        ``[num_tokens, embedding_dim]`` partial embeddings.
+        `[num_tokens, embedding_dim]` partial embeddings.
 
     """
     out = torch.empty(
@@ -274,7 +289,7 @@ def ngram_compute_n_gram_ids(
 ) -> None:
     """Compute concatenated (offset) n-gram ids for a ragged prefill batch.
 
-    Writes ``n_gram_ids`` of shape ``[token_num, (ne_n-1)*ne_k]``.
+    Writes `n_gram_ids` of shape `[token_num, (ne_n-1)*ne_k]`.
     """
     torch.ops._C.ngram_compute_n_gram_ids(
         ne_n,
@@ -305,7 +320,7 @@ def muse_spark_mul_tanh_soft_cap(
     multiplier: float,
     soft_cap_temp: float,
 ) -> torch.Tensor:
-    """Cast to FP32 and apply ``temp * tanh(x * multiplier / temp)`` in one pass."""
+    """Cast to FP32 and apply `temp * tanh(x * multiplier / temp)` in one pass."""
     out = torch.empty_like(x, dtype=torch.float32)
     torch.ops._C.muse_spark_mul_tanh_soft_cap(out, x, multiplier, soft_cap_temp)
     return out
@@ -703,6 +718,36 @@ def moe_gptq_gemm_rdna3(
         block_size_m,
         mul_topk_weight,
         output_topk,
+    )
+
+
+def moe_w4a8_decode_rdna3(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    workspace: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_zp: torch.Tensor | None,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_zp: torch.Tensor | None,
+) -> None:
+    torch.ops._rocm_C.moe_w4a8_decode_rdna3(
+        out,
+        x,
+        topk_ids,
+        topk_weights,
+        expert_map,
+        workspace,
+        w13,
+        w13_scale,
+        w13_zp,
+        w2,
+        w2_scale,
+        w2_zp,
     )
 
 
@@ -1491,7 +1536,7 @@ def scaled_fp4_quant(
             backends the 8x4 scale-factor layout is selected for small
             batches (m <= 32) instead of the 128x4 layout.
         padded_n: Optional padded K dimension. When provided, the quantized
-            output and scale tensors are allocated for ``padded_n``
+            output and scale tensors are allocated for `padded_n`
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
@@ -1927,50 +1972,50 @@ def scaled_int8_quant(
     return output, input_scales, input_azp
 
 
-# mamba
-def selective_scan_fwd(
-    u: torch.Tensor,
-    delta: torch.Tensor,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    C: torch.Tensor,
-    D_: torch.Tensor | None,
-    z_: torch.Tensor | None,
-    delta_bias_: torch.Tensor | None,
-    delta_softplus: bool,
-    query_start_loc: torch.Tensor | None,
-    cache_indices: torch.Tensor | None,
-    has_initial_state: torch.Tensor | None,
-    ssm_states: torch.Tensor,
+# GDN prefill fused conv1d + post-conv prep (csrc/mamba/gdn_prefill_conv.cu)
+def gdn_prefill_conv(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    num_k_heads: int,
+    head_dim: int,
+    output_g_exp: bool,
+    beta_scale: float,
     null_block_id: int,
-    block_size: int = 1024,
-    block_idx_first_scheduled_token: torch.Tensor | None = None,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
-    initial_state_idx: torch.Tensor | None = None,
-    cu_chunk_seqlen: torch.Tensor | None = None,
-    last_chunk_indices: torch.Tensor | None = None,
 ):
-    torch.ops._C.selective_scan_fwd(
-        u,
-        delta,
-        A,
-        B,
-        C,
-        D_,
-        z_,
-        delta_bias_,
-        delta_softplus,
+    torch.ops._C.gdn_prefill_conv(
+        x,
+        weight,
+        conv_states,
         query_start_loc,
         cache_indices,
         has_initial_state,
-        ssm_states,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        num_k_heads,
+        head_dim,
+        output_g_exp,
+        beta_scale,
         null_block_id,
-        block_size,
-        block_idx_first_scheduled_token,
-        block_idx_last_scheduled_token,
-        initial_state_idx,
-        cu_chunk_seqlen,
-        last_chunk_indices,
     )
 
 
@@ -2062,6 +2107,16 @@ def wvSplitKQ(
     out = torch.empty((b.shape[0], a.shape[0]), dtype=out_dtype, device=b.device)
     torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
     return out
+
+
+def swmmac_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    logical_m: int,
+    cu_count: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.swmmacGEMM(a, b, bias, logical_m, cu_count)
 
 
 # moe
@@ -2241,10 +2296,10 @@ def lut_b_moe_gemm(
 ) -> None:
     """Grouped GEMM of MXFP8 activations with LUT-B expert weights.
 
-    ``c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T`` for each routed
-    row ``i`` (scaled by ``topk_weights[i]`` when given), using routing
-    aligned to blocks of 128 by ``moe_align_block_size``. ``b`` holds the
-    weights in the kernel tile layout from ``lut_b_to_sm107_tiles``.
+    `c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T` for each routed
+    row `i` (scaled by `topk_weights[i]` when given), using routing
+    aligned to blocks of 128 by `moe_align_block_size`. `b` holds the
+    weights in the kernel tile layout from `lut_b_to_sm107_tiles`.
     """
     torch.ops._moe_C.lut_b_moe_gemm(
         a,
@@ -2271,6 +2326,69 @@ def fp32_router_gemm(
     )
     torch.ops._C.fp32_router_gemm(output, hidden_states, router_weight)
     return output
+
+
+def hy_v4_ihc_boundary_supported(hc_mult: int, hidden_size: int) -> bool:
+    return (
+        hc_mult == 4
+        and hidden_size % 64 == 0
+        and hidden_size <= 8192
+        and hasattr(torch.ops._C, "hy_v4_ihc_boundary")
+    )
+
+
+def hy_v4_ihc_boundary(
+    residual: torch.Tensor,
+    x: torch.Tensor | None,
+    post: torch.Tensor | None,
+    weight: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    norm_weight: torch.Tensor | None,
+    magnitude: float,
+    hc_eps: float,
+    rms_eps: float,
+    variance_eps: float,
+    round_before_norm: bool = False,
+    fp8_out: bool = False,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    tuple[torch.Tensor, torch.Tensor] | None,
+]:
+    """HY V4 iHC boundary: optional post step, then pre and RMSNorm.
+
+    Returns `(residual, hidden_states, post_gates, hidden_fp8)`. With `x`
+    and `post` the residual is a new tensor holding `post * x + residual`;
+    otherwise it is the input residual. All inputs must be contiguous. The
+    gated reduction enters the norm in FP32, as in the HPC library's fused
+    kernel, unless `round_before_norm` rounds it to BF16 first, as the
+    unfused path does. With `fp8_out`, `hidden_fp8` equals
+    `per_token_group_quant_fp8_packed_for_deepgemm(hidden_states, 128)`;
+    otherwise it is None.
+    """
+    hidden, post_out, residual_out, q, s = torch.ops._C.hy_v4_ihc_boundary(
+        residual,
+        x,
+        post,
+        weight,
+        hc_scale,
+        hc_base,
+        norm_weight,
+        magnitude,
+        hc_eps,
+        rms_eps,
+        variance_eps,
+        round_before_norm,
+        fp8_out,
+    )
+    return (
+        residual_out if x is not None else residual,
+        hidden,
+        post_out,
+        (q, s) if fp8_out else None,
+    )
 
 
 def topk_softmax(
@@ -2598,7 +2716,10 @@ def fused_qknorm_rope_cache(
     rotary_dim: int,
     eps: float,
     norm_weight_bias: float = 0.0,
+    *,
+    q_dtype: torch.dtype | None = None,
     kv_cache_dtype: str = "auto",
+    q_scale: float = 1.0,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -2609,7 +2730,11 @@ def fused_qknorm_rope_cache(
     """
     if rotary_dim < 0 or rotary_dim > head_dim or rotary_dim % 8:
         raise ValueError("rotary_dim must be a multiple of 8 in [0, head_dim]")
-    q = qkv.new_empty((qkv.shape[0], num_q_heads * head_dim))
+    q = torch.empty(
+        (qkv.shape[0], num_q_heads * head_dim),
+        device=qkv.device,
+        dtype=qkv.dtype if q_dtype is None else q_dtype,
+    )
     k = qkv.new_empty((qkv.shape[0], num_kv_heads * head_dim))
     v = torch.empty_like(k)
     cos, sin = cos_sin_cache.chunk(2, dim=-1)
@@ -2633,6 +2758,7 @@ def fused_qknorm_rope_cache(
         eps,
         norm_weight_bias,
         kv_cache_dtype,
+        q_scale,
         k_scale,
         v_scale,
     )
@@ -2659,8 +2785,8 @@ def fused_muse_spark_qknorm_rope_kv_insert(
 ) -> None:
     """In-place weightless QK RMSNorm + GPT-J RoPE, optionally writing k/v to cache.
 
-    When ``kv_cache`` is given, the caller must skip the attention layer's own KV write.
-    With ``q_fp8_out``, write scaled E4M3 Q there instead of rewriting Q in ``qkv``.
+    When `kv_cache` is given, the caller must skip the attention layer's own KV write.
+    With `q_fp8_out`, write scaled E4M3 Q there instead of rewriting Q in `qkv`.
     """
     torch.ops._C.fused_muse_spark_qknorm_rope_kv_insert(
         qkv,
@@ -2712,45 +2838,45 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
-    Applies Gemma RMSNorm + partial NeoX RoPE to ``qkv`` in place. ``qkv`` is a
+    Applies Gemma RMSNorm + partial NeoX RoPE to `qkv` in place. `qkv` is a
     single fused tensor:
 
-    - dense layer (``num_index_heads == 0``): ``[q | k | v]``;
-    - sparse layer (``num_index_heads > 0``): ``[q | k | v | index_q |
-      index_k]`` — the index branch is read straight out of ``qkv``.
+    - dense layer (`num_index_heads == 0`): `[q | k | v]`;
+    - sparse layer (`num_index_heads > 0`): `[q | k | v | index_q |
+      index_k]` — the index branch is read straight out of `qkv`.
 
-    When ``kv_cache`` is given, also scatter-inserts the normed/roped k & v
-    into the paged KV cache by ``slot_mapping`` and, on sparse layers, the
-    index key into ``index_cache`` by ``index_slot_mapping``.
-    ``kv_cache_dtype`` selects the cache storage/conversion path; a dense
-    layer's insert stores exactly what ``reshape_and_cache_flash`` would with
-    unit k/v scales. If ``index_slot_mapping`` is omitted, ``slot_mapping`` is
+    When `kv_cache` is given, also scatter-inserts the normed/roped k & v
+    into the paged KV cache by `slot_mapping` and, on sparse layers, the
+    index key into `index_cache` by `index_slot_mapping`.
+    `kv_cache_dtype` selects the cache storage/conversion path; a dense
+    layer's insert stores exactly what `reshape_and_cache_flash` would with
+    unit k/v scales. If `index_slot_mapping` is omitted, `slot_mapping` is
     used for both caches.
 
-    If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
-    niq*128]``) are given, the normed/roped q / index_q are written there
+    If `q_out` / `index_q_out` (contiguous `[N, nq*128]` / `[N,
+    niq*128]`) are given, the normed/roped q / index_q are written there
     instead of in place — folding the de-interleave into this kernel's store so
-    callers skip a separate ``.contiguous()`` copy before the SM100 sparse
+    callers skip a separate `.contiguous()` copy before the SM100 sparse
     attention's flat TMA descriptor.
 
-    If ``q_fp8_out`` is given, the same normalized q is also written in FP8
-    E4M3 using ``q_fp8_scale`` as its dequantization scale. Without ``q_out``,
-    q is then written only in FP8 and the q slice of ``qkv`` is left as is.
+    If `q_fp8_out` is given, the same normalized q is also written in FP8
+    E4M3 using `q_fp8_scale` as its dequantization scale. Without `q_out`,
+    q is then written only in FP8 and the q slice of `qkv` is left as is.
 
-    ``kv_cache_dtype="nvfp4"`` quantizes k/v into the packed HND
-    ``[num_blocks, 2 * num_kv_heads, block_size, 72]`` uint8 cache using the
-    device dequantization scales ``kv_k_scale``/``kv_v_scale``. Slot
-    ``2 * head + side`` (K = 0, V = 1) holds that head's E2M1 data followed by
+    `kv_cache_dtype="nvfp4"` quantizes k/v into the packed HND
+    `[num_blocks, 2 * num_kv_heads, block_size, 72]` uint8 cache using the
+    device dequantization scales `kv_k_scale`/`kv_v_scale`. Slot
+    `2 * head + side` (K = 0, V = 1) holds that head's E2M1 data followed by
     its E4M3 block scales, so every head is one contiguous run of the page.
 
-    When ``skip_index_branch`` is true, sparse rows still keep their packed
-    ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
+    When `skip_index_branch` is true, sparse rows still keep their packed
+    `[index_q | index_k]` tail, but the kernel only processes the main q/k/v
     branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
     layers that consume top-k block ids selected by an earlier sparse layer.
 
-    ``write_qkv=False`` needs ``q_fp8_out`` without ``q_out``, for callers that
-    read only the FP8 q, ``index_q_out`` and the caches: k and index_k need not
-    be rewritten in ``qkv``. The persistent kernel (SM80+, ``rotary_dim`` 64)
+    `write_qkv=False` needs `q_fp8_out` without `q_out`, for callers that
+    read only the FP8 q, `index_q_out` and the caches: k and index_k need not
+    be rewritten in `qkv`. The persistent kernel (SM80+, `rotary_dim` 64)
     skips those stores; the fallback kernel may still make them.
     """
     torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
@@ -2799,13 +2925,13 @@ def fused_minimax_m3_dspark_context_kv(
 ) -> None:
     """Store the MiniMax-M3 DSpark draft's context K/V for every layer.
 
-    ``all_kv`` ``[N, L, 2, nkv, 128]`` holds each layer's K and V. K gets the
-    layer's Gemma RMSNorm (``k_norm_weight[L, 128]``) and partial NeoX RoPE;
-    both are stored like ``reshape_and_cache_flash`` into the layers' caches.
-    Layer ``l``'s cache is ``kv_cache`` (layer 0, ``[nb, nkv, bs, 2 * 128]``)
-    shifted by ``cache_offsets[l]`` elements; its fp8 k/v scales are
-    ``k_scale`` (layer 0's) shifted by ``scale_offsets[0, l]`` /
-    ``scale_offsets[1, l]`` floats. Slots < 0 are skipped.
+    `all_kv` `[N, L, 2, nkv, 128]` holds each layer's K and V. K gets the
+    layer's Gemma RMSNorm (`k_norm_weight[L, 128]`) and partial NeoX RoPE;
+    both are stored like `reshape_and_cache_flash` into the layers' caches.
+    Layer `l`'s cache is `kv_cache` (layer 0, `[nb, nkv, bs, 2 * 128]`)
+    shifted by `cache_offsets[l]` elements; its fp8 k/v scales are
+    `k_scale` (layer 0's) shifted by `scale_offsets[0, l]` /
+    `scale_offsets[1, l]` floats. Slots < 0 are skipped.
     """
     torch.ops._C.fused_minimax_m3_dspark_context_kv(
         all_kv,
@@ -2917,16 +3043,9 @@ def concat_and_cache_mla(
     scale: torch.Tensor,
     skip_scale: bool = False,
 ) -> None:
-    if current_platform.is_xpu():
-        if skip_scale:
-            raise NotImplementedError("skip_scale is not supported on XPU")
-        torch.ops._C_cache_ops.concat_and_cache_mla(
-            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
-        )
-    else:
-        torch.ops._C_cache_ops.concat_and_cache_mla(
-            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
-        )
+    torch.ops._C_cache_ops.concat_and_cache_mla(
+        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
+    )
 
 
 def concat_and_cache_mla_grouped(
@@ -3019,7 +3138,7 @@ def swap_blocks(
     This method assumes each of the two input tensors is composed of
     consecutive contiguous blocks, of size block_size_in_bytes.
     i.e. the memory layout for each tensor is:
-    [block0] [block1] ... [block N]
+    `[block0] [block1] ... [block N]`
 
     block_mapping determines the subset of blocks to copy of the source tensor,
     and their matching destination block number on the destination tensor.
@@ -3236,6 +3355,10 @@ def top_k_per_row_decode(
     stride1: int,
     topk_tokens: int,
 ) -> None:
+    """Select per-row indices with a runtime width in [1, 8192].
+
+    Device shared-memory limits can further restrict the width for a given launch.
+    """
     torch.ops._C.top_k_per_row_decode(
         logits,
         next_n,
@@ -3478,9 +3601,9 @@ def dsv3_fused_a_gemm(
 ) -> None:
     """Low-latency fused-A-style GEMM (SM 9.0+, BF16, 1-16 tokens).
 
-    Computes ``output = mat_a @ mat_b`` for the compiled Kimi K3 and
-    DeepSeek V3 projection shapes. ``mat_a`` and ``output`` are row-major;
-    ``mat_b`` is the column-major transposed weight. ``enable_pdl`` permits
+    Computes `output = mat_a @ mat_b` for the compiled Kimi K3 and
+    DeepSeek V3 projection shapes. `mat_a` and `output` are row-major;
+    `mat_b` is the column-major transposed weight. `enable_pdl` permits
     programmatic dependent launch for callers that have validated it.
 
     Requires SM 9.0+.

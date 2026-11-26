@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
+from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
@@ -15,6 +16,10 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     build_mm_input_norm,
 )
 from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models.gemma3n_mm import (
+    Gemma3nForConditionalGeneration,
+    batch_audio_features,
+)
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
@@ -34,6 +39,37 @@ from ...utils import build_model_context
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
 DIFFUSION_GEMMA_MODEL_ID = "google/diffusiongemma-26B-A4B-it"
+
+
+@pytest.mark.parametrize(
+    "sample_counts", [(161,), (320,), (321,), (161, 320), (161, 321)]
+)
+def test_audio_batching_preserves_single_frame(sample_counts):
+    """Single-frame clips retain the batch and time axes consumed by the tower."""
+    extractor = Gemma4AudioFeatureExtractor()
+    extracted = extractor(
+        [np.zeros(n, dtype=np.float32) for n in sample_counts],
+        sampling_rate=16000,
+        return_tensors="pt",
+    )
+    masks = extracted["input_features_mask"].bool()
+    features = [f[m] for f, m in zip(extracted["input_features"], masks)]
+    masks = [m[m] for m in masks]
+    field = MultiModalFieldConfig.batched("audio").field
+    batched_features, batched_masks = batch_audio_features(
+        field.reduce_data(list(field.build_elems("audio", "input_features", features))),
+        field.reduce_data(
+            list(field.build_elems("audio", "input_features_mask", masks))
+        ),
+    )
+
+    max_frames = max(f.shape[0] for f in features)
+    assert batched_features.shape == (len(sample_counts), max_frames, 128)
+    assert batched_masks.shape == (len(sample_counts), max_frames)
+    for i, (feature, mask) in enumerate(zip(features, masks)):
+        torch.testing.assert_close(batched_features[i, : len(feature)], feature)
+        assert torch.equal(batched_masks[i, : len(mask)], mask)
+        assert not batched_masks[i, len(mask) :].any()
 
 
 def test_gemma4_image_schema_accepts_variable_patch_counts():
@@ -369,8 +405,8 @@ def test_embed_patches_normalizes_channel_last_patches():
     model.vision_input_norm = FusedMMInputNorm(
         image_mean=mean, image_std=std, rescale_factor=1 / 255
     )
+    model.config = SimpleNamespace(vision_config=SimpleNamespace(num_channels=3))
     model.vision_tower = SimpleNamespace(
-        config=SimpleNamespace(num_channels=3),
         patch_embedder=SimpleNamespace(
             input_proj=lambda pixel_values: pixel_values,
             _position_embeddings=lambda *_: 0.0,
@@ -543,3 +579,32 @@ def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
 
     config = model.get_encoder_cudagraph_config()
     assert config.capture_axes == ((70, 140, 280, 560),)
+
+
+@pytest.mark.parametrize(
+    "model_cls", [Gemma4ForConditionalGeneration, Gemma3nForConditionalGeneration]
+)
+def test_ple_cache_follows_inputs_device(model_cls):
+    """A model built on meta (or moved after init) gets one zeroed cache on the
+    inputs' device, which later steps reuse."""
+    model = object.__new__(model_cls)  # type: ignore[type-abstract]
+    torch.nn.Module.__init__(model)
+    model.per_layer_embeddings = torch.zeros(8, 2, 4, device="meta")
+    model._full_attn_layer_idxs = ()
+    seen = []
+
+    def backbone(*args, per_layer_inputs, **kwargs):
+        seen.append(per_layer_inputs)
+
+    model.language_model = SimpleNamespace(model=backbone)
+    inputs_embeds = torch.zeros(3, 1)
+    model(None, None, inputs_embeds=inputs_embeds)
+    first = seen[0]
+    assert first.device.type == "cpu"
+    assert first.shape == (3, 2, 4)
+    assert not first.any()
+
+    model.per_layer_embeddings[:3] = 1.0
+    model(None, None, inputs_embeds=inputs_embeds)
+    assert seen[1].data_ptr() == first.data_ptr()
+    assert bool((seen[1] == 1).all())
