@@ -193,4 +193,3 @@ steps:
     tests/models/kimi_k3/amd_specialized_decode/test_numerics.py
     tests/models/kimi_k3/amd_specialized_decode/test_runtime.py
     tests/models/kimi_k3/amd_specialized_decode/test_engine_fault.py
-    tests/models/kimi_k3/amd_specialized_decode/test_online_fp8.py

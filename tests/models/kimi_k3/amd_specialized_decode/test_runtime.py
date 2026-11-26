@@ -41,6 +41,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     mla_weight_reasons,
     weight_reasons,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -261,7 +262,7 @@ def _k3_layer_before_load() -> SimpleNamespace:
 
 
 def _marked(linear) -> bool:
-    return getattr(linear, "keep_unquantized_weight", False)
+    return runtime.has_bf16_copy(linear)
 
 
 def test_bf16_copies_mark_the_online_fp8_linears_the_kernels_read(
@@ -297,6 +298,36 @@ def test_bf16_copies_mark_the_online_fp8_linears_the_kernels_read(
     assert not _marked(mla.self_attn.in_proj_qkvgfab)
     assert not _marked(layers[0].self_attn.o_proj)  # dense, no kernel
     assert not _marked(layers[50].self_attn.o_proj)  # another PP rank's
+
+
+@pytest.mark.parametrize(
+    "linear", ["fp8_per_tensor", "fp8_per_block", "fp8_per_channel"]
+)
+def test_bf16_copy_keeps_the_loaded_weight_beside_the_fp8_one(
+    default_vllm_config, dist_init, workspace_init, linear
+):
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    quant_config = OnlineQuantizationConfig(QuantizationConfigArgs(linear=linear))
+    torch.manual_seed(0)
+    loaded = torch.randn(256, 256, dtype=torch.bfloat16, device="cuda")
+
+    def load(keep: bool):
+        with torch.device("cuda"):
+            layer = ReplicatedLinear(
+                256, 256, bias=False, params_dtype=torch.bfloat16,
+                quant_config=quant_config,
+            )  # fmt: skip
+        if keep:
+            runtime.keep_bf16_copy(layer)
+            runtime.keep_bf16_copy(layer)  # idempotent
+        layer.weight.weight_loader(layer.weight, loaded)
+        return layer
+
+    kept = load(keep=True)
+    assert kept.weight.dtype == current_platform.fp8_dtype()
+    assert torch.equal(kept.unquantized_weight, loaded)
+    assert runtime.dense_weight(kept) is kept.unquantized_weight
+    assert not hasattr(load(keep=False), "unquantized_weight")
 
 
 def test_supported_config_is_accepted(supported_vllm_config):

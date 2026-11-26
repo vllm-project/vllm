@@ -166,3 +166,44 @@ def test_a_stalled_rank_stops_the_engine(tmp_path, speculative: bool):
         assert served > 0, "the engine failed before the injected step"
         # the failed step stops the engine and the server exits
         assert server.proc.wait(timeout=EXIT_TIMEOUT) is not None
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_online_fp8_serves_with_the_specialized_decode():
+    """The weight check refuses FP8 weights in the layers K1 / K2 read, so the
+    deployment needs `specialized_decode_bf16_copies`."""
+    at = SERVER_ARGS.index("--additional-config")
+    args = [
+        *SERVER_ARGS[: at + 1],
+        json.dumps(
+            {
+                "decode_backend": "latency_specialized",
+                "specialized_decode_bf16_copies": True,
+            }
+        ),
+        *SERVER_ARGS[at + 2 :],
+        "--quantization-config",
+        json.dumps(
+            {
+                "linear": "fp8_per_channel",
+                "ignore": ["*vision_tower*", "*mm_projector*", "*.mlp.gate"],
+            }
+        ),
+    ]
+    env = {
+        "VLLM_ROCM_USE_AITER": "1",
+        "VLLM_ROCM_AITER_MLA_ASM_PADDING": "asm",
+        "VLLM_ROCM_USE_AITER_FP4BMM": "1",
+    }
+    with RemoteOpenAIServer(
+        MODEL, args, env_dict=env, max_wait_seconds=STARTUP_TIMEOUT
+    ) as server:
+        completion = server.get_client().completions.create(
+            model=MODEL,
+            prompt="hello " * 64,
+            max_tokens=64,
+            temperature=0,
+            extra_body={"ignore_eos": True},
+        )
+    assert completion.usage.completion_tokens == 64

@@ -376,14 +376,35 @@ def kernel_linears(layer, kind: str) -> list[torch.nn.Module]:
     return [linear for linear in linears if linear is not None]
 
 
+def keep_bf16_copy(linear) -> None:
+    """Before the weights load: `linear`, an online-FP8 linear, keeps the weight
+    it quantizes (the loaded bf16 weight, or the dequantized checkpoint weight
+    when requantizing) as `linear.unquantized_weight`. Not supported with weight
+    reloading."""
+    if has_bf16_copy(linear):
+        return
+    method = linear.quant_method
+    quantizing_weight = method.get_weight_for_quantization
+
+    def get_weight_for_quantization(layer):
+        weight = quantizing_weight(layer)
+        # a copy: quantization may write the FP8 weight into this storage
+        layer.unquantized_weight = weight.detach().clone()
+        return weight
+
+    method.get_weight_for_quantization = get_weight_for_quantization
+    linear.keeps_bf16_copy = True
+
+
+def has_bf16_copy(linear) -> bool:
+    return getattr(linear, "keeps_bf16_copy", False)
+
+
 def mark_bf16_copies(model) -> int:
     """Before the weights load: every online-FP8 linear the kernels read keeps a
     bf16 copy of its loaded weight (`dense_weight`). `model`: the
     `KimiLinearModel`. Returns the copies' bytes on this rank."""
-    from vllm.model_executor.layers.quantization.online.fp8 import (
-        OnlineLinearBase,
-        keep_unquantized_weight,
-    )
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
 
     nbytes = 0
     for i, kind in layer_kinds(model.config).items():
@@ -391,7 +412,7 @@ def mark_bf16_copies(model) -> int:
             continue
         for linear in kernel_linears(model.layers[i], kind):
             if isinstance(getattr(linear, "quant_method", None), OnlineLinearBase):
-                keep_unquantized_weight(linear)
+                keep_bf16_copy(linear)
                 nbytes += linear.weight.numel() * linear.weight.element_size()
     return nbytes
 
