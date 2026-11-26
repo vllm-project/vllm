@@ -46,6 +46,27 @@ def user_tokens(tokenizer: Tokenizer, text: str) -> list[int]:
     return tokenizer(rewritten, add_special_tokens=False).input_ids
 
 
+def render(value: Any, indent: int = 0) -> str:
+    """Flatten a JSON value into the text the reference model reads.
+
+    Strings pass through unchanged; mappings become `key: value` lines and
+    arrays become `- item` lines, indented by depth. `None` is empty.
+    """
+    pad = "  " * indent
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        return "\n".join(f"{pad}- {render(x, indent + 1).lstrip()}" for x in value)
+    return "\n".join(
+        f"{pad}{key}:\n{render(item, indent + 1)}"
+        if isinstance(item, (dict, list))
+        else f"{pad}{key}: {render(item)}"
+        for key, item in value.items()
+    )
+
+
 def option_text(name: str, description: str | None) -> str:
     """Render one option as `name` or `name: description`."""
     if not description:

@@ -1490,6 +1490,10 @@ class DrexStrategy(ReadStrategy):
             labeled=False,
         )
 
+    def render_state(self, state: Any) -> str:
+        """Render the state the way the checkpoint was trained to read it."""
+        return drex_prompt.render(state)
+
     def _options(self, q: Question) -> tuple[list[str], list[int]]:
         try:
             return drex_prompt.model_options(

@@ -146,3 +146,22 @@ def test_score_options_are_level_labels_in_order():
 def test_unknown_question_type_is_rejected():
     with pytest.raises(ValueError, match="does not answer"):
         drex_prompt.model_options("weird", [("a", None)])
+
+
+def test_render_keeps_a_string_as_is():
+    assert drex_prompt.render("hello\nworld") == "hello\nworld"
+
+
+def test_render_flattens_a_mapping_into_labelled_lines():
+    assert drex_prompt.render({"hp": 3, "name": "x"}) == "hp: 3\nname: x"
+
+
+def test_render_indents_nested_structures():
+    assert (
+        drex_prompt.render({"a": {"b": 1}, "c": [1, 2]})
+        == "a:\n  b: 1\nc:\n  - 1\n  - 2"
+    )
+
+
+def test_render_empty_values_are_empty():
+    assert drex_prompt.render(None) == ""
