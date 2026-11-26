@@ -1186,18 +1186,28 @@ fn decisions_read_strategy_reaches_frontend_config() {
             "999998",
             "--args-json",
             args_json,
-        ])
-        .unwrap();
+        ])?;
         let Command::Frontend(args) = cli.command else {
             panic!("expected frontend args");
         };
-        args.into_config().server.api_server_options.decisions_read_strategy
+        Ok::<_, clap::Error>(args.into_config().server.decisions_read_strategy)
     };
     assert_eq!(
-        parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","decisions_read_strategy":"next_token"}"#),
+        parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","decisions_read_strategy":"NextTokenStrategy"}"#)
+            .unwrap(),
         Some(DecisionsReadStrategy::NextToken)
     );
-    assert_eq!(parse(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#), None);
+    assert_eq!(parse(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap(), None);
+
+    // A strategy the Rust frontend does not implement fails startup, rather
+    // than leaving the endpoint to answer 501.
+    let error =
+        parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","decisions_read_strategy":"SlotLMStrategy"}"#)
+            .unwrap_err();
+    expect![[r#"
+        error: invalid JSON arguments: decisions_read_strategy: unknown variant `SlotLMStrategy`, expected `NextTokenStrategy` at line 1 column 73
+    "#]]
+    .assert_eq(&error.to_string());
 }
 
 #[test]
@@ -3945,6 +3955,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,
@@ -3974,7 +3985,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
-                    decisions_read_strategy: None,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4099,6 +4109,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,
@@ -4128,7 +4139,6 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
-                    decisions_read_strategy: None,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4359,6 +4369,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,
@@ -4388,7 +4399,6 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                         33554432,
                     ),
                     max_n_sequences: 16384,
-                    decisions_read_strategy: None,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {

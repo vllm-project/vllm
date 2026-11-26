@@ -588,21 +588,23 @@ def test_rust_frontend_uses_pulled_object_storage_model(
 @pytest.mark.parametrize(
     ("runner_type", "architecture", "logprobs_mode", "expected"),
     [
-        ("generate", "Qwen3ForCausalLM", "raw_logprobs", "next_token"),
-        # A NextTokenStrategy subclass reads with its own prompts.
-        ("generate", "Qwen3_5ForSlotDecision", "raw_logprobs", None),
-        # Architectures without a read strategy, and the cases
-        # select_read_strategy refuses, get no Decisions API.
+        ("generate", "Qwen3ForCausalLM", "raw_logprobs", "NextTokenStrategy"),
+        # Forwarded even though the Rust frontend refuses it at startup.
+        ("generate", "Qwen3_5ForSlotDecision", "raw_logprobs", "SlotLMStrategy"),
+        ("pooling", "D3ForSequenceClassification", "raw_logits", "D3Strategy"),
+        # Where Python answers 501, nothing is forwarded: architectures
+        # without a read strategy, and the cases select_read_strategy refuses.
         ("generate", "LlamaForCausalLM", "raw_logprobs", None),
         ("generate", "Qwen3ForCausalLM", "raw_logits", None),
         ("pooling", "Qwen3ForCausalLM", "raw_logprobs", None),
+        ("generate", "D3ForSequenceClassification", "raw_logprobs", None),
     ],
 )
 def test_rust_frontend_receives_decisions_read_strategy(
     monkeypatch, runner_type, architecture, logprobs_mode, expected
 ):
-    """Python's read strategy table decides whether the Rust frontend serves
-    /v1/decisions, so Rust keeps no copy of it."""
+    """The launcher forwards the read strategy Python's table picks, so the
+    Rust frontend keeps no copy of the table."""
     import json
     import subprocess as subprocess_mod
 

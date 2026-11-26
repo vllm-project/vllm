@@ -298,26 +298,33 @@ _RUST_FRONTEND_ENV_ARGS = {
 }
 
 
-def _rust_decisions_read_strategy(model_config: "ModelConfig | None") -> str | None:
-    """The Decisions API read strategy the Rust frontend serves for this model.
+def _decisions_read_strategy(model_config: "ModelConfig | None") -> str | None:
+    """The class name of the Decisions API read strategy Python serves this
+    model with, or None where Python answers 501.
 
-    Python's `select_read_strategy` stays the one table of supported
-    architectures. The Rust frontend implements `NextTokenStrategy` only;
-    without a strategy it does not serve `/v1/decisions`.
+    The Rust frontend refuses to start with a strategy it does not implement,
+    so which ones it implements is known to Rust alone.
     """
-    if model_config is None or getattr(model_config, "runner_type", None) != "generate":
+    if model_config is None:
         return None
     from vllm.entrypoints.openai.decisions.strategies import (
-        NextTokenStrategy,
+        READ_STRATEGIES,
         select_read_strategy,
     )
 
+    strategy = READ_STRATEGIES.get(getattr(model_config, "architecture", ""))
+    if strategy is None:
+        return None
+    # The engine reports its supported tasks only once it runs. The runner
+    # type tells whether the model generates; a pooling architecture in the
+    # table pools for its strategy's task.
+    generates = getattr(model_config, "runner_type", None) == "generate"
+    tasks = (strategy.task,) if generates == (strategy.task == "generate") else ()
     try:
-        strategy = select_read_strategy(model_config, ("generate",))
+        select_read_strategy(model_config, tasks)
     except ValueError:
         return None
-    # Its subclasses read with other prompts or canvases.
-    return "next_token" if strategy is NextTokenStrategy else None
+    return strategy.__name__
 
 
 class RustFrontendProcessManager:
@@ -397,7 +404,7 @@ class RustFrontendProcessManager:
         if model_tag is not None:
             args_dict["model_tag"] = model_tag
 
-        if (strategy := _rust_decisions_read_strategy(model_config)) is not None:
+        if (strategy := _decisions_read_strategy(model_config)) is not None:
             args_dict["decisions_read_strategy"] = strategy
 
         # Object storage models (s3://, gs://, az://) have their config and

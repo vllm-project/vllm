@@ -5,9 +5,9 @@
 //! questions about a text, read from the next-token logprobs of the option
 //! labels.
 //!
-//! Only the next-token read strategy is implemented. Python's
-//! `select_read_strategy` decides at launch whether a model uses it
-//! ([`crate::DecisionsReadStrategy`]); other models get 501 here.
+//! Only the next-token read strategy is implemented. The Python launcher
+//! passes the strategy Python's `select_read_strategy` picks for the model
+//! ([`crate::DecisionsReadStrategy`]); without one, this answers 501.
 
 mod next_token;
 mod questions;
@@ -40,9 +40,7 @@ pub async fn decisions(
     request: Result<Json<DecisionRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = request?;
-    let reads = (state.decisions())
-        .expect("the route is registered only with a read strategy")
-        .clone();
+    let reads = (state.decisions()).expect("the route is registered only with a read strategy");
     let ctx = resolve_request_context(&headers, None)?;
     let lora_resolution = state.resolve_model_with_loras(Some(&request.model)).await;
     lora_resolution.model_names.check(Some(&request.model))?;

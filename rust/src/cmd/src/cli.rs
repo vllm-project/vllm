@@ -790,8 +790,10 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub max_n_sequences: Option<i64>,
 
-    /// How `/v1/decisions` reads the model. The Python launcher sets it from
-    /// Python's `select_read_strategy`; without it, the endpoint answers 501.
+    /// How `/v1/decisions` reads the model: the class name of the read
+    /// strategy Python's `select_read_strategy` picks, set by the Python
+    /// launcher. Without one, the endpoint answers 501. A strategy the Rust
+    /// frontend does not implement fails startup.
     #[arg(long, hide = true, value_enum)]
     #[serde(default)]
     pub decisions_read_strategy: Option<DecisionsReadStrategyArg>,
@@ -1077,6 +1079,7 @@ impl SharedRuntimeArgs {
                 renderer: self.renderer,
                 language_model_only: self.language_model_only,
                 chat_template: self.chat_template,
+                decisions_read_strategy: self.decisions_read_strategy.map(Into::into),
                 default_chat_template_kwargs: self.default_chat_template_kwargs,
                 reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
                 trust_request_chat_template: self.trust_request_chat_template,
@@ -1178,6 +1181,7 @@ impl SharedRuntimeArgs {
                 renderer: self.renderer,
                 language_model_only: self.language_model_only,
                 chat_template: self.chat_template,
+                decisions_read_strategy: self.decisions_read_strategy.map(Into::into),
                 default_chat_template_kwargs: self.default_chat_template_kwargs,
                 reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
                 trust_request_chat_template: self.trust_request_chat_template,
@@ -1262,9 +1266,6 @@ impl SharedRuntimeArgs {
                 Some(limit) => Some(limit),
             },
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
-            decisions_read_strategy: self.decisions_read_strategy.map(|strategy| match strategy {
-                DecisionsReadStrategyArg::NextToken => DecisionsReadStrategy::NextToken,
-            }),
         }
     }
 
@@ -1308,13 +1309,21 @@ impl SharedRuntimeArgs {
     }
 }
 
-/// `--decisions-read-strategy` values: Python's read strategies that the Rust
-/// frontend implements.
+/// `--decisions-read-strategy` values: the Python read strategies the Rust
+/// frontend implements, by class name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum DecisionsReadStrategyArg {
-    /// `NextTokenStrategy`.
+    #[serde(rename = "NextTokenStrategy")]
+    #[value(name = "NextTokenStrategy")]
     NextToken,
+}
+
+impl From<DecisionsReadStrategyArg> for DecisionsReadStrategy {
+    fn from(strategy: DecisionsReadStrategyArg) -> Self {
+        match strategy {
+            DecisionsReadStrategyArg::NextToken => Self::NextToken,
+        }
+    }
 }
 
 /// `--fingerprint-mode` values.

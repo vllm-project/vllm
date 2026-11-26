@@ -111,12 +111,10 @@ pub struct ApiServerOptions {
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
     #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
     pub max_n_sequences: i64,
-    /// How `/v1/decisions` reads the model. Without one, it answers 501.
-    pub decisions_read_strategy: Option<DecisionsReadStrategy>,
 }
 
-/// The Decisions API read strategies the Rust frontend implements. The Python
-/// launcher chooses one with Python's `select_read_strategy`.
+/// The Decisions API read strategies the Rust frontend implements, named
+/// after Python's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum DecisionsReadStrategy {
     /// Python's `NextTokenStrategy`: each question is one request, read from
@@ -392,6 +390,9 @@ pub struct ServerConfig {
     /// Server-default chat template override, as a file path or inline
     /// template.
     pub chat_template: Option<String>,
+    /// How `/v1/decisions` reads the model, the strategy Python's
+    /// `select_read_strategy` picks for it. Without one, it answers 501.
+    pub decisions_read_strategy: Option<DecisionsReadStrategy>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
     /// Server-side rewrites of the request's typed reasoning effort.

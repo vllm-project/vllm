@@ -188,7 +188,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
 
-    let decisions = match config.api_server_options.decisions_read_strategy {
+    let decisions = match config.decisions_read_strategy {
         Some(DecisionsReadStrategy::NextToken) => (NextTokenReads::probe(&chat))
             .inspect_err(|error| warn!("/v1/systemone and /v1/decisions are off: {error}"))
             .ok(),

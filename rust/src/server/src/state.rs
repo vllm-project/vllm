@@ -68,7 +68,7 @@ pub struct AppState {
     /// so routes and services that drive its engine-core client are served.
     has_engine_core_client: bool,
     /// How `/v1/decisions` reads the model, when it serves the endpoint.
-    decisions: Option<Arc<NextTokenReads>>,
+    decisions: Option<NextTokenReads>,
 }
 
 impl AppState {
@@ -112,12 +112,12 @@ impl AppState {
 
     /// Serve `/v1/decisions` with these reads.
     pub(crate) fn with_decisions(mut self, decisions: Option<NextTokenReads>) -> Self {
-        self.decisions = decisions.map(Arc::new);
+        self.decisions = decisions;
         self
     }
 
     /// How `/v1/decisions` reads the model, when it serves the endpoint.
-    pub(crate) fn decisions(&self) -> Option<&Arc<NextTokenReads>> {
+    pub(crate) fn decisions(&self) -> Option<&NextTokenReads> {
         self.decisions.as_ref()
     }
 
