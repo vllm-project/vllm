@@ -172,6 +172,28 @@ def test_persistent_resource_lock_applies_to_each_slot(monkeypatch) -> None:
     assert manager.get_persistent_resource("scratch", factory) is first
 
 
+def test_reserve_persistent_resource_all_ubatches(monkeypatch) -> None:
+    """One call from ubatch 0 fills every ubatch slot of the current lane only."""
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+    factory = Mock(side_effect=object)
+    first = manager.reserve_persistent_resource_all_ubatches("scratch", factory)
+    assert factory.call_count == 2
+    manager.lock()
+    assert manager.get_persistent_resource("scratch", factory) is first
+    active_ubatch = 1
+    second = manager.get_persistent_resource("scratch", factory)
+    assert second is not first and factory.call_count == 2
+    with (
+        workspace.use_workspace_lane(1),
+        pytest.raises(AssertionError, match="was not allocated during warmup"),
+    ):
+        manager.get_persistent_resource("scratch", factory)
+
+
 def test_persistent_tensor_preserves_contents_and_rejects_changes() -> None:
     """Initialization happens once and transient scratch cannot overwrite locks."""
     manager = workspace.WorkspaceManager(torch.device("cpu"))

@@ -217,6 +217,7 @@ steps:
   source_file_dependencies:
   - vllm/models/hy_v4/nvidia/sparse_mla_decode.py
   - vllm/models/hy_v4/nvidia/flashmla_sparse.py
+  - vllm/v1/worker/workspace.py
   - tests/kernels/test_hy_v4_sm90_sparse_decode.py
   commands:
     - pytest -v -s kernels/test_hy_v4_sm90_sparse_decode.py

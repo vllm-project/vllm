@@ -91,6 +91,27 @@ def test_matches_flashmla(kernel, workspace_init, heads, width, num_tokens):
     assert torch.equal(out, _run(kernel, *inputs))
 
 
+@pytest.mark.parametrize("fused", [True, False])
+def test_repeated_launches_bitwise_stable(kernel, request, fused):
+    """Every compiled row count, fused and two-launch, 100 launches each with
+    an L2 flush in between, bit for bit. This guards the software-pipelined
+    gather loop against shared-memory races (cf. triton-lang/triton#6691),
+    which comparing a graph with the eager call cannot catch."""
+    if fused:
+        request.getfixturevalue("workspace_init")
+    flush = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
+    for (heads, width), max_tokens in ((DSA, 40), (SWA, 16)):
+        for num_tokens in range(1, max_tokens + 1):
+            inputs = _inputs(num_tokens, heads, width, seed=num_tokens)
+            first = _run(kernel, *inputs)
+            assert first is not None
+            mismatches = torch.zeros((), dtype=torch.int64, device="cuda")
+            for _ in range(100):
+                flush.zero_()
+                mismatches += (_run(kernel, *inputs) != first).sum()
+            assert mismatches.item() == 0, (heads, num_tokens, fused)
+
+
 @pytest.mark.parametrize("heads,width,num_tokens", [(*DSA, 16), (*SWA, 16)])
 def test_flashmla_contract_edges(kernel, workspace_init, heads, width, num_tokens):
     """Indices >= the KV row count are unused and +inf / -inf sinks behave as in

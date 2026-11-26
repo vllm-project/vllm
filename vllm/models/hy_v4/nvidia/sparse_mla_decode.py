@@ -39,12 +39,17 @@ launches share a workspace or something else wrote it, and the kernel executes
 (fail-loud); `VLLM_DISABLE_HY4_SM90_SPLITK_MLA_DECODE=1` turns the path off.
 
 The workspace (counters, then partials) is one zero-initialised FP32 buffer per
-workspace-manager slot, reserved in the memory-profiling run, so micro-batches
-and lanes never share one. Each launch returns its counters to 0, so CUDA
-graphs that captured the buffer replay in any order; launches on one slot run
-in stream order. A slot first used under capture has no buffer: that call runs
-the split and merge roles as two launches on scratch (no counters, no wait),
-whose bits differ from the fused launch's.
+workspace-manager slot (ubatch, lane), reserved for every ubatch in the
+memory-profiling run. Each launch returns its counters to 0, so CUDA graphs
+that captured the buffer replay in any order; launches on one slot run in
+stream order. Without a workspace (no manager, or a slot first used under
+capture) a call runs the split and merge roles as two launches on scratch,
+with no counters and no wait.
+
+Tested with Triton 3.8.0 (the version vLLM's torch pin brings). The loop's
+dots are mma.sync because the heads pad to M = 16; `prepare()` rejects a
+variant that compiles to async wgmma, which the Hopper software pipeliner can
+race (triton-lang/triton#6691).
 """
 
 import math
@@ -454,12 +459,21 @@ def _new_workspace() -> torch.Tensor:
 _WORKSPACE_KEY = ("hy_v4_sparse_mla_decode", "workspace")
 
 
-def reserve_workspace() -> torch.Tensor | None:
-    """The zero-initialised workspace of the current workspace slot, allocated
-    on first use; None if this slot has none and cannot get one now (under CUDA
-    graph capture, or after the workspace manager is locked)."""
+def _workspace() -> torch.Tensor | None:
     try:
         return current_workspace_manager().get_persistent_resource(
+            _WORKSPACE_KEY, _new_workspace
+        )
+    except (AssertionError, _NoWorkspace):
+        return None
+
+
+def reserve_workspace() -> torch.Tensor | None:
+    """Allocate the zero-initialised workspace in every ubatch slot of the
+    current lane (call it from the memory-profiling run) and return the current
+    slot's; None without a workspace manager, under capture or once locked."""
+    try:
+        return current_workspace_manager().reserve_persistent_resource_all_ubatches(
             _WORKSPACE_KEY, _new_workspace
         )
     except (AssertionError, _NoWorkspace):
@@ -585,7 +599,8 @@ class SparseMLADecodeKernel(VllmJitKernel["SparseMLADecodeKernel.CompileKey"]):
                 reason = f"{type(e).__name__}: {e}"
         if reason is None:
             logger.info(
-                "HY V4 SM90 split-K sparse MLA decode for %d heads ready in %.1f s.",
+                "HY V4 SM90 split-K sparse MLA decode for %d heads ready in %.1f s "
+                "(compile, plan and self-test).",
                 heads,
                 time.perf_counter() - start,
             )
@@ -611,9 +626,15 @@ class SparseMLADecodeKernel(VllmJitKernel["SparseMLADecodeKernel.CompileKey"]):
                 runs = []
                 for mode in modes:
                     key = self.dispatch(heads=heads, num_tokens=T, mode=mode)
+                    compiled = self._get_or_compile(key)
+                    # The heads pad to M = 16, so the loop's dots are synchronous
+                    # mma.sync. With async wgmma it would be exposed to the
+                    # software pipeliner's WAR race (triton-lang/triton#6691).
+                    if "wgmma" in compiled.asm["ptx"]:
+                        raise RuntimeError(f"{key} compiled to async wgmma")
                     grid = _grid(T, heads, splits, key)
                     consts = (heads, _HEADS_PAD, key.block_n, mode, key.merge_chunks)
-                    runs.append((self._get_or_compile(key)[grid], consts, grid))
+                    runs.append((compiled[grid], consts, grid))
                 launches.append(tuple(runs))
             scalars = (T, width, cols, splits)
             self._calls[(device, T, heads)] = (scalars, *launches, T * splits * heads)
@@ -709,10 +730,10 @@ class SparseMLADecodeKernel(VllmJitKernel["SparseMLADecodeKernel.CompileKey"]):
         ):
             return None
         scalars, runs, two_launch, rows = call
-        ws = reserve_workspace()
+        ws = _workspace()
         if ws is None:
-            # This workspace slot is first used under capture (or after the
-            # lock): split and merge launches on scratch, which needs no zeros.
+            # No workspace for this slot (none reserved, first use under
+            # capture): split and merge launches on scratch, which needs no zeros.
             ws = q.new_empty((_workspace_numel(rows),), dtype=torch.float32)
             runs = two_launch
         out = q.new_empty((T, h, _D_V))
@@ -729,6 +750,8 @@ def _current_stream() -> int:
     return torch.cuda.current_stream().cuda_stream
 
 
+# _synthetic and _reference feed the self-test in `prepare()`: they guard
+# against a miscompile or a changed launch convention at startup.
 def _synthetic(T: int, h: int, width: int, gen: torch.Generator, rows: int = 4096):
     """Aligned inputs of one call: `q` is a head slice of a 64-head buffer, with
     holes, an empty row and cut index rows."""

@@ -169,6 +169,27 @@ class WorkspaceManager:
             resources[key] = factory()
         return cast(T, resources[key])
 
+    def reserve_persistent_resource_all_ubatches(
+        self, key: Hashable, factory: Callable[[], T]
+    ) -> T:
+        """`get_persistent_resource` for every ubatch slot of the current lane.
+
+        For warmup paths that do not run per ubatch (such as the profiling run)
+        but reserve a resource that each ubatch then uses, possibly first under
+        CUDA graph capture. Returns the resource of the current slot.
+        """
+        lane = self._get_workspace_id() % self._num_lanes
+        for ubatch in range(self._num_ubatches):
+            resources = self._persistent_resources[ubatch * self._num_lanes + lane]
+            if key not in resources:
+                if self._locked:
+                    raise AssertionError(
+                        f"Workspace is locked but {key!r} was not allocated during "
+                        "warmup for every ubatch."
+                    )
+                resources[key] = factory()
+        return self.get_persistent_resource(key, factory)
+
     def get_persistent(
         self,
         key: Hashable,
