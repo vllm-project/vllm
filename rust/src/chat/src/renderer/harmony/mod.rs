@@ -128,6 +128,7 @@ impl ChatRenderer for HarmonyChatRenderer {
     /// Render a chat request as [`Prompt::TokenIds`] with template kwargs echoed
     /// for downstream accounting/debugging.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        super::reject_system_tools(request)?;
         let reasoning = ReasoningControl::resolve(request, &self.default_template_kwargs)?
             .fallback(ReasoningControl::enabled("medium"));
         let effort = to_harmony_reasoning_effort(reasoning.effort())?;
@@ -180,7 +181,9 @@ fn peel_leading_instructions(
     };
 
     match first {
-        ChatMessage::System { content } => Ok((Some(flatten_text(content)?), None, &messages[1..])),
+        ChatMessage::System { content, .. } => {
+            Ok((Some(flatten_text(content)?), None, &messages[1..]))
+        }
         ChatMessage::Developer { content, tools } => Ok((
             Some(flatten_text(content)?),
             tools.as_deref(),
@@ -289,7 +292,7 @@ fn to_harmony_message(
     options: &Options,
 ) -> Result<Vec<Message>> {
     Ok(match message {
-        ChatMessage::System { content } => {
+        ChatMessage::System { content, .. } => {
             let instructions = flatten_text(content)?;
             vec![system_or_developer_message(
                 "system",

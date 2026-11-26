@@ -30,6 +30,7 @@ impl DeepSeekV32ChatRenderer {
 
 impl ChatRenderer for DeepSeekV32ChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        super::reject_system_tools(request)?;
         request.validate()?;
         let reasoning = ReasoningControl::resolve(request, &self.default_template_kwargs)?
             .fallback(ReasoningControl::Disabled);
