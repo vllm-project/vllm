@@ -91,7 +91,6 @@ def check_supported(
         "prefix caching": cache_config.enable_prefix_caching,
         "--mamba-backend other than triton": vllm_config.mamba_config.backend
         != MambaBackendEnum.TRITON,
-        "more than 256 sequences": vllm_config.scheduler_config.max_num_seqs > 256,
         "the DS conv-state layout": is_conv_state_dim_first(),
         "a model dtype or cache dtypes other than bf16 / bf16 conv / fp32 state": (
             vllm_config.model_config.dtype,
