@@ -209,7 +209,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
-    "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1"),
+    "AXK1ForCausalLM": _HfExamplesInfo(
+        "skt/A.X-K1",
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50644"
+        },
+    ),
     "BailingMoeForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-lite-1.5", trust_remote_code=True
     ),
@@ -381,13 +387,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
     ),
     "Jais2ForCausalLM": _HfExamplesInfo("inceptionai/Jais-2-8B-Chat"),
-    "JambaForCausalLM": _HfExamplesInfo(
-        "ai21labs/AI21-Jamba-1.5-Mini",
-        extras={
-            "tiny": "ai21labs/Jamba-tiny-dev",
-            "random": "ai21labs/Jamba-tiny-random",
-        },
-    ),
     "K2HorizonForCausalLM": _HfExamplesInfo(
         "IFM/K2-Horizon-36B",
         trust_remote_code=True,
@@ -426,14 +425,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         # so the dummy-weight init test fits in CI memory.
         hf_overrides={"ngram_vocab_size_ratio": 1},
     ),
-    "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo(
         "mistralai/Mamba-Codestral-7B-v0.1",
         extras={
+            "130m": "vllm-project/mamba2-130m-hf",
+            "1.3b": "vllm-project/mamba2-1.3b-hf",
             "random": "vllm-project/mamba2-codestral-v0.1-tiny-random",
         },
     ),
-    "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),
     "MiniCPMForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM-2B-sft-bf16", trust_remote_code=True
     ),
@@ -593,9 +592,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
-    ),
-    "TeleFLMForCausalLM": _HfExamplesInfo(
-        "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
     "VaultGemmaForCausalLM": _HfExamplesInfo("google/vaultgemma-1b"),
     "YoutuForCausalLM": _HfExamplesInfo("tencent/Youtu-LLM-2B"),
@@ -778,7 +774,6 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
     ),
-    "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),
     "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
         "nvidia/llama-nemotron-rerank-1b-v2", trust_remote_code=True
     ),

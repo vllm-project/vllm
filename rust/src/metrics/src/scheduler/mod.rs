@@ -38,7 +38,8 @@ pub use kv_connector::KvConnectorHandles;
 use kv_connector::KvConnectorMetrics;
 pub use kv_connector::{
     KvConnectorStats, MooncakeRecord, MooncakeStats, MooncakeTransferStats, MultiConnectorStats,
-    NixlStats, SimpleCpuOffloadData, SimpleCpuOffloadStats, UmbpOperationCounts, UmbpStats,
+    NixlStats, OffloadingSample, OffloadingStats, SimpleCpuOffloadData, SimpleCpuOffloadStats,
+    UmbpOperationCounts, UmbpStats,
 };
 pub use log_stats::{
     CudagraphLogKey, CudagraphStats, SchedulerLogStatsAccumulator, SchedulerLogStatsInterval,
