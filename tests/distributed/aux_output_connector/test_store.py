@@ -276,7 +276,7 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
 def test_next_step_does_not_consume_pending_output(monkeypatch):
     """begin_step must not wait for or consume an unconsumed step output."""
     event = Mock()
-    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
+    monkeypatch.setattr(torch, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
     worker = _make_worker(1)
     worker.begin_step(
