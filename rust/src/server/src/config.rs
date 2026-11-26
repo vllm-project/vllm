@@ -334,7 +334,7 @@ pub type DefaultMmLoras = IndexMap<MmModality, String>;
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
 pub struct ServerConfig {
-    /// Backend model identifier used for engine-core loading.
+    /// Model identifier or local checkpoint path.
     pub model: String,
     /// Operator-specified context length in tokens.
     #[serde(skip_serializing_if = "Option::is_none")]

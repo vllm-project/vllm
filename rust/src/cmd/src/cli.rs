@@ -1119,46 +1119,6 @@ impl SharedRuntimeArgs {
         }
     }
 
-    /// Build the engine-core client config for the `serve` path that owns
-    /// the startup handshake.
-    fn to_engine_core_config(
-        &self,
-        handshake_address: String,
-        advertised_host: String,
-        topology: &DataParallelTopology,
-        local_input_address: Option<String>,
-        local_output_address: Option<String>,
-        manages_engine: bool,
-    ) -> EngineCoreConfig {
-        let ready_timeout = self.ready_timeout();
-        let log_stats_interval = self.log_stats_interval();
-        let admission_limits = self.admission_limits();
-        let profiler = self.profiler();
-        EngineCoreConfig {
-            transport_mode: TransportMode::HandshakeOwner {
-                handshake_address,
-                advertised_host,
-                engine_start_index: topology.frontend_engine_start_index(),
-                engine_count: topology.frontend_engine_count(),
-                data_parallel_size: topology.data_parallel_size,
-                ready_timeout,
-                local_input_address,
-                local_output_address,
-            },
-            coordinator_mode: CoordinatorMode::MaybeInProc,
-            lora_modules: self.lora_modules.clone(),
-            default_mm_loras: self.default_mm_loras.clone(),
-            stream_interval: self.stream_interval,
-            admission_limits,
-            disable_log_stats: self.disable_log_stats,
-            log_stats_interval,
-            custom_histogram_buckets: self.custom_histogram_buckets.clone(),
-            disable_request_id_randomization: self.disable_request_id_randomization,
-            manages_engine,
-            profiler,
-        }
-    }
-
     /// The model arguments with `--tokens-only` applied, which implies
     /// `--skip-tokenizer-init` as in Python's `EngineArgs`.
     fn model_args(&self) -> ModelArgs {
@@ -1501,8 +1461,8 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
-    /// TCP port for the gRPC Inference, Control, and Render services. When not
-    /// set, no gRPC server is started.
+    /// TCP port for the gRPC Inference and Render services, and Control when
+    /// the server drives engine-core. When not set, no gRPC server is started.
     #[arg(long)]
     pub grpc_port: Option<u16>,
 
@@ -1526,7 +1486,24 @@ pub struct ServeArgs {
 
 impl ServeArgs {
     pub(super) fn to_server_config(&self) -> ServerConfig {
-        let (listener_mode, grpc_listener_mode) = self.listener_modes();
+        let listener_mode = match &self.uds {
+            Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
+            None => HttpListenerMode::BindTcp {
+                host: self.host.clone(),
+                port: self.port,
+            },
+        };
+        // gRPC follows the HTTP TCP host. With a Unix socket it defaults to IPv4
+        // loopback rather than all interfaces, so the side-car is never
+        // accidentally network-exposed.
+        let grpc_listener_mode = self.grpc_port.map(|port| HttpListenerMode::BindTcp {
+            host: match self.uds {
+                Some(_) => "127.0.0.1".to_string(),
+                None => self.host.clone(),
+            },
+            port,
+        });
+
         let runtime = &self.runtime;
         let ModelFileSources {
             model,
@@ -1601,36 +1578,32 @@ impl ServeArgs {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
             topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
-        self.runtime.to_engine_core_config(
-            handshake_address,
-            self.managed_engine.handshake_host.clone(),
-            topology,
-            local_input_address,
-            local_output_address,
-            // `--data-parallel-size-local 0` runs the frontend without a local engine.
-            self.managed_engine.data_parallel_size_local != Some(0),
-        )
-    }
+        let runtime = &self.runtime;
 
-    fn listener_modes(&self) -> (HttpListenerMode, Option<HttpListenerMode>) {
-        let listener_mode = match &self.uds {
-            Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
-            None => HttpListenerMode::BindTcp {
-                host: self.host.clone(),
-                port: self.port,
+        EngineCoreConfig {
+            transport_mode: TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host: self.managed_engine.handshake_host.clone(),
+                engine_start_index: topology.frontend_engine_start_index(),
+                engine_count: topology.frontend_engine_count(),
+                data_parallel_size: topology.data_parallel_size,
+                ready_timeout: runtime.ready_timeout(),
+                local_input_address,
+                local_output_address,
             },
-        };
-        // gRPC follows the HTTP TCP host. With a Unix socket it defaults to IPv4
-        // loopback rather than all interfaces, so the side-car is never
-        // accidentally network-exposed.
-        let grpc_listener_mode = self.grpc_port.map(|port| HttpListenerMode::BindTcp {
-            host: match self.uds {
-                Some(_) => "127.0.0.1".to_string(),
-                None => self.host.clone(),
-            },
-            port,
-        });
-        (listener_mode, grpc_listener_mode)
+            coordinator_mode: CoordinatorMode::MaybeInProc,
+            lora_modules: runtime.lora_modules.clone(),
+            default_mm_loras: runtime.default_mm_loras.clone(),
+            stream_interval: runtime.stream_interval,
+            admission_limits: runtime.admission_limits(),
+            disable_log_stats: runtime.disable_log_stats,
+            log_stats_interval: runtime.log_stats_interval(),
+            custom_histogram_buckets: runtime.custom_histogram_buckets.clone(),
+            disable_request_id_randomization: runtime.disable_request_id_randomization,
+            // `--data-parallel-size-local 0` runs the frontend without a local engine.
+            manages_engine: self.managed_engine.data_parallel_size_local != Some(0),
+            profiler: runtime.profiler(),
+        }
     }
 
     /// Build the managed Python-engine spawn configuration with the given

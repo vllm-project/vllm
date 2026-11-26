@@ -1450,7 +1450,7 @@ fn serve_accepts_remote_generation_with_an_optional_model_limit() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--remote-generation-url=unix:///run/vllm/generation.sock",
+        "--remote-generation-url=http://127.0.0.1:50051",
     ];
 
     for (flag, expected) in [(None, None), (Some("--max-model-len=512"), Some(512))] {
@@ -1460,7 +1460,7 @@ fn serve_accepts_remote_generation_with_an_optional_model_limit() {
         };
         assert_eq!(
             serve.remote_generation_url.as_deref(),
-            Some("unix:///run/vllm/generation.sock")
+            Some("http://127.0.0.1:50051")
         );
         assert_eq!(
             serve.remote_max_model_len().unwrap().map(|n| n.get()),
