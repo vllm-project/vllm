@@ -561,7 +561,7 @@ pub(super) fn json_to_proto_struct(value: &serde_json::Value) -> Option<prost_ty
     }
 }
 
-fn json_to_proto_value(v: &serde_json::Value) -> prost_types::Value {
+pub(super) fn json_to_proto_value(v: &serde_json::Value) -> prost_types::Value {
     use prost_types::value::Kind;
     let kind = match v {
         serde_json::Value::Null => Kind::NullValue(0),

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{Stream, StreamExt, TryStreamExt};
 use serde_json::Value;
+use thiserror_ext::AsReport as _;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -102,23 +103,20 @@ impl GrpcLlm {
     }
 }
 
-fn remote_error(error: impl ToString) -> Error {
+fn remote_error(message: impl Into<String>) -> Error {
     Error::Remote {
-        message: error.to_string(),
+        message: message.into(),
     }
 }
 
 fn status_to_llm_error(status: Status) -> Error {
+    let message = status.to_report_string();
     match status.code() {
         Code::InvalidArgument | Code::OutOfRange | Code::FailedPrecondition => {
-            Error::RemoteInvalidRequest {
-                message: status.to_string(),
-            }
+            Error::RemoteInvalidRequest { message }
         }
-        Code::Unavailable | Code::ResourceExhausted => Error::Unavailable {
-            message: status.to_string(),
-        },
-        _ => remote_error(status),
+        Code::Unavailable | Code::ResourceExhausted => Error::Unavailable { message },
+        _ => remote_error(message),
     }
 }
 
@@ -203,14 +201,19 @@ fn to_grpc_request(
     let kwargs = request
         .reasoning_parser_kwargs
         .filter(|k| !k.chat_template_kwargs.is_empty())
-        .map(|k| {
-            let value = Value::Object(k.chat_template_kwargs.into_iter().collect());
-            if !numbers_fit_protobuf_struct(&value) {
+        .map(|kwargs| {
+            let kwargs = kwargs.chat_template_kwargs;
+            if !kwargs.values().all(numbers_fit_protobuf_struct) {
                 return Err(Error::Unsupported {
                     field: "chat_template_kwargs number outside protobuf Struct precision",
                 });
             }
-            Ok(convert::json_to_proto_struct(&value).expect("JSON object"))
+            Ok(prost_types::Struct {
+                fields: kwargs
+                    .into_iter()
+                    .map(|(key, value)| (key, convert::json_to_proto_value(&value)))
+                    .collect(),
+            })
         })
         .transpose()?;
     let mut grpc_request = Request::new(pb::GenerateRequest {
@@ -250,7 +253,7 @@ fn to_grpc_request(
                 .thinking_token_budget
                 .map(i64::try_from)
                 .transpose()
-                .map_err(remote_error)?,
+                .map_err(|error| remote_error(error.to_report_string()))?,
             ..Default::default()
         }),
         response: Some(pb::ResponseOptions {
@@ -278,8 +281,11 @@ fn to_grpc_request(
     for (key, value) in request.trace_headers.into_iter().flatten() {
         let key =
             tonic::metadata::MetadataKey::<tonic::metadata::Ascii>::from_bytes(key.as_bytes())
-                .map_err(remote_error)?;
-        grpc_request.metadata_mut().insert(key, value.parse().map_err(remote_error)?);
+                .map_err(|error| remote_error(error.to_report_string()))?;
+        let value = value
+            .parse::<tonic::metadata::AsciiMetadataValue>()
+            .map_err(|error| remote_error(error.to_report_string()))?;
+        grpc_request.metadata_mut().insert(key, value);
     }
     Ok(grpc_request)
 }
@@ -432,10 +438,18 @@ impl Llm for GrpcLlm {
         ])
     }
     async fn abort(&self, external_ids: &[String]) -> Result<()> {
-        for call in self.inflight.lock().unwrap().values() {
-            if external_ids.is_empty() || external_ids.contains(&call.external_request_id) {
-                call.abort();
-            }
+        let calls: Vec<_> = self
+            .inflight
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|call| {
+                external_ids.is_empty() || external_ids.contains(&call.external_request_id)
+            })
+            .cloned()
+            .collect();
+        for call in calls {
+            call.abort();
         }
         Ok(())
     }
