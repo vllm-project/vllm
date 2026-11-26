@@ -53,6 +53,7 @@ class FlashInferPcieIpcAllReduce:
         self.device = torch.device(device)
         self.world_size = dist.get_world_size(group)
         self.rank = dist.get_rank(group)
+        self._dispatch_enabled = False
         self.workspace: Any | None = None
         self.hidden_dim = 0
         self.dtype: torch.dtype | None = None
@@ -84,8 +85,8 @@ class FlashInferPcieIpcAllReduce:
             )
             return
 
-        # Setup is deferred until kernel_warmup, where the model hidden size and
-        # exact CUDA Graph buckets are known. Until then dispatch falls through.
+        # The workspace can be prepared for memory profiling before kernel
+        # warmup enables it for all-reduce dispatch.
         self.disabled = False
 
     @property
@@ -99,9 +100,14 @@ class FlashInferPcieIpcAllReduce:
         dtype: torch.dtype,
         capture_sizes: Sequence[int],
         tune_cache: Path,
+        enable_dispatch: bool = True,
     ) -> None:
         """Allocate, tune, and prepare the exact graph-capture shapes."""
-        if self.disabled or self.workspace is not None:
+        if self.disabled:
+            return
+        if self.workspace is not None:
+            if enable_dispatch:
+                self._dispatch_enabled = True
             return
         if dtype not in _SUPPORTED_DTYPES:
             logger.warning_once(
@@ -146,6 +152,7 @@ class FlashInferPcieIpcAllReduce:
         workspace.prepare([(batch, self.hidden_dim) for batch in batches], dtype=dtype)
         torch.accelerator.synchronize(self.device)
         workspace.rebind_stream()
+        self._dispatch_enabled = enable_dispatch
         logger.info_once(
             "Initialized FlashInfer PCIe IPC all-reduce for TP%d, hidden_dim=%d, "
             "dtype=%s, max_tokens=%d.",
@@ -158,7 +165,8 @@ class FlashInferPcieIpcAllReduce:
     def should_use(self, inp: torch.Tensor) -> bool:
         workspace = self.workspace
         return bool(
-            not self.disabled
+            self._dispatch_enabled
+            and not self.disabled
             and workspace is not None
             and inp.is_cuda
             and inp.is_contiguous()
@@ -176,7 +184,7 @@ class FlashInferPcieIpcAllReduce:
     def capture(self):
         """Move the single-stream workspace to and from the capture stream."""
         workspace = self.workspace
-        if workspace is None:
+        if workspace is None or not self._dispatch_enabled:
             yield
             return
 
@@ -197,10 +205,13 @@ class FlashInferPcieIpcAllReduce:
         if workspace is not None:
             workspace.destroy()
             self.workspace = None
+            self._dispatch_enabled = False
 
 
-def warmup_flashinfer_pcie_ipc_allreduce(worker: "Worker") -> None:
-    """Initialize the TP PCIe IPC backend immediately before graph capture."""
+def warmup_flashinfer_pcie_ipc_allreduce(
+    worker: "Worker", *, enable_dispatch: bool = True
+) -> None:
+    """Initialize the TP PCIe IPC backend before profiling or graph capture."""
     from vllm.distributed.device_communicators.cuda_communicator import (
         CudaCommunicator,
     )
@@ -236,4 +247,5 @@ def warmup_flashinfer_pcie_ipc_allreduce(worker: "Worker") -> None:
         dtype=worker.model_config.dtype,
         capture_sizes=capture_sizes,
         tune_cache=tune_cache,
+        enable_dispatch=enable_dispatch,
     )
