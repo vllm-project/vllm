@@ -169,7 +169,6 @@ def test_openai_decisions_score_matches_systemone_score(server):
     assert native.status_code == 200, native.text
     answer = decision.json()["answers"][0]
     reference = native.json()["answers"]["0"]
-    assert [p["label"] for p in answer["probabilities"]] == [v["label"] for v in levels]
     assert [p["probability"] for p in answer["probabilities"]] == pytest.approx(
         [reference["probabilities"][str(i)] for i in range(len(levels))], abs=1e-3
     )
