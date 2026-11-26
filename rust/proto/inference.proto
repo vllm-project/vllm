@@ -27,7 +27,7 @@ message GenerateRequest {
     TokenIds token_ids = 4;
   }
 
-  // Temperature, defaults to model-specific default or 0
+  // Temperature; omitted uses the model's default or 1.0, as in the HTTP API
   optional float temperature = 5;
   // Parameters controlling random sampling, not applicable if temperature == 0
   RandomSampling sampling = 6;
@@ -174,7 +174,7 @@ message ResponseOptions {
   bool output_token_ids = 5;
   bool output_logprobs = 6;
   optional CandidateTokens output_candidates = 7;
-  // Defaults to true when omitted.
+  // Defaults to the model's generation config, else true, when omitted.
   optional bool skip_special_tokens = 8;
 }
 

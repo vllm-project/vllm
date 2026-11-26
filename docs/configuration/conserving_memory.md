@@ -130,6 +130,21 @@ llm = LLM(
 )
 ```
 
+!!! note
+    If [embedding inputs](../features/multimodal_inputs.md#embedding-inputs) are enabled (`enable_mm_embeds=True`, which EC/KV consumers turn on automatically), a zero limit only disables raw inputs: the modality still accepts pre-computed embeddings and reserves encoder cache space for them.
+    Also set `"allow_embeds": False` to disable it completely:
+
+    ```python
+    from vllm import LLM
+
+    # Accept image embeddings, but neither videos nor video embeddings
+    llm = LLM(
+        model="Qwen/Qwen2.5-VL-3B-Instruct",
+        enable_mm_embeds=True,
+        limit_mm_per_prompt={"image": 0, "video": {"count": 0, "allow_embeds": False}},
+    )
+    ```
+
 ### Configurable options
 
 `limit_mm_per_prompt` also accepts configurable options per modality. In the configurable form, you still specify `count`, and you may optionally provide size hints that control how vLLM profiles and reserves memory for your multi‑modal inputs. This helps you tune memory for the actual media you expect, instead of the model’s absolute maxima.

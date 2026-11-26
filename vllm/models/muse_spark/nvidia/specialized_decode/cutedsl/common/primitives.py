@@ -483,17 +483,6 @@ def packed_u32x4_to_f16x8(packed, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def packed_u32_to_bf16x2(packed: Uint32, *, loc=None, ip=None):
-    values = llvm.bitcast(
-        ir.VectorType.get([2], BFloat16.mlir_type, loc=loc),
-        packed.ir_value(loc=loc, ip=ip),
-        loc=loc,
-        ip=ip,
-    )
-    return cute.TensorSSA(values, 2, BFloat16)
-
-
-@dsl_user_op
 def packed_u32x2_to_bf16x4(packed, *, loc=None, ip=None):
     values = llvm.bitcast(
         ir.VectorType.get([QUAD_BF16], BFloat16.mlir_type, loc=loc),
@@ -663,78 +652,6 @@ def load_shared_u32x4_address(address: Int32, *, loc=None, ip=None):
 def load_shared_u32x4_unpacked(address: Int32, *, loc=None, ip=None) -> tuple:
     """`load_shared_u32x4_address` as a tuple of four Uint32."""
     return _unpack(_load_shared_u32x4(address, loc, ip), Uint32, 4, loc=loc, ip=ip)
-
-
-@dsl_user_op
-def store_shared_u32x4(pointer: cute.Pointer, packed, *, loc=None, ip=None) -> None:
-    address = pointer.toint(loc=loc, ip=ip)
-    words = [packed[index].ir_value(loc=loc, ip=ip) for index in range(4)]
-    _asm(
-        None,
-        [Int32(address).ir_value(loc=loc, ip=ip), *words],
-        "st.shared.v4.u32 [$0], {$1, $2, $3, $4};",
-        "r,r,r,r,r",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def cpasync_bulk_g2s(
-    gmem_ptr: cute.Pointer,
-    smem_ptr: cute.Pointer,
-    barrier_ptr: cute.Pointer,
-    size_bytes: Int32,
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    operands = [
-        gmem_ptr.toint(loc=loc, ip=ip).ir_value(),
-        smem_ptr.toint(loc=loc, ip=ip).ir_value(),
-        barrier_ptr.toint(loc=loc, ip=ip).ir_value(),
-        size_bytes.ir_value(loc=loc, ip=ip),
-        Int64(L2_EVICT_FIRST).ir_value(),
-    ]
-    _asm(
-        None,
-        operands,
-        (
-            "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"
-            ".L2::cache_hint [$1], [$0], $3, [$2], $4;"
-        ),
-        "l,r,r,r,l",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def fence_proxy_async_shared_cta(*, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [],
-        "fence.proxy.async.shared::cta;",
-        "",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def remote_release_add1_u32(address: Int64, *, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [address.ir_value(loc=loc, ip=ip)],
-        "red.release.sys.global.add.u32 [$0], 1;",
-        "l",
-        side_effects=True,
-        loc=loc,
-        ip=ip,
-    )
 
 
 @dsl_user_op

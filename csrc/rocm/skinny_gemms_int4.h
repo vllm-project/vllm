@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  *
- * Declaration of the int4 skinny GEMM, one instantiation per N_in (1..5). The
+ * Declaration of the int4 skinny GEMM, one instantiation per N_in (1..8). The
  * API unit only dispatches on N_in and needs this header; the kernels stay in
  * skinny_gemms_int4.cuh, which the per-N_in units instantiate through
  * VLLM_SKINNY_INT4_INSTANTIATE below.
@@ -42,3 +42,6 @@ VLLM_SKINNY_INT4_EXTERN(2)
 VLLM_SKINNY_INT4_EXTERN(3)
 VLLM_SKINNY_INT4_EXTERN(4)
 VLLM_SKINNY_INT4_EXTERN(5)
+VLLM_SKINNY_INT4_EXTERN(6)
+VLLM_SKINNY_INT4_EXTERN(7)
+VLLM_SKINNY_INT4_EXTERN(8)

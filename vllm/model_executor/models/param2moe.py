@@ -34,7 +34,6 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
-    MoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -341,9 +340,6 @@ class Param2MoEMoEBlock(nn.Module):
             use_grouped_topk=self.use_grouped_topk,
             routed_scaling_factor=self.routed_scaling_factor,
         )
-
-    def maybe_get_fused_moe(self) -> MoERunner:
-        return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape

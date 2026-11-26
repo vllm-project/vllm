@@ -60,8 +60,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 @pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
-def test_minicpmv_lora(minicpmv_lora_files):
-    llm = vllm.LLM(
+def test_minicpmv_lora(vllm_runner, minicpmv_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_num_seqs=2,
         enable_lora=True,
@@ -71,21 +71,22 @@ def test_minicpmv_lora(minicpmv_lora_files):
         max_model_len=2048,
         limit_mm_per_prompt={"image": 2, "video": 0},
         trust_remote_code=True,
-    )
-    output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output1[i])
-    output2 = do_sample(llm, minicpmv_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output2[i])
+        enable_chunked_prefill=None,
+    ) as runner:
+        output1 = do_sample(runner.llm, minicpmv_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_OUTPUT)):
+            assert EXPECTED_OUTPUT[i].startswith(output1[i])
+        output2 = do_sample(runner.llm, minicpmv_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_OUTPUT)):
+            assert EXPECTED_OUTPUT[i].startswith(output2[i])
 
 
 @pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 @multi_gpu_test(num_gpus=4)
-def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
-    llm = vllm.LLM(
+def test_minicpmv_tp4_wo_fully_sharded_loras(vllm_runner, minicpmv_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
         max_num_seqs=2,
@@ -94,18 +95,20 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
         tensor_parallel_size=4,
         limit_mm_per_prompt={"image": 2, "video": 0},
         trust_remote_code=True,
-    )
-    output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
+        enable_chunked_prefill=None,
+        max_model_len=None,
+    ) as runner:
+        output_tp = do_sample(runner.llm, minicpmv_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_OUTPUT)):
+            assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
 
 
 @pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 @multi_gpu_test(num_gpus=4)
-def test_minicpmv_tp4_fully_sharded_loras(minicpmv_lora_files):
-    llm = vllm.LLM(
+def test_minicpmv_tp4_fully_sharded_loras(vllm_runner, minicpmv_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
         max_num_seqs=2,
@@ -115,10 +118,12 @@ def test_minicpmv_tp4_fully_sharded_loras(minicpmv_lora_files):
         trust_remote_code=True,
         limit_mm_per_prompt={"image": 1, "video": 0},
         fully_sharded_loras=True,
-    )
-    output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
-    output_tp = do_sample(llm, minicpmv_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
+        enable_chunked_prefill=None,
+        max_model_len=None,
+    ) as runner:
+        output_tp = do_sample(runner.llm, minicpmv_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_OUTPUT)):
+            assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
+        output_tp = do_sample(runner.llm, minicpmv_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_OUTPUT)):
+            assert EXPECTED_OUTPUT[i].startswith(output_tp[i])

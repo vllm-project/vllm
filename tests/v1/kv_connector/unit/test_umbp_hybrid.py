@@ -12,7 +12,6 @@ import torch
 from tests.v1.core.utils import new_kv_cache_group, uniform_spec
 from tests.v1.kv_connector.umbp_test_utils import (
     MemoryRuntime,
-    _EmbeddedRuntime,
     _hybrid_kv_cache_config,
     _kv_cache_config,
     _SchedulerHandle,
@@ -22,15 +21,12 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_scheduler_output,
     mori_has_umbp,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
     scheduler as umbp_scheduler,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
-    UMBPStoreConnector,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
+    BlockLoadBatch,
     BlockTransferPlan,
     KVLayoutPlanner,
     LoadSpec,
@@ -45,9 +41,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     EmbeddedRuntime,
     UMBPRuntimeConfig,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
-    UMBPRuntimeFactory,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.scheduler import (
     UMBPStoreConnectorScheduler,
@@ -105,6 +98,7 @@ def test_mamba_align_states_store_only_from_boundary_handoffs():
         )
 
     positional = scheduler.build_connector_meta(output({}))
+    assert isinstance(positional, UMBPConnectorMetadata)
     assert {
         (plan.group_id, plan.block_id) for plan in positional.iter_store_plans()
     } == {
@@ -114,6 +108,7 @@ def test_mamba_align_states_store_only_from_boundary_handoffs():
 
     scheduler._request_trackers["m"].saved_tokens = 0
     handed_off = scheduler.build_connector_meta(output({"m": [(1, 9, 32)]}))
+    assert isinstance(handed_off, UMBPConnectorMetadata)
     handed_off_plans = list(handed_off.iter_store_plans())
     assert (1, 9) in {(plan.group_id, plan.block_id) for plan in handed_off_plans}
     assert not any(
@@ -198,7 +193,7 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
         assert kwargs["start_block"] == 0
         assert kwargs["end_block"] == 4
         assert kwargs["alignment_tokens"] == 16
-        assert kwargs["reachable_boundaries"] == (63,)
+        assert kwargs["reachable_boundaries"] == (63, 64)
         return [False, True, False, True]
 
     scheduler = UMBPStoreConnectorScheduler(
@@ -224,17 +219,13 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
     assert [plan.block_id for plan in plans if plan.group_id == 1] == [6, 8]
 
 
-@pytest.mark.parametrize("use_eagle", [False, True])
-def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
+def test_single_sliding_window_stores_a_replayable_tail():
     config = _kv_cache_config()
     config.kv_cache_groups[0].manager_config = SlidingWindowManager.config(
         sliding_window=32
     )
     config.prefix_cache_retention_interval = 0
     vllm_config = _vllm_config({})
-    vllm_config.speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: use_eagle
-    )
     codec = BlockIdentityCodec(UMBPNamespace("swa-replay"))
     handle = _SchedulerHandle({})
     scheduler = UMBPStoreConnectorScheduler(vllm_config, config, handle, codec)
@@ -246,19 +237,20 @@ def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
     )
     try:
         plans = scheduler._store_plans(request, RequestTracker(), 64)
-        assert plans.block_ids == ([2, 3, 4] if use_eagle else [3, 4])
+        assert plans.block_ids == [3, 4]
         handle.hits = dict.fromkeys(plans.keys, True)
         matched, async_load = scheduler.get_num_new_matched_tokens(request, 0)
-        assert (matched, async_load) == (48 if use_eagle else 64, True)
-        destinations = ([0, 5, 6] if use_eagle else [0, 0, 5, 6],)
+        assert (matched, async_load) == (64, True)
+        destinations = ([0, 0, 5, 6],)
         scheduler.update_state_after_alloc(
             request,
             SimpleNamespace(get_block_ids=lambda group_ids: destinations),
             matched,
         )
         loaded = scheduler._pending_loads[request.request_id]
+        assert isinstance(loaded, BlockLoadBatch)
         assert loaded.block_ids == [5, 6]
-        expected_hashes = [b"b", b"c"] if use_eagle else [b"c", b"d"]
+        expected_hashes = [b"c", b"d"]
         assert loaded.keys == [codec.key(block_hash) for block_hash in expected_hashes]
     finally:
         scheduler.close()
@@ -332,7 +324,7 @@ def test_external_chunked_local_hit_preserves_absolute_positions(
         scheduler.close()
 
 
-def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
+def test_lookup_stops_before_the_aligned_prompt_end():
     config = _kv_cache_config()
     config.kv_cache_groups.append(
         new_kv_cache_group(
@@ -340,17 +332,15 @@ def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
             SlidingWindowManager.layer_config(
                 uniform_spec(config.kv_cache_groups[0]), sliding_window=32
             ),
-            is_eagle_group=True,
         )
     )
     config.prefix_cache_retention_interval = 0
     vllm_config = _vllm_config({})
-    vllm_config.speculative_config = SimpleNamespace(use_eagle_block_drop=lambda: True)
-    codec = BlockIdentityCodec(UMBPNamespace("eagle-proof"))
+    codec = BlockIdentityCodec(UMBPNamespace("prompt-end"))
     handle = _SchedulerHandle({})
     scheduler = UMBPStoreConnectorScheduler(vllm_config, config, handle, codec)
     request = make_request(
-        "eagle",
+        "prompt-end",
         num_tokens=64,
         block_hashes=[b"a", b"b", b"c", b"d"],
         block_ids=([1, 2, 3, 4], [5, 6, 7, 8]),
@@ -359,7 +349,7 @@ def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
         plans = scheduler._store_plans(request, RequestTracker(), 64)
         handle.hits = dict.fromkeys(plans.keys, True)
         assert scheduler.get_num_new_matched_tokens(request, 0) == (48, True)
-        assert codec.key(b"d", 1) in handle.queries[-1]
+        assert codec.key(b"d", 1) not in handle.queries[-1]
         scheduler.update_state_after_alloc(
             request,
             SimpleNamespace(
@@ -371,6 +361,7 @@ def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
             48,
         )
         loaded = scheduler._pending_loads[request.request_id]
+        assert isinstance(loaded, BlockLoadBatch)
         assert loaded.keys == [
             codec.key(b"a", 0),
             codec.key(b"b", 0),
@@ -482,25 +473,6 @@ def test_hybrid_external_hit_keeps_local_sparse_checkpoint(
         scheduler.close()
 
 
-def test_draft_groups_must_be_restorable(monkeypatch):
-    monkeypatch.setitem(
-        UMBPRuntimeFactory._builders, "embedded", lambda config: _EmbeddedRuntime()
-    )
-    config = _kv_cache_config()
-    config.kv_cache_groups.append(
-        new_kv_cache_group(
-            ["draft"],
-            uniform_spec(config.kv_cache_groups[0]),
-            is_eagle_group=True,
-            enable_kv_transfer=False,
-        )
-    )
-    with pytest.raises(NotImplementedError, match="draft-model KV"):
-        UMBPStoreConnector(
-            _vllm_config({"mode": "embedded"}), KVConnectorRole.SCHEDULER, config
-        )
-
-
 def test_hybrid_model_loads_asynchronously_even_when_sync_is_requested():
     codec = BlockIdentityCodec(UMBPNamespace("hybrid-sync"))
     block_hashes = [b"a", b"b"]
@@ -539,6 +511,7 @@ def test_hybrid_lookup_uses_latest_mamba_checkpoint(lookup_async, monkeypatch):
         codec,
     )
     try:
+        assert scheduler._lookup_coordinator is not None
         pool = scheduler._lookup_coordinator.block_pool
         for operation in (
             "get_new_blocks",
@@ -596,7 +569,9 @@ def test_hybrid_shadow_lookup_cleans_up_after_failure(monkeypatch, failure_stage
     request = make_request("r", num_tokens=33)
     handle.hits = {codec.key(h, g): True for h in request.block_hashes for g in (0, 1)}
     coordinator = scheduler._lookup_coordinator
+    assert coordinator is not None
     pool = coordinator.block_pool
+    assert isinstance(pool, umbp_scheduler._LookupBlockPool)
     free_blocks = pool.get_num_free_blocks()
 
     def fail(*args, **kwargs):
@@ -691,6 +666,8 @@ def test_scheduler_accepts_only_computed_hash_aligned_tail(boundary, monkeypatch
         request, ([7],), [(0, 7, boundary)]
     )
     metadata = scheduler.build_connector_meta(make_scheduler_output())
+    assert isinstance(metadata, UMBPConnectorMetadata)
+    assert scheduler.codec is not None
 
     assert len(metadata.store_plans) == (1 if boundary == 12 else 0)
     if metadata.store_plans:
@@ -729,6 +706,8 @@ def test_scheduler_stores_exact_hybrid_boundary_state():
         )
     )
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
+    assert scheduler.codec is not None
     assert len(metadata.store_plans) == 1
     plan = metadata.store_plans[0]
     assert plan.group_id == 1
@@ -843,6 +822,7 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         make_scheduler_output(finished={request.request_id})
     )
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert len(metadata.store_plans) == 2
     assert {(plan.group_id, plan.block_id) for plan in metadata.store_plans} == {
         (0, 7),
@@ -953,6 +933,7 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
     output = make_scheduler_output(finished={"tail"})
     try:
         metadata = scheduler.build_connector_meta(output)
+        assert isinstance(metadata, UMBPConnectorMetadata)
         assert len(metadata.store_plans) == 2
         worker.enqueue_stores(metadata)
         worker.wait_for_save()
@@ -969,6 +950,9 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         assert [block.ref_cnt for block in sources] == [0, 0]
         for cache in caches.values():
             cache.zero_()
+        # Core leaves no write to an asynchronous load's blocks queued on the
+        # caller stream, which the transfer is not ordered behind.
+        torch.accelerator.synchronize()
 
         request.request_id = "replay"
         assert scheduler.get_num_new_matched_tokens(request, 0) == (12, True)
@@ -987,7 +971,9 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
             expected = torch.zeros_like(cache)
             expected[block_id] = pages[name]
             assert torch.equal(cache, expected), name
-        counters = worker.get_kv_connector_stats().reduce()
+        connector_stats = worker.get_kv_connector_stats()
+        assert connector_stats is not None
+        counters = connector_stats.reduce()
         page_bytes = sum(group.page_size_bytes for group in groups)
         assert counters["load_num_bytes"] == page_bytes
         assert counters["store_num_bytes"] == page_bytes
@@ -1065,6 +1051,8 @@ def test_eager_restored_prefix_rechecks_residency_per_group_and_rank(
     )
     try:
         meta = scheduler.build_connector_meta(output)
+        assert isinstance(meta, UMBPConnectorMetadata)
+        assert scheduler.codec is not None
         expected = {(0, b"c"), (0, b"d"), (1, b"d")} if restored_tokens == 32 else set()
         if failure == "missing-rank":
             expected.add((0, b"a"))

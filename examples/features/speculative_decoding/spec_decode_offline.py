@@ -141,7 +141,6 @@ def main(args):
 
     llm = LLM(
         model=model_dir,
-        trust_remote_code=True,
         tensor_parallel_size=args.tp,
         enable_chunked_prefill=args.enable_chunked_prefill,
         enforce_eager=args.enforce_eager,
