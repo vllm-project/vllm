@@ -171,7 +171,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
                 limit.get()
             } else {
                 let limit = text_backend
-                    .checkpoint_context_len()?
+                    .max_model_len()?
                     .context("config.json has no context length; pass --max-model-len")?;
                 anyhow::ensure!(
                     limit > 0,

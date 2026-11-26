@@ -277,7 +277,7 @@ impl ModelConfig {
     }
 
     /// Return the context length declared by the checkpoint.
-    pub(super) fn checkpoint_context_len(&self) -> Result<Option<u32>> {
+    pub(super) fn max_model_len(&self) -> Result<Option<u32>> {
         let text = self.effective_text_config();
         text.model_max_length
             .as_ref()

@@ -2255,39 +2255,36 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn grpc_llm_abort_reaches_engine_while_output_is_idle() {
-    let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
-    let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
-    let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
-        .await
-        .unwrap()
-        .unwrap();
-    llm.abort(&["proof".into()]).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), engine_task)
-        .await
-        .expect("engine should receive abort before caller polls the stream")
-        .expect("mock engine task");
-    assert!(stream.next().await.unwrap().is_err());
-    server_task.abort();
-}
+async fn grpc_llm_cancels_unpolled_streams_on_abort_and_drop() {
+    for explicit_abort in [true, false] {
+        let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
+        let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
+        let request = grpc_llm_request();
+        let request_id = request.request_id.clone();
+        let stream = llm.generate(request).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+            .await
+            .expect("timed out waiting for engine submission")
+            .expect("engine submission signal");
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn dropping_unpolled_grpc_llm_stream_aborts_engine_request() {
-    let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
-    let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
-    let stream = llm.generate(grpc_llm_request()).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
-        .await
-        .expect("timed out waiting for engine submission")
-        .expect("engine submission signal");
-    drop(stream);
-    tokio::time::timeout(Duration::from_secs(5), engine_task)
-        .await
-        .expect("dropping the unpolled stream should abort the engine request")
-        .expect("mock engine task");
-    server_task.abort();
+        let mut aborted_stream = if explicit_abort {
+            llm.abort(&[request_id]).await.unwrap();
+            Some(stream)
+        } else {
+            drop(stream);
+            None
+        };
+        tokio::time::timeout(Duration::from_secs(5), engine_task)
+            .await
+            .unwrap_or_else(|_| {
+                panic!("engine must receive cancellation (explicit_abort = {explicit_abort})")
+            })
+            .expect("mock engine task");
+        if let Some(stream) = &mut aborted_stream {
+            assert!(stream.next().await.unwrap().is_err());
+        }
+        server_task.abort();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

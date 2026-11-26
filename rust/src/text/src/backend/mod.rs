@@ -148,8 +148,8 @@ pub trait TextBackend: Send + Sync {
         None
     }
 
-    /// Return the context length declared in the model config, if any.
-    fn checkpoint_context_len(&self) -> Result<Option<u32>> {
+    /// Return the model config's context limit, if declared.
+    fn max_model_len(&self) -> Result<Option<u32>> {
         Ok(None)
     }
 
