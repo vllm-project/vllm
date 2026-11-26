@@ -138,17 +138,20 @@ def _load_reference(reference_dir: str):
         SystemExit: The snapshot has no importable ``code/kev`` package.
 
     """
-    package_dir = Path(reference_dir) / "code"
+    kev_dir = Path(reference_dir) / "code" / "kev"
+    init = kev_dir / "__init__.py"
+    if not init.is_file():
+        raise SystemExit(f"no reference package at {kev_dir}")
     spec = importlib.util.spec_from_file_location(
-        "drex_reference", package_dir, submodule_search_locations=[str(package_dir)]
+        "drex_reference", init, submodule_search_locations=[str(kev_dir)]
     )
     if spec is None or spec.loader is None:
-        raise SystemExit(f"no reference package at {package_dir}")
+        raise SystemExit(f"no reference package at {kev_dir}")
     package = importlib.util.module_from_spec(spec)
     sys.modules["drex_reference"] = package
     spec.loader.exec_module(package)
-    api = importlib.import_module("drex_reference.kev.api")
-    checkpoint = importlib.import_module("drex_reference.kev.checkpoint")
+    api = importlib.import_module("drex_reference.api")
+    checkpoint = importlib.import_module("drex_reference.checkpoint")
     return api, checkpoint.load
 
 
