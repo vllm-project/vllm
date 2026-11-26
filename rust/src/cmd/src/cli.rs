@@ -1174,49 +1174,43 @@ impl SharedRuntimeArgs {
         }
     }
 
-    /// Build the OpenAI-server config for the managed `serve` path that still
-    /// owns the startup handshake and binds its own HTTP listener.
-    fn to_managed_config(
+    /// Build the engine-core settings for the managed startup handshake.
+    fn to_engine_core_config(
         &self,
-        listener_mode: HttpListenerMode,
-        grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
         topology: &DataParallelTopology,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
         manages_engine: bool,
-    ) -> FrontendConfig {
+    ) -> EngineCoreConfig {
         let ready_timeout = self.ready_timeout();
         let log_stats_interval = self.log_stats_interval();
         let admission_limits = self.admission_limits();
         let profiler = self.profiler();
 
-        FrontendConfig {
-            server: self.to_server_config(listener_mode, grpc_listener_mode),
-            engine_core: EngineCoreConfig {
-                transport_mode: TransportMode::HandshakeOwner {
-                    handshake_address,
-                    advertised_host,
-                    engine_start_index: topology.frontend_engine_start_index(),
-                    engine_count: topology.frontend_engine_count(),
-                    data_parallel_size: topology.data_parallel_size,
-                    ready_timeout,
-                    local_input_address,
-                    local_output_address,
-                },
-                coordinator_mode: CoordinatorMode::MaybeInProc,
-                lora_modules: self.lora_modules.clone(),
-                default_mm_loras: self.default_mm_loras.clone(),
-                stream_interval: self.stream_interval,
-                admission_limits,
-                disable_log_stats: self.disable_log_stats,
-                log_stats_interval,
-                custom_histogram_buckets: self.custom_histogram_buckets.clone(),
-                disable_request_id_randomization: self.disable_request_id_randomization,
-                manages_engine,
-                profiler,
+        EngineCoreConfig {
+            transport_mode: TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host,
+                engine_start_index: topology.frontend_engine_start_index(),
+                engine_count: topology.frontend_engine_count(),
+                data_parallel_size: topology.data_parallel_size,
+                ready_timeout,
+                local_input_address,
+                local_output_address,
             },
+            coordinator_mode: CoordinatorMode::MaybeInProc,
+            lora_modules: self.lora_modules.clone(),
+            default_mm_loras: self.default_mm_loras.clone(),
+            stream_interval: self.stream_interval,
+            admission_limits,
+            disable_log_stats: self.disable_log_stats,
+            log_stats_interval,
+            custom_histogram_buckets: self.custom_histogram_buckets.clone(),
+            disable_request_id_randomization: self.disable_request_id_randomization,
+            manages_engine,
+            profiler,
         }
     }
 
@@ -1621,17 +1615,18 @@ impl ServeArgs {
             topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let (listener_mode, grpc_listener_mode) = self.listener_modes();
 
-        self.runtime.to_managed_config(
-            listener_mode,
-            grpc_listener_mode,
-            handshake_address,
-            self.managed_engine.handshake_host.clone(),
-            topology,
-            local_input_address,
-            local_output_address,
-            // `--data-parallel-size-local 0` runs the frontend without a local engine.
-            self.managed_engine.data_parallel_size_local != Some(0),
-        )
+        FrontendConfig {
+            server: self.runtime.to_server_config(listener_mode, grpc_listener_mode),
+            engine_core: self.runtime.to_engine_core_config(
+                handshake_address,
+                self.managed_engine.handshake_host.clone(),
+                topology,
+                local_input_address,
+                local_output_address,
+                // `--data-parallel-size-local 0` runs the frontend without a local engine.
+                self.managed_engine.data_parallel_size_local != Some(0),
+            ),
+        }
     }
 
     fn listener_modes(&self) -> (HttpListenerMode, Option<HttpListenerMode>) {
