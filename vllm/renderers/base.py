@@ -1250,9 +1250,10 @@ class BaseRenderer(ABC, Generic[_T]):
     @staticmethod
     def _copy_prompt_dict(prompt: DictPrompt) -> DictPrompt:
         if "encoder_prompt" in prompt:
-            copied = dict(prompt)
-            copied["encoder_prompt"] = dict(copied["encoder_prompt"])
-            decoder_prompt = copied["decoder_prompt"]
+            enc_dec_prompt = cast(EncoderDecoderDictPrompt, prompt)
+            copied = dict(enc_dec_prompt)
+            copied["encoder_prompt"] = dict(enc_dec_prompt["encoder_prompt"])
+            decoder_prompt = enc_dec_prompt["decoder_prompt"]
             if decoder_prompt is not None:
                 copied["decoder_prompt"] = dict(decoder_prompt)
             return copied  # type: ignore[return-value]
