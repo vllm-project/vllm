@@ -455,6 +455,14 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 "UVA is unavailable; staging the CPU-offloaded PLE rows from host RAM."
             )
             embedding_cls = Qwen4ExpPLEHostMemoryEmbedding
+        # Disk/shared state is loader-owned, and processed-weight loading cannot
+        # materialize the ordinary attributes used by host staging.
+        if embedding_cls in (
+            Qwen4ExpPLEDiskOffloadEmbedding,
+            Qwen4ExpPLESharedHostEmbedding,
+            Qwen4ExpPLEHostMemoryEmbedding,
+        ):
+            embedding_quant_method.supports_pre_processed_weights = False
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
         # Disk-offload ranks hold full rows, so they only shard tokens.
         self.use_reduce_scatter = (
@@ -492,6 +500,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             weight.device,
             weight.is_pinned(),
         )
+
+    def process_weights_after_loading(self) -> None:
+        if self.ngram_embedding.supports_prefetch and self._prefetch_ids.is_meta:
+            self._prefetch_ids = torch.empty_like(
+                self._prefetch_ids, device=self.layer_multipliers.device
+            )
 
     @staticmethod
     def _shift_precompute(

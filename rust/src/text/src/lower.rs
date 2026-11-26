@@ -237,6 +237,7 @@ pub fn lower_sampling_params(
     }
 
     let mut bad_words_token_ids = bad_words_token_ids.unwrap_or_default();
+    let raw_bad_words_count = bad_words_token_ids.len();
     if let Some(tokenized) = tokenize_bad_words(bad_words.as_deref(), tokenizer)? {
         bad_words_token_ids.extend(tokenized);
     }
@@ -286,7 +287,7 @@ pub fn lower_sampling_params(
         stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
-    validate_vocab_range(&params, &sampling_limits)?;
+    validate_vocab_range(&params, &sampling_limits, raw_bad_words_count)?;
     Ok(params)
 }
 
@@ -297,7 +298,7 @@ pub fn lower_sampling_params(
 /// `None` and the `-1` "unlimited" sentinel both map to `None`; any other
 /// negative value is rejected; non-negative values pass through unchanged. Like
 /// Python's `int`, no upper bound is imposed.
-fn normalize_thinking_token_budget(value: Option<i64>) -> Result<Option<u64>> {
+pub(crate) fn normalize_thinking_token_budget(value: Option<i64>) -> Result<Option<u64>> {
     match value {
         None | Some(-1) => Ok(None),
         Some(budget) if budget >= 0 => Ok(Some(budget as u64)),
@@ -305,7 +306,9 @@ fn normalize_thinking_token_budget(value: Option<i64>) -> Result<Option<u64>> {
     }
 }
 
-fn validate_repetition_detection(params: Option<&RepetitionDetectionParams>) -> Result<()> {
+pub(crate) fn validate_repetition_detection(
+    params: Option<&RepetitionDetectionParams>,
+) -> Result<()> {
     let Some(params) = params else {
         return Ok(());
     };
@@ -404,6 +407,9 @@ pub fn resolve_max_tokens(
     max_model_len: u32,
     prompt_len: u32,
 ) -> Result<u32> {
+    if user_max_tokens == Some(0) {
+        return Err(SamplingParamsError::InvalidMaxTokens.into());
+    }
     match prompt_len.cmp(&max_model_len) {
         Ordering::Greater => {
             return Err(Error::PromptTooLong {
@@ -423,7 +429,11 @@ pub fn resolve_max_tokens(
         Some(DefaultMaxTokens::Fallback(fallback)) => Some(user_max_tokens.unwrap_or(fallback)),
         Some(DefaultMaxTokens::Cap(cap)) => Some(user_max_tokens.map_or(cap, |n| n.min(cap))),
     };
-    Ok(request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens)))
+    let resolved = request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens));
+    if resolved == 0 {
+        return Err(SamplingParamsError::InvalidMaxTokens.into());
+    }
+    Ok(resolved)
 }
 
 fn merge_unique_token_ids(
@@ -539,7 +549,7 @@ mod tests {
         assert_eq!(lower(None).unwrap(), 0);
         assert_eq!(lower(Some(3)).unwrap(), 3);
         let error = lower(Some(4)).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
         assert!(error.to_string().contains("routed_experts_prompt_start"));
     }
 
@@ -645,7 +655,7 @@ mod tests {
         };
 
         let error = lower(StructuredOutputBackend::Xgrammar).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
         assert!(error.to_report_string().contains("not supported by xgrammar"));
 
         let params = lower(StructuredOutputBackend::Guidance).unwrap();
@@ -1491,15 +1501,21 @@ mod tests {
     #[test]
     fn lower_sampling_params_rejects_out_of_vocab_bad_words() {
         let tokenizer = TestTokenizer::new().with_regular_token("blocked", 2000);
-        for sampling_params in [
-            SamplingParams {
-                bad_words: Some(vec!["blocked".to_string()]),
-                ..Default::default()
-            },
-            SamplingParams {
-                bad_words_token_ids: Some(vec![vec![1999, 2000]]),
-                ..Default::default()
-            },
+        for (sampling_params, expected_param) in [
+            (
+                SamplingParams {
+                    bad_words: Some(vec!["blocked".to_string()]),
+                    ..Default::default()
+                },
+                "bad_words",
+            ),
+            (
+                SamplingParams {
+                    bad_words_token_ids: Some(vec![vec![1999, 2000]]),
+                    ..Default::default()
+                },
+                "bad_words_token_ids",
+            ),
         ] {
             let error = lower_sampling_params(
                 sampling_params,
@@ -1512,13 +1528,17 @@ mod tests {
             .unwrap_err();
 
             assert!(matches!(
-                error,
+                &error,
                 Error::TokenIds(TokenIdsError::OutOfVocab {
-                    parameter: "bad_words",
+                    parameter,
                     token_ids,
                     vocab_size: 2000,
-                }) if token_ids == vec![2000]
+                }) if *parameter == expected_param && token_ids == &[2000]
             ));
+            assert_eq!(
+                error.kind(),
+                crate::ErrorKind::invalid_param(expected_param)
+            );
         }
     }
 
@@ -1560,6 +1580,63 @@ mod tests {
             error,
             Error::TokenIds(TokenIdsError::EmptyBadWordSequence)
         ));
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::invalid_param("bad_words_token_ids")
+        );
+
+        // Pre-tokenized bad-word OOV and limit errors report
+        // `bad_words_token_ids`, while a combined limit failure stays unset.
+        let oov = lower_sampling_params_with_limits(
+            SamplingParams {
+                bad_words_token_ids: Some(vec![vec![99_999]]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            oov.kind(),
+            crate::ErrorKind::invalid_param("bad_words_token_ids")
+        );
+
+        let too_many_raw = lower_sampling_params_with_limits(
+            SamplingParams {
+                bad_words_token_ids: Some(vec![vec![7]; 129]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            too_many_raw.kind(),
+            crate::ErrorKind::invalid_param("bad_words_token_ids")
+        );
+
+        let combined_too_many = lower_sampling_params(
+            SamplingParams {
+                bad_words: Some(vec!["blocked".to_string()]),
+                bad_words_token_ids: Some(vec![vec![7]; 128]),
+                ..Default::default()
+            },
+            SamplingHints::default(),
+            sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
+            3,
+            &tokenizer,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            combined_too_many,
+            Error::TokenIds(TokenIdsError::TooManyBadWords {
+                parameter: None,
+                ..
+            })
+        ));
+        assert_eq!(
+            combined_too_many.kind(),
+            crate::ErrorKind::invalid_request()
+        );
     }
 
     #[test]
@@ -1967,6 +2044,22 @@ mod tests {
             result,
             Err(Error::PromptFillsContext { max_model_len: 100 })
         ));
+    }
+
+    #[test]
+    fn resolve_max_tokens_rejects_zero() {
+        for (user, default) in [
+            (Some(0), None),
+            (None, Some(DefaultMaxTokens::Fallback(0))),
+            (Some(10), Some(DefaultMaxTokens::Cap(0))),
+        ] {
+            let error = resolve_max_tokens(user, default, 200, 100).unwrap_err();
+            assert!(matches!(
+                error,
+                Error::SamplingParams(SamplingParamsError::InvalidMaxTokens)
+            ));
+            assert_eq!(error.kind(), crate::ErrorKind::invalid_param("max_tokens"));
+        }
     }
 
     #[test]
