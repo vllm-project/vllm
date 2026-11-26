@@ -97,8 +97,11 @@ def build_binary(build_rust_args: list[str]) -> None:
 
 
 def stamp_version(binary: Path, version: str) -> None:
-    """Write `version` into the version slot of a linked Rust binary, so a
-    cached build can take a new version without relinking."""
+    """Write `version` into the version slot of a linked Rust binary.
+
+    Docker builds stamp the cached binary instead of relinking the crates that
+    embed the version: ~130 s -> ~1 s per commit.
+    """
     payload = version.encode()
     if len(payload) > VERSION_SLOT_LEN:
         raise ValueError(f"Version does not fit the version slot: {version!r}")
