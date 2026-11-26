@@ -275,7 +275,8 @@ class KVBlockValidator:
     """Consumer side: reads remote entries after the data and checks them.
 
     Each source rank reads into its own host staging area, indexed by the
-    local block that received the data.
+    local block that received the data. With a local pool (an engine that also
+    produces), validated blocks are published in it.
     """
 
     def __init__(
@@ -284,15 +285,17 @@ class KVBlockValidator:
         backends: list[str],
         mode: KVBlockValidationMode,
         identity: str,
-        pool: KVBlockMetaPool,
+        num_blocks: int,
         remote_mem_type: str,
+        pool: KVBlockMetaPool | None = None,
     ):
         self.nixl_wrapper = nixl_wrapper
         self.backends = backends
         self.mode = mode
         self.identity = identity
-        self.pool = pool
+        self.num_blocks = num_blocks
         self.remote_mem_type = remote_mem_type
+        self.pool = pool
         self._staging: list[_Staging] = []
         self._remote_handles: dict[tuple[str, int], int] = {}
         self._pending: dict[str, list[_MetaRead]] = {}
@@ -424,7 +427,7 @@ class KVBlockValidator:
                     read.remote_block_ids[first],
                     "invalid" if not received[first].any() else "other content",
                 )
-        if not mismatched:
+        if not mismatched and self.pool is not None:
             # The local blocks now hold the expected content.
             for read in reads:
                 self.pool.write(read.local_block_ids, read.expected)
@@ -432,7 +435,7 @@ class KVBlockValidator:
 
     def _ensure_staging(self, source: int) -> None:
         while len(self._staging) <= source:
-            num_blocks = self.pool.num_blocks
+            num_blocks = self.num_blocks
             buffer = torch.zeros((num_blocks, ENTRY_SIZE), dtype=torch.uint8)
             base = buffer.data_ptr()
             reg_descs = self.nixl_wrapper.get_reg_descs(

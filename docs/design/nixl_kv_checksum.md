@@ -471,11 +471,16 @@ The first PR implements the pull path for the common deployment:
   the worker-side `KVBlockMetaPool`, and the consumer-side `KVBlockValidator`.
 - Ordering option 1 (two dependent transfers): the data READ is posted without
   its notification, and the metadata READ is posted once the data landed and
-  polled once right away. The producer is notified after the metadata read,
-  including when validation fails (the read itself completed).
+  polled for up to 200 µs, so it rarely waits for the next step. The producer
+  is notified after the metadata read, including when validation fails (the
+  read itself completed).
 - Each source rank reads into its own host staging buffer indexed by local
   block, so heterogeneous TP reads validate every source rank.
-- Validated blocks are published in the consumer's own pool.
+- Roles: only a producer (`kv_producer` or `kv_both`) keeps and advertises the
+  pool, and only a consumer validates. A `kv_consumer`'s blocks are never read,
+  so it skips the per-step pool updates (measured at about 50 µs of host time
+  per step that has updates). With `kv_both`, validated blocks are also
+  published in the local pool.
 - `NIXL_CONNECTOR_VERSION` 18 adds `kv_meta_base_addr`, `kv_meta_num_entries`
   and `kv_meta_hash_identity` (a digest of the hash algorithm and seed) to
   `NixlAgentMetadata`.

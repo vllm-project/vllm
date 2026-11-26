@@ -231,6 +231,11 @@ class _RemoteStage:
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
 
 
+# How long a step waits for kv_block_validation metadata reads it just
+# posted before leaving them to the next step.
+_KV_META_READ_SPIN_S = 200e-6
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -2147,7 +2152,7 @@ class NixlBaseConnectorWorker:
 
         kv_meta_base_addr = None
         if self._kv_validation_mode != "off":
-            kv_meta_base_addr = self._register_kv_meta_pool(
+            kv_meta_base_addr = self._setup_kv_validation(
                 next(iter(kv_caches.values())).device
             )
 
@@ -2188,7 +2193,9 @@ class NixlBaseConnectorWorker:
                 self._kv_meta_pool.num_blocks if self._kv_meta_pool is not None else 0
             ),
             kv_meta_hash_identity=(
-                self._kv_validator.identity if self._kv_validator is not None else None
+                get_block_hash_identity(self.vllm_config)
+                if self._kv_meta_pool is not None
+                else None
             ),
         )
         # Wrap metadata in payload with hash for defensive decoding
@@ -2199,20 +2206,31 @@ class NixlBaseConnectorWorker:
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
 
-    def _register_kv_meta_pool(self, device: torch.device) -> int:
-        """Allocate and register the KV block metadata pool; returns its addr."""
-        if self._kv_meta_pool is None:
+    def _setup_kv_validation(self, device: torch.device) -> int | None:
+        """Set up kv_block_validation for this engine's role.
+
+        A producer keeps the metadata pool its consumers read; a consumer
+        validates what it reads. A consumer's blocks are never read, so it
+        keeps no pool. Returns the address of the pool, if any.
+        """
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        if self._kv_meta_pool is None and kv_transfer_config.is_kv_producer:
             self._kv_meta_pool = KVBlockMetaPool(
                 self.kv_cache_config.num_blocks, device
             )
+        if self._kv_validator is None and kv_transfer_config.is_kv_consumer:
             self._kv_validator = KVBlockValidator(
                 self.nixl_wrapper,
                 self.nixl_backends,
                 self._kv_validation_mode,
                 get_block_hash_identity(self.vllm_config),
-                self._kv_meta_pool,
+                self.kv_cache_config.num_blocks,
                 remote_mem_type=self.nixl_memory_type,
+                pool=self._kv_meta_pool,
             )
+        if self._kv_meta_pool is None:
+            return None
         entries = self._kv_meta_pool.entries
         descs = self.nixl_wrapper.get_reg_descs(
             [(entries.data_ptr(), entries.numel(), self.device_id, "")],
@@ -3917,17 +3935,20 @@ class NixlBaseConnectorWorker:
                     continue
                 self._kv_meta_handles.update(handles)
                 posted[req_id] = handles
-        if posted:
-            # The entries are small: most reads land before this poll.
+        # The entries are small, so poll briefly rather than wait a step.
+        deadline = time.perf_counter() + _KV_META_READ_SPIN_S
+        while posted:
             landed, newly_failed = self._pop_done_transfers(posted)
             failed |= newly_failed
-            self._recving_transfers.update(posted)
             for req_id in landed:
                 if req_id in newly_failed:
                     validator.drop(req_id)
                     complete.add(req_id)
                 else:
                     self._finish_kv_validation(req_id, failed, complete)
+            if time.perf_counter() >= deadline:
+                break
+        self._recving_transfers.update(posted)
         return complete
 
     def _finish_kv_validation(

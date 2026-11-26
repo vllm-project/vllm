@@ -458,6 +458,9 @@ Set the same value on the prefiller and the decoder:
 - **enforce**: a mismatch fails the load, which then follows
   `kv_load_failure_policy`.
 
+Only producers keep the metadata pool, so use `kv_role="kv_consumer"` on decode
+instances: with `kv_both`, a decoder also updates its own pool every step.
+
 Each mismatch is logged with the request, the remote engine and the first bad
 block, and counted in `vllm:nixl_num_kv_block_validation_failures`. Both sides
 must use the same `prefix_caching_hash_algo` and `PYTHONHASHSEED` (required

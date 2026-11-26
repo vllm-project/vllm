@@ -141,7 +141,7 @@ def entries_pair():
     producer = KVBlockMetaPool(NUM_BLOCKS, torch.device("cpu"))
     consumer = KVBlockMetaPool(NUM_BLOCKS, torch.device("cpu"))
     validator = KVBlockValidator(
-        nixl, [], "enforce", "id", consumer, remote_mem_type="DRAM"
+        nixl, [], "enforce", "id", NUM_BLOCKS, "DRAM", pool=consumer
     )
     validator.add_remote(
         _REMOTE, 0, "remote", producer.entries.data_ptr(), NUM_BLOCKS, 0, "id"
@@ -183,12 +183,44 @@ def test_validator_rejects_stale_or_reused_blocks(entries_pair, reused):
 
 def test_validator_skips_peers_hashing_differently():
     nixl = CopyingFakeNixlWrapper("agent")
-    pool = KVBlockMetaPool(NUM_BLOCKS, torch.device("cpu"))
-    validator = KVBlockValidator(nixl, [], "enforce", "id", pool, "DRAM")
+    validator = KVBlockValidator(nixl, [], "enforce", "id", NUM_BLOCKS, "DRAM")
     validator.add_remote(_REMOTE, 0, "remote", 1234, NUM_BLOCKS, 0, "other-id")
     validator.add_remote(_REMOTE, 1, "remote", None, 0, 0, None)
     assert not validator.supports(_REMOTE, 0)
     assert not validator.supports(_REMOTE, 1)
+
+
+@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
+def test_only_producers_keep_a_pool(dist_init, kv_role):
+    """A consumer's blocks are never read, so it validates but keeps no pool;
+    a producer keeps the pool but has nothing to validate."""
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE,
+        kv_connector_extra_config={"kv_block_validation": "enforce"},
+        kv_role=kv_role,
+    )
+    kv_cache_config = make_kv_cache_config(block_size=BLOCK_SIZE, num_blocks=NUM_BLOCKS)
+    producer = kv_role != "kv_consumer"
+    consumer = kv_role != "kv_producer"
+
+    scheduler = NixlConnector(vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config)
+    assert (scheduler.connector_scheduler._kv_meta_tracker is not None) is producer
+    scheduler.shutdown()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        CopyingFakeNixlWrapper,
+    ):
+        worker = FakeNixlConnectorWorker(
+            vllm_config,
+            "engine",
+            hand_shake_latency=0,
+            kv_cache_config=kv_cache_config,
+        )
+    pool_addr = worker._setup_kv_validation(torch.device("cpu"))
+    assert (pool_addr is not None) is producer
+    assert (worker._kv_meta_pool is not None) is producer
+    assert (worker._kv_validator is not None) is consumer
 
 
 def _make_connector(mode: str):
@@ -208,7 +240,7 @@ def _make_connector(mode: str):
         host="localhost", port=1234, remote_tp_size=1, expected_engine_id=_REMOTE
     )
     worker._remote_agents[_REMOTE] = remote_agents
-    worker._register_kv_meta_pool(torch.device("cpu"))
+    worker._setup_kv_validation(torch.device("cpu"))
     # The fake handshake carries no metadata pool: attach the producer's.
     producer = KVBlockMetaPool(NUM_BLOCKS, torch.device("cpu"))
     assert worker._kv_validator is not None
