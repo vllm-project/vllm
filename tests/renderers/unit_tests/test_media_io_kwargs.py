@@ -539,12 +539,22 @@ class TestChatMediaIOCacheKey:
         ]
 
     @staticmethod
-    async def _get_hash_async(renderer, messages, chat_params):
+    async def _get_hash_async(
+        renderer: HfRenderer,
+        messages: list[ChatCompletionMessageParam],
+        chat_params: ChatParams,
+    ) -> str:
         _, inputs = await renderer.render_chat_async([[*messages]], chat_params)
         return inputs[0]["mm_hashes"]["video"][0]
 
     @classmethod
-    def _get_hash(cls, renderer, messages, chat_params, is_async):
+    def _get_hash(
+        cls,
+        renderer: HfRenderer,
+        messages: list[ChatCompletionMessageParam],
+        chat_params: ChatParams,
+        is_async: bool,
+    ) -> str:
         if is_async:
             return asyncio.run(cls._get_hash_async(renderer, messages, chat_params))
 
