@@ -205,3 +205,12 @@ curl -X POST http://localhost:8000/inference/v1/abort_requests \
 The request ID is the `request_id` the server returned: the `X-Request-Id` header or body `request_id` you sent, prefixed with `generate-tokens-`. A missing `request_ids` returns a 400. The response is empty and the abort finishes in the background.
 
 With `--tokens-only`, the same handler is also served at `POST /abort_requests` for existing deployments. That path doesn't require the API key, even when `--api-key` is set. See [Security](../../usage/security.md#unprotected-endpoints-no-api-key-required).
+
+## Rust frontend with a remote generation worker
+
+Set `--remote-generation-url` to the worker’s gRPC address and use the same
+model and context limit as the worker.
+
+```bash
+vllm-rs serve Qwen/Qwen3-0.6B --remote-generation-url http://worker:50051 --max-model-len 512
+```
