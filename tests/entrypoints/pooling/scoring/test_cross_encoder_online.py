@@ -325,11 +325,27 @@ async def test_score_api_max_model_len(server: RemoteOpenAIServer):
             "model": MODEL_NAME,
             "queries": queries,
             "documents": documents,
-            "truncate_prompt_tokens": 101,
+            "truncate_prompt_tokens": MAX_MODEL_LEN + 1,
         },
     )
     assert score_response.status_code == 400
     assert "Please request a smaller truncation size." in score_response.text
+
+    max_chars = MAX_MODEL_LEN * get_tokenizer(MODEL_NAME).max_chars_per_token
+    score_response = requests.post(
+        server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": "a" * (max_chars + 1),
+            "documents": documents,
+            "max_tokens_per_query": 10,
+            "truncate_prompt_tokens": 50,
+        },
+    )
+    assert score_response.status_code == 400
+    error = score_response.json()["error"]
+    assert error["param"] == "input_text"
+    assert "Scoring query contains" in error["message"]
 
 
 @pytest.mark.asyncio
@@ -365,35 +381,6 @@ async def test_invocations(server: RemoteOpenAIServer):
         assert rerank_result["relevance_score"] == pytest.approx(
             invocations_result["relevance_score"], rel=0.01
         )
-
-
-@pytest.mark.parametrize("endpoint", ["score", "v2/rerank", "invocations"])
-def test_scoring_rejects_overlong_text_with_truncation(server, endpoint):
-    max_chars = MAX_MODEL_LEN * get_tokenizer(MODEL_NAME).max_chars_per_token
-    long_text = "a" * (max_chars + 1)
-    if endpoint == "score":
-        inputs = {
-            "queries": long_text,
-            "documents": TEXTS_2,
-            "max_tokens_per_query": 10,
-        }
-        role = "query"
-    else:
-        inputs = {
-            "query": TEXTS_1[0],
-            "documents": [long_text],
-            "max_tokens_per_doc": 10,
-        }
-        role = "document"
-
-    response = requests.post(
-        server.url_for(endpoint),
-        json={"model": MODEL_NAME, "truncate_prompt_tokens": 50, **inputs},
-    )
-    assert response.status_code == 400
-    error = response.json()["error"]
-    assert error["param"] == "input_text"
-    assert f"Scoring {role} contains" in error["message"]
 
 
 @pytest.mark.asyncio

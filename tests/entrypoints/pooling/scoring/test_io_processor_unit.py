@@ -198,22 +198,6 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     assert nonbinding["prompt_token_ids"] == expected
 
 
-def test_scoring_rejects_overlong_rendered_prompt(llm_reranker_processor):
-    processor = llm_reranker_processor
-    max_chars = processor.model_config.max_model_len
-    max_chars *= processor.tokenizer.max_chars_per_token
-
-    with pytest.raises(VLLMValidationError, match="Scoring prompt contains"):
-        processor.get_score_prompt(
-            "a",
-            "bc",
-            {},
-            chat_template="{{ instruction }}",
-            chat_template_content_format="string",
-            chat_template_kwargs={"instruction": "a" * (max_chars + 1)},
-        )
-
-
 @pytest.mark.parametrize(
     "default_template,request_template,expected",
     [
@@ -508,22 +492,6 @@ def test_scoring_template_keeps_images_distinct_from_literal_placeholder_text(
     assert inputs["multi_modal_uuids"] == {"image": ["document-image"]}
 
 
-def test_scoring_character_limit_counts_all_text_parts(multimodal_reranker_processor):
-    processor = multimodal_reranker_processor
-    max_chars = processor.model_config.max_model_len
-    max_chars *= processor.tokenizer.max_chars_per_token
-    document: list[ScoreContentPartParam] = [
-        {"type": "text", "text": "a" * (max_chars // 2)},
-        {"type": "text", "text": "b" * (max_chars - max_chars // 2)},
-    ]
-
-    assert processor.valid_inputs("a", {"content": document}).data_2 == [document]
-
-    document.append({"type": "text", "text": "b"})
-    with pytest.raises(VLLMValidationError, match="Scoring document contains"):
-        processor.valid_inputs("a", {"content": document})
-
-
 @pytest.mark.parametrize(
     ("doc_limit", "expected_document"),
     [(1, "a[IMG]"), (3, "a bc[IMG]bc")],
@@ -559,15 +527,30 @@ def test_scoring_text_limits_share_budget_across_blocks_and_keep_images(
 def test_scoring_text_limit_is_independent_of_adjacent_block_boundaries(
     multimodal_reranker_processor,
 ):
+    processor = multimodal_reranker_processor
     # This tokenizer splits "abc" into three tokens, but "a" and "bc" into one each.
     for document in (
         "abc",
         [{"type": "text", "text": "a"}, {"type": "text", "text": "bc"}],
     ):
-        prompt, _ = multimodal_reranker_processor.get_score_prompt(
+        prompt, _ = processor.get_score_prompt(
             "a", document, {}, chat_template=_BLOCK_TEMPLATE, max_tokens_per_doc=2
         )
         assert prompt == "query:adocument:ab"
+
+    max_chars = processor.model_config.max_model_len
+    max_chars *= processor.tokenizer.max_chars_per_token
+    split_document: list[ScoreContentPartParam] = [
+        {"type": "text", "text": "a" * (max_chars // 2)},
+        {"type": "text", "text": "b" * (max_chars - max_chars // 2)},
+    ]
+    assert processor.valid_inputs("a", {"content": split_document}).data_2 == [
+        split_document
+    ]
+
+    split_document.append({"type": "text", "text": "b"})
+    with pytest.raises(VLLMValidationError, match="Scoring document contains"):
+        processor.valid_inputs("a", {"content": split_document})
 
 
 @pytest.mark.parametrize("multimodal_reranker_processor", ["qwen3_vl"], indirect=True)
@@ -593,7 +576,19 @@ def test_string_scoring_templates_keep_model_placeholders(
 def test_scoring_detects_structured_content_with_saved_template(
     multimodal_reranker_processor,
 ):
-    prompt, _ = multimodal_reranker_processor.get_score_prompt(
+    processor = multimodal_reranker_processor
+    prompt, _ = processor.get_score_prompt(
         "a", "bc", {}, chat_template_content_format="auto"
     )
     assert prompt == "query:adocument:bc"
+
+    document = "bc"
+    max_chars = processor.model_config.max_model_len
+    max_chars *= processor.tokenizer.max_chars_per_token
+    # The inputs fit before the saved template adds the role labels.
+    query = "a" * (max_chars - len(document))
+    assert processor.valid_inputs(query, document).data_1 == [query]
+    with pytest.raises(VLLMValidationError, match="Scoring prompt contains"):
+        processor.get_score_prompt(
+            query, document, {}, chat_template_content_format="auto"
+        )
