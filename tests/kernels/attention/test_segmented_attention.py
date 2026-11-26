@@ -16,13 +16,15 @@ from vllm.v1.attention.ops.segmented_attention_config import SegmentedAttentionC
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx12x, on_rdna
 
-pytestmark = pytest.mark.skip_global_cleanup
-
 has_rdna_device = current_platform.is_rocm() and torch.cuda.is_available() and on_rdna()
-requires_rdna = pytest.mark.skipif(
-    not has_rdna_device,
-    reason="Segmented attention requires RDNA GPUs",
-)
+pytestmark = [
+    pytest.mark.skip_global_cleanup,
+    pytest.mark.skipif(
+        not has_rdna_device,
+        reason="Segmented attention requires RDNA GPUs",
+    ),
+]
+
 requires_gfx12 = pytest.mark.skipif(
     not (has_rdna_device and on_gfx12x()),
     reason="Segmented attention with FP8 KV requires gfx12",
@@ -366,7 +368,6 @@ def test_segmented_d512_gqa8_long_extend_splits(
     assert config["splits"] == expected_splits
 
 
-@requires_rdna
 @torch.inference_mode()
 def test_segmented_bf16_d256_long_extend_matches_dense_reference():
     from vllm.v1.attention.ops.segmented_attention import run_segmented_attention
@@ -750,7 +751,6 @@ def test_segmented_tuning_releases_only_new_kernel_modules(monkeypatch, fail, de
         assert kernel.device_caches[1][0] == {"other": other_device}
 
 
-@requires_rdna
 def test_segmented_tuning_cleanup_preserves_graphs_and_reloads_kernels():
     """Existing graphs survive cleanup, and released variants still run correctly."""
     import weakref
@@ -860,7 +860,6 @@ def test_segmented_tuning_does_not_reuse_incompatible_winners(
     assert tuning.get_segmented_config(*state.lookup_args, **mode) is not None
 
 
-@requires_rdna
 @pytest.mark.parametrize(
     "dim,page,hq,hk,dtype,kv_dtype,byte_cache,force_splits",
     [
@@ -1011,7 +1010,6 @@ def test_segmented_attention_ragged_unified_graph_replay(
     check(replay_lengths)
 
 
-@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize(
     "head_size,gqa_ratio,force_splits",
@@ -1042,7 +1040,6 @@ def test_segmented_ragged_prefill_matches_dense_reference(
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
-@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("head_size", [256, 512])
 @torch.inference_mode()
@@ -1093,7 +1090,6 @@ def test_rocm_segmented_attn_layout_cache_update(fp8, head_size):
     torch.testing.assert_close(cached_value, expected_value, rtol=0, atol=0)
 
 
-@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("head_size,gqa,window", [(256, 2, 32), (512, 8, 0)])
 @torch.inference_mode()
@@ -1180,7 +1176,6 @@ def test_rocm_segmented_attn_cache_only_reader(
     torch.testing.assert_close(cache, original_cache, rtol=0, atol=0)
 
 
-@requires_rdna
 @torch.inference_mode()
 def test_segmented_mixed_causality_matches_dense_reference():
     from vllm.v1.attention.ops import segmented_attention as dispatcher
@@ -1227,7 +1222,6 @@ def test_segmented_mixed_causality_matches_dense_reference():
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
-@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("window_size", [1, 2048])
@@ -1257,7 +1251,6 @@ def test_segmented_sliding_window_matches_dense_reference(fp8, causal, window_si
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
-@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("window_size", [0, 128])
 @pytest.mark.parametrize("head_size", [64, 128, 512])
@@ -1297,7 +1290,6 @@ def test_segmented_sinks_match_dense_reference(fp8, window_size, head_size):
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
-@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("window_size", [0, 128])
 @pytest.mark.parametrize("query_len", [1, 8])
@@ -1374,7 +1366,6 @@ def test_segmented_long_context_fp8_sinks_match_dense_reference(query_len, conte
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
-@requires_rdna
 @pytest.mark.parametrize(
     "feature",
     [
@@ -1443,7 +1434,6 @@ def test_segmented_softcap_and_output_scaling_match_dense_reference(feature):
         assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
-@requires_rdna
 @torch.inference_mode()
 def test_segmented_attention_cache_offsets_cross_int32_boundary():
     """A small logical prefix can live beyond 2**31 elements in a strided cache."""
