@@ -3,7 +3,7 @@
 """Core abstractions for KV cache offloading in vLLM v1."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, fields
 from enum import Enum, auto
@@ -226,19 +226,6 @@ class OffloadingEvent:
     metadata_only: bool = False
     # Originating request context for a stored event.
     req_context: ReqContext | None = field(default=None, repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
-class StepResult:
-    """What the manager reports to the connector once per step."""
-
-    # Whether the engine must keep stepping with no requests scheduled. Read
-    # only here, so a manager cannot raise it between steps.
-    pending: bool = False
-    # Events collected since the previous step, in emission order.
-    events: list[OffloadingEvent] = field(default_factory=list)
-    # Metrics collected since the previous step, or None if disabled.
-    stats: "OffloadingConnectorStats | None" = None
 
 
 """
@@ -503,7 +490,20 @@ class OffloadingManager(ABC):
         """
         return
 
-    def on_schedule_end(self, context: ScheduleEndContext) -> StepResult:
+    def take_events(self) -> Iterable[OffloadingEvent]:
+        """Take the offloading events from the manager.
+
+        A tier manager emits only events for storage state it owns. A
+        composing manager may aggregate child event streams, but should not
+        synthesize events on behalf of a child tier.
+
+        Yields:
+            New OffloadingEvents collected since the last call.
+
+        """
+        return ()
+
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
 
         This is the last manager call of a step: every lookup(), prepare_load(),
@@ -512,16 +512,16 @@ class OffloadingManager(ABC):
 
         Managers may override this to flush deferred work accumulated
         during the step (e.g., batched promotions).
-
-        A tier manager reports only events for storage state it owns. A
-        composing manager may aggregate child event streams, but should not
-        synthesize events on behalf of a child tier.
-
-        Returns:
-            Everything the connector reads from the manager for this step.
-
         """
-        return StepResult()
+        return
+
+    def has_pending_work(self) -> bool:
+        """Whether this manager needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
 
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
@@ -531,6 +531,10 @@ class OffloadingManager(ABC):
         """Called once workers have reported every job in flight at the last
         reset_cache(); blocks it freed are no longer written by them."""
         return
+
+    def get_stats(self) -> "OffloadingConnectorStats | None":
+        """Return collected metrics since last call, or None if disabled."""
+        return None
 
     def config_info(self) -> Sequence[ConfigInfoMapping]:
         """Return the info metric labels, one mapping for each series.
