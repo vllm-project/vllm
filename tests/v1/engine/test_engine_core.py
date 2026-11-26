@@ -7,6 +7,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -49,9 +50,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
-if not current_platform.is_cuda_alike():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        reason="V1 currently only supported on CUDA and ROCm.", allow_module_level=True
+        reason="V1 is currently supported only on CUDA, ROCm, and XPU.",
+        allow_module_level=True,
     )
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
@@ -456,16 +458,24 @@ def test_engine_core_concurrent_batches():
         expected_num_tokens[request_id] += 1
 
 
-@pytest.mark.parametrize("encoder_only", [True, False])
-def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
-    """Encoder outputs are complete; only language-model steps need sampling."""
+def _mock_batch_queue_core() -> MagicMock:
+    """A mock EngineCore for step_with_batch_queue, without PP admission."""
     core = MagicMock()
     core.batch_queue = deque()
     core.batch_queue_size = 2
     core.deferred_step = None
+    core._pp_admission = False
+    core._wait_for_new_request = partial(EngineCore._wait_for_new_request, core)
+    return core
+
+
+@pytest.mark.parametrize("encoder_only", [True, False])
+def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
+    """Encoder outputs are complete; only language-model steps need sampling."""
+    core = _mock_batch_queue_core()
     core.is_mm_encoder_only = encoder_only
     core.is_pooling_model = False
-    core.scheduler.has_requests.side_effect = [True, False, False]
+    core.scheduler.should_schedule.side_effect = [True, False, False]
     scheduled = core.scheduler.schedule.return_value
     scheduled.total_num_scheduled_tokens = 16
     scheduled.pending_structured_output_tokens = False
@@ -493,15 +503,13 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
 @pytest.mark.parametrize("step_fn", [EngineCore.step, EngineCore.step_with_batch_queue])
 def test_prefill_interval_counts_only_executed_steps(step_fn):
     """Prefills run every Nth executed step; empty schedules don't advance it."""
-    core = MagicMock()
-    core.batch_queue = deque()
-    core.batch_queue_size = 2
-    core.deferred_step = None
+    core = _mock_batch_queue_core()
     core.is_mm_encoder_only = False
     core.is_pooling_model = False
     core.prefill_schedule_interval = 3
     core.num_executed_steps = 0
     core.scheduler.has_requests.return_value = True
+    core.scheduler.should_schedule.return_value = True
     core._should_throttle_prefills = lambda: EngineCore._should_throttle_prefills(core)
 
     scheduled_tokens = [16, 0, 0, 16, 16, 16]

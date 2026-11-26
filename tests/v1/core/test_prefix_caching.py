@@ -68,6 +68,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
+    MambaManager,
 )
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVPageTransfer
@@ -2599,6 +2600,36 @@ def test_prefill(hash_fn):
         free_block_queue.fake_free_list_tail.prev_free_block
         is free_block_queue.fake_free_list_head
     )
+
+
+def test_extend_cached_prefix():
+    """Probes only the blocks after the given prefix, and stops before the last
+    token, which is always recomputed."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 20),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt = [i for i in range(4) for _ in range(block_size)] + [4]
+    req = make_request("req", prompt, block_size, sha256)
+    assert manager.extend_cached_prefix(req, 0) == 0
+
+    def cache_prefix(req_id: str, num_tokens: int) -> None:
+        writer = make_request(req_id, prompt[:num_tokens], block_size, sha256)
+        assert manager.allocate_slots(writer, num_tokens) is not None
+
+    cache_prefix("a", 33)
+    assert manager.extend_cached_prefix(req, 0) == 32
+    cache_prefix("b", 49)
+    assert manager.extend_cached_prefix(req, 32) == 48
+    assert manager.extend_cached_prefix(req, 48) == 48
+
+    cache_prefix("c", 65)
+    assert manager.extend_cached_prefix(req, 48) == 64
+    req_64 = make_request("req_64", prompt[:64], block_size, sha256)
+    assert manager.extend_cached_prefix(req_64, 0) == 48
 
 
 def test_prefill_hybrid_model():
@@ -6742,6 +6773,65 @@ def test_mamba_sparse_retention_caches_decode_resume_state_on_free(lookahead):
     assert [len(blocks) for blocks in computed_blocks.blocks] == [6, 6]
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_mamba_decode_resume_skips_off_boundary_checkpoint_block(async_scheduling):
+    """A resumed prefill over [0, 95) runs in one pass and exports its checkpoint
+    at 80 into the Mamba block ending at 64. That block must not be cached on
+    free as the decode state at 64, also after later steps were scheduled."""
+    hash_block_size, mamba_block_size = 16, 64
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        hash_block_size, 100, ["full", "mamba"]
+    )
+    _replace_group(
+        kv_cache_config,
+        1,
+        block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=hash_block_size,
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        retention_interval=0,
+    )
+    # A preempted request: 50 prompt tokens, then 45 output tokens to replay.
+    req = make_request("0", list(range(50)), hash_block_size, sha256)
+    for token in range(1000, 1045):
+        req.append_output_token_ids(token)
+
+    # Mirror the scheduler: a step is scheduled, then its output arrives.
+    def schedule(num_new_tokens: int) -> int:
+        manager.new_step_starts()
+        assert manager.allocate_slots(req, num_new_tokens) is not None
+        req.num_computed_tokens += num_new_tokens
+        req.num_in_flight_tokens += num_new_tokens
+        return num_new_tokens
+
+    def finish(num_scheduled_tokens: int) -> None:
+        req.num_in_flight_tokens -= num_scheduled_tokens
+        req.append_output_token_ids(7)
+
+    resumed_prefill = schedule(95)
+    if async_scheduling:
+        # The next step is scheduled before the resumed prefill finishes.
+        decode = schedule(1)
+        finish(resumed_prefill)
+        schedule(1)
+        finish(decode)
+    else:
+        finish(resumed_prefill)
+        schedule(1)
+    manager.free(req)
+
+    # The state at 64 was never computed and the one at 80 is transient, so
+    # nothing here is reusable for the Mamba group.
+    probe = make_request("probe", req.all_token_ids[:96], hash_block_size, sha256)
+    _, num_hit_tokens, _ = manager.get_computed_blocks(probe)
+    assert num_hit_tokens == 0
+
+
 @pytest.mark.skip_global_cleanup
 def test_swa_reachable_block_mask_final_partial_segment():
     """Only a final SWA horizon makes its incomplete segment tail reachable."""
@@ -7165,3 +7255,228 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+def _run_mamba_finished_request(
+    manager: KVCacheManager, request: Request, chunk_ends: list[int]
+) -> int:
+    blocks, hit, junction = manager.get_computed_blocks(request)
+    request.shared_prefix_boundary = junction
+    num_computed = hit
+    prefix_hit: tuple = (hit, blocks)
+    for end in chunk_ends:
+        manager.new_step_starts()
+        assert manager.allocate_slots(request, end - num_computed, *prefix_hit)
+        prefix_hit = ()
+        request.num_computed_tokens = num_computed = end
+    request.status = RequestStatus.FINISHED_STOPPED
+    manager.free(request)
+    return hit
+
+
+def test_mamba_deprioritize_superseded_state():
+    """States two or more turns behind the latest tip are deprioritized across
+    all Mamba groups (evicted after uncached blocks but before normal
+    LRU-cached blocks), while the immediate predecessor stays in normal LRU as
+    a rollback fallback."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 60, ["full", "mamba", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+    )
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
+    turn1 = make_request("t1", [1] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn1, [32, 40]) == 0
+    turn2 = make_request("t2", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn2, [64, 80]) == 32
+
+    pool = manager.block_pool
+    # After turn2, turn1 is the immediate predecessor fallback and must stay
+    # behind older's blocks in normal LRU order (not deprioritized yet).
+    free_blocks = pool.free_block_queue.get_all_free_blocks()
+    t1_block = pool.get_cached_block(turn1.block_hashes[1], [1])
+    older_block = pool.get_cached_block(older.block_hashes[1], [1])
+    assert t1_block is not None and older_block is not None
+    assert free_blocks.index(t1_block[0]) > free_blocks.index(older_block[0])
+
+    # A third turn makes turn1 two turns behind (superseded) and promotes turn2
+    # to the one-turn fallback.
+    turn3 = make_request("t3", [1] * 40 + [2] * 40 + [3] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn3, [112, 120]) == 80
+
+    free_blocks = pool.free_block_queue.get_all_free_blocks()
+    num_uncached = sum(b.block_hash is None for b in free_blocks)
+    assert num_uncached > 0
+
+    # Consuming all uncached blocks keeps the deprioritized states alive.
+    pool.get_new_blocks(num_uncached)
+    assert pool.get_cached_block(turn1.block_hashes[1], [1, 2]) is not None
+
+    # The first 2 cached evictions take turn1's superseded states across both
+    # Mamba groups while keeping turn2's fallback and older's prefix intact.
+    pool.get_new_blocks(2)
+    assert pool.get_cached_block(turn1.block_hashes[1], [1]) is None
+    assert pool.get_cached_block(turn1.block_hashes[1], [2]) is None
+    assert pool.get_cached_block(turn2.block_hashes[4], [1, 2]) is not None
+    assert pool.get_cached_block(older.block_hashes[1], [0, 1, 2]) is not None
+
+
+def test_mamba_deprioritize_keeps_shared_prefix_junction():
+    """Shared-prefix junction states keep normal LRU order even when multiple
+    later turns advance past them."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+    )
+    shared = [7] * (2 * block_size)
+    primer = make_request("p", shared + [50] * 32, block_size, sha256)
+    assert _run_mamba_finished_request(manager, primer, [48, 64]) == 0
+    writer = make_request("w1", shared + [60] * 8, block_size, sha256)
+    assert _run_mamba_finished_request(manager, writer, [32, 40]) == 0
+    turn2 = make_request("w2", shared + [60] * 8 + [61] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn2, [64, 80]) == 32
+    turn3 = make_request(
+        "w3", shared + [60] * 8 + [61] * 40 + [62] * 40, block_size, sha256
+    )
+    assert _run_mamba_finished_request(manager, turn3, [112, 120]) == 80
+
+    pool = manager.block_pool
+    num_uncached = sum(
+        b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
+    )
+    pool.get_new_blocks(num_uncached + 1)
+    assert pool.get_cached_block(writer.block_hashes[1], [1]) is not None
+
+
+def test_mamba_deprioritize_skips_referenced_state():
+    """A superseded state still referenced by another reader is left untouched
+    and returns to normal LRU when released."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+    )
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
+    turn1 = make_request("t1", [1] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn1, [32, 40]) == 0
+    turn2 = make_request("t2", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn2, [64, 80]) == 32
+
+    pool = manager.block_pool
+    t1_blocks = pool.get_cached_block(turn1.block_hashes[1], [1])
+    assert t1_blocks is not None
+    # Hold an external reference while turn3 supersedes turn1.
+    pool.touch(t1_blocks)
+    turn3 = make_request("t3", [1] * 40 + [2] * 40 + [3] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn3, [112, 120]) == 80
+
+    # Releasing the reference returns turn1 to the normal LRU tail.
+    pool.free_blocks(t1_blocks)
+    assert pool.free_block_queue.get_all_free_blocks()[-1] is t1_blocks[0]
+
+
+@pytest.mark.parametrize(
+    "status", [RequestStatus.PREEMPTED, RequestStatus.FINISHED_ABORTED]
+)
+def test_mamba_deprioritize_preempted_request_keeps_old_state(status):
+    """A preempted or aborted request does not deprioritize earlier states and
+    cleans up its tracked hit/tip metadata."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+    )
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
+    turn1 = make_request("t1", [1] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn1, [32, 40]) == 0
+    turn2 = make_request("t2", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn2, [64, 80]) == 32
+
+    turn3 = make_request("t3", [1] * 40 + [2] * 40 + [3] * 40, block_size, sha256)
+    blocks, hit, junction = manager.get_computed_blocks(turn3)
+    assert hit == 80
+    turn3.shared_prefix_boundary = junction
+    manager.new_step_starts()
+    assert manager.allocate_slots(turn3, 32, hit, blocks)
+    turn3.num_computed_tokens = 112
+    # Preempted or aborted: free without deprioritizing turn1's state.
+    turn3.status = status
+    manager.free(turn3)
+    mamba_mgr = manager.coordinator.single_type_managers[1]
+    assert isinstance(mamba_mgr, MambaManager)
+    assert turn3.request_id not in mamba_mgr._req_hit
+    assert turn3.request_id not in mamba_mgr._req_tip
+
+    pool = manager.block_pool
+    num_uncached = sum(
+        b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
+    )
+    pool.get_new_blocks(num_uncached + 1)
+    assert pool.get_cached_block(turn1.block_hashes[1], [1]) is not None
+
+
+def test_mamba_deprioritize_preserves_shared_fork_fallback():
+    """A cached fork state (A -> B and A -> C) is treated as a shared branch
+    point and keeps normal LRU order when either branch advances."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 80, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+    )
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
+    root_a = make_request("a", [1] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, root_a, [32, 40]) == 0
+
+    # Two independent continuations fork from already-cached root_a
+    # (so shared_prefix_boundary == 0 for both).
+    branch_b = make_request("b", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_b, [64, 80]) == 32
+    branch_c = make_request("c", [1] * 40 + [3] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_c, [64, 80]) == 32
+
+    # Advancing both branches past b and c must keep shared fork root_a in
+    # normal LRU (behind older's blocks), while later turns on a linear branch
+    # still deprioritize their own superseded states.
+    branch_d = make_request("d", [1] * 40 + [2] * 40 + [4] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_d, [112, 120]) == 80
+    branch_e = make_request("e", [1] * 40 + [3] * 40 + [5] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_e, [112, 120]) == 80
+
+    pool = manager.block_pool
+    free_blocks = pool.free_block_queue.get_all_free_blocks()
+    a_block = pool.get_cached_block(root_a.block_hashes[1], [1])
+    older_block = pool.get_cached_block(older.block_hashes[1], [1])
+    assert a_block is not None and older_block is not None
+    assert free_blocks.index(a_block[0]) > free_blocks.index(older_block[0])
+
+    # Advancing branch_d -> f (linear chain b -> d -> f) deprioritizes b.
+    branch_f = make_request(
+        "f", [1] * 40 + [2] * 40 + [4] * 40 + [6] * 40, block_size, sha256
+    )
+    assert _run_mamba_finished_request(manager, branch_f, [144, 160]) == 112
+    num_uncached = sum(
+        b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
+    )
+    pool.get_new_blocks(num_uncached + 1)
+    assert pool.get_cached_block(branch_b.block_hashes[4], [1]) is None
+    assert pool.get_cached_block(root_a.block_hashes[1], [1]) is not None
