@@ -797,6 +797,7 @@ class AiterMLABackend(MLACommonBackend):
         use_dcp: bool = False,
         use_rswa: bool = False,
         use_hisparse: bool = False,
+        required_kernel_block_size: int | None = None,
     ) -> list[str]:
         invalid_reasons = super().validate_configuration(
             head_size=head_size,
@@ -819,6 +820,7 @@ class AiterMLABackend(MLACommonBackend):
             use_dcp=use_dcp,
             use_rswa=use_rswa,
             use_hisparse=use_hisparse,
+            required_kernel_block_size=required_kernel_block_size,
         )
         # Arch/signature cannot express this: the backend still advertises
         # fp16, so a DSpark draft with kv_cache_dtype="auto" would select

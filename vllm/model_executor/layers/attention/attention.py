@@ -284,10 +284,15 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
         query_pre_quantized: bool = False,
+        required_kernel_block_size: int | None = None,
         **extra_impl_args,
     ) -> None:
         """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
+
+        required_kernel_block_size: the kernel block size this layer's backend
+        must support exactly, for a model whose other layers only support that
+        one (all layers share one kernel block size).
         """
         super().__init__()
         sliding_window: int | None
@@ -391,6 +396,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
                 has_sliding_window=sliding_window is not None,
+                required_kernel_block_size=required_kernel_block_size,
             )
         else:
             self.attn_backend = attn_backend
