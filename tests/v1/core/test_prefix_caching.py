@@ -6772,6 +6772,65 @@ def test_mamba_sparse_retention_caches_decode_resume_state_on_free(lookahead):
     assert [len(blocks) for blocks in computed_blocks.blocks] == [6, 6]
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_mamba_decode_resume_skips_off_boundary_checkpoint_block(async_scheduling):
+    """A resumed prefill over [0, 95) runs in one pass and exports its checkpoint
+    at 80 into the Mamba block ending at 64. That block must not be cached on
+    free as the decode state at 64, also after later steps were scheduled."""
+    hash_block_size, mamba_block_size = 16, 64
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        hash_block_size, 100, ["full", "mamba"]
+    )
+    _replace_group(
+        kv_cache_config,
+        1,
+        block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=hash_block_size,
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        retention_interval=0,
+    )
+    # A preempted request: 50 prompt tokens, then 45 output tokens to replay.
+    req = make_request("0", list(range(50)), hash_block_size, sha256)
+    for token in range(1000, 1045):
+        req.append_output_token_ids(token)
+
+    # Mirror the scheduler: a step is scheduled, then its output arrives.
+    def schedule(num_new_tokens: int) -> int:
+        manager.new_step_starts()
+        assert manager.allocate_slots(req, num_new_tokens) is not None
+        req.num_computed_tokens += num_new_tokens
+        req.num_in_flight_tokens += num_new_tokens
+        return num_new_tokens
+
+    def finish(num_scheduled_tokens: int) -> None:
+        req.num_in_flight_tokens -= num_scheduled_tokens
+        req.append_output_token_ids(7)
+
+    resumed_prefill = schedule(95)
+    if async_scheduling:
+        # The next step is scheduled before the resumed prefill finishes.
+        decode = schedule(1)
+        finish(resumed_prefill)
+        schedule(1)
+        finish(decode)
+    else:
+        finish(resumed_prefill)
+        schedule(1)
+    manager.free(req)
+
+    # The state at 64 was never computed and the one at 80 is transient, so
+    # nothing here is reusable for the Mamba group.
+    probe = make_request("probe", req.all_token_ids[:96], hash_block_size, sha256)
+    _, num_hit_tokens, _ = manager.get_computed_blocks(probe)
+    assert num_hit_tokens == 0
+
+
 @pytest.mark.skip_global_cleanup
 def test_swa_reachable_block_mask_final_partial_segment():
     """Only a final SWA horizon makes its incomplete segment tail reachable."""
