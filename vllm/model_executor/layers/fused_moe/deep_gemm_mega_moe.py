@@ -976,7 +976,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             dp_metadata = get_forward_context().dp_metadata
             if dp_metadata is not None:
                 num_dp_tokens = int(dp_metadata.num_tokens_across_dp_cpu.sum())
-                return cdiv(num_dp_tokens, get_ep_group().world_size)
+                return cdiv(num_dp_tokens, self._group().world_size)
         # Warmup: every rank runs the same token counts.
         return num_tokens
 
