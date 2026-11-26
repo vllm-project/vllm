@@ -67,7 +67,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -1393,52 +1393,27 @@ class OffloadingConnectorScheduler:
                     self._current_batch_jobs_to_flush.add(job_id)
         return job_id
 
-    def _collect_finished_decode_states(
+    def _hold_finished_decode_blocks(
         self,
         req_status: RequestOffloadState,
         block_ids: tuple[list[int], ...],
-    ) -> None:
-        request = req_status.req
-        if (
-            not self._store_finished_decode
-            or not self._offloading_enabled
-            or not self.access_mode.can_write
-            or request.num_in_flight_tokens
-            or request.num_preemptions
-            or request.resumable
-            or request.status
-            not in (
-                RequestStatus.FINISHED_STOPPED,
-                RequestStatus.FINISHED_LENGTH_CAPPED,
-                RequestStatus.FINISHED_REPETITION,
-            )
-        ):
-            return
+    ) -> bool:
+        if not self._store_finished_decode or not block_ids:
+            return False
 
-        confirmed_tokens = request.num_computed_tokens
-        max_boundary = req_status.num_offloadable_tokens(confirmed_tokens)
-        if max_boundary <= request.num_prompt_tokens:
-            return
+        recurrent_block_ids = {
+            group.group_idx: tuple(block_ids[group.group_idx])
+            for group in self.config.kv_group_configs
+            if group.requires_cow_source
+        }
+        if not any(any(group_blocks) for group_blocks in recurrent_block_ids.values()):
+            return False
 
-        for group in self.config.kv_group_configs:
-            if not group.requires_cow_source:
-                continue
-            boundary = round_down(confirmed_tokens, group.tokens_per_block)
-            if (
-                boundary <= request.num_prompt_tokens
-                or boundary == confirmed_tokens
-                or boundary > max_boundary
-                or boundary % group.tokens_per_chunk
-            ):
-                continue
-            block_idx = boundary // group.tokens_per_block - 1
-            group_blocks = block_ids[group.group_idx]
-            # Finish trims the table first. Once decode is past the boundary,
-            # an ordinary running state there would have been retired.
-            if block_idx < len(group_blocks) and (block_id := group_blocks[block_idx]):
-                req_status.finished_decode_states.append(
-                    (group.group_idx, block_id, boundary)
-                )
+        req_status.finished_decode_block_ids = recurrent_block_ids
+        self._finished_req_releases[req_status.req.request_id] = (
+            _FinishedReqReleaseState.WAITING_FOR_STORES
+        )
+        return True
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -1527,7 +1502,7 @@ class OffloadingConnectorScheduler:
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
-            req_status.finished_decode_states.clear()
+            req_status.finished_decode_block_ids = None
             req_status.finished_signaled = True
             self.manager.on_request_finished(req_status.req_context)
             if not req_status.transfer_jobs:
@@ -1780,13 +1755,7 @@ class OffloadingConnectorScheduler:
         # Update offload keys with final block hash so the store handlers can
         # create store jobs for the last block(s) on the next schedule step.
         req_status.update_offload_keys()
-        if block_ids:
-            self._collect_finished_decode_states(req_status, block_ids)
-        hold_blocks = bool(req_status.finished_decode_states)
-        if hold_blocks:
-            self._finished_req_releases[request.request_id] = (
-                _FinishedReqReleaseState.WAITING_FOR_STORES
-            )
+        hold_blocks = self._hold_finished_decode_blocks(req_status, block_ids)
 
         # Keep req_status alive: the store handlers process finished_req_ids
         # on the next step, and the cleanup follows their store jobs.

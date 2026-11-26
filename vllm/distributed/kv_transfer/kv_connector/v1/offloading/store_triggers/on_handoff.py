@@ -18,9 +18,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base
     StoreJobSink,
     StoreTriggerHandler,
 )
+from vllm.utils.math_utils import round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import get_reusable_prefix_length
 from vllm.v1.kv_offload.base import GPULoadStoreSpec, StoreTrigger
+from vllm.v1.request import RequestStatus
 
 
 class OnHandoffStoreHandler(StoreTriggerHandler):
@@ -72,10 +74,56 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
         finished_handoffs = {}
         for req_id in scheduler_output.finished_req_ids:
             req_status = req_states.get(req_id)
-            if req_status is not None and req_status.finished_decode_states:
-                finished_handoffs[req_id] = req_status.finished_decode_states
+            if req_status is not None:
+                states = self._collect_finished_decode_states(req_status)
+                if states:
+                    finished_handoffs[req_id] = states
         if finished_handoffs:
             self._build_aligned_boundary_store_jobs(finished_handoffs, req_states, sink)
+
+    def _collect_finished_decode_states(
+        self, req_status: RequestOffloadState
+    ) -> list[tuple[int, int, int]]:
+        block_ids = req_status.finished_decode_block_ids
+        if block_ids is None:
+            return []
+
+        request = req_status.req
+        if (
+            request.num_in_flight_tokens
+            or request.num_preemptions
+            or request.resumable
+            or request.status
+            not in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_REPETITION,
+            )
+        ):
+            return []
+
+        confirmed_tokens = request.num_computed_tokens
+        max_boundary = req_status.num_offloadable_tokens(confirmed_tokens)
+        if max_boundary <= request.num_prompt_tokens:
+            return []
+
+        states = []
+        for group in self._config.kv_group_configs:
+            if not group.requires_cow_source:
+                continue
+            boundary = round_down(confirmed_tokens, group.tokens_per_block)
+            if (
+                boundary <= request.num_prompt_tokens
+                or boundary == confirmed_tokens
+                or boundary > max_boundary
+                or boundary % group.tokens_per_chunk
+            ):
+                continue
+            group_blocks = block_ids.get(group.group_idx, ())
+            block_idx = boundary // group.tokens_per_block - 1
+            if block_idx < len(group_blocks) and (block_id := group_blocks[block_idx]):
+                states.append((group.group_idx, block_id, boundary))
+        return states
 
     def _build_aligned_boundary_store_jobs(
         self,
