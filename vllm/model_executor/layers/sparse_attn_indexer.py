@@ -40,6 +40,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.layers import indexer_overlap
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -450,6 +451,13 @@ def _decode_chunk_ranges(
     return ranges
 
 
+def _decode_candidate_score_dtype(topk_backend: str) -> torch.dtype | None:
+    """The score dtype of the unchunked decode path's candidate selection."""
+    return (
+        torch.float32 if topk_backend in ("auto", "cooperative", "persistent") else None
+    )
+
+
 def _varlen_decode_rows(
     q: torch.Tensor,
     q_scale: torch.Tensor | None,
@@ -520,6 +528,97 @@ def _varlen_decode_rows(
         topk_tokens,
         max_seq_len,
     )
+
+
+def _localized_candidate_source_topk(
+    attn_metadata_narrowed: DeepseekV32IndexerMetadata,
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    seq_lens: torch.Tensor,
+    max_model_len: int,
+    logits_dtype: torch.dtype,
+    topk_backend: str,
+    topk_tokens: int,
+    topk_out: torch.Tensor,
+    candidate_blocks: torch.Tensor,
+    candidate_block_size: int,
+) -> bool:
+    """The candidate source layer's die-split decode: the token top-k runs per
+    locality domain and is merged, and the join of both domains' scores runs
+    with the deferred candidate work (selection and expansion), off the
+    critical path. Only when the candidates are deferred (VLLM_INDEXER_OVERLAP,
+    FULL CUDA graph decode): otherwise returns False without launching
+    anything, and the caller runs the scan, join and stock top-k, whose
+    candidate blocks this matches bit for bit (kept tokens: same scores).
+    """
+    from vllm.v1.attention.ops.indexer_localize import scan
+
+    decode_metadata = attn_metadata_narrowed.decode
+    assert decode_metadata is not None
+    loc = decode_metadata.localized
+    assert loc is not None
+    selector = get_indexer_topk(topk_backend)
+    domain_topk = scan.localized_topk_backend(
+        selector, topk_out.shape[0], max_model_len, topk_tokens
+    )
+    if domain_topk is None:
+        return False
+    if not indexer_overlap.candidate_defer_allowed():
+        if envs.VLLM_INDEXER_OVERLAP:
+            # This path runs only inside captures; build its merge now.
+            scan.prepare_merge(loc, topk_tokens, logits_dtype)
+        return False
+    scores: list[torch.Tensor] = []
+    scan.localized_paged_mqa_topk(
+        loc,
+        q,
+        kv_cache,
+        weights,
+        max_model_len,
+        logits_dtype,
+        decode_metadata.indices,
+        topk_tokens,
+        attn_metadata_narrowed.max_seq_len,
+        topk_out,
+        topk_backend=domain_topk,
+        scores_out=scores,
+    )
+    o0, o1 = scores
+    row_ends = seq_lens.reshape(-1)
+
+    def takes_bf16(t: torch.Tensor) -> bool:
+        return selector.takes_bf16_logits(t, topk_tokens, t.shape[0])
+
+    out = scan.localized_join_alloc(o0, lambda t: not takes_bf16(t))
+    num_rows = out.shape[0]
+    vis = row_ends[:num_rows]
+    decode_candidates = candidate_blocks[:num_rows]
+
+    def join_select_and_expand() -> None:
+        scan.localized_join_scores(loc, o0, o1, out, row_ends)
+        logits = out if takes_bf16(out) else as_fp32_logits(out, row_ends)
+        _select_candidate_blocks(
+            logits,
+            None,
+            vis,
+            decode_candidates.shape[1],
+            candidate_block_size,
+            decode_candidates,
+            1,
+            score_dtype=_decode_candidate_score_dtype(topk_backend),
+        )
+        indexer_overlap.expand_sparse_decode_rows(
+            attn_metadata_narrowed, candidate_blocks, candidate_block_size
+        )
+
+    # Both domains' scores (allocated on their streams) and the joined array
+    # stay referenced until the first candidate consumer joins, so their
+    # memory is not reused before the candidate stream has read them.
+    indexer_overlap.defer_candidates(
+        join_select_and_expand, (o0, o1, out, vis, row_ends, loc.join_map)
+    )
+    return True
 
 
 def _gather_workspace_shapes(
@@ -1207,17 +1306,119 @@ def sparse_attn_indexer(
                 weights[:num_padded_tokens],
                 logits_dtype,
             )
-            logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
-                kv_cache,
-                decode_weights,
-                seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                logits_dtype=logits_dtype,
-                indices=decode_metadata.indices,
+            q = (padded_q_quant_cast, padded_q_scale)
+            localized = decode_metadata.localized
+            # One row per query token (the varlen form, also with speculative
+            # decoding) over the whole context on this rank: what the deferred
+            # path takes.
+            whole_rows = (
+                dcp_world_size == 1
+                and decode_metadata.global_seq_lens is None
+                and not needs_padded_path
+                and next_n == 1
             )
+            if (
+                whole_rows
+                and localized is None
+                and indexer_overlap.consume_deferred_topk_request()
+            ):
+                # Defer the stock scan and top-k below (VLLM_INDEXER_OVERLAP).
+                def stock_scan_topk() -> None:
+                    scores = fp8_fp4_paged_mqa_logits(
+                        q,
+                        kv_cache,
+                        decode_weights,
+                        seq_lens,
+                        decode_metadata.block_table,
+                        decode_metadata.schedule_metadata,
+                        max_model_len=max_model_len,
+                        logits_dtype=logits_dtype,
+                        indices=decode_metadata.indices,
+                    )
+                    if not get_indexer_topk(topk_backend).takes_bf16_logits(
+                        scores, topk_tokens, scores.shape[0]
+                    ):
+                        scores = as_fp32_logits(scores, seq_lens.view(-1))
+                    get_indexer_topk(topk_backend)(
+                        scores,
+                        seq_lens,
+                        next_n,
+                        topk_indices_buffer[:num_padded_tokens, :topk_tokens],
+                        topk_tokens,
+                        attn_metadata_narrowed.max_seq_len,
+                    )
+
+                indexer_overlap.defer_stock_topk(stock_scan_topk, (*q, decode_weights))
+                return topk_indices_buffer
+            if localized is not None:
+                # Built for whole_rows only: varlen rows, never with DCP.
+                from vllm.v1.attention.ops.indexer_localize import scan
+
+                selector = get_indexer_topk(topk_backend)
+                topk_out = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+                if candidate_blocks is None:
+                    domain_topk = scan.localized_topk_backend(
+                        selector, num_padded_tokens, max_model_len, topk_tokens
+                    )
+                    if domain_topk is not None:
+                        # Per-domain scan and top-k, then the merge: no
+                        # full-length scores (VLLM_INDEXER_LOCALIZE).
+                        scan.localized_paged_mqa_topk(
+                            localized,
+                            q,
+                            kv_cache,
+                            decode_weights,
+                            max_model_len,
+                            logits_dtype,
+                            decode_metadata.indices,
+                            topk_tokens,
+                            attn_metadata_narrowed.max_seq_len,
+                            topk_out,
+                            topk_backend=domain_topk,
+                        )
+                        return topk_indices_buffer
+                elif candidate_write and _localized_candidate_source_topk(
+                    attn_metadata_narrowed,
+                    q,
+                    kv_cache,
+                    decode_weights,
+                    seq_lens,
+                    max_model_len,
+                    logits_dtype,
+                    topk_backend,
+                    topk_tokens,
+                    topk_out,
+                    candidate_blocks,
+                    candidate_block_size,
+                ):
+                    return topk_indices_buffer
+                # Else one scan per domain and a join, which may already write
+                # the FP32 scores the top-k wants.
+                logits = scan.localized_paged_mqa_logits(
+                    localized,
+                    q,
+                    kv_cache,
+                    decode_weights,
+                    seq_lens,
+                    max_model_len,
+                    logits_dtype,
+                    decode_metadata.indices,
+                    lambda t: (
+                        not selector.takes_bf16_logits(t, topk_tokens, t.shape[0])
+                    ),
+                )
+            else:
+                logits = fp8_fp4_paged_mqa_logits(
+                    q,
+                    kv_cache,
+                    decode_weights,
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=max_model_len,
+                    logits_dtype=logits_dtype,
+                    indices=decode_metadata.indices,
+                )
             # Keeping bf16 halves top-k/candidate reads. SM100 decode is varlen:
             # one context length per row.
             if dcp_world_size != 1 or not get_indexer_topk(
@@ -1234,7 +1435,26 @@ def sparse_attn_indexer(
             row_repeat = next_n if vis.numel() != num_rows else 1
             vis = vis[:num_rows]
             decode_candidates = candidate_blocks[:num_rows]
-            if candidate_write:
+            if candidate_write and indexer_overlap.candidate_defer_allowed():
+                # Defer the candidate selection and the first consumer's block-id
+                # expansion to the candidate stream (VLLM_INDEXER_OVERLAP).
+                def select_and_expand() -> None:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                        row_repeat,
+                        score_dtype=_decode_candidate_score_dtype(topk_backend),
+                    )
+                    indexer_overlap.expand_sparse_decode_rows(
+                        attn_metadata_narrowed, candidate_blocks, candidate_block_size
+                    )
+
+                indexer_overlap.defer_candidates(select_and_expand, (logits, vis))
+            elif candidate_write:
                 _select_candidate_blocks(
                     logits,
                     None,
@@ -1243,11 +1463,7 @@ def sparse_attn_indexer(
                     candidate_block_size,
                     decode_candidates,
                     row_repeat,
-                    score_dtype=(
-                        torch.float32
-                        if topk_backend in ("auto", "cooperative", "persistent")
-                        else None
-                    ),
+                    score_dtype=_decode_candidate_score_dtype(topk_backend),
                 )
             else:
                 _apply_candidate_mask(

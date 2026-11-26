@@ -18,10 +18,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers import indexer_overlap
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -236,6 +238,7 @@ class KimiK3DSAIndexer(nn.Module):
         # The specialized decode merges each rank's packed local top-N in one
         # exchange (0 keeps the generic merge).
         self.dcp_local_topk = init_dcp_topk_merge(vllm_config, index_topk)
+        self._wkv_stream: torch.cuda.Stream | None = None
 
     @property
     def cp_kv_cache_interleave_size(self) -> int:
@@ -326,12 +329,25 @@ class KimiK3DSAIndexer(nn.Module):
             num_tokens,
         )
 
+    def start_wkv_index(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Event]:
+        """Issue wkv_index, which reads only the layer input, on a side stream
+        beside the query chain; `forward` given the result waits for it."""
+        if self._wkv_stream is None:
+            self._wkv_stream = torch.cuda.Stream(device=hidden_states.device)
+        self._wkv_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self._wkv_stream):
+            wkv = self.wkv_index(hidden_states)[0]
+        return wkv, self._wkv_stream.record_event()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         index_q_input: torch.Tensor | None,
         positions: torch.Tensor | None = None,
         rotary_emb: nn.Module | None = None,
+        started_wkv: tuple[torch.Tensor, torch.cuda.Event] | None = None,
     ) -> torch.Tensor:
         if index_q_input is None:
             # q_lora_rank is None: MultiHeadLatentAttention.forward_native
@@ -345,7 +361,12 @@ class KimiK3DSAIndexer(nn.Module):
         index_q = self.wq_index(index_q_input)[0].view(
             -1, self.index_num_heads, self.index_head_dim
         )
-        index_k, index_weights = self.wkv_index(hidden_states)[0].split(
+        if started_wkv is None:
+            wkv = self.wkv_index(hidden_states)[0]
+        else:
+            wkv, wkv_ready = started_wkv
+            torch.cuda.current_stream().wait_event(wkv_ready)
+        index_k, index_weights = wkv.split(
             [self.index_head_dim, self.index_num_heads], dim=-1
         )
         if rows is not None:
@@ -674,6 +695,13 @@ class KimiK3DSAAttention(nn.Module):
             prefix,
             shardq_eligible=True,
         )
+        # VLLM_INDEXER_OVERLAP: FULL CUDA graph decode steps of the wrapper path
+        # defer the indexer's top-k (`_forward_deferred_topk`).
+        self.defer_topk = (
+            envs.VLLM_INDEXER_OVERLAP
+            and self.q_lora_rank is not None
+            and indexer_overlap.index_group_joins_topk(self.mla_attn.mla_attn.impl)
+        )
 
         # Dense-MHA prefills never read the top-k indices (PCP excluded, as
         # upstream).
@@ -751,6 +779,12 @@ class KimiK3DSAAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self._packed is None:
+            layer_name = self.mla_attn.mla_attn.layer_name
+            if (
+                self.defer_topk
+                and indexer_overlap.captured_decode_metadata(layer_name) is not None
+            ):
+                return self._forward_deferred_topk(positions, hidden_states)
             return self.mla_attn(positions, hidden_states)
         # As in the dense Kimi-K3 MLA: the output-gate GEMM overlaps the
         # attention front-end on the aux stream for small batches.
@@ -768,6 +802,44 @@ class KimiK3DSAAttention(nn.Module):
             attn_out = self._fused_attention(hidden_states)
             gate = self.g_proj(hidden_states)[0]
         return self.o_proj(_gate_sigmoid_mul(attn_out, gate))[0]
+
+    def _forward_deferred_topk(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        """`MultiHeadLatentAttentionWrapper.forward`'s ops for this layer around a
+        deferred indexer top-k: while it runs on another stream, this one issues
+        the work that never reads the kept tokens (kv norm, q_b_proj, output gate,
+        MLA cache insert and query preparation). The index group's conversion
+        waits for the top-k, and attention for the conversion.
+        """
+        attn = cast(Any, self.mla_attn.mla_attn)
+        started_wkv = self.dsa_indexer.start_wkv_index(hidden_states)
+        q_c, kv_c, k_pe = self.fused_qkv_a_proj(hidden_states)[0].split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        q_c = self.q_a_layernorm(q_c)
+
+        indexer_overlap.request_deferred_topk()
+        self.dsa_indexer(hidden_states, q_c, positions, self.rotary_emb, started_wkv)
+        topk_stream, topk_inputs = indexer_overlap.take_deferred_topk()
+
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+        k_pe = k_pe.unsqueeze(1)
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        gate = None
+        if hasattr(self, "g_proj"):
+            gate = self.g_proj(hidden_states)[0].sigmoid()
+
+        # Ready on the stream that writes the top-k (this one if the indexer joined).
+        with torch.cuda.stream(topk_stream):
+            attn.impl.record_logical_topk_ready()
+        out_shape = (hidden_states.shape[0], self.num_local_heads * self.v_head_dim)
+        attn_out = attn(q, kv_c_normed, k_pe, output_shape=out_shape)
+        # This stream has waited for the top-k: its inputs may be freed.
+        del topk_inputs
+        if gate is not None:
+            attn_out = attn_out * gate
+        return self.o_proj(attn_out)[0]
 
     def _fused_attention(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert self.q_lora_rank is not None and self._packed is not None

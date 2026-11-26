@@ -7,8 +7,10 @@ from __future__ import annotations
 import ctypes
 import itertools
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import torch
@@ -29,6 +31,19 @@ def granule_size(device_index: int) -> int:
     """Commit granule for device_index: driver granularity, floored at 2 MiB."""
     driver_granularity = get_vmm_driver().granularity(device_index)
     return _round_up(max(driver_granularity, _MIN_GRANULARITY), driver_granularity)
+
+
+@dataclass(frozen=True)
+class GranulePlacement:
+    """Where the physical memory of each granule is created.
+
+    Consecutive granules with the same `location(granule_index)` are committed
+    as one chunk, created by `create(num_bytes, location)`, which returns a
+    driver handle and raises `RuntimeError` on failure.
+    """
+
+    location: Callable[[int], int]
+    create: Callable[[int, int], int]
 
 
 class _VirtualBuffer:
@@ -56,6 +71,8 @@ class _VirtualBuffer:
         # Each entry is (handle, va_offset, size) for one mapped physical chunk.
         self._handles: list[tuple[int, int, int]] = []
         self._freed: bool = False
+        # None creates every chunk on the device.
+        self.placement: GranulePlacement | None = None
 
     @property
     def committed_bytes(self) -> int:
@@ -81,9 +98,7 @@ class _VirtualBuffer:
             if unmapped and run_start is None:
                 run_start = g
             elif not unmapped and run_start is not None:
-                self._map_chunk_at(
-                    run_start * self.granularity, (g - run_start) * self.granularity
-                )
+                self._map_run(run_start, g)
                 # Grant before recording the run as mapped: a failure in a
                 # later run must not leave these granules mapped but
                 # inaccessible, since later commits would skip them.
@@ -111,17 +126,48 @@ class _VirtualBuffer:
             self.device_index,
         )
 
-    def _map_chunk_at(self, offset: int, size: int) -> None:
-        """Create one physical chunk of `size` bytes and map it at `offset`."""
+    def _map_run(self, first: int, last: int) -> None:
+        """Map granules `[first, last)` as one chunk or, with a placement, one
+        chunk per run of granules of a location: all of them or none."""
+        granule = self.granularity
+        placement = self.placement
+        if placement is None:
+            self._map_chunk_at(first * granule, (last - first) * granule)
+            return
+        num_handles = len(self._handles)
+        try:
+            for location, run in itertools.groupby(
+                range(first, last), placement.location
+            ):
+                granules = list(run)
+                size = len(granules) * granule
+                create = partial(placement.create, size, location)
+                self._map_chunk_at(granules[0] * granule, size, create)
+        except Exception:
+            for handle, offset, size in self._handles[num_handles:]:
+                self._driver.unmap(self.base_ptr + offset, size)
+                self._driver.release(handle)
+            del self._handles[num_handles:]
+            raise
+
+    def _map_chunk_at(
+        self, offset: int, size: int, create: Callable[[], int] | None = None
+    ) -> None:
+        """Create one physical chunk of `size` bytes, on the device or with
+        `create`, and map it at `offset`."""
         driver = self._driver
         driver.ensure_context(self.device_index)
+        if create is None:
+            create = partial(
+                driver.create, size, self.device_index, self.export_handle_types
+            )
         try:
-            handle = driver.create(size, self.device_index, self.export_handle_types)
+            handle = create()
         except RuntimeError:
             # The VMM allocator cannot reuse memory idling in torch's
             # caching allocator; return it to the driver and retry once.
             torch.accelerator.empty_cache()
-            handle = driver.create(size, self.device_index, self.export_handle_types)
+            handle = create()
 
         addr = self.base_ptr + offset
         try:
@@ -298,6 +344,11 @@ class ExtensibleTensor:
         self._buffer: _VirtualBuffer = _VirtualBuffer(
             max_num_bytes, self._device_index, export_handle_types
         )
+
+    def set_granule_placement(self, placement: GranulePlacement) -> None:
+        """Create the granules committed from now on as `placement` says,
+        instead of on the device. Not for buffers that export their memory."""
+        self._buffer.placement = placement
 
     def full_view(self) -> torch.Tensor:
         """Uint8 view spanning the whole reservation."""

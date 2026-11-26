@@ -1685,6 +1685,8 @@ class KimiK3ForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
+    # Opts in to the die-local sparse indexer (VLLM_INDEXER_LOCALIZE).
+    supports_localized_indexer = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

@@ -338,6 +338,75 @@ def test_failed_commit_leaves_no_inaccessible_granules() -> None:
         et.free()
 
 
+@pytest.mark.parametrize("placed", [False, True])
+@create_new_process_for_each_test("spawn")
+def test_granule_placement_splits_chunks_by_location(placed: bool) -> None:
+    """Without a granule placement each commit maps one chunk per unmapped
+    range; with one, one chunk per run of granules of a location, created by
+    the placement for that location. All of it stays accessible."""
+    _skip_unless_vmm()
+    from vllm.utils.extensible_tensor import GranulePlacement
+    from vllm.utils.vmm_driver import get_vmm_driver
+
+    et = ExtensibleTensor(max_num_bytes=1, device="cuda")
+    g = et.granularity
+    et.free()
+    et = ExtensibleTensor(max_num_bytes=8 * g, device="cuda")
+    created: list[tuple[int, int]] = []
+
+    def create(num_bytes: int, location: int) -> int:
+        created.append((num_bytes // g, location))
+        return get_vmm_driver().create(num_bytes, et.device.index)
+
+    try:
+        if placed:
+            # Granule locations: 0 0 0 1 1 1 0 0.
+            et.set_granule_placement(GranulePlacement(lambda i: i // 3 % 2, create))
+        et.resize_per_segment_(4 * g + 1)
+        et.resize_per_segment_(8 * g)
+        assert created == ([(3, 0), (2, 1), (1, 1), (2, 0)] if placed else [])
+        assert et.num_physical_chunks == (4 if placed else 2)
+        full = et.full_view()
+        full.fill_(3)
+        assert torch.all(full == 3)
+    finally:
+        et.free()
+
+
+@create_new_process_for_each_test("spawn")
+def test_failed_placed_run_maps_none_of_its_chunks() -> None:
+    """A run whose second location cannot be created keeps none of its chunks
+    mapped, so retrying the commit maps the whole run."""
+    _skip_unless_vmm()
+    from vllm.utils.extensible_tensor import GranulePlacement
+    from vllm.utils.vmm_driver import get_vmm_driver
+
+    et = ExtensibleTensor(max_num_bytes=1, device="cuda")
+    g = et.granularity
+    et.free()
+    et = ExtensibleTensor(max_num_bytes=4 * g, device="cuda")
+    failing = True
+
+    def create(num_bytes: int, location: int) -> int:
+        if failing and location == 1:
+            raise RuntimeError("simulated allocation failure")
+        return get_vmm_driver().create(num_bytes, et.device.index)
+
+    try:
+        # Granule locations: 0 0 1 1.
+        et.set_granule_placement(GranulePlacement(lambda i: i // 2, create))
+        with pytest.raises(RuntimeError, match="simulated"):
+            et.resize_per_segment_(4 * g)
+        assert et.num_physical_chunks == 0 and et.physical_bytes == 0
+        failing = False
+        et.resize_per_segment_(4 * g)
+        assert et.num_physical_chunks == 2
+        et.full_view().fill_(1)
+        torch.accelerator.synchronize()
+    finally:
+        et.free()
+
+
 @create_new_process_for_each_test("spawn")
 def test_views_survive_interpreter_teardown() -> None:
     _skip_unless_vmm()

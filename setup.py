@@ -1644,6 +1644,8 @@ package_data = {
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
         # Inkling2 TRT-LLM-gen expert GEMM binding (FlashInfer JIT)
         "models/inkling2/nvidia/ops/*.cu",
+        # Compiled at runtime with NVRTC.
+        "v1/attention/ops/indexer_localize/*.cu",
         # Built-in multimodal chat template fallbacks (registry.py)
         "transformers_utils/chat_templates/*.jinja",
         "third_party/flash_linear_attention/LICENSE",

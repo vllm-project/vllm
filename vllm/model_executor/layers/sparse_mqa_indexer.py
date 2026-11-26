@@ -19,22 +19,29 @@ from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+    candidate_blocks_to_sparse_indices,
     has_deep_select,
     sparse_mqa_logits_paged_decode,
     sparse_mqa_logits_prefill_chunk,
 )
+from vllm.model_executor.layers import indexer_overlap
 from vllm.model_executor.layers.sparse_attn_indexer import (
     _gather_workspace_shapes,
     kv_cache_as_quant_view,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa, mqa_logits_mx_inputs
+from vllm.utils.deep_gemm import (
+    get_paged_sparse_mqa_logits_metadata,
+    has_deep_gemm_sparse_mqa,
+    mqa_logits_mx_inputs,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
     dsa_indexer_uses_fp4,
 )
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerMetadata,
+    SparseMQARowsMetadata,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -119,7 +126,11 @@ class SparseMQAIndexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
-        self.use_fp4_cache = dsa_indexer_uses_fp4(get_current_vllm_config())
+        vllm_config = get_current_vllm_config()
+        self.use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
+        indexer_overlap.init_candidate_stream(
+            not vllm_config.parallel_config.use_ubatching
+        )
 
     def _reserve_workspaces(self, device: torch.device) -> None:
         """Profiling run: claim the K-gather workspace and the peak sparse
@@ -144,6 +155,7 @@ class SparseMQAIndexer(nn.Module):
         assert isinstance(metadata, DeepseekV41SparseIndexerMetadata), (
             "SparseMQAIndexer needs DeepseekV41SparseIndexerBackend metadata"
         )
+        indexer_overlap.join_candidates()
         assert k is None, "the model writes the indexer K cache"
         if self.use_fp4_cache:
             # MXFP4 values go to DeepGEMM as int8 (its packed-FP4 tag).
@@ -202,6 +214,12 @@ class SparseMQAIndexer(nn.Module):
             assert decode_rows.row_indices is not None
             num_rows = decode_rows.row_ke.shape[0]
             if num_rows > 0:
+                if indexer_overlap.take_expanded(decode_rows):
+                    # Expanded on the candidate stream; the schedule is built here, as
+                    # DeepGEMM cannot create that stream's workspace in a capture.
+                    decode_rows.kernel_metadata = decode_schedule(
+                        self, decode_rows, sparse_block_kv, decode_rows.sparse_indices
+                    )
                 decode_rows.kernel_metadata = sparse_mqa_logits_paged_decode(
                     q_values[:num_rows].unsqueeze(1),
                     q_scale[:num_rows].unsqueeze(1),
@@ -222,3 +240,48 @@ class SparseMQAIndexer(nn.Module):
                     kernel_metadata=decode_rows.kernel_metadata,
                 )
         return topk_indices_buffer
+
+
+def expand_decode_candidates(
+    rows: SparseMQARowsMetadata,
+    candidate_blocks: torch.Tensor,
+    candidate_block_size: int,
+    sparse_block_kv: int,
+    scratch: bool = False,
+) -> torch.Tensor:
+    """The first step of `sparse_mqa_logits_paged_decode`: expand the decode
+    rows' candidate blocks into `rows.sparse_indices` / `rows.end` and return
+    the former; with `scratch`, zero candidates into private outputs instead."""
+    candidates = candidate_blocks[: rows.row_ke.shape[0]]
+    sparse_indices, end = rows.sparse_indices, rows.end
+    if scratch:
+        candidates = torch.zeros_like(candidates)
+        sparse_indices, end = torch.empty_like(sparse_indices), torch.empty_like(end)
+    candidate_blocks_to_sparse_indices(
+        candidates,
+        rows.row_ks,
+        rows.row_ke,
+        candidate_block_size,
+        sparse_block_kv,
+        out=(sparse_indices, end),
+    )
+    return sparse_indices
+
+
+def decode_schedule(
+    op: SparseMQAIndexer,
+    rows: SparseMQARowsMetadata,
+    sparse_block_kv: int,
+    sparse_indices: torch.Tensor,
+) -> torch.Tensor:
+    """The second step of `sparse_mqa_logits_paged_decode`: the DeepGEMM
+    schedule of `op`'s decode rows over `sparse_indices`."""
+    return get_paged_sparse_mqa_logits_metadata(
+        rows.row_ke,
+        rows.block_table,
+        rows.row_indices,
+        op.k_cache.kv_cache.shape[1],
+        sparse_indices,
+        torch.int8 if op.use_fp4_cache else current_platform.fp8_dtype(),
+        sparse_block_kv,
+    )

@@ -16,6 +16,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.model_executor.layers import indexer_overlap
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -587,6 +588,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         self.aux_stream_list = aux_stream_list
+        # VLLM_INDEXER_OVERLAP: FULL CUDA graph decode steps of indexer layers
+        # reorder their front end around the indexer.
+        self.reorder_front_end = (
+            envs.VLLM_INDEXER_OVERLAP
+            and not self.use_pcp
+            and not vllm_config.parallel_config.use_ubatching
+        )
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
         # before post-GEMM starts.
@@ -953,6 +961,23 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """
         attn_metadata = get_forward_context().attn_metadata
         indexer = self.indexer
+        if (
+            self.reorder_front_end
+            and indexer is not None
+            and indexer_overlap.captured_decode_metadata(indexer.k_cache.prefix)
+            is not None
+        ):
+            self._prepare_and_attn_reordered(
+                hidden_states,
+                qr,
+                kv,
+                qr_scale,
+                kv_score,
+                indexer_weights,
+                positions,
+                attn_out,
+            )
+            return
         compressor = self.compressor
         aux_streams = self.aux_stream_list
 
@@ -1033,6 +1058,66 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             positions,
             attn_out,
         )
+
+    def _prepare_and_attn_reordered(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor | QuantizedActivation,
+        kv: torch.Tensor,
+        qr_scale: torch.Tensor | None,
+        kv_score: torch.Tensor,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        attn_out: "torch.Tensor | QuantizedActivation",
+    ) -> None:
+        """`_prepare_and_attn` with the same ops and inputs, on other streams:
+
+        - main: compressor, index K (`wk` and store), indexer op, attention;
+        - aux 1: index Q (indexer `wq_b`, RoPE, quantization) beside the
+          compressor and index K, joined before the indexer op;
+        - aux 0: main query (`wq_b`, q norm, RoPE, SWA KV insert) and compressed
+          KV insert beside the indexer op, joined before attention, their only reader.
+
+        The aux streams' inputs stay referenced until the joins. The eager-only
+        short-context branch of `DeepseekV4Indexer.forward` never applies here.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        indexer = self.indexer
+        compressor = self.compressor
+        assert indexer is not None and self.aux_stream_list is not None
+        aux0, aux1 = self.aux_stream_list[0], self.aux_stream_list[1]
+        main = torch.cuda.current_stream()
+        latent: torch.Tensor | None = None
+        if compressor is not None:
+            aux1.wait_stream(main)
+            with torch.cuda.stream(aux1):
+                index_q, index_q_scale, index_weights = indexer.forward_q(
+                    qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
+                )
+            index_q_done = aux1.record_event()
+            latent = compressor(kv_score, positions)
+            indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+            main.wait_event(index_q_done)
+        else:
+            index_q, index_q_scale, index_weights = indexer.forward_q(
+                qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
+            )
+
+        aux0.wait_stream(main)
+        with torch.cuda.stream(aux0):
+            q = self._wq_b_proj(qr, qr_scale).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+            if compressor is not None:
+                compressor.insert_cache(latent, positions, self.rotary_emb)
+        attn_inputs_ready = aux0.record_event()
+        logger.info_once("Sparse indexer overlap: reordered attention front end.")
+
+        q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
+        indexer.indexer_op(hidden_states, q_quant, None, index_weights)
+        main.wait_event(attn_inputs_ready)
+        self.forward_mqa(q, kv, positions, attn_out)
 
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Override point: the ROCm layer preshuffles this weight in place, so

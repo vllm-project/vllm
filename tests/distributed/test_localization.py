@@ -72,6 +72,7 @@ def cuda_locality(monkeypatch):
     monkeypatch.setattr(localization.envs, "VLLM_USE_LOCALITY_DOMAINS", True)
     monkeypatch.setattr(localization.envs, "VLLM_MOE_LOCALIZE_BACKFILL", False)
     monkeypatch.setattr(localization, "_LOCALIZED_RESOURCES", {})
+    monkeypatch.setattr(localization, "_DOMAIN_CONTEXTS", {})
     return resource, green, state
 
 
@@ -160,6 +161,7 @@ def test_unsupported_stack_disables_localization(monkeypatch, missing):
     cuda = localization.torch.cuda
     monkeypatch.setattr(localization.envs, "VLLM_USE_LOCALITY_DOMAINS", True)
     monkeypatch.setattr(localization, "_LOCALIZED_RESOURCES", {})
+    monkeypatch.setattr(localization, "_DOMAIN_CONTEXTS", {})
     # Provide the allocator/partition APIs so only the MoE-stack check can refuse.
     monkeypatch.setattr(cuda, "LocalizedAllocator", Mock(), raising=False)
     green = SimpleNamespace(

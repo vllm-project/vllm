@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -618,6 +619,13 @@ def allocate_kv_cache(
     # Create the wvSplitKrc workspaces before the backing allocation and any capture.
     if current_platform.is_rocm():
         warmup_rocm_skinny_gemm_workspaces(device)
+    if envs.VLLM_INDEXER_LOCALIZE:
+        # Place the KV cache by locality domain for the die-local indexer.
+        from vllm.v1.attention.ops.indexer_localize.placement import (
+            localized_kv_allocate,
+        )
+
+        allocate = localized_kv_allocate(kv_cache_config, device, allocate)
     if allocate is not None:
         buf = allocate(raw_size)
     else:

@@ -64,8 +64,24 @@ class LocalizedResources:
         return self.sm_per_resource[: self.num_split]
 
 
+@dataclass(frozen=True, slots=True)
+class LocalityDomainContexts:
+    """A green context on each locality domain's SMs, one stream on each.
+
+    `remainder` is the device's SM partition outside these contexts, if any.
+    """
+
+    # Keep contexts alive: streams hold weak references and are destroyed with them.
+    contexts: list[Any] = field(repr=False)
+    streams: list[torch.cuda.Stream] = field(repr=False)
+    sm_counts: list[int] = field(repr=False)
+    remainder: Any = field(repr=False)
+
+
 # Retain resources for the process lifetime; initialize before model execution.
 _LOCALIZED_RESOURCES: dict[int, LocalizedResources] = {}
+# Per (device, backfill), shared by every feature that splits work by domain.
+_DOMAIN_CONTEXTS: dict[tuple[int, bool], LocalityDomainContexts] = {}
 
 
 def localization_enabled() -> bool:
@@ -94,6 +110,31 @@ def _locality_contexts(device_index: int, num_domains: int, *, backfill: bool):
                 "backfilled partitions do not match the requested allocation"
             )
     return contexts, remainder
+
+
+def get_locality_domain_contexts(
+    device_index: int, *, backfill: bool = False
+) -> LocalityDomainContexts:
+    """The per-domain green contexts and streams of `device_index`.
+
+    Created on first use for each backfill setting and then shared, so that
+    features splitting work by domain use the same SM partitions. Raises when
+    the device or the installed stack cannot split by domain.
+    """
+    key = (device_index, backfill)
+    if key not in _DOMAIN_CONTEXTS:
+        from torch.cuda.green_contexts import get_num_locality_domains
+
+        contexts, remainder = _locality_contexts(
+            device_index, get_num_locality_domains(device_index), backfill=backfill
+        )
+        _DOMAIN_CONTEXTS[key] = LocalityDomainContexts(
+            contexts=contexts,
+            streams=[context.Stream() for context in contexts],
+            sm_counts=[context.sm_count for context in contexts],
+            remainder=remainder,
+        )
+    return _DOMAIN_CONTEXTS[key]
 
 
 def _reserved_remainder_stream(remainder):
@@ -203,9 +244,7 @@ def maybe_init_localized_resources(
         backfill = False
         if envs.VLLM_MOE_LOCALIZE_BACKFILL:
             try:
-                contexts, remainder = _locality_contexts(
-                    idx, num_domains, backfill=True
-                )
+                domains = get_locality_domain_contexts(idx, backfill=True)
                 backfill = True
             except Exception as e:  # noqa: BLE001 - optional optimization
                 logger.warning(
@@ -215,8 +254,9 @@ def maybe_init_localized_resources(
                     e,
                 )
         if not backfill:
-            contexts, remainder = _locality_contexts(idx, num_domains, backfill=False)
-        streams = [c.Stream() for c in contexts]
+            domains = get_locality_domain_contexts(idx)
+        contexts = list(domains.contexts)
+        streams = list(domains.streams)
         # MemPool binds to the current device, which may differ from idx.
         with torch.accelerator.device_index(idx):
             pools: list[Any | None] = [
@@ -226,7 +266,7 @@ def maybe_init_localized_resources(
                 for i in range(num_domains)
             ]
         total_sm = torch.cuda.get_device_properties(idx).multi_processor_count
-        sm_per_resource = [context.sm_count for context in contexts]
+        sm_per_resource = list(domains.sm_counts)
         logger.info(
             "[locality domains] using %s compute partitions",
             "backfilled" if backfill else "node-local",
@@ -234,7 +274,7 @@ def maybe_init_localized_resources(
 
         # Use remainder SMs for memset, falling back to a full-device stream.
         aux_stream, aux_ctx, memset_reason, aux_sms = _reserved_remainder_stream(
-            remainder
+            domains.remainder
         )
         if aux_stream is None:
             aux_stream = torch.cuda.Stream(device=idx)

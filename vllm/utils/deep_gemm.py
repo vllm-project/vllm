@@ -436,6 +436,20 @@ def set_num_sms(num_sms: int) -> None:
     dg.set_num_sms(num_sms)
 
 
+def get_pdl() -> bool | None:
+    """Whether DeepGEMM launches with programmatic dependent launch; None
+    when the installed DeepGEMM has no such setting."""
+    _lazy_init()
+    get = getattr(_import_deep_gemm(), "get_pdl", None)
+    return None if get is None else bool(get())
+
+
+def set_pdl(enable: bool) -> None:
+    """Set DeepGEMM's programmatic dependent launch; only where `get_pdl`
+    returned a setting."""
+    _import_deep_gemm().set_pdl(enable)
+
+
 def get_mk_alignment_for_contiguous_layout() -> list[int]:
     _lazy_init()
     if _get_mk_alignment_for_contiguous_layout_impl is None:
