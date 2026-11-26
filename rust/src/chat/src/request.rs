@@ -13,7 +13,9 @@ pub use vllm_text::{PromptTruncation, SamplingParams};
 use xgrammar_structural_tag::AllowedToolRef;
 pub use xgrammar_structural_tag::AllowedToolsMode;
 
-use crate::error::{Error, Result};
+use crate::error::{
+    Error, Result, bail_invalid_continue_final_message, invalid_chat_template_kwargs,
+};
 use crate::event::{AssistantContentBlock, AssistantMessage};
 use crate::multimodal::InputAudioFormat;
 use crate::{AssistantMessageExt, EffortValue};
@@ -774,7 +776,10 @@ impl ChatRequest {
         ) {
             (GenerationPromptMode::ContinueFinalAssistant, Some(ChatRole::Assistant)) => {}
             (GenerationPromptMode::ContinueFinalAssistant, _) => {
-                return Err(Error::ContinueFinalAssistantWithoutFinalAssistant);
+                bail_invalid_continue_final_message!(
+                    "cannot continue the final message when the last message is not from the \
+                     assistant"
+                );
             }
             (GenerationPromptMode::NoGenerationPrompt, _)
             | (GenerationPromptMode::StartNewAssistant, _) => {}
@@ -852,9 +857,9 @@ impl ChatRequest {
         match self.chat_options.template_kwargs.get(key) {
             None => Ok(None),
             Some(Value::Bool(value)) => Ok(Some(*value)),
-            Some(other) => Err(Error::ChatTemplate(format!(
+            Some(other) => Err(invalid_chat_template_kwargs!(
                 "template kwarg `{key}` must be a boolean, got {other}"
-            ))),
+            )),
         }
     }
 }

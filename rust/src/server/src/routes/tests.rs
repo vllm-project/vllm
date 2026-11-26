@@ -2980,6 +2980,73 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
+/// Render classifies a renderer's errors like the chat route: a refusal of
+/// the request is 400 with its parameter, the model's template failing on
+/// this request is 400, and a renderer failure is 500.
+#[tokio::test]
+async fn render_chat_classifies_renderer_errors_by_fault() {
+    type MakeError = fn() -> vllm_chat::Error;
+    struct FailingRenderer(MakeError);
+
+    impl ChatRenderer for FailingRenderer {
+        fn render(&self, _request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
+            Err((self.0)())
+        }
+    }
+
+    let cases: [(MakeError, StatusCode, serde_json::Value); 4] = [
+        (
+            || vllm_chat::Error::InvalidMessages {
+                message: "unknown tool_call_id `call-unknown`".to_string(),
+            },
+            StatusCode::BAD_REQUEST,
+            json!("messages"),
+        ),
+        (
+            || vllm_chat::Error::InvalidContinueFinalMessage {
+                message: "nothing to continue".to_string(),
+            },
+            StatusCode::BAD_REQUEST,
+            json!("continue_final_message"),
+        ),
+        (
+            || vllm_chat::Error::ChatTemplateRender {
+                message: "unknown filter".to_string(),
+            },
+            StatusCode::BAD_REQUEST,
+            serde_json::Value::Null,
+        ),
+        (
+            || vllm_chat::Error::ChatTemplate("renderer state is inconsistent".to_string()),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::Value::Null,
+        ),
+    ];
+    for (error, status, param) in cases {
+        let backend = Arc::new(FakeChatBackend::with_chat_renderer(Arc::new(
+            FailingRenderer(error),
+        )));
+        let mut app = build_render_router(Arc::new(RenderState {
+            text: TextRequestProcessor::new(backend.clone(), 128),
+            chat: ChatRequestProcessor::new(backend, None, None),
+            ..test_render_state(Some(128))
+        }));
+
+        let (actual_status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            }),
+        )
+        .await;
+
+        assert_eq!(actual_status, status, "{json}");
+        assert_eq!(json["error"]["param"], param, "{json}");
+    }
+}
+
 /// Python renders an empty user turn, so the render route must accept empty
 /// message content instead of rejecting it.
 #[tokio::test]
