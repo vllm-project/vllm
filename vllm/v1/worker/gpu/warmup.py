@@ -13,6 +13,7 @@ from vllm import PoolingParams, SamplingParams
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -110,16 +111,20 @@ def _warmup_block_counter(
     return block_count
 
 
+def _num_draft_slots(model_runner: GPUModelRunner) -> int:
+    """Token budget the scheduler reserves per request for drafting."""
+    spec_config = model_runner.speculative_config
+    return spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
+
+
 def _cap_num_warmup_reqs(
     model_runner: GPUModelRunner, num_reqs: int, num_tokens_per_req: int
 ) -> int:
     """Limit synthetic requests to the scheduler's token budget."""
-    spec_config = model_runner.speculative_config
-    num_draft_slots = (
-        spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
-    )
     return min(
-        num_reqs, model_runner.max_num_tokens // (num_tokens_per_req + num_draft_slots)
+        num_reqs,
+        model_runner.max_num_tokens
+        // (num_tokens_per_req + _num_draft_slots(model_runner)),
     )
 
 
@@ -172,23 +177,25 @@ def run_mixed_prefill_decode_warmup(
     req_id_prefix: str = "_v2_mixed_warmup",
     prompt_logprobs: int | None = None,
     prefill_only_fallback: bool = False,
+    max_prefill_len: int | None = None,
     num_prefill_reqs: int | None = None,
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs,
     requesting prompt_logprobs on the prefill requests.
 
-    Prefill tokens beyond what one request can hold (max_model_len - 1) are
-    split across further prefill requests, up to max_num_reqs. With
-    num_prefill_reqs, that many prefill requests hold one token each and the
-    rest of the tokens fill the first ones. If prefill_only_fallback, the
-    prefills run alone when request slots rather than tokens limit them,
-    including on a runner limited to one request.
+    Prefill tokens beyond max_prefill_len (by default what one request can
+    hold, max_model_len - 1) are split across further prefill requests, up to
+    max_num_reqs. With num_prefill_reqs, that many prefill requests hold one
+    token each and the rest of the tokens fill the first ones. If
+    prefill_only_fallback, the prefills run alone when request slots rather
+    than tokens limit them, including on a runner limited to one request.
     """
     with_decode = model_runner.max_num_reqs >= 2
     if model_runner.is_pooling_model or not (with_decode or prefill_only_fallback):
         return False
 
-    max_prefill_len = model_runner.max_model_len - 1
+    if max_prefill_len is None:
+        max_prefill_len = model_runner.max_model_len - 1
     # The decode request verifies a full set of drafts, as in serving: some
     # backends allocate their largest decode workspace only to verify.
     num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens
@@ -502,6 +509,14 @@ def _measure_sizing_step(model_runner: GPUModelRunner) -> Iterator[None]:
     )
 
 
+def _size_for_chunk_state() -> bool:
+    """Whether the many-prompt sizing step also maximizes 64-token chunks.
+
+    Measured on ROCm only; CUDA keeps the equal split until measured there.
+    """
+    return current_platform.is_rocm()
+
+
 @torch.inference_mode()
 def run_kv_cache_sizing_warmup(
     model_runner: GPUModelRunner,
@@ -547,21 +562,37 @@ def run_kv_cache_sizing_warmup(
         prefill_only_fallback=True,
         mixed_step_context=_measure_sizing_step(model_runner),
     )
-    # Kernels that keep state per sequence and per 64-token chunk (e.g. GDN's
-    # chunked prefill) peak on the most of both a step can hold: a prompt in
-    # every slot the budget admits, the rest of the budget on the first ones,
-    # as a burst of short prompts next to a long prefill schedules it.
-    num_prompts = _cap_num_warmup_reqs(model_runner, model_runner.max_num_reqs, 1)
+    # Kernels that keep state per sequence (e.g. GDN's chunked prefill) need
+    # far more for the budget spread over every request slot, as a burst of
+    # short prompts schedules it, than for a few long prompts.
+    if _size_for_chunk_state():
+        # GDN also keeps state per 64-token chunk: one-token prompts in every
+        # slot, the rest of the budget on the first ones, hold the most chunks.
+        num_prompts = _cap_num_warmup_reqs(model_runner, model_runner.max_num_reqs, 1)
+        num_tokens = max_num_tokens
+        max_prefill_len, num_prefill_reqs = None, num_prompts
+    else:
+        short_prompt_len = max(
+            max_num_tokens // model_runner.max_num_reqs
+            - _num_draft_slots(model_runner),
+            1,
+        )
+        num_prompts = _cap_num_warmup_reqs(
+            model_runner, model_runner.max_num_reqs, short_prompt_len
+        )
+        num_tokens = num_prompts * short_prompt_len
+        max_prefill_len, num_prefill_reqs = short_prompt_len, None
     num_long_prompts = cdiv(max_num_tokens, model_runner.max_model_len - 1)
     if num_prompts > num_long_prompts:
         run_mixed_prefill_decode_warmup(
             model_runner,
             worker_execute_model,
             worker_sample_tokens,
-            max_num_tokens,
+            num_tokens,
             prefill_only_fallback=True,
-            num_prefill_reqs=num_prompts,
             mixed_step_context=_measure_sizing_step(model_runner),
+            max_prefill_len=max_prefill_len,
+            num_prefill_reqs=num_prefill_reqs,
         )
     if model_runner.model_config.use_mla:
         from vllm.model_executor.layers.attention.mla_attention import (

@@ -731,30 +731,40 @@ def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
     assert step.total_num_scheduled_tokens == sum(step.num_scheduled_tokens.values())
 
 
+@pytest.mark.parametrize("chunk_state", [False, True], ids=["equal-split", "chunks"])
 @pytest.mark.parametrize(
-    "max_num_reqs, max_model_len, num_draft_slots, expected_step",
+    "max_num_reqs, max_model_len, num_draft_slots, equal_split_step, chunks_step",
     [
-        # A prompt in each of the 4 slots, the rest of the 2048-token budget
-        # on the first ones, up to max_model_len - 1 each.
-        (4, MAX_MODEL_LEN, 0, ([1023, 1023, 1, 1], 0)),
+        # The 2048-token budget over 4 request slots; with chunk state, the
+        # rest of the budget on the first ones, up to max_model_len - 1 each.
+        (4, MAX_MODEL_LEN, 0, ([512] * 4, 0), ([1023, 1023, 1, 1], 0)),
         # Each request also takes its draft slots from the budget.
-        (4, MAX_MODEL_LEN, 3, ([1023, 1011, 1, 1], 0)),
-        # Draft slots leave room for 510 one-token prompts next to the decode
-        # request, as the scheduler would admit; the last token goes to the
-        # first prompt.
-        (1024, MAX_MODEL_LEN, 3, ([2] + [1] * 509, 1)),
+        (4, MAX_MODEL_LEN, 3, ([509] * 4, 0), ([1023, 1011, 1, 1], 0)),
+        # Draft slots leave room for 512 one-token prompts, as the scheduler
+        # would admit; the decode request takes the place of a few. With chunk
+        # state the budget holds 510 next to the decode request.
+        (1024, MAX_MODEL_LEN, 3, ([1] * 508, 1), ([2] + [1] * 509, 1)),
         # The full-budget step already holds a prompt in every slot.
-        (4, 514, 0, None),
+        (4, 514, 0, None, None),
     ],
 )
 def test_sizing_warmup_spreads_token_budget_over_every_request_slot(
-    monkeypatch, max_num_reqs, max_model_len, num_draft_slots, expected_step
+    monkeypatch,
+    max_num_reqs,
+    max_model_len,
+    num_draft_slots,
+    equal_split_step,
+    chunks_step,
+    chunk_state,
 ):
-    """Kernels that keep state per sequence and per 64-token chunk need far
-    more for a prompt in every request slot than for a few long prompts, so
-    the sizing warmup also measures a step of as many prompts as the scheduler
-    could admit, the rest of the budget on the first ones, unless the
-    full-budget step holds as many already."""
+    """Kernels that keep state per sequence need far more for the budget
+    spread over every request slot than for a few long prompts, so the sizing
+    warmup also measures a step of as many short prompts as the scheduler
+    could admit, unless the full-budget step holds as many already. Where it
+    also sizes per-chunk state, the rest of the budget goes on the first
+    prompts."""
+    monkeypatch.setattr(warmup, "_size_for_chunk_state", lambda: chunk_state)
+    expected_step = chunks_step if chunk_state else equal_split_step
     runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
     runner.model_config = SimpleNamespace(
         get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
