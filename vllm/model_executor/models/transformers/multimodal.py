@@ -89,7 +89,7 @@ _MAX_FRAMES_PER_VIDEO = 16
 _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
 _MIN_DUMMY_SIDE = 224
-# Keyed by the HF processor, which every vLLM processor of a model shares
+# Keyed by the HF processor, which vLLM caches per model and tokenizer
 _PROMPT_PREFIX_IDS: "WeakKeyDictionary[ProcessorMixin, list[int]]" = WeakKeyDictionary()
 
 
@@ -198,9 +198,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         except (ValueError, KeyError, IndexError, AttributeError):
             ids = []
         tail = cached_encode(self.get_tokenizer(), "")
-        prefix = ids[: len(ids) - len(tail)]
-        if ids[len(prefix) :] != tail:
-            prefix = []
+        split = len(ids) - len(tail)
+        prefix = ids[:split] if split > 0 and ids[split:] == tail else []
         _PROMPT_PREFIX_IDS[hf_processor] = prefix
         return prefix
 
