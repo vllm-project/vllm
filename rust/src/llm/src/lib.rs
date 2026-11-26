@@ -21,6 +21,7 @@ use vllm_metrics::METRICS;
 mod admission;
 mod aux_output;
 mod error;
+mod fingerprint;
 mod inflight;
 mod log_stats;
 mod output;
@@ -31,6 +32,7 @@ mod weight_versions;
 pub use admission::AdmissionLimits;
 pub use aux_output::AuxOutputRows;
 pub use error::{Error, Result};
+pub use fingerprint::LlmFingerprint;
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
     GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage,
@@ -65,6 +67,9 @@ pub struct LlmInfo {
     pub allow_missing_mm_embeddings: bool,
     /// vLLM version of the engine.
     pub vllm_version: String,
+    /// The engine configuration that the `system_fingerprint` of responses
+    /// describes.
+    pub fingerprint: LlmFingerprint,
 }
 
 /// Token-level generation: a [`GenerateRequest`] in, a [`GenerateOutput`]
@@ -168,6 +173,10 @@ impl EngineCoreLlm {
             supports_lora: client.ready_response().supports_lora,
             allow_missing_mm_embeddings: client.ready_response().allow_missing_mm_embeddings,
             vllm_version: client.vllm_version().to_string(),
+            fingerprint: LlmFingerprint::from_engines(
+                &client.ready_responses(),
+                client.data_parallel_size(),
+            ),
         };
         Self {
             client,

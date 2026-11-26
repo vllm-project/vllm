@@ -209,7 +209,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
-    "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1"),
+    "AXK1ForCausalLM": _HfExamplesInfo(
+        "skt/A.X-K1",
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50644"
+        },
+    ),
     "BailingMoeForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-lite-1.5", trust_remote_code=True
     ),
@@ -586,9 +592,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
-    ),
-    "TeleFLMForCausalLM": _HfExamplesInfo(
-        "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
     "VaultGemmaForCausalLM": _HfExamplesInfo("google/vaultgemma-1b"),
     "YoutuForCausalLM": _HfExamplesInfo("tencent/Youtu-LLM-2B"),
