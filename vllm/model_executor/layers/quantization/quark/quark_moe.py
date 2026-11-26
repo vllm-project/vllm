@@ -1617,28 +1617,27 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.static_input_scales = activation_quant_key == kFp8StaticTensorSym
 
-        # Select backend based on OCP MX scheme
-        if self.ocp_mx_scheme == "w_mxfp4":
+        # Select the backend once, keyed by the scheme's activation quant.
+        # Schemes not listed here (mxfp6, a_fp8 without static scales) stay NONE.
+        activation_keys: dict[str, QuantKey | None] = {
             # W4A16: weight-only MXFP4
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
-        elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
-            # W4A8: MXFP4 weights + static FP8 activations
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kFp8StaticTensorSym
-            )
-        elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
+            "w_mxfp4": None,
             # W4A4: MXFP4 weights + MXFP4 activations
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp4Dynamic
-            )
-        elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp8":
+            "w_mxfp4_a_mxfp4": kMxfp4Dynamic,
             # MXFP4 weights + dynamic per-group MXFP8 activations. gfx950 uses
             # AITER moe_gemm_a8w4 when AITER is enabled; otherwise emulation.
             # GEMM1 writes the second activation straight into MXFP8, so there
             # is no bf16 SwiGLU output to rotate. A rotated checkpoint has to
             # stay on emulation; do not add this backend to that allowlist.
+            "w_mxfp4_a_mxfp8": kMxfp8Dynamic,
+        }
+        if self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
+            # W4A8: MXFP4 weights + static FP8 activations
+            activation_keys["w_mxfp4_a_fp8"] = kFp8StaticTensorSym
+
+        if self.ocp_mx_scheme in activation_keys:
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp8Dynamic
+                moe, activation_key=activation_keys[self.ocp_mx_scheme]
             )
 
         # Validation for unsupported schemes
