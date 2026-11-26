@@ -142,9 +142,14 @@ For models that are too large to fit on a single GPU (like 70B parameter models)
 On MI355X, DeepSeek-V4.1-Flash can gather the MXFP8 input of its attention
 output projection (`wo_b`) at TP2 or TP4. Eligible engines keep a full copy of
 this projection on each GPU, using about 1.6 GiB per GPU for this checkpoint.
+At fixed GPU memory utilization, this leaves less room for the KV cache. In two
+TP2 runs with `--gpu-memory-utilization 0.9`, the reported KV token capacity
+fell by 2.2% and 2.3%.
+
 The gather starts at 256 rows for TP2 and 1024 for TP4. Engines with a smaller
 token budget, microbatching, or an unavailable AITER gather keep the sharded
-projection only.
+projection only. The same applies when LoRA, batch invariance, or prefill context
+parallelism is enabled.
 
 ### Pipeline Parallelism (PP)
 
