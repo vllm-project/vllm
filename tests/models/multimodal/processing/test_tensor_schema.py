@@ -30,6 +30,7 @@ from vllm.distributed import (
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.multimodal.processing.context import profiling_media
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -110,11 +111,13 @@ def create_batched_mm_kwargs(
     # video metadata will be added back to the resized video data here.
     token_prompt = get_token_prompt(processor, resized_mm_data)
 
-    mm_kwargs = processor(
-        prompt=token_prompt,
-        mm_items=processor.info.parse_mm_data(resized_mm_data),
-        hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-    )["mm_kwargs"].require_data()
+    # Exercise the full range of dummy tensor shapes as in startup profiling.
+    with profiling_media():
+        mm_kwargs = processor(
+            prompt=token_prompt,
+            mm_items=processor.info.parse_mm_data(resized_mm_data),
+            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+        )["mm_kwargs"].require_data()
 
     return group_and_batch_mm_kwargs(
         [
@@ -230,11 +233,14 @@ def test_model_tensor_schema(model_id: str):
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     assert isinstance(model_cls, type)
 
-    if (
-        model_config.hf_config.model_type == "hy_v4_flash_vl"
-        and not current_platform.is_cuda()
-    ):
-        pytest.skip("HY4 Flash is only supported on CUDA")
+    if model_config.hf_config.model_type == "hy_v4_flash_vl":
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                pytest.skip("HY4 Flash on ROCm requires gfx950")
+        elif not current_platform.is_cuda():
+            pytest.skip("HY4 Flash is only supported on CUDA and ROCm")
 
     assert supports_multimodal(model_cls)
     factories = model_cls._processor_factory

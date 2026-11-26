@@ -23,7 +23,6 @@ from vllm.compilation.codegen import (
     generate_execution_code,
     generate_execution_code_with_name,
 )
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def _trace_and_split(
@@ -271,12 +270,6 @@ def test_non_graphmodule_submod_uses_indexed_callable(x: torch.Tensor) -> None:
     assert torch.equal(fn(x), model_fn(x))
 
 
-# split_graph only passes tuple_return=True to split_module on PyTorch >= 2.12,
-# so getitem nodes only appear in the stitching graph from that version onward.
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.12.0.dev"),
-    reason="split_module tuple_return requires PyTorch >= 2.12",
-)
 def test_getitem_in_stitching_graph(x: torch.Tensor) -> None:
     """`operator.getitem` on submod tuple returns is the `call_function`
     special case at codegen.py — emitted as `name = source[index]`

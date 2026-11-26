@@ -32,6 +32,7 @@ from vllm.v1.hisparse.runtime import (
     HiSparseHostPool,
     HiSparseSlotInvalidator,
     drop_hisparse_host_pool,
+    get_hisparse_host_leader_rank,
     release_pinned_state,
     update_hisparse_residency,
 )
@@ -158,6 +159,7 @@ def _select_written_row_mirrors(
 def _create_hisparse_host_events(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,
+    host_leader_rank: int,
     device: torch.device,
 ) -> tuple[torch.Event, torch.Event]:
     backend = get_hisparse_backend()
@@ -175,7 +177,12 @@ def _create_hisparse_host_events(
         for event in events:
             event.record(stream)
         ipc_handles = tuple(backend.export_event(event) for event in events)
-    ipc_handles = get_tp_group().broadcast_object(ipc_handles, src=0)
+    tp_group = get_tp_group()
+    all_ipc_handles: list[Any] = [None] * tp_group.world_size
+    torch.distributed.all_gather_object(
+        all_ipc_handles, ipc_handles, group=tp_group.cpu_group
+    )
+    ipc_handles = all_ipc_handles[host_leader_rank]
     if events is None:
         events = (
             backend.import_event(device, ipc_handles[0]),
@@ -229,8 +236,10 @@ class HiSparseConnectorWorker:
         host_pool = next(iter(host_pools.values()))
         shared_host_region = host_pool.shared_region
         pinned_host_pools = host_pool.pinned
+        host_leader_rank = get_hisparse_host_leader_rank(self.vllm_config)
         is_host_writer = (
-            shared_host_region is None or get_tensor_model_parallel_rank() == 0
+            shared_host_region is None
+            or get_tensor_model_parallel_rank() == host_leader_rank
         )
         host_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
         assert host_num_blocks is not None
@@ -244,6 +253,7 @@ class HiSparseConnectorWorker:
                 pinned_host_pools,
                 shared_host_region=shared_host_region,
                 is_host_writer=is_host_writer,
+                host_leader_rank=host_leader_rank,
             )
         except Exception:
             release_pinned_state(
@@ -266,6 +276,7 @@ class HiSparseConnectorWorker:
         *,
         shared_host_region: SharedOffloadRegion | None = None,
         is_host_writer: bool = True,
+        host_leader_rank: int = 0,
     ) -> None:
         if self._initialized:
             raise RuntimeError("HiSparse connector worker is already initialized.")
@@ -316,7 +327,7 @@ class HiSparseConnectorWorker:
             if cache.runtime.is_group_leader
         )
         self.host_write_events = _create_hisparse_host_events(
-            shared_host_region, is_host_writer, device
+            shared_host_region, is_host_writer, host_leader_rank, device
         )
         self.host_write_event = self.host_write_events[1]
         self._next_host_write_event = 0

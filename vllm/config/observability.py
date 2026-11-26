@@ -103,7 +103,17 @@ class ObservabilityConfig:
     If set, vllm EngineCore will log iteration details
     This includes number of context/generation requests and tokens
     and, where the output worker measures it with CUDA events, the
-    elapsed GPU time for the iteration."""
+    elapsed GPU time for the iteration.
+
+    Stat loggers also receive two workload summaries, which are not printed
+    in the log; read them in a custom stat logger. Each iteration record has
+    `scheduled_workload`, a summary of the KV context lengths of the requests
+    that iteration scheduled, and `SchedulerStats` has `queued_workload`, a
+    summary of the requests that are still waiting.
+
+    With `--api-server-count` above 1, the engine sends the stats of each
+    step to only one of the API servers, so the stat loggers of any one
+    server receive only part of the iterations."""
 
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""

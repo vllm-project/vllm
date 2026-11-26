@@ -6,6 +6,8 @@ Every decode step runs these per DSA layer, so each stage is a single Triton
 kernel instead of a chain of eager elementwise ops.
 """
 
+from typing import Any
+
 import torch
 
 from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
@@ -303,7 +305,13 @@ def _rope_arguments(positions, parameters, device):
     )
 
 
-def quantize_query(query, head_weights, positions, parameters, padded_heads):
+def quantize_query(
+    query: torch.Tensor,
+    head_weights: torch.Tensor,
+    positions: torch.Tensor,
+    parameters: dict[str, Any],
+    padded_heads: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """RoPE, FWHT and FP8-quantize indexer queries, padding heads with zeros.
 
     Args:
@@ -314,8 +322,9 @@ def quantize_query(query, head_weights, positions, parameters, padded_heads):
         padded_heads: Head count the MQA logits kernel expects.
 
     Returns:
-        FP8 queries `[tokens, padded_heads, 128]` and FP32 weights
-        `[tokens, padded_heads]` with each head's quantization scale folded in.
+        FP8 queries of shape `[tokens, padded_heads, 128]`.
+        FP32 weights of shape `[tokens, padded_heads]` with each head's
+            quantization scale folded in.
 
     """
     tokens, heads, dim = query.shape
@@ -350,19 +359,19 @@ def quantize_query(query, head_weights, positions, parameters, padded_heads):
 
 
 def pool_quantize_write(
-    projection,
-    ape,
-    norm_weight,
-    eps,
-    positions,
-    parameters,
-    cache,
-    table,
-    owners,
-    groups,
-    active,
-    mx_scales,
-):
+    projection: torch.Tensor,
+    ape: torch.Tensor,
+    norm_weight: torch.Tensor,
+    eps: float,
+    positions: torch.Tensor,
+    parameters: dict[str, Any],
+    cache: torch.Tensor,
+    table: torch.Tensor,
+    owners: torch.Tensor,
+    groups: torch.Tensor,
+    active: torch.Tensor,
+    mx_scales: bool,
+) -> None:
     """Gate-pool raw keys, RoPE, FWHT, FP8-quantize and write pool pages.
 
     Args:
