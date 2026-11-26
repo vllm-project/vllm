@@ -1083,11 +1083,11 @@ def test_ignored_unexpected_patterns_match_renamed_keys():
     stub.hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_renaming=[WeightRenaming("post_norm", "mlp.post_norm")]
     )
-    weights = [(f"layers.{i}.post_norm.weight", torch.ones(2)) for i in range(2)]
+    weights = [(f"layers.{i}.mlp.post_norm.weight", torch.ones(2)) for i in range(2)]
 
     kept = Base._drop_ignored_unexpected(stub, iter(weights))
 
-    assert [name for name, _ in kept] == ["layers.0.post_norm.weight"]
+    assert [name for name, _ in kept] == ["layers.0.mlp.post_norm.weight"]
 
 
 @pytest.mark.skipif(
@@ -1095,9 +1095,9 @@ def test_ignored_unexpected_patterns_match_renamed_keys():
 )
 def test_convert_weights_splits_fused_gqa_qkv():
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
-    into each projection's size. Like in Transformers, a longer name that only starts
-    with the pattern is not split, and a quantization scale for the fused tensor is
-    rejected, not split."""
+    into each projection's size, after the renamings. Like in Transformers, a longer
+    name that only starts with the pattern is not split, and a quantization scale for
+    the fused tensor is rejected, not split."""
     with torch.device("meta"):
         model = nn.Module()
         model.config = PreTrainedConfig()
@@ -1110,11 +1110,12 @@ def test_convert_weights_splits_fused_gqa_qkv():
         target_patterns=["q_proj", "k_proj", "v_proj"],
         operations=[core_model_loading.Split(dim=0)],
     )
+    renaming = WeightRenaming(r"^attention\.", "self_attn.")
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
-    weights = ConvertWeights(converter, model)
-    other = ("self_attn.query_key_value_norm.weight", torch.zeros(12))
-    pieces = dict(weights([("self_attn.query_key_value.weight", fused), other]))
+    weights = ConvertWeights([renaming], [converter], WeightsMapper(), model)
+    other = ("attention.query_key_value_norm.weight", torch.zeros(12))
+    pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
 
     assert list(pieces) == [
         "self_attn.q_proj.weight",
@@ -1126,7 +1127,7 @@ def test_convert_weights_splits_fused_gqa_qkv():
     torch.testing.assert_close(torch.cat(split), fused)
     assert [p.shape[0] for p in split] == [8, 2, 2]
 
-    scale = ("self_attn.query_key_value.weight_scale", torch.ones(1))
+    scale = ("attention.query_key_value.weight_scale", torch.ones(1))
     with pytest.raises(ValueError, match="quantized tensors is not supported"):
         list(weights([scale]))
 
