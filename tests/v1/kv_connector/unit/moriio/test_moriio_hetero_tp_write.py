@@ -693,7 +693,7 @@ def test_write_rejects_incomplete_prompt_before_touching_decode(
         region.fill_(0xAB)
     before = [region.clone() for region in consumer.regions]
     producer = _build_rank("gqa", 0, 1, KVCacheLayout.LBNHC, True, state, True)
-    _connect(producer, [consumer], "decode")
+    _connect(producer, [consumer], "decode", monkeypatch=monkeypatch)
     info = RemoteAllocInfo(block_ids=[remote])
     info.num_prompt_tokens = decode_tokens
     producer.wrapper.done_remote_allocate_req_dict["t"] = info
@@ -855,7 +855,7 @@ def test_invalid_mamba_allocation_notifies_decode_without_writing(monkeypatch):
     consumer = _build_rank("mla_hybrid", 0, 1, KVCacheLayout.LBNHC, True, state, False)
     consumer.wrapper = _consumer_wrapper()
     producer = _build_rank("mla_hybrid", 0, 1, KVCacheLayout.LBNHC, True, state, True)
-    _connect(producer, [consumer], "decode")
+    _connect(producer, [consumer], "decode", monkeypatch=monkeypatch)
     for region in consumer.regions:
         region.fill_(0xAB)
     before = [region.clone() for region in consumer.regions]
