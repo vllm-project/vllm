@@ -104,9 +104,11 @@ def test_video_request_budget_charges_decoded_frames_once(
     budget = MediaDecodedBudget()
     video_io = VideoMediaIO(ImageMediaIO(decoded_budget=budget), num_frames=4)
 
-    frames, _ = video_io.load_bytes(data).media
+    result = video_io.load_bytes(data)
+    frames, _ = result.media
 
     assert frames.shape == (4, 32, 32, 3)
+    assert result.decoded_budget is budget
     assert budget.used == frames.nbytes
 
 

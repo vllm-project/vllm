@@ -15,6 +15,9 @@ from typing import Literal
 import numpy as np
 from PIL import Image
 
+from vllm.multimodal.media.base import MediaDecodedBudget
+from vllm.multimodal.video_decoders.base import check_frame_pixel_limit
+
 _ALIGN = 28
 _MIN_FRAMES = 4
 _PF_FLOOR = 128
@@ -217,6 +220,7 @@ def _decode_frames(
     visual_budget: int,
     seq_length: int,
     jpeg_quality: int,
+    decoded_budget: MediaDecodedBudget | None = None,
 ) -> tuple[list[tuple[float, Image.Image]], float]:
     decoder = _open_video(video_bytes)
     metadata = decoder.metadata
@@ -230,6 +234,7 @@ def _decode_frames(
             "Invalid video metadata: "
             f"duration={duration}, height={orig_h}, width={orig_w}"
         )
+    check_frame_pixel_limit(orig_w, orig_h)
     if total_frames <= 0:
         total_frames = max(1, int(duration * orig_fps))
 
@@ -258,6 +263,9 @@ def _decode_frames(
         step = (total_frames - 1) / (num_frames - 1)
         indices = [int(round(i * step)) for i in range(num_frames)]
     indices = sorted({max(0, min(index, total_frames - 1)) for index in indices})
+
+    budget = decoded_budget if decoded_budget is not None else MediaDecodedBudget()
+    budget.charge(len(indices) * orig_h * orig_w * 3)
 
     try:
         decoded = decoder.get_frames_at(indices=indices).data
@@ -391,6 +399,7 @@ def preprocess_dots3_note_video(
     audio_sample_rate: int = _AUDIO_SAMPLE_RATE,
     k_mode: str = "eval_ek",
     max_new_tokens: int = 0,
+    decoded_budget: MediaDecodedBudget | None = None,
 ) -> list[Dots3NoteVideoPart]:
     """Expand one video into timestamped, interleaved image/audio parts."""
     if seq <= 0:
@@ -450,6 +459,7 @@ def preprocess_dots3_note_video(
             visual_budget,
             seq_length,
             jpeg_quality,
+            decoded_budget,
         )
     else:
         frames, video_duration = _prepare_decoded_frames(

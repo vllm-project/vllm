@@ -152,7 +152,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
             # Charge what the decoder did not charge up front, e.g. a custom
             # loader or frames a loader duplicated after decoding.
             frames_charge(max(0, decoded_bytes - frames_charge.charged_bytes))
-        return MediaWithBytes(video, data)
+        return MediaWithBytes(video, data, decoded_budget=budget)
 
     def load_base64(
         self, media_type: str, data: str
@@ -218,7 +218,11 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                 "frames_indices": frames_indices,
                 "do_sample_frames": self.kwargs.get("do_sample_frames", False),
             }
-            return MediaWithBytes((frames, metadata), data.encode())
+            return MediaWithBytes(
+                (frames, metadata),
+                data.encode(),
+                decoded_budget=self.image_io.decoded_budget,
+            )
 
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 

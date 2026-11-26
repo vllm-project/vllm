@@ -4,9 +4,12 @@
 
 import httpx
 import numpy as np
+import pybase64 as base64
 import pytest
 import pytest_asyncio
+from PIL import Image
 
+from tests.multimodal.utils import create_video_from_image
 from tests.utils import RemoteLaunchRenderServer
 from vllm.multimodal.utils import encode_video_url
 
@@ -279,6 +282,45 @@ async def test_chat_render_multiple_chat_templates():
     assert response.status_code == 200
     token_ids = response.json()["token_ids"]
     assert token_ids == [151644, 872, 198, 9707, 151645, 198, 151644, 77091, 198]
+
+
+def test_dots3_note_render_rejects_video_exceeding_request_decode_budget(tmp_path):
+    model = "dots-studio/dots3-note-prev"
+    image_path = tmp_path / "frame.png"
+    video_path = tmp_path / "video.mp4"
+    Image.new("RGB", (64, 64), color="red").save(image_path)
+    create_video_from_image(str(image_path), str(video_path), num_frames=8)
+    video_url = "data:video/mp4;base64," + base64.b64encode(
+        video_path.read_bytes()
+    ).decode("ascii")
+    frame_bytes = 64 * 64 * 3
+
+    with RemoteLaunchRenderServer(
+        model,
+        ["--mm-processor-cache-gb", "0", "--max-model-len", "4096"],
+        env_dict={"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": str(9 * frame_bytes)},
+    ) as server:
+        response = httpx.post(
+            server.url_for("v1/chat/completions/render"),
+            json={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "video_url", "video_url": {"url": video_url}}
+                        ],
+                    }
+                ],
+                "mm_payload": "none",
+            },
+            timeout=120,
+        )
+        health = httpx.get(server.url_for("health"))
+
+    assert response.status_code == 400
+    assert "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES" in response.text
+    assert health.status_code == 200
 
 
 # -- Completion Render --
