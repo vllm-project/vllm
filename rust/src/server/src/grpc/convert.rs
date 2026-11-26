@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Conversion between gRPC protobuf types and internal `vllm-text`
-//! request/response types.
+//! Conversion between gRPC protobuf types and internal request/response types.
 
+use serde_json::Value;
+use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
@@ -13,6 +14,7 @@ use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::structured_outputs::{
     StructuredOutputConstraint, StructuredOutputsParams,
 };
+use vllm_llm::{Error as LlmError, GenerateRequest};
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
     PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
@@ -345,6 +347,169 @@ pub(super) fn structured_output_to_proto(params: &StructuredOutputsParams) -> pb
     pb::StructuredOutput { kind: Some(kind) }
 }
 
+/// Encode an already lowered token request for a remote generation RPC.
+pub(super) fn to_grpc_request(
+    model: &str,
+    rpc_request_id: Uuid,
+    request: GenerateRequest,
+) -> Result<pb::GenerateRequest, LlmError> {
+    reject_unsupported_fields(&request)?;
+    let sampling_params = request.sampling_params;
+    let kwargs = request
+        .reasoning_parser_kwargs
+        .filter(|k| !k.chat_template_kwargs.is_empty())
+        .map(|kwargs| {
+            let kwargs = kwargs.chat_template_kwargs;
+            if !kwargs.values().all(numbers_fit_protobuf_struct) {
+                return Err(LlmError::Unsupported {
+                    field: "chat_template_kwargs number outside protobuf Struct precision",
+                });
+            }
+            Ok(prost_types::Struct {
+                fields: kwargs
+                    .into_iter()
+                    .map(|(key, value)| (key, json_to_proto_value(&value)))
+                    .collect(),
+            })
+        })
+        .transpose()?;
+    Ok(pb::GenerateRequest {
+        model: model.into(),
+        request_id: rpc_request_id.to_string(),
+        prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: request.prompt_token_ids,
+        })),
+        temperature: Some(sampling_params.temperature),
+        sampling: Some(pb::RandomSampling {
+            num_sequences: 1,
+            top_p: Some(sampling_params.top_p),
+            top_k: Some(sampling_params.top_k),
+            min_p: Some(sampling_params.min_p),
+            seed: sampling_params.seed,
+        }),
+        decoding: Some(pb::DecodingParameters {
+            presence_penalty: sampling_params.presence_penalty,
+            frequency_penalty: sampling_params.frequency_penalty,
+            repetition_penalty: sampling_params.repetition_penalty,
+            allowed_token_ids: sampling_params.allowed_token_ids.unwrap_or_default(),
+            logit_bias: sampling_params.logit_bias.unwrap_or_default(),
+            bad_words_token_ids: sampling_params
+                .bad_words_token_ids
+                .unwrap_or_default()
+                .into_iter()
+                .map(|ids| pb::TokenIds { ids })
+                .collect(),
+            ..Default::default()
+        }),
+        stopping: Some(pb::StoppingCriteria {
+            max_new_tokens: sampling_params.max_tokens,
+            min_new_tokens: sampling_params.min_tokens,
+            stop_token_ids: sampling_params.stop_token_ids,
+            ignore_eos: sampling_params.eos_token_id.is_none(),
+            thinking_token_budget: sampling_params
+                .thinking_token_budget
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|error| LlmError::Remote {
+                    message: error.to_report_string(),
+                })?,
+            ..Default::default()
+        }),
+        response: Some(pb::ResponseOptions {
+            output_text: Some(false),
+            output_token_ids: true,
+            prompt_token_ids: true,
+            ..Default::default()
+        }),
+        priority: request.priority,
+        session_id: request.session_id,
+        watermarking: Some(sampling_params.watermarking),
+        kv: Some(pb::KvCacheParameters {
+            cache_salt: request.cache_salt.unwrap_or_default(),
+            bypass_prefix_cache: sampling_params.skip_reading_prefix_cache.unwrap_or(false),
+            ..Default::default()
+        }),
+        engine_reasoning_gate: (request.reasoning_ended.is_some() || kwargs.is_some()).then_some(
+            pb::EngineReasoningGate {
+                reasoning_ended: request.reasoning_ended,
+                chat_template_kwargs: kwargs,
+            },
+        ),
+        ..Default::default()
+    })
+}
+
+fn reject_unsupported_fields(request: &GenerateRequest) -> Result<(), LlmError> {
+    if request.mm_features.is_some() {
+        return Err(LlmError::Unsupported {
+            field: "multimodal inputs",
+        });
+    }
+    if request.lora_request.is_some() {
+        return Err(LlmError::Unsupported {
+            field: "lora_request",
+        });
+    }
+    if request.kv_hints.is_some() {
+        return Err(LlmError::Unsupported { field: "kv_hints" });
+    }
+    if request.data_parallel_rank.is_some() {
+        return Err(LlmError::Unsupported {
+            field: "data_parallel_rank",
+        });
+    }
+
+    let sampling_params = &request.sampling_params;
+    if sampling_params.extra_args.is_some() {
+        return Err(LlmError::Unsupported {
+            field: "extra_args",
+        });
+    }
+    if sampling_params.structured_outputs.is_some() {
+        return Err(LlmError::Unsupported {
+            field: "structured_outputs",
+        });
+    }
+    if sampling_params.logprobs.is_some() || sampling_params.logprob_token_ids.is_some() {
+        return Err(LlmError::Unsupported { field: "logprobs" });
+    }
+    if sampling_params.prompt_logprobs.is_some()
+        || sampling_params.prompt_logprob_token_ids.is_some()
+    {
+        return Err(LlmError::Unsupported {
+            field: "prompt_logprobs",
+        });
+    }
+    if sampling_params.repetition_detection.is_some() {
+        return Err(LlmError::Unsupported {
+            field: "repetition_detection",
+        });
+    }
+    if sampling_params.stream_interval.is_some() {
+        return Err(LlmError::Unsupported {
+            field: "stream_interval",
+        });
+    }
+    if sampling_params.routed_experts_prompt_start != 0 {
+        return Err(LlmError::Unsupported {
+            field: "routed_experts_prompt_start",
+        });
+    }
+
+    Ok(())
+}
+
+fn numbers_fit_protobuf_struct(value: &Value) -> bool {
+    match value {
+        // Struct stores numbers as f64. Compare integer values in i128 so even
+        // a u64::MAX rounded up to 2^64 is detected.
+        Value::Number(n) => n.as_i128().is_none_or(|i| i as f64 as i128 == i),
+        Value::Array(items) => items.iter().all(numbers_fit_protobuf_struct),
+        Value::Object(fields) => fields.values().all(numbers_fit_protobuf_struct),
+        _ => true,
+    }
+}
+
 // ========================================================================================
 // Response conversion
 // ========================================================================================
@@ -561,7 +726,7 @@ pub(super) fn json_to_proto_struct(value: &serde_json::Value) -> Option<prost_ty
     }
 }
 
-pub(super) fn json_to_proto_value(v: &serde_json::Value) -> prost_types::Value {
+fn json_to_proto_value(v: &serde_json::Value) -> prost_types::Value {
     use prost_types::value::Kind;
     let kind = match v {
         serde_json::Value::Null => Kind::NullValue(0),
@@ -623,9 +788,25 @@ mod tests {
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{
-        ResponseOpts, json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
+        ResponseOpts, json_to_proto_struct, numbers_fit_protobuf_struct, pb, to_finish_info,
+        to_sequence_output, to_text_request,
     };
     use crate::model_names::ServedModelNames;
+
+    #[test]
+    fn template_kwargs_require_exact_numbers_in_protobuf_struct() {
+        use serde_json::json;
+        assert!(numbers_fit_protobuf_struct(
+            &json!({"nested": [1.0, 0.25, 1u64 << 63]})
+        ));
+        for integer in [
+            json!(9_007_199_254_740_993u64),
+            json!(-9_007_199_254_740_993i64),
+            json!(u64::MAX),
+        ] {
+            assert!(!numbers_fit_protobuf_struct(&json!({"nested": [integer]})));
+        }
+    }
 
     fn served() -> ServedModelNames {
         ServedModelNames::new(vec!["test-model".to_string()])
