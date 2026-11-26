@@ -134,6 +134,18 @@ fn status(s: Status) -> Error {
     }
 }
 
+fn numbers_fit_protobuf_struct(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        // Struct stores numbers as f64. Compare integer values in i128 so even
+        // a u64::MAX rounded up to 2^64 is detected.
+        Value::Number(n) => n.as_i128().is_none_or(|i| i as f64 as i128 == i),
+        Value::Array(items) => items.iter().all(numbers_fit_protobuf_struct),
+        Value::Object(fields) => fields.values().all(numbers_fit_protobuf_struct),
+        _ => true,
+    }
+}
+
 fn encode(model: &str, wire_id: Uuid, r: GenerateRequest) -> Result<Request<pb::GenerateRequest>> {
     let s = r.sampling_params;
     for (field, present) in [
@@ -169,13 +181,12 @@ fn encode(model: &str, wire_id: Uuid, r: GenerateRequest) -> Result<Request<pb::
         .filter(|k| !k.chat_template_kwargs.is_empty())
         .map(|k| {
             let value = serde_json::Value::Object(k.chat_template_kwargs.into_iter().collect());
-            let encoded = super::convert::json_to_proto_struct(&value).expect("JSON object");
-            if super::convert::proto_struct_to_json(&encoded) != value {
+            if !numbers_fit_protobuf_struct(&value) {
                 return Err(Error::Unsupported {
                     field: "chat_template_kwargs number outside protobuf Struct precision",
                 });
             }
-            Ok(encoded)
+            Ok(super::convert::json_to_proto_struct(&value).expect("JSON object"))
         })
         .transpose()?;
     let mut req = Request::new(pb::GenerateRequest {
@@ -400,6 +411,21 @@ impl Llm for GrpcLlm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn template_kwargs_require_exact_numbers_in_protobuf_struct() {
+        use serde_json::json;
+        assert!(numbers_fit_protobuf_struct(
+            &json!({"nested": [1.0, 0.25, 1u64 << 63]})
+        ));
+        for integer in [
+            json!(9_007_199_254_740_993u64),
+            json!(-9_007_199_254_740_993i64),
+            json!(u64::MAX),
+        ] {
+            assert!(!numbers_fit_protobuf_struct(&json!({"nested": [integer]})));
+        }
+    }
 
     #[tokio::test]
     async fn terminal_frame_requires_successful_rpc_status() {
