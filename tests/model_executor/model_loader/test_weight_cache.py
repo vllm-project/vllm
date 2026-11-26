@@ -923,6 +923,70 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize("pcp,dcp", [(2, 1), (1, 2)], ids=["pcp", "dcp-qrep-a2a"])
+def test_ipc_cache_context_parallel(vllm_runner, monkeypatch, pcp, dcp):
+    model = "vllm-project/tiny-random-DeepseekV2ForCausalLM"
+    monkeypatch.delenv("VLLM_DCP_Q_REPLICATE", raising=False)
+    # Exercise both the replicated Q projection and the gathered V projection.
+    monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
+    kwargs = dict(
+        tensor_parallel_size=dcp,
+        prefill_context_parallel_size=pcp,
+        decode_context_parallel_size=dcp,
+        dcp_q_replicate=dcp > 1,
+        dcp_comm_backend="a2a",
+        enforce_eager=True,
+        max_model_len=256,
+        max_num_seqs=1,
+        enable_chunked_prefill=True,
+        attention_backend="TRITON_MLA",
+        kv_cache_memory_bytes=32 << 20,
+        kernel_config={"moe_backend": "triton", "enable_flashinfer_autotune": False},
+    )
+    prompts = ["The capital of France is"]
+    with vllm_runner(model, **kwargs) as runner:
+        baseline = runner.generate_greedy_logprobs(prompts, 4, 5)
+    with WeightCacheDaemon(
+        model,
+        tp_size=dcp,
+        extra_args=[
+            "--prefill-context-parallel-size",
+            str(pcp),
+            "--decode-context-parallel-size",
+            str(dcp),
+            "--dcp-comm-backend",
+            "a2a",
+            "--dcp-q-replicate" if dcp > 1 else "--no-dcp-q-replicate",
+            "--attention-backend",
+            "TRITON_MLA",
+            "--max-model-len",
+            "256",
+            "--disable-flashinfer-autotune",
+            "--kernel-config",
+            '{"moe_backend":"triton"}',
+        ],
+    ) as daemon:
+        daemon.wait_until_ready()
+        kwargs.update(
+            load_format="ipc_cache",
+            model_loader_extra_config={
+                "socket_dir": daemon.socket_dir,
+                "fallback": False,
+            },
+        )
+        with vllm_runner(model, **kwargs) as runner:
+            assert runner.generate_greedy_logprobs(prompts, 4, 5) == baseline
+        if dcp > 1:
+            kwargs["dcp_q_replicate"] = False
+            with pytest.raises(RuntimeError), vllm_runner(model, **kwargs):
+                pytest.fail("IPC loader accepted replicated Q weights")
+            daemon.wait_for_log(
+                "WeightCacheKey mismatch on fields: ['dcp_q_replicate']"
+            )
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
 def test_ipc_cache_cold_start_and_warm_restart_pp2_mtp(vllm_runner, tmp_path):
     """Same as above at pp=2, with an MTP draft model."""
     run_cold_start_and_warm_restart(vllm_runner, QWEN_MTP_PP2_CASE, tmp_path)
@@ -1152,78 +1216,101 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
 
 
 def _parallel(**kw):
-    from types import SimpleNamespace
+    from vllm.config import ParallelConfig
 
-    base = dict(
-        tensor_parallel_size=1,
-        pipeline_parallel_size=1,
-        data_parallel_size=1,
-        data_parallel_size_local=1,
-        data_parallel_rank=0,
-        nnodes=1,
-        node_rank=0,
+    return ParallelConfig(distributed_executor_backend="mp", **kw)
+
+
+def test_daemon_places_tp_and_dp_ranks_on_local_gpus(tmp_path, monkeypatch):
+    """Preload serves the workers local to each DP replica placed by EngineArgs."""
+    from transformers import DeepseekV2Config
+
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        WeightCacheDaemon,
+        daemon_serves_model,
+        plan_local_ranks,
     )
-    base.update(kw)
-    return SimpleNamespace(**base)
 
+    DeepseekV2Config(
+        architectures=["DeepseekV2ForCausalLM"], n_routed_experts=16
+    ).save_pretrained(tmp_path)
 
-def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
-    """Each node serves a contiguous global-rank block (DP-major), so without
-    DP local GPU i is TP rank r*local+i, and single-node DP launchers offset
-    by --data-parallel-start-rank."""
-    from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
+    def engine_config(distributed_executor_backend="mp", **kwargs):
+        return EngineArgs(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            distributed_executor_backend=distributed_executor_backend,
+            **kwargs,
+        ).create_engine_config()
 
-    tp_second_node = _parallel(tensor_parallel_size=8, nnodes=2, node_rank=1)
-    assert plan_local_ranks(tp_second_node) == [(i, 0, 0, 4 + i) for i in range(4)]
+    def ranks(**kwargs):
+        return plan_local_ranks(engine_config(**kwargs).parallel_config)
 
-    dp_third_node = _parallel(
-        data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=8
-    )
-    assert plan_local_ranks(dp_third_node) == [(i, 8 + i, 0, 0) for i in range(4)]
+    # EngineArgs infers the starting DP rank and local replica count on each node.
+    for tp, dp, nodes, node, expected in [
+        (8, 1, 2, 1, [4, 5, 6, 7]),
+        (8, 2, 2, 0, list(range(8))),
+        (8, 2, 2, 1, list(range(8, 16))),
+        (8, 2, 4, 1, [4, 5, 6, 7]),
+        (8, 2, 4, 2, [8, 9, 10, 11]),
+        (4, 4, 2, 0, list(range(8))),
+    ]:
+        actual = ranks(
+            tensor_parallel_size=tp, data_parallel_size=dp, nnodes=nodes, node_rank=node
+        )
+        assert actual == expected
 
-    dp_tp = _parallel(
+    assert ranks(pipeline_parallel_size=2, tensor_parallel_size=2) == [0, 1, 2, 3]
+    assert ranks(
+        data_parallel_size=16, data_parallel_size_local=4, data_parallel_start_rank=8
+    ) == [8, 9, 10, 11]
+    assert ranks(
         tensor_parallel_size=2,
         data_parallel_size=4,
         data_parallel_size_local=2,
-        data_parallel_rank=2,
-    )
-    assert plan_local_ranks(dp_tp) == [
-        (0, 2, 0, 0),
-        (1, 2, 0, 1),
-        (2, 3, 0, 0),
-        (3, 3, 0, 1),
-    ]
+        data_parallel_start_rank=2,
+    ) == [4, 5, 6, 7]
 
-    # DP + nnodes: node-local TP replicas
-    dp_tp_node0 = _parallel(tensor_parallel_size=8, data_parallel_size=2, nnodes=2)
-    assert plan_local_ranks(dp_tp_node0) == [(i, 0, 0, i) for i in range(8)]
-    dp_tp_node1 = _parallel(
-        tensor_parallel_size=8, data_parallel_size=2, nnodes=2, node_rank=1
-    )
-    assert plan_local_ranks(dp_tp_node1) == [(i, 1, 0, i) for i in range(8)]
+    # Each external DP replica spans two nodes. This is its last PP stage.
+    external_lb = engine_config(
+        pipeline_parallel_size=2,
+        prefill_context_parallel_size=2,
+        tensor_parallel_size=2,
+        decode_context_parallel_size=4,
+        data_parallel_size=2,
+        data_parallel_rank=1,
+        nnodes=4,
+        node_rank=1,
+    ).parallel_config
+    assert plan_local_ranks(external_lb) == [12, 13, 14, 15]
+    assert all(daemon_serves_model(True, rank, external_lb) for rank in range(12, 16))
+    assert not daemon_serves_model(True, 11, external_lb)
 
-    # DP + nnodes: TP group spans nodes (TP8 x DP2 on 4 nodes)
-    tp_span_node1 = _parallel(
-        tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=1
+    # torchrun counts DP in its world. This node owns half of each TP group.
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    torchrun = engine_config(
+        distributed_executor_backend="external_launcher",
+        tensor_parallel_size=4,
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        nnodes=4,
+        node_rank=0,
     )
-    assert plan_local_ranks(tp_span_node1) == [(i, 0, 0, 4 + i) for i in range(4)]
-    tp_span_node2 = _parallel(
-        tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=2
-    )
-    assert plan_local_ranks(tp_span_node2) == [(i, 1, 0, i) for i in range(4)]
+    assert plan_local_ranks(torchrun.parallel_config) == [0, 1, 4, 5]
+    server = WeightCacheDaemon(torchrun, 4, 2, "unused")
+    assert server.world_size == 16
+    assert server.cache_key.dp_rank == 1
+    assert server.vllm_config.parallel_config.data_parallel_rank_local == 1
 
-    # DP + nnodes: several DP replicas per node (TP4 x DP4 on 2 nodes)
-    dp_multi_node0 = _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
-    assert plan_local_ranks(dp_multi_node0) == [(i, i // 4, 0, i % 4) for i in range(8)]
-
-    # PP adds one daemon placement per stage while preserving TP rank order.
-    pp_tp = _parallel(tensor_parallel_size=2, pipeline_parallel_size=2)
-    assert plan_local_ranks(pp_tp) == [
-        (0, 0, 0, 0),
-        (1, 0, 0, 1),
-        (2, 0, 1, 0),
-        (3, 0, 1, 1),
-    ]
+    monkeypatch.setenv("VLLM_DP_SIZE", "4")
+    monkeypatch.setenv("VLLM_DP_RANK", "1")
+    offline = engine_config(
+        distributed_executor_backend="external_launcher", tensor_parallel_size=2
+    ).parallel_config
+    assert offline.world_size_across_dp == 8
+    assert plan_local_ranks(offline) == [2, 3]
 
 
 def test_daemon_rejects_unmappable_parallelism():
@@ -1281,35 +1368,33 @@ def test_daemon_keys_dense_dp_ranks_like_the_engine():
     assert get_engine_dp_placement(daemon_config(is_moe=True), dp_rank=3) == (4, 3)
 
 
-def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
+def test_daemon_sets_its_rank_like_engine_workers(tmp_path):
     """Per-rank state such as the torch.compile cache is keyed by
     parallel_config.rank, so daemons left at rank 0 would share rank 0's
     compiled artifact and run every rank's kernels on rank 0's device."""
-    from types import SimpleNamespace
+    from itertools import product
 
-    from vllm.model_executor.model_loader.weight_cache import daemon
+    from transformers import DeepseekV2Config
 
-    monkeypatch.setattr(
-        daemon.WeightCacheKey, "from_model_config", lambda *args, **kwargs: None
+    from vllm.config import CacheConfig, ModelConfig, VllmConfig
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+
+    hf_config = DeepseekV2Config(architectures=["DeepseekV2ForCausalLM"])
+    hf_config.save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), skip_tokenizer_init=True),
+        cache_config=CacheConfig(),
+        parallel_config=_parallel(
+            tensor_parallel_size=2,
+            prefill_context_parallel_size=2,
+            pipeline_parallel_size=2,
+        ),
     )
-    for global_rank in range(4):
-        vllm_config = SimpleNamespace(
-            parallel_config=_parallel(
-                tensor_parallel_size=2,
-                pipeline_parallel_size=2,
-                enable_eplb=False,
-                enable_expert_parallel=False,
-                expert_placement_strategy="linear",
-                rank=0,
-            ),
-            model_config=SimpleNamespace(is_moe=False),
-            cache_config=None,
-            kernel_config=None,
-        )
-        server = daemon.WeightCacheDaemon(
-            vllm_config, global_rank, global_rank, "tcp://127.0.0.1:0"
-        )
+    for global_rank, ranks in enumerate(product(range(2), repeat=3)):
+        server = WeightCacheDaemon(config, global_rank, global_rank, "unused")
         assert server.vllm_config.parallel_config.rank == global_rank
+        key = server.cache_key
+        assert (key.pp_rank, key.pcp_rank, key.tp_rank) == ranks
 
 
 def test_weight_cache_key_distinguishes_dp_ranks():
@@ -1370,13 +1455,13 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
         ),
     )
     static_key = WeightCacheKey.from_model_config(
-        model_config, tp_size=1, tp_rank=0, cache_config=CacheConfig()
+        model_config, _parallel(), cache_config=CacheConfig()
     )
     model_config.quantization_config = QuantizationConfigArgs(
         moe={"activation": "nvfp4_per_token"}
     )
     per_token_key = WeightCacheKey.from_model_config(
-        model_config, tp_size=1, tp_rank=0, cache_config=CacheConfig()
+        model_config, _parallel(), cache_config=CacheConfig()
     )
     assert static_key.mismatched_fields(per_token_key) == ["quant_config_hash"]
 
@@ -1452,7 +1537,9 @@ def test_ipc_rope_matching(
         default_vllm_config.parallel_config, "tensor_parallel_size", tp_size
     )
     server.cache_key = WeightCacheKey.from_model_config(
-        model_config, tp_size, 0, cache_config=default_vllm_config.cache_config
+        model_config,
+        _parallel(tensor_parallel_size=tp_size),
+        cache_config=default_vllm_config.cache_config,
     )
     model_config.hf_text_config.rope_parameters.update(
         rope_type=rope_type, rope_theta=theta, factor=factor
@@ -1846,7 +1933,7 @@ def test_ipc_cache_key_tracks_skipped_mm_components(
             **mm_kwargs,
         )
         return WeightCacheKey.from_model_config(
-            model_config, tp_size=1, tp_rank=0, cache_config=CacheConfig()
+            model_config, _parallel(), cache_config=CacheConfig()
         )
 
     daemon_key = key(**daemon_mm_kwargs)

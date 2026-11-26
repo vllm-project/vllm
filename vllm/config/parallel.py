@@ -532,7 +532,7 @@ class ParallelConfig:
     default timeout is used (1800s for gloo)."""
 
     world_size: int = Field(init=False)
-    """world_size is TPxPP, it affects the number of workers we create."""
+    """Executor size (PP × PCP × TP). External launchers also include DP."""
 
     rank: int = 0
     """Global rank in distributed setup."""
@@ -822,6 +822,8 @@ class ParallelConfig:
     @property
     def world_size_across_dp(self) -> int:
         """Process world size across TP, PCP, PP, and DP."""
+        if self.distributed_executor_backend == "external_launcher":
+            return self.world_size
         return self.world_size * self.data_parallel_size
 
     @property
@@ -1187,10 +1189,6 @@ class ParallelConfig:
             * self.prefill_context_parallel_size
         )
 
-        if self.distributed_executor_backend == "external_launcher":
-            logger.info("Using external launcher for distributed inference.")
-            self.world_size *= self.data_parallel_size
-
         if self.enable_elastic_ep:
             if not self.enable_eplb:
                 raise ValueError("Elastic EP is only supported with enable_eplb=True.")
@@ -1220,9 +1218,7 @@ class ParallelConfig:
             if self.distributed_executor_backend == "external_launcher":
                 # For external launcher,
                 # we need to set the data parallel rank automatically
-                self.data_parallel_rank = int(os.environ["RANK"]) // (
-                    self.world_size // self.data_parallel_size
-                )
+                self.data_parallel_rank = int(os.environ["RANK"]) // self.world_size
                 logger.info(
                     "Set data_parallel_rank to %d automatically.",
                     self.data_parallel_rank,
@@ -1268,6 +1264,8 @@ class ParallelConfig:
         self.data_parallel_index = self.data_parallel_rank
 
         if self.distributed_executor_backend == "external_launcher":
+            logger.info("Using external launcher for distributed inference.")
+            self.world_size *= self.data_parallel_size
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 

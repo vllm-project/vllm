@@ -900,6 +900,10 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/warmup/flashinfer_autotune_cache.py
+  - vllm/models/kimi_k3/nvidia/mla.py
+  - vllm/v1/attention/ops/dcp.py
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
@@ -917,6 +921,10 @@ steps:
       source_file_dependencies:
       - vllm/entrypoints/cli/preload.py
       - vllm/model_executor/model_loader/weight_cache/
+      - vllm/model_executor/layers/attention/mla_attention.py
+      - vllm/model_executor/warmup/flashinfer_autotune_cache.py
+      - vllm/models/kimi_k3/nvidia/mla.py
+      - vllm/v1/attention/ops/dcp.py
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
       - tests/model_executor/model_loader/test_weight_cache.py
       - vllm/platforms/rocm.py

@@ -17,7 +17,7 @@ Engines then load from the daemons with:
     vllm serve /path/to/model --tensor-parallel-size 4 \\
         --load-format ipc_cache
 
-Tensor, expert, data and pipeline parallelism are supported.
+Global ranks enumerate DP, PP, PCP and TP. DCP reuses the TP/PCP ranks.
 
 For multi-node tensor parallelism, run one launcher per node with a shared
 rendezvous so the global TP group forms across nodes (weight sharing is
@@ -39,8 +39,7 @@ node-local, so each node serves only its local GPUs' shards). Reuse the same
 The global TP rank of local GPU `i` on node `r` is
 `r * (tp_size // nnodes) + i`, matching vLLM's contiguous per-node rank
 assignment, so each engine worker maps its shard from the daemon on its own
-node. With pipeline parallelism each node additionally runs one daemon per PP
-stage; the global rank is `pp_rank * tp_size + tp_rank`.
+node.
 
 For data parallelism (e.g. a TP1 x DP16 x EP decode fleet) run one launcher per
 node with the engine's DP placement flags. Local GPU `i` serves DP rank
@@ -58,8 +57,8 @@ shards are laid out exactly as in the engine:
 
 Data parallelism also combines with multi-node tensor parallelism: pass both
 flag sets (`--nnodes`/`--node-rank`/`--master-addr` and the DP flags with
-a reachable `--data-parallel-address`). Each node then serves a contiguous
-block of the `dp_size * tp_size` global ranks, e.g. TP8 x DP2 on 4 nodes:
+a reachable `--data-parallel-address`). Each node serves its local workers
+for each DP replica assigned to it, e.g. TP8 x DP2 on 4 nodes:
 
     # node r (4 local GPUs)
     vllm preload \\
@@ -84,6 +83,7 @@ with `--weight-cache-seed`; see `docs/features/preload.md`.
 """
 
 import contextlib
+import copy
 import fcntl
 import gc
 import multiprocessing
@@ -180,8 +180,6 @@ class WeightCacheDaemon:
         distributed_init_method: str,
         socket_dir: str | None = None,
         is_draft: bool = False,
-        dp_rank: int = 0,
-        pp_rank: int = 0,
         seed_config: SeedConfig | None = None,
         device_index: int | None = None,
         warmup_cache_stores: Iterable[str] = (),
@@ -206,23 +204,18 @@ class WeightCacheDaemon:
         self.d2d = SeedTransport(
             [*self.warmup_caches, self.weight_seed], self.seed_config
         )
-        self.tp_size = parallel_config.tensor_parallel_size
-        self.pp_size = parallel_config.pipeline_parallel_size
-        self.dp_size = parallel_config.data_parallel_size
-        if self.dp_size > 1:
+        self.world_size = parallel_config.world_size_across_dp
+        replica_size = self.world_size // parallel_config.data_parallel_size
+        dp_rank, rank_in_dp = divmod(global_rank, replica_size)
+        if parallel_config.data_parallel_size > 1:
             # The engine sets these on each DP rank's workers; the MoE/EP
             # layers read them to place their expert shards.
-            if parallel_config.nnodes > 1:
-                world_size = self.dp_size * self.tp_size
-                local_world = world_size // parallel_config.nnodes
-                start_dp_rank = parallel_config.node_rank * local_world // self.tp_size
-            else:
-                start_dp_rank = parallel_config.data_parallel_rank
-            parallel_config = replace(
-                parallel_config,
-                data_parallel_rank=dp_rank,
-                data_parallel_rank_local=dp_rank - start_dp_rank,
+            parallel_config = copy.copy(parallel_config)
+            parallel_config.data_parallel_rank_local = (
+                dp_rank - parallel_config.data_parallel_rank
             )
+            parallel_config.data_parallel_rank = dp_rank
+            parallel_config.data_parallel_index = dp_rank
             vllm_config = replace(vllm_config, parallel_config=parallel_config)
         self.vllm_config = vllm_config
         # A draft daemon builds the draft with the target's VllmConfig, like
@@ -234,15 +227,10 @@ class WeightCacheDaemon:
         else:
             self.model_config = vllm_config.model_config
         self.global_rank = global_rank
-        rank_in_dp = global_rank - dp_rank * self.pp_size * self.tp_size
         # Set like the engine's workers do: per-rank state such as the
         # torch.compile cache is keyed by it, and a compiled artifact shared
         # across ranks would run every rank's kernels on rank 0's device.
         vllm_config.parallel_config.rank = rank_in_dp
-        self.tp_rank = rank_in_dp % self.tp_size
-        self.pp_rank = rank_in_dp // self.tp_size
-        self.dp_rank = dp_rank
-        self.world_size = self.dp_size * self.pp_size * self.tp_size
         self.local_rank = local_rank
         # A peer's local weight handle names its device by index, so a same-host
         # mirror keeps every device visible and places its own ranks on the
@@ -253,7 +241,7 @@ class WeightCacheDaemon:
         self.socket_dir = socket_dir
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
-        self.serves_model = daemon_serves_model(is_draft, self.pp_rank, self.pp_size)
+        self.serves_model = daemon_serves_model(is_draft, global_rank, parallel_config)
         self.model: torch.nn.Module | None = None
         self.state: WeightCacheState | None = None
         # Engine watch connections, held open for the daemon's lifetime.
@@ -282,15 +270,19 @@ class WeightCacheDaemon:
             local_rank=self.device_index,
             backend=current_platform.dist_backend,
         )
-        if not self.serves_model:
-            # Model parallel groups are created collectively by every rank.
-            with set_current_vllm_config(self.vllm_config):
-                ensure_model_parallel_initialized(self.tp_size, self.pp_size)
-            return
-        for cache in self.warmup_caches:
-            cache.adopt_before_load(self, self.d2d)
+        if self.serves_model:
+            for cache in self.warmup_caches:
+                cache.adopt_before_load(self, self.d2d)
         with set_current_vllm_config(self.vllm_config):
-            ensure_model_parallel_initialized(self.tp_size, self.pp_size)
+            parallel = self.vllm_config.parallel_config
+            ensure_model_parallel_initialized(
+                parallel.tensor_parallel_size,
+                parallel.pipeline_parallel_size,
+                parallel.prefill_context_parallel_size,
+                parallel.decode_context_parallel_size,
+            )
+            if not self.serves_model:
+                return
             with single_pp_stage() if self.is_draft else contextlib.nullcontext():
                 self.model = self.get_model()
         # Loading and post-processing leave freed transients in the caching
@@ -343,6 +335,10 @@ class WeightCacheDaemon:
         get_world_group().barrier()
         # Created lazily by warmup's all-reduce fusion and owned by no group.
         destroy_fi_ar_workspace()
+        if self.vllm_config.parallel_config.decode_context_parallel_size > 1:
+            from vllm.v1.attention.ops.dcp import clear_direct_dcp_workspaces
+
+            clear_direct_dcp_workspaces()
         destroy_model_parallel()
         destroy_distributed_environment()
         gc.collect()
@@ -619,8 +615,6 @@ def _run_daemon(
     socket_dir: str | None,
     ready_queue: "multiprocessing.Queue[tuple[DaemonRole, int]]",
     is_draft: bool = False,
-    dp_rank: int = 0,
-    pp_rank: int = 0,
     seed_config: SeedConfig | None = None,
     device_index: int | None = None,
     warmup_cache_stores: Iterable[str] = (),
@@ -636,8 +630,6 @@ def _run_daemon(
         distributed_init_method,
         socket_dir,
         is_draft,
-        dp_rank,
-        pp_rank,
         seed_config=seed_config,
         device_index=device_index,
         warmup_cache_stores=warmup_cache_stores,
@@ -658,43 +650,34 @@ def _run_daemon(
     )
 
 
-def plan_local_ranks(
-    parallel_config: ParallelConfig,
-) -> list[tuple[int, int, int, int]]:
-    """`(local_rank, dp_rank, pp_rank, tp_rank)` for every local daemon.
-
-    Global ranks enumerate DP, PP, then TP: `global = dp_rank * pp_size *
-    tp_size + pp_rank * tp_size + tp_rank`.
-    With `--nnodes` the engine hands each node a contiguous block of global
-    ranks, so node `r` serves `node_rank * local + i`; without it a
-    launcher's block starts at `--data-parallel-start-rank * tp_size`.
-    """
-    tp_size = parallel_config.tensor_parallel_size
-    pp_size = parallel_config.pipeline_parallel_size
-    world_size = parallel_config.data_parallel_size * pp_size * tp_size
-    if parallel_config.nnodes > 1:
-        local_world_size = world_size // parallel_config.nnodes
-        base = parallel_config.node_rank * local_world_size
-    else:
-        local_world_size = parallel_config.data_parallel_size_local * pp_size * tp_size
-        base = parallel_config.data_parallel_rank * pp_size * tp_size
-    placements = []
-    for local_rank in range(local_world_size):
-        global_rank = base + local_rank
-        rank_in_dp = global_rank % (pp_size * tp_size)
-        dp_rank = global_rank // (pp_size * tp_size)
-        pp_rank, tp_rank = divmod(rank_in_dp, tp_size)
-        placements.append((local_rank, dp_rank, pp_rank, tp_rank))
-    return placements
+def plan_local_ranks(config: ParallelConfig) -> list[int]:
+    """Global ranks served by each local DP replica, in device order."""
+    replica_size = config.world_size
+    local_size = config.local_world_size
+    if config.distributed_executor_backend == "external_launcher":
+        # torchrun's executor sizes already include all DP replicas.
+        replica_size //= config.data_parallel_size
+        local_size //= config.data_parallel_size
+    dp_start = config.data_parallel_rank
+    rank_start = config.node_rank_within_dp * local_size
+    return [
+        dp_rank * replica_size + rank
+        for dp_rank in range(dp_start, dp_start + config.data_parallel_size_local)
+        for rank in range(rank_start, rank_start + local_size)
+    ]
 
 
-def daemon_serves_model(is_draft: bool, pp_rank: int, pp_size: int) -> bool:
+def daemon_serves_model(
+    is_draft: bool, global_rank: int, config: ParallelConfig
+) -> bool:
     """Whether the daemon at this placement loads and serves a model.
 
     The engine runs the draft model only on the last pipeline stage. Draft
     daemons on other stages join the group's rendezvous and then exit.
     """
-    return not is_draft or pp_rank == pp_size - 1
+    stage_size = config.prefill_context_parallel_size * config.tensor_parallel_size
+    pp_rank = global_rank // stage_size % config.pipeline_parallel_size
+    return not is_draft or pp_rank == config.pipeline_parallel_size - 1
 
 
 def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:
@@ -708,16 +691,12 @@ def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
     """Reject placements the daemon cannot map."""
     dp_size = parallel_config.data_parallel_size
-    tp_size = parallel_config.tensor_parallel_size
-    pp_size = parallel_config.pipeline_parallel_size
     if parallel_config.nnodes > 1:
-        world_size = dp_size * pp_size * tp_size
+        world_size = parallel_config.world_size_across_dp
         if world_size % parallel_config.nnodes != 0:
             raise ValueError(
                 f"--nnodes ({parallel_config.nnodes}) must evenly divide the "
-                f"daemon world size ({world_size} = data-parallel-size "
-                f"{dp_size} x pipeline-parallel-size {pp_size} x "
-                f"tensor-parallel-size {tp_size})"
+                f"daemon world size ({world_size} = DP x PP x PCP x TP)"
             )
         return
     if dp_size == 1:
