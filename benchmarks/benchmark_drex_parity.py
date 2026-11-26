@@ -174,6 +174,11 @@ def main() -> int:
     parser.add_argument("--dtype", default=None)
     parser.add_argument("--flip", action="store_true")
     parser.add_argument("--max-diff", type=float, default=1e-3)
+    parser.add_argument(
+        "--save",
+        default=None,
+        help="write every compared probability vector to this JSONL file",
+    )
     args = parser.parse_args()
 
     ref_api, ref_load, encode_limits = _load_reference(args.reference_dir)
@@ -188,6 +193,10 @@ def main() -> int:
     calibration: list[tuple[float, bool]] = []
     flips = 0
     flip_total = 0
+    reference_flips = 0
+    flip_mismatch = 0
+    saved: list[dict] = []
+    reference_vectors: dict[str, dict[str, float]] = {}
 
     for index, case in enumerate(cases):
         labels = case.pop("labels", {})
@@ -200,6 +209,7 @@ def main() -> int:
         for meta_q, probs in zip(meta, reference):
             qid = meta_q["id"]
             wanted = _reference_vector(meta_q, probs)
+            reference_vectors[qid] = wanted
             got = _normalize_vllm(meta_q["type"], answers[qid])
             if set(wanted) != set(got):
                 print(f"[{index}] {qid}: keys differ {sorted(wanted)} != {sorted(got)}")
@@ -209,6 +219,23 @@ def main() -> int:
             total += 1
             agree = _argmax(wanted) == _argmax(got)
             hits += agree
+            # Big option sets are close to uniform, so their absolute error is
+            # small even when the relative error is not; report both.
+            print(
+                f"[{index}] {qid} type={meta_q['type']} k={len(wanted)} "
+                f"p*={max(wanted.values()):.4g} max-diff={diff:.3g} "
+                f"argmax={'ok' if agree else 'MISMATCH'}"
+            )
+            saved.append(
+                {
+                    "case": index,
+                    "qid": qid,
+                    "type": meta_q["type"],
+                    "keys": list(wanted),
+                    "reference": [wanted[key] for key in wanted],
+                    "vllm": [got[key] for key in wanted],
+                }
+            )
             if qid in labels:
                 confidence = max(got.values())
                 calibration.append((confidence, _argmax(got) == str(labels[qid])))
@@ -216,19 +243,47 @@ def main() -> int:
                 print(f"[{index}] {qid}: argmax {_argmax(wanted)} != {_argmax(got)}")
 
         if args.flip:
-            flipped = _post(args.url, args.model, _flip_body(case))
+            flipped_body = _flip_body(case)
+            flipped = _post(args.url, args.model, flipped_body)
+            # The reference is not strictly order-invariant either, so its own
+            # flip decisions are the baseline vLLM has to reproduce.
+            flipped_request = ref_api.SystemOneRequest(**flipped_body)
+            flipped_record, flipped_meta = ref_api.to_record(flipped_request)
+            flipped_packed = model.encode(tokenizer, flipped_record, **encode_limits)
+            flipped_reference = model.probs(flipped_packed)
+            moved_reference = {
+                meta_q["id"]: _reference_vector(meta_q, probs)
+                for meta_q, probs in zip(flipped_meta, flipped_reference)
+            }
             for qid, spec in case["questions"].items():
                 if spec["type"] not in ("choice", "score"):
                     continue
                 original = _argmax(_normalize_vllm(spec["type"], answers[qid]))
                 moved = _flipped_answer(spec["type"], spec["criteria"], flipped[qid])
+                flipped_here = original != moved
+                reference_original = _argmax(reference_vectors[qid])
+                reference_moved = _flipped_answer(
+                    spec["type"],
+                    spec["criteria"],
+                    {"probabilities": moved_reference[qid], "type": spec["type"]},
+                )
+                reference_flipped = reference_original != reference_moved
                 flip_total += 1
-                if original != moved:
-                    flips += 1
+                flips += flipped_here
+                reference_flips += reference_flipped
+                flip_mismatch += flipped_here != reference_flipped
+                print(
+                    f"[{index}] {qid} flip: vllm={'yes' if flipped_here else 'no'} "
+                    f"reference={'yes' if reference_flipped else 'no'}"
+                )
 
     max_diff = max(diffs, default=0.0)
     agreement = hits / total if total else 1.0
     ece = _ece(calibration)
+    if args.save:
+        with open(args.save, "w") as handle:
+            for row in saved:
+                handle.write(json.dumps(row) + "\n")
     print(f"cases={len(cases)} questions={total}")
     print(f"max-abs-diff={max_diff:.6g} (bar {args.max_diff:g})")
     print(f"argmax-agreement={agreement:.2%} (bar 100%)")
@@ -236,6 +291,8 @@ def main() -> int:
         print(f"ece={ece:.6g}")
     if args.flip:
         print(f"option-order-flip-rate={flips / flip_total:.2%} of {flip_total}")
+        print(f"reference-flip-rate={reference_flips / flip_total:.2%}")
+        print(f"flip-decision-mismatch={flip_mismatch} of {flip_total}")
 
     if max_diff > args.max_diff or agreement < 1.0:
         return 1
