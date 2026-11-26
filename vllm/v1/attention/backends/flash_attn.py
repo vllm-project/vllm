@@ -1389,6 +1389,8 @@ class FlashAttentionImpl(AttentionImpl):
         from vllm.v1.attention.backends.fa_int4 import (
             ensure_int4_scale_caches,
             fa_int4_enabled,
+            finalize_fa_int4_output,
+            prepare_fa_int4_query,
             run_int4_triton_attention,
         )
 
@@ -1570,8 +1572,19 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 causal = not has_window
 
+            # Triton write RHT-rotates K/V; FA decode must RHT(Q) and
+            # inverse-RHT(out) with the same norm as unified_attention_int4.
+            q_fa = query[:num_actual_tokens]
+            sm_scale = self.scale
+            fa_int4_rht_norm = None
+            fa_int4_q_dtype = q_fa.dtype
+            if use_fa_int4:
+                q_fa, sm_scale, fa_int4_rht_norm, fa_int4_q_dtype = (
+                    prepare_fa_int4_query(q_fa, self.scale)
+                )
+
             _FA4_DENSE_ATTENTION_KERNEL(
-                q=query[:num_actual_tokens],
+                q=q_fa,
                 k=key_cache,
                 v=value_cache,
                 out=output[:num_actual_tokens],
@@ -1579,7 +1592,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_q=max_seqlen_q,
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
+                softmax_scale=sm_scale,
                 causal=causal,
                 alibi_slopes=self.alibi_slopes,
                 window_size=sliding_window_size,
@@ -1596,6 +1609,12 @@ class FlashAttentionImpl(AttentionImpl):
                 mask_mod=rswa_mask_mod_fn or mm_mask_mod,
                 aux_tensors=rswa_aux or mm_aux,
             )
+            if use_fa_int4:
+                finalize_fa_int4_output(
+                    output[:num_actual_tokens],
+                    fa_int4_rht_norm,
+                    fa_int4_q_dtype,
+                )
             return output
 
     def do_kv_cache_update(

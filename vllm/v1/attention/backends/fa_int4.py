@@ -34,6 +34,37 @@ def fa_int4_enabled() -> bool:
     return fa_int4_kernels_available()
 
 
+def prepare_fa_int4_query(
+    query: torch.Tensor,
+    softmax_scale: float,
+) -> tuple[torch.Tensor, float, float, torch.dtype]:
+    """Match Triton ``unified_attention_int4``: RHT(Q) and scale /= rht_norm.
+
+    KV pages are written with ``reshape_and_cache_int4`` which applies the
+    same forward RHT before INT4 pack. FA decode dequants in that rotated
+    basis, so Q must be rotated too (and the output inverse-rotated).
+    """
+    from vllm.utils.math_utils import largest_power_of_2_divisor
+    from vllm.v1.attention.ops.int4_per_token_head import single_rht
+
+    q_dtype = query.dtype
+    q_rot = single_rht(query.float()).to(q_dtype)
+    rht_norm = float(largest_power_of_2_divisor(query.shape[-1]))
+    return q_rot, softmax_scale / rht_norm, rht_norm, q_dtype
+
+
+def finalize_fa_int4_output(
+    output: torch.Tensor,
+    rht_norm: float,
+    q_dtype: torch.dtype,
+) -> None:
+    """Inverse RHT on attention output (Triton ``unified_attention_int4``)."""
+    from vllm.v1.attention.ops.int4_per_token_head import single_rht
+
+    out_f = single_rht(output.float(), inverse=True) / rht_norm
+    output.copy_(out_f.to(q_dtype))
+
+
 def ensure_int4_scale_caches(
     kv_cache: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
