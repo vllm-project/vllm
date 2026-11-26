@@ -32,17 +32,25 @@ MERGED_KW = {"image": {"num_frames": 16, "fps": 2}}
 class _StubRenderer(BaseRenderer):
     """Captures what the downstream stages of each render path receive."""
 
-    def __init__(self):
+    def __init__(self, rendered_prompt=None):
         # Deliberately no super().__init__: none of the tested paths touch
         # the resources, tokenizer, or cache created there.
         self._applied_extras: list[dict] = []
         self._chat_params_seen: list[ChatParams] = []
         self._eng_prompts: list = []
+        # The dict `render_messages` hands back. The chat-path merge helper
+        # only touches prompts that carry multimodal payload, so tests for it
+        # need a prompt that has `multi_modal_data`/`multi_modal_uuids`.
+        self._rendered_prompt = (
+            {"prompt_token_ids": [1]} if rendered_prompt is None else rendered_prompt
+        )
 
     # -- chat downstream stages --------------------------------------
     def render_messages(self, messages, params):
         self._chat_params_seen.append(params)
-        return [], {"prompt_token_ids": [1]}
+        # Shallow copy so the caller's fixture dict is never mutated by the
+        # chat merge helper.
+        return [], dict(self._rendered_prompt)
 
     # -- shared downstream stages ------------------------------------
     def tokenize_prompts(self, prompts, params):
@@ -249,6 +257,65 @@ class TestCmplPath:
 
 
 # =========================================================================
+# Prompt dict isolation
+# =========================================================================
+class TestPromptDictIsolation:
+    """`render_prompt` must copy caller-owned prompt dicts.
+
+    The downstream merge / extras stages write keys such as
+    `media_io_kwargs` into the prompt. Returning the caller's object
+    unchanged would leak those writes back, so reusing the same dict for a
+    second request would pick up the first request's keys.
+    """
+
+    @staticmethod
+    def _run(prompts, media_io_kwargs=_UNSET, is_async=False):
+        renderer = _StubRenderer()
+        extras = _make_extras(media_io_kwargs)
+        tok_params = object()
+        if is_async:
+            asyncio.run(
+                renderer.render_cmpl_async(prompts, tok_params, prompt_extras=extras)
+            )
+        else:
+            renderer.render_cmpl(prompts, tok_params, prompt_extras=extras)
+        return renderer
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_reused_prompt_dict_not_polluted(self, is_async):
+        prompt = {"multi_modal_data": {"image": "<img>"}}
+
+        r1 = self._run([prompt], REQ_KW, is_async)
+        # The caller's dict must be left alone.
+        assert "media_io_kwargs" not in prompt
+        assert r1._eng_prompts[-1]["media_io_kwargs"] == REQ_KW
+
+        # A second request on the same dict, without request-level kwargs,
+        # must not inherit the first request's media_io_kwargs.
+        r2 = self._run([prompt], _UNSET, is_async)
+        assert "media_io_kwargs" not in prompt
+        assert "media_io_kwargs" not in r2._eng_prompts[-1]
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_reused_enc_dec_prompt_dict_not_polluted(self, is_async):
+        enc = {"multi_modal_data": {"image": "<img>"}}
+        dec = {"multi_modal_uuids": {"image": ["uuid-0"]}}
+        prompt = {"encoder_prompt": enc, "decoder_prompt": dec}
+
+        r1 = self._run([prompt], REQ_KW, is_async)
+        # Nested prompt dicts must not be mutated either.
+        assert "media_io_kwargs" not in prompt
+        assert "media_io_kwargs" not in enc
+        assert "media_io_kwargs" not in dec
+        assert r1._eng_prompts[-1]["encoder_prompt"]["media_io_kwargs"] == REQ_KW
+        assert r1._eng_prompts[-1]["decoder_prompt"]["media_io_kwargs"] == REQ_KW
+
+        r2 = self._run([prompt], _UNSET, is_async)
+        assert "media_io_kwargs" not in r2._eng_prompts[-1]["encoder_prompt"]
+        assert "media_io_kwargs" not in r2._eng_prompts[-1]["decoder_prompt"]
+
+
+# =========================================================================
 # Chat path
 # =========================================================================
 class TestChatPath:
@@ -346,6 +413,84 @@ class TestChatPath:
             sync_r._chat_params_seen[-1].media_io_kwargs
             == async_r._chat_params_seen[-1].media_io_kwargs
         )
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_resolved_kwargs_used_as_base(self, monkeypatch, is_async):
+        """`chat_params.media_io_kwargs` is already server+request merged.
+
+        It must be passed as the *base* (defaults) side of
+        `merge_media_io_kwargs`, with prompt-level kwargs as overrides.
+        Passing it as the request side would make `VideoMediaIO.merge_kwargs`
+        strip server-only keys (`device`, `max_width`, `backend`) and log a
+        bogus "Stripping request-level ..." warning; the prompt would then
+        carry only the request-level keys, diverging from the engine's view
+        and corrupting the mm cache hash.
+        """
+        calls = _install_merge_spy(monkeypatch)
+        resolved = {
+            "video": {
+                "device": "cuda",
+                "max_width": 1280,
+                "backend": "pynvvideocodec",
+                "num_frames": 8,
+            }
+        }
+        prompt = {"multi_modal_data": {"video": "<video>"}}
+        renderer = _StubRenderer(rendered_prompt=prompt)
+        chat_params = _make_chat_params(resolved)
+
+        if is_async:
+            asyncio.run(
+                renderer.render_chat_async(
+                    [[{"role": "user", "content": "hi"}]], chat_params, object()
+                )
+            )
+        else:
+            renderer.render_chat(
+                [[{"role": "user", "content": "hi"}]], chat_params, object()
+            )
+
+        # Base = resolved chat params, overrides = prompt-level (absent here).
+        assert calls[-1] == (resolved, None)
+
+        out = renderer._eng_prompts[-1]["media_io_kwargs"]["video"]
+        # Server-only keys must survive; the request-side key stays.
+        assert out["device"] == "cuda"
+        assert out["max_width"] == 1280
+        assert out["backend"] == "pynvvideocodec"
+        assert out["num_frames"] == 8
+
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_prompt_level_kwargs_are_overrides(self, monkeypatch, is_async):
+        """Prompt-level `media_io_kwargs` override the resolved chat config."""
+        calls = _install_merge_spy(monkeypatch)
+        resolved = {"video": {"device": "cuda", "num_frames": 8}}
+        prompt_kw = {"video": {"num_frames": 16}}
+        prompt = {
+            "multi_modal_data": {"video": "<video>"},
+            "media_io_kwargs": prompt_kw,
+        }
+        renderer = _StubRenderer(rendered_prompt=prompt)
+        chat_params = _make_chat_params(resolved)
+
+        if is_async:
+            asyncio.run(
+                renderer.render_chat_async(
+                    [[{"role": "user", "content": "hi"}]], chat_params, object()
+                )
+            )
+        else:
+            renderer.render_chat(
+                [[{"role": "user", "content": "hi"}]], chat_params, object()
+            )
+
+        # (defaults=resolved chat kwargs, overrides=prompt-level)
+        assert calls[-1] == (resolved, prompt_kw)
+
+        out = renderer._eng_prompts[-1]["media_io_kwargs"]["video"]
+        assert out == {"device": "cuda", "num_frames": 16}
+        # Prompt-level dict itself must not be mutated.
+        assert prompt_kw == {"video": {"num_frames": 16}}
 
 
 @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])

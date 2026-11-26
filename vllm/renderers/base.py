@@ -572,9 +572,9 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> DictPrompt:
         if isinstance(prompt, bytes):
             embeds = safe_load_prompt_embeds(self.model_config, prompt)
-            prompt = EmbedsPrompt(prompt_embeds=embeds)
+            return EmbedsPrompt(prompt_embeds=embeds)
 
-        return prompt
+        return self._copy_prompt_dict(prompt)
 
     def render_prompts(
         self,
@@ -597,7 +597,7 @@ class BaseRenderer(ABC, Generic[_T]):
             )
             return EmbedsPrompt(prompt_embeds=embeds)
 
-        return prompt
+        return self._copy_prompt_dict(prompt)
 
     async def render_prompts_async(
         self,
@@ -1247,6 +1247,33 @@ class BaseRenderer(ABC, Generic[_T]):
             skip_decoder_start_token=self._should_skip_decoder_start_token,
         )
 
+    @staticmethod
+    def _copy_prompt_dict(prompt: DictPrompt) -> DictPrompt:
+        if "encoder_prompt" in prompt:
+            copied = dict(prompt)
+            copied["encoder_prompt"] = dict(copied["encoder_prompt"])
+            decoder_prompt = copied["decoder_prompt"]
+            if decoder_prompt is not None:
+                copied["decoder_prompt"] = dict(decoder_prompt)
+            return copied  # type: ignore[return-value]
+
+        return dict(prompt)  # type: ignore[return-value]
+
+    def _iter_media_io_targets(
+        self,
+        prompts: Sequence[DictPrompt],
+    ):
+        for prompt in prompts:
+            if "encoder_prompt" in prompt:
+                enc_dec_prompt = cast(EncoderDecoderDictPrompt, prompt)
+                yield enc_dec_prompt["encoder_prompt"]
+                if (decoder_prompt := enc_dec_prompt["decoder_prompt"]) is not None:
+                    yield decoder_prompt
+            elif "prompt_embeds" in prompt:
+                continue
+            else:
+                yield prompt
+
     def _merge_prompt_extras_media_io_kwargs(
         self,
         prompts: Sequence[DictPrompt],
@@ -1256,27 +1283,28 @@ class BaseRenderer(ABC, Generic[_T]):
         if not req_media_io_kwargs:
             return
 
-        for prompt in prompts:
-            if (enc_dec_prompt := cast(EncoderDecoderDictPrompt, prompt)) and (
-                "encoder_prompt" in prompt
-            ):
-                targets: list[Any] = [enc_dec_prompt["encoder_prompt"]]
-                if (decoder_prompt := enc_dec_prompt["decoder_prompt"]) is not None:
-                    targets.append(decoder_prompt)
-            elif "prompt_embeds" in prompt:
-                continue
-            else:
-                targets = [prompt]
-
-            for target in targets:
-                # Merge media_io_kwargs only when the target has multimodal data or UUIDs. # noqa: E501
-                is_multimodal = (
-                    "multi_modal_data" in target or "multi_modal_uuids" in target
+        for target in self._iter_media_io_targets(prompts):
+            # Merge media_io_kwargs only when the target has multimodal data or UUIDs. # noqa: E501
+            if "multi_modal_data" in target or "multi_modal_uuids" in target:
+                target["media_io_kwargs"] = merge_media_io_kwargs(
+                    target.get("media_io_kwargs"), req_media_io_kwargs
                 )
-                if is_multimodal:
-                    target["media_io_kwargs"] = merge_media_io_kwargs(
-                        target.get("media_io_kwargs"), req_media_io_kwargs
-                    )
+
+    def _apply_chat_media_io_kwargs(
+        self,
+        prompts: Sequence[DictPrompt],
+        resolved_media_io_kwargs: dict[str, dict[str, Any]] | None,
+    ) -> None:
+        """Attach the fully-resolved chat `media_io_kwargs` to the prompts."""
+        if not resolved_media_io_kwargs:
+            return
+
+        for target in self._iter_media_io_targets(prompts):
+            if "multi_modal_data" in target or "multi_modal_uuids" in target:
+                target["media_io_kwargs"] = merge_media_io_kwargs(
+                    resolved_media_io_kwargs,
+                    target.get("media_io_kwargs"),
+                )
 
     async def _process_enc_dec_async(
         self,
@@ -1444,9 +1472,7 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
-        self._merge_prompt_extras_media_io_kwargs(
-            dict_prompts, chat_params.media_io_kwargs
-        )
+        self._apply_chat_media_io_kwargs(dict_prompts, chat_params.media_io_kwargs)
 
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
         self._apply_prompt_extras(tok_prompts, prompt_extras)
@@ -1493,9 +1519,7 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
-        self._merge_prompt_extras_media_io_kwargs(
-            dict_prompts, chat_params.media_io_kwargs
-        )
+        self._apply_chat_media_io_kwargs(dict_prompts, chat_params.media_io_kwargs)
 
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
