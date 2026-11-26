@@ -37,6 +37,7 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+import vllm.envs as envs
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -124,6 +125,11 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.common.ops.sequence_parallel import is_sequence_parallel_active
+from vllm.models.qwen3_5.common.sequence_parallel import (
+    mark_residual_sp_regions,
+    use_residual_sequence_parallel,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.platforms import current_platform
@@ -307,12 +313,18 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         self.use_attn_reduce_scatter_for_moe = (
             parallel_config.use_sequence_parallel_moe and is_moe_layer
         )
+        # Residual SP collectives live in the wrapped linears and the GDN input
+        # hook, which the fused-norm forward bypasses.
+        self.use_residual_sequence_parallel = use_residual_sequence_parallel(
+            vllm_config
+        )
         # Defer row-parallel all-reduces to the following norm
         # (deepseek_v32 pattern); exclude PP and SP.
         self.use_fused_allreduce_norm = (
             get_tensor_model_parallel_world_size() > 1
             and parallel_config.pipeline_parallel_size == 1
             and not self.use_attn_reduce_scatter_for_moe
+            and not self.use_residual_sequence_parallel
             and flashinfer_trtllm_fused_allreduce_norm is not None
         )
         # Whether this layer's MLP/MoE leaves an un-reduced partial, i.e.
@@ -423,7 +435,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         positions: torch.Tensor,
         **kwargs: object,
     ):
-        if self.use_attn_reduce_scatter_for_moe:
+        if self.use_attn_reduce_scatter_for_moe or self.use_residual_sequence_parallel:
             return super().forward(hidden_states, residual, positions, **kwargs)
 
         # Each norm absorbs the preceding row-parallel linear's deferred
@@ -534,6 +546,15 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        self.residual_sp_min_tokens = envs.VLLM_RESIDUAL_SP_MIN_TOKENS
+        self.use_residual_sequence_parallel = use_residual_sequence_parallel(
+            vllm_config
+        )
+        # Token count of the in-flight forward while it runs residual SP.
+        self.residual_sp_num_tokens: int | None = None
+        if self.use_residual_sequence_parallel:
+            layers = self.layers[self.start_layer : self.end_layer]
+            mark_residual_sp_regions(layers, lambda: self.residual_sp_num_tokens)
         # Mirror of the decoder layers' flag (uniform across layers): when
         # True, every layer returns its MLP/MoE output as an un-reduced TP
         # partial, so the final norm and eagle aux captures must all-reduce.
@@ -601,7 +622,14 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
-        if self.use_sequence_parallel:
+        use_residual_sp = is_sequence_parallel_active(
+            self.use_residual_sequence_parallel,
+            full_num_tokens,
+            self.residual_sp_min_tokens,
+        )
+        self.residual_sp_num_tokens = full_num_tokens if use_residual_sp else None
+        use_sequence_parallel = self.use_sequence_parallel or use_residual_sp
+        if use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
             if residual is not None:
                 residual = sequence_parallel_chunk(residual)
@@ -621,7 +649,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
-            if self.use_sequence_parallel:
+            if use_sequence_parallel:
                 # PP transport expects full-token tensors replicated across TP ranks.
                 packed = torch.cat([hidden_states, residual], dim=-1)
                 packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
@@ -637,7 +665,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             )
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
-        if self.use_sequence_parallel:
+        if use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
                 hidden_states = torch.cat([hidden_states, *aux_hidden_states], dim=-1)

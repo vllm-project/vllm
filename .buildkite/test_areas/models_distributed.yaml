@@ -2,6 +2,20 @@ group: Models - Distributed
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (L4) Qwen3.5 SP"
+  key: qwen3_5-sp-tests-2-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/models/common/ops/sp_linear.py
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/models/qwen3_5/
+  - tests/models/qwen3_5/test_sequence_parallel.py
+  commands:
+  - pytest -v -s models/qwen3_5/test_sequence_parallel.py
+
 - label: ":nvidia: (L4) [Nightly] Qwen4 Exp SP"
   key: qwen4-exp-sp-tests-4-gpus
   automatic_shard: true

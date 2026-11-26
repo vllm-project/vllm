@@ -12,6 +12,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.utils.math_utils import cdiv
 
 
 def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
@@ -46,6 +47,7 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
 # Below this many tokens per rank the pipelined copy-engine all-gather costs
 # more than it hides behind the GEMM (B300 TP4, K=8192).
 _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK = 1024
+_FUSED_MATMUL_RS_MIN_TOKENS_PER_RANK = 1024
 
 
 @lru_cache
@@ -77,6 +79,41 @@ def sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         group_name=get_tp_group().device_group.group_name,
     )
     return outputs[0]
+
+
+@lru_cache
+def _has_fused_matmul_reduce_scatter() -> bool:
+    try:
+        import torch.distributed._symmetric_memory  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch.ops.symm_mem, "fused_matmul_reduce_scatter")
+
+
+def can_sp_matmul_reduce_scatter(x: torch.Tensor, weight: torch.Tensor) -> bool:
+    """Whether `sp_matmul_reduce_scatter` applies to this input and weight."""
+    tokens_per_rank = cdiv(x.shape[0], get_tensor_model_parallel_world_size())
+    return (
+        tokens_per_rank >= _FUSED_MATMUL_RS_MIN_TOKENS_PER_RANK
+        and x.dtype == weight.dtype == torch.bfloat16
+        and weight.ndim == 2
+        and not torch.cuda.is_current_stream_capturing()
+        and _has_fused_matmul_reduce_scatter()
+    )
+
+
+def sp_matmul_reduce_scatter(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """`sp_reduce_scatter(x @ weight.T)`, overlapping the GEMM with the scatter."""
+    sp_pad = (-x.shape[0]) % get_tensor_model_parallel_world_size()
+    if sp_pad > 0:
+        x = torch.nn.functional.pad(x, (0, 0, 0, sp_pad))
+    return torch.ops.symm_mem.fused_matmul_reduce_scatter(
+        x.contiguous(),
+        weight.t(),
+        "sum",
+        scatter_dim=0,
+        group_name=get_tp_group().device_group.group_name,
+    )
 
 
 def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:

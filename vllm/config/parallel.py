@@ -298,6 +298,10 @@ class ParallelConfig:
     Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
     Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
     """
+    enable_residual_sp: bool = False
+    """Enable eager residual sequence parallelism: the residual stream between
+    TP linears runs on a per-rank token shard. Currently supported by dense
+    Qwen3.5."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_batch_sharded_sampling: bool | None = None
