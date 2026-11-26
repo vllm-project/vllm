@@ -113,8 +113,10 @@ class GdpReplayTrackers:
     """The replay cursors of every mamba block, sized when the cache binds."""
 
     def __init__(self) -> None:
-        empty = torch.empty(0, dtype=torch.int32)
-        self.base = self.hist_len = self.ring_bank = self.prev_query_len = empty
+        self.trackers = torch.empty(4, 0, dtype=torch.int32)
+        """base, hist_len, ring_bank and prev_query_len, one row each, so a
+        reset is one kernel."""
+        self.base, self.hist_len, self.ring_bank, self.prev_query_len = self.trackers
         self.seed = torch.zeros(1, dtype=torch.int64)
         """The stochastic-rounding seed of the checkpoint fold, drawn fresh
         every step (also under CUDA graph replay)."""
@@ -142,11 +144,10 @@ class GdpReplayTrackers:
                 )
             return
 
-        def zeros() -> torch.Tensor:
-            return torch.zeros(num_blocks, dtype=torch.int32, device=conv_state.device)
-
-        self.base, self.hist_len = zeros(), zeros()
-        self.ring_bank, self.prev_query_len = zeros(), zeros()
+        self.trackers = torch.zeros(
+            4, num_blocks, dtype=torch.int32, device=conv_state.device
+        )
+        self.base, self.hist_len, self.ring_bank, self.prev_query_len = self.trackers
         self.seed = torch.zeros(1, dtype=torch.int64, device=conv_state.device)
         self.base_modulus = rows
 
@@ -164,10 +165,10 @@ class GdpReplayTrackers:
 
     def reset(self, slots: torch.Tensor) -> None:
         """Zero the trackers of freshly prefilled blocks. Padding rows hold
-        NULL_BLOCK_ID (0), a block no request owns, so writing it is harmless."""
-        index = slots.long()
-        for tracker in (self.base, self.hist_len, self.ring_bank, self.prev_query_len):
-            tracker[index] = 0
+        NULL_BLOCK_ID (0), a block no request owns, so writing it is harmless.
+        `index_fill_`, not `tracker[index] = 0`: assigning a Python scalar
+        copies it to the device with a blocking memcpy."""
+        self.trackers.index_fill_(1, slots.long(), 0)
 
     def commit(
         self,

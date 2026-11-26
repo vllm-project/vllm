@@ -546,7 +546,14 @@ def test_a_mixed_step_in_place_matches_the_gathered_one(forward_context):
             out = torch.full(
                 (rows[step].size(0), HEADS, 64), float("nan"), dtype=torch.bfloat16
             ).cuda()
-            mixer._forward_replay(rows[step].clone(), out)
+            projected = rows[step].clone()
+            # A mixed step runs eagerly; a device sync in it would stall every
+            # layer behind the GPU. (The first step compiles kernels.)
+            torch.cuda.set_sync_debug_mode("error" if step else 0)
+            try:
+                mixer._forward_replay(projected, out)
+            finally:
+                torch.cuda.set_sync_debug_mode(0)
             outs.append(out)
         runs.append((outs, [t.clone() for t in mixer.kv_cache]))
     (in_place_outs, in_place_cache), (gathered_outs, gathered_cache) = runs
