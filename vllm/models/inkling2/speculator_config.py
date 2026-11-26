@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-from vllm.models.inkling2.configs import Inkling2DSparkConfig
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
@@ -16,11 +15,20 @@ class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
     @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
         super().apply_options(spec)
-        # Generic draft loading forwards only rope-related dict overrides.
-        target = Inkling2DSparkConfig.from_target(spec.target_model_config.hf_config)
+        target = spec.target_model_config
         draft = spec.draft_model_config.hf_config
-        draft.draft_weight_quantization = target.draft_weight_quantization
-        draft.draft_quantize_layers = target.draft_quantize_layers
+        draft.validate_target(target.hf_config)
+        # Dict overrides are filtered when loading the draft checkpoint.
+        overrides = target.hf_overrides
+        if callable(overrides):
+            # The generic loader has already called it on the converted draft.
+            overrides = vars(draft)
+        draft.set_quantization(
+            overrides.get(
+                "dspark_weight_quantization", draft.draft_weight_quantization
+            ),
+            overrides.get("dspark_quantize_layers", draft.draft_quantize_layers),
+        )
 
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:

@@ -253,12 +253,7 @@ class Inkling2DSparkConfig(PreTrainedConfig):
         draft_quantize_layers: bool = True,
         **kwargs,
     ) -> None:
-        if draft_weight_quantization not in (None, "int8"):
-            raise ValueError(
-                "Inkling2 draft_weight_quantization must be null or 'int8'"
-            )
-        self.draft_weight_quantization = draft_weight_quantization
-        self.draft_quantize_layers = draft_quantize_layers
+        self.set_quantization(draft_weight_quantization, draft_quantize_layers)
         # Not stored as ``block_size``: vLLM DSpark would take that as the
         # number of speculative tokens, but the block holds an anchor plus
         # block_size - 1 masks, each predicting the token at its own position.
@@ -275,26 +270,25 @@ class Inkling2DSparkConfig(PreTrainedConfig):
         kwargs.setdefault("architectures", ["Inkling2DSparkModel"])
         super().__init__(tie_word_embeddings=False, **kwargs)
 
-    @classmethod
-    def from_target(cls, config: Inkling2MMConfig) -> Inkling2DSparkConfig:
-        mtp_config = getattr(config, "mtp_config", None)
-        if not mtp_config:
-            raise ValueError("The Inkling2 checkpoint has no mtp_config")
-        text = config.text_config
+    def set_quantization(
+        self, mode: Literal["int8"] | None, quantize_layers: bool
+    ) -> None:
+        if mode not in (None, "int8"):
+            raise ValueError(
+                "Inkling2 draft_weight_quantization must be null or 'int8'"
+            )
+        self.draft_weight_quantization = mode
+        self.draft_quantize_layers = quantize_layers
+
+    def validate_target(self, target: Inkling2MMConfig) -> None:
+        text = target.text_config
         loop = text.loop_config
         if loop is not None and text.num_loop_passes != loop["num_passes"]:
             raise ValueError(
                 "Inkling2 DSpark drafts read hidden states at fixed layer visits; "
                 f"serve them at the checkpoint's {loop['num_passes']} loop passes"
             )
-        draft = {
-            k: v
-            for k, v in mtp_config.items()
-            if k not in ("torch_dtype", "dtype", "architectures")
-        }
-        draft["draft_weight_quantization"] = config.dspark_weight_quantization
-        draft["draft_quantize_layers"] = config.dspark_quantize_layers
-        features = draft.get("target_layer_ids", [])
+        features = self.target_layer_ids
         if (
             len(features) < 2
             or features != sorted(set(features))
@@ -304,17 +298,36 @@ class Inkling2DSparkConfig(PreTrainedConfig):
                 "Inkling2 MTP target_layer_ids must be sorted target layer visits "
                 "followed by num_layer_visits (the final-norm output)"
             )
+        if self.hidden_size != text.hidden_size:
+            raise ValueError(
+                "Inkling2 DSpark requires matching draft and target widths"
+            )
+
+    @classmethod
+    def from_target(cls, config: Inkling2MMConfig) -> Inkling2DSparkConfig:
+        mtp_config = getattr(config, "mtp_config", None)
+        if not mtp_config:
+            raise ValueError("The Inkling2 checkpoint has no mtp_config")
+        text = config.text_config
+        draft = {
+            k: v
+            for k, v in mtp_config.items()
+            if k not in ("torch_dtype", "dtype", "architectures")
+        }
+        draft["draft_weight_quantization"] = config.dspark_weight_quantization
+        draft["draft_quantize_layers"] = config.dspark_quantize_layers
         if (
-            draft["hidden_size"] != text.hidden_size
-            or draft.get("markov_head_type") != "rnn_hidden"
+            draft.get("markov_head_type") != "rnn_hidden"
             or draft.get("q_bias")
             or draft.get("o_bias")
         ):
             raise ValueError("Unsupported Inkling2 mtp_config")
-        return cls(
+        config_draft = cls(
             **draft,
             vocab_size=text.vocab_size,
             padded_vocab_size=text.padded_vocab_size,
             final_logit_softcapping=text.final_logit_softcapping,
             torch_dtype="bfloat16",
         )
+        config_draft.validate_target(config)
+        return config_draft

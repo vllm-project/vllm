@@ -293,23 +293,32 @@ def test_tiny_model_generates(
     paged KV and conv-state caches and CUDA graphs, optionally speculating
     with the DSpark draft (target feature capture, draft KV and graphs).
     Probabilistic drafting caches the draft's bf16 logits for rejection."""
+    config = copy.deepcopy(TINY_LOOP_CONFIG if looped else TINY_CONFIG)
+    draft_path = None
+    overrides = {}
+    quantize_layers = draft_sample_method == "greedy"
     if draft_weight_quantization is not None:
         # The custom dummy loader is registered only in this process.
         monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    config = copy.deepcopy(TINY_LOOP_CONFIG if looped else TINY_CONFIG)
+        if quantize_layers:
+            overrides["dspark_weight_quantization"] = draft_weight_quantization
+        else:
+            # Keep the separate draft's INT8 heads and override only the layers.
+            draft_path = tmp_path / "draft"
+            draft_path.mkdir()
+            draft = {**config, "dspark_weight_quantization": draft_weight_quantization}
+            (draft_path / "config.json").write_text(json.dumps(draft))
+            del config["mtp_config"]
+            overrides["dspark_quantize_layers"] = False
     (tmp_path / "config.json").write_text(json.dumps(config))
-    # Exercise full draft quantization and heads-only through CLI-style overrides.
-    quantize_layers = draft_sample_method == "greedy"
     llm = LLM(
-        hf_overrides={
-            "dspark_weight_quantization": draft_weight_quantization,
-            "dspark_quantize_layers": quantize_layers,
-        },
+        hf_overrides=overrides,
         speculative_config=(
             None
             if draft_sample_method is None
             else {
                 "method": "dspark",
+                "model": str(draft_path) if draft_path else None,
                 "num_speculative_tokens": 7,
                 "draft_sample_method": draft_sample_method,
             }
