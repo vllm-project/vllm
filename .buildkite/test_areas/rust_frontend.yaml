@@ -138,7 +138,7 @@ steps:
   # The multimodal model (SmolVLM, Idefics3) has no Rust processor, so the Rust frontend refuses
   # to start it.
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist and not multimodal"
-  # /tokenizer_info returns 501 in the Rust frontend.
+  # The Rust frontend does not implement /tokenizer_info.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
   # The Rust frontend loads runtime LoRA paths only under VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES and
   # rejects beam search.

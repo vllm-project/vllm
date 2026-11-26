@@ -131,6 +131,7 @@ impl ChatEventStream {
                     message: done,
                     usage,
                     timestamps,
+                    first_content_token_ts: _,
                     spec_decode_metrics,
                     finish_reason,
                     kv_transfer_params,
@@ -272,6 +273,7 @@ mod tests {
                         prompt_cache_usage: Default::default(),
                     }),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                         num_spec_tokens: 2,
                         histogram: vec![0, 1, 0],
