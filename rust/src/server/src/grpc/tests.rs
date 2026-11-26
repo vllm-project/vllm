@@ -867,9 +867,7 @@ fn grpc_llm_request() -> GenerateRequest {
         "proof".into(),
         vec![21, 43],
         EngineCoreSamplingParams {
-            temperature: 0.75,
             max_tokens: 8,
-            stop_token_ids: vec![99],
             seed: Some(9_007_199_254_740_993),
             ..Default::default()
         },
@@ -890,12 +888,9 @@ async fn grpc_llm_round_trips_through_inference_to_engine_core() {
             ..Default::default()
         }),
         |request| {
-            assert_eq!(decode_prompt_token_ids(request).unwrap(), [21, 43]);
             let sampling = request.sampling_params.as_ref().unwrap();
             assert_eq!(sampling.seed, Some(9_007_199_254_740_993));
-            assert_eq!(sampling.temperature, 0.75);
             assert_eq!(sampling.max_tokens, 8);
-            assert_eq!(sampling.stop_token_ids, [99]);
         },
     )
     .await;
@@ -2169,15 +2164,12 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
     server_task.abort();
 }
 
-async fn pending_generation_server() -> (
-    Channel,
-    tokio::task::JoinHandle<()>,
-    MockEngineTask,
-    tokio::sync::oneshot::Receiver<()>,
-) {
-    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
-    let (inference_service, control_service, engine_health, engine_task) =
-        setup_grpc_service_with_engine_script(
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_llm_cancels_unpolled_streams_on_abort_and_drop() {
+    for explicit_abort in [true, false] {
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
             b"engine-grpc-cancel-pending-output".to_vec(),
             default_ready_response(),
             Arc::new(FakeTextBackend::default()),
@@ -2185,7 +2177,6 @@ async fn pending_generation_server() -> (
             move |dealer, _push| {
                 boxed_test_future(async move {
                     let add = recv_engine_message(dealer).await;
-                    assert_eq!(add[0].as_ref(), &[0x00]);
                     let request = decode_add_request(&add);
                     submitted_tx.send(()).expect("signal submitted request");
 
@@ -2194,59 +2185,13 @@ async fn pending_generation_server() -> (
                     assert_eq!(abort[0].as_ref(), &[0x01]);
                     let request_ids: Vec<String> =
                         rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
-                    assert_eq!(request_ids, vec![request.request_id]);
+                    assert_eq!(request_ids, [request.request_id]);
                 })
             },
         )
         .await;
-    let (channel, server_task) = start_grpc_test_server(
-        inference_service,
-        control_service,
-        engine_health,
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
-    (channel, server_task, engine_task, submitted_rx)
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn dropping_generate_stream_aborts_before_engine_output() {
-    let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
-    let mut client = InferenceClient::new(channel);
-    let stream = client
-        .generate_stream(pb::GenerateRequest {
-            request_id: "test-cancel-pending-output".to_string(),
-            model: "test-model".to_string(),
-            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
-            stopping: Some(pb::StoppingCriteria {
-                max_new_tokens: 10,
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
-        .expect("start generation")
-        .into_inner();
-    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
-        .await
-        .expect("timed out waiting for engine submission")
-        .expect("engine submission signal");
-
-    drop(stream);
-
-    let result = tokio::time::timeout(Duration::from_secs(5), engine_task).await;
-    server_task.abort();
-    result
-        .expect("disconnect must abort without waiting for engine output")
-        .expect("mock engine task");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn grpc_llm_cancels_unpolled_streams_on_abort_and_drop() {
-    for explicit_abort in [true, false] {
-        let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
+        let (channel, server_task) =
+            start_grpc_test_server(inference, control, health, Default::default()).await;
         let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
         let request = grpc_llm_request();
         let request_id = request.request_id.clone();

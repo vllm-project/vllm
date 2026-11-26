@@ -1445,28 +1445,22 @@ fn int_flag_parses_like_python_bool_int() {
 }
 
 #[test]
-fn serve_accepts_remote_generation_with_an_optional_model_limit() {
-    let args = [
+fn serve_parses_remote_generation_and_model_limit() {
+    let url = "http://127.0.0.1:50051";
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--remote-generation-url=http://127.0.0.1:50051",
-    ];
-
-    for (flag, expected) in [(None, None), (Some("--max-model-len=512"), Some(512))] {
-        let cli = Cli::try_parse_from(args.into_iter().chain(flag)).unwrap();
-        let Command::Serve(serve) = cli.command else {
-            panic!("expected serve args");
-        };
-        assert_eq!(
-            serve.remote_generation_url.as_deref(),
-            Some("http://127.0.0.1:50051")
-        );
-        assert_eq!(
-            serve.remote_max_model_len().unwrap().map(|n| n.get()),
-            expected
-        );
-    }
+        "--remote-generation-url",
+        url,
+        "--max-model-len=1K",
+    ])
+    .unwrap();
+    let Command::Serve(serve) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(serve.remote_generation_url.as_deref(), Some(url));
+    assert_eq!(serve.remote_max_model_len().unwrap().unwrap().get(), 1024);
 }
 
 #[test]
