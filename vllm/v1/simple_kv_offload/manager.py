@@ -1125,7 +1125,11 @@ class SimpleCPUOffloadScheduler:
                 if state is None:
                     continue
                 state.store_events.discard(event_idx)
-                if state.finished and not state.store_events:
+                if (
+                    state.finished
+                    and not state.store_events
+                    and req_id not in self._pending_finished_stores
+                ):
                     self._requeue_cpu_prefix(state.request)
                     self._cleanup_store_request(req_id)
 
