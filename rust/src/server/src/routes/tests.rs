@@ -2970,7 +2970,7 @@ async fn render_chat_classifies_renderer_errors_by_fault() {
         let mut app = build_render_router(Arc::new(RenderState {
             text: TextRequestProcessor::new(backend.clone(), 128),
             chat: ChatRequestProcessor::new(backend, None, None),
-            ..test_render_state(Some(128), ParserSelection::Auto, ParserSelection::Auto)
+            ..test_render_state(Some(128))
         }));
 
         let (actual_status, json) = post_json(
