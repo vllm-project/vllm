@@ -39,6 +39,9 @@ class TokensInput(_InputOptions):
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""
 
+    prompt_echo_mask: NotRequired[list[bool]]
+    """Whether each prompt token is represented in the rebuilt echo text."""
+
     prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
     """Char-level (start, end) offsets per token, propagated from the
     renderer's TokensPrompt when offsets were computed."""

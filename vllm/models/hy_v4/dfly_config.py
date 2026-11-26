@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedConfig
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dfly.config import DFlySpeculatorConfig
 
 if TYPE_CHECKING:
@@ -191,10 +192,19 @@ def _derive_dfly_config(
     return config
 
 
+def verify_rocm_dfly_kv_cache_dtype(cache_dtype: str | None) -> None:
+    """Reject KV caches the ROCm DFly sparse MLA path cannot apply sinks to."""
+    if cache_dtype not in (None, "auto", "bfloat16"):
+        raise ValueError(
+            f"HYV4 DFly on ROCm requires a BF16 KV cache, got {cache_dtype!r}"
+        )
+
+
 class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
     """HYV4's configuration and implementation of DFly speculative decoding."""
 
-    speculator_class = "vllm.models.hy_v4.nvidia.dfly_speculator.HYV4DFlySpeculator"
+    # Resolved per platform by the `vllm.models.hy_v4` entry point.
+    speculator_class = "vllm.models.hy_v4.HYV4DFlySpeculator"
     target_model_type = "hy_v4"
 
     @classmethod
@@ -318,7 +328,18 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
         super().adapt_draft_model_config(spec)
 
     @classmethod
+    def verify_platform(cls, spec: "SpeculativeConfig") -> None:
+        if not current_platform.is_rocm():
+            return
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            raise NotImplementedError("HYV4 DFly on ROCm requires gfx950")
+        verify_rocm_dfly_kv_cache_dtype(spec.kv_cache_dtype)
+
+    @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
+        cls.verify_platform(spec)
         if spec.kv_cache_dtype not in (None, "auto", "bfloat16", "fp8_ds_mla"):
             raise ValueError("DFly requires BF16 or fp8_ds_mla draft MLA KV cache")
         if spec.attention_backend is not None:

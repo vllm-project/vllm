@@ -152,9 +152,9 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) EC Filesystem Tiering"
+- label: ":nvidia: (H200 MIG 35GB) EC Filesystem Tiering"
   key: ec-filesystem-tiering
-  device: h200
+  device: h200_35gb
   num_devices: 1
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
@@ -298,6 +298,7 @@ steps:
   - >-
     pytest -v -s -rs
     "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_restore_matches_recompute[tp2]"
+    "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_synchronous_restore_survives_block_zeroing[mixed-precision-tp2]"
     "v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py::test_objects_outlive_the_writer_and_restore_on_another_gpu"
 
 # Single-node MoRIIO P/D on dummy weights, WRITE and READ mode: prefill and
@@ -983,6 +984,7 @@ steps:
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+    - pytest -v -s v1/determinism/test_batch_invariance_vlm.py -k vision_fa3
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:
@@ -1097,9 +1099,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) Batch Invariance (Distributed)"
+      label: ":amd: (MI300 DPX) Batch Invariance (Distributed)"
       dind: false
-      device: mi300_4
+      device: mi300_dpx_4
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
