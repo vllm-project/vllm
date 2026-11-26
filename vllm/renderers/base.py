@@ -106,6 +106,9 @@ class _SwappableExecutor(Executor):
 
 
 class BaseRenderer(ABC, Generic[_T]):
+    def validate_request_chat_template(self) -> None:
+        """Check whether this renderer accepts template source from a request."""
+
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 

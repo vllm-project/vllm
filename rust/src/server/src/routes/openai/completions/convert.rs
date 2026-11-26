@@ -389,7 +389,7 @@ mod tests {
         fn new_chat_output_processor(
             &self,
             _request: &mut ChatRequest,
-            _options: NewChatOutputProcessorOptions<'_>,
+            _options: NewChatOutputProcessorOptions,
         ) -> vllm_chat::Result<DynChatOutputProcessor> {
             unreachable!("completions do not parse chat output")
         }
