@@ -715,8 +715,7 @@ def _get_mamba_gpu_state_copy_funcs(
 ) -> MambaStateCopyFuncs:
     state_copy_funcs = copy_funcs[spec.mamba_type]
     if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
-        # The rings follow the canonical states, in the page or in a block of
-        # their own.
+        # The rings follow the canonical states, in a block of their own.
         if len(layer.kv_cache) != 5 or state_copy_funcs != (
             get_conv_copy_spec,
             get_temporal_copy_spec,
