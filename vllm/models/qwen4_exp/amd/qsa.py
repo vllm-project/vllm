@@ -465,13 +465,13 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        mm_config = model_config.multimodal_config
-        text_only = mm_config is None or mm_config.language_model_only
+        # The fused path only implements 1D RoPE.
+        mrope_section = getattr(self.rotary_emb, "mrope_section", None)
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
-            and text_only
+            and not mrope_section
         )
 
         self.layer_name = f"{prefix}.attn"

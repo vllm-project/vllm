@@ -573,8 +573,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        mm_config = model_config.multimodal_config
-        text_only = mm_config is None or mm_config.language_model_only
         mrope_section = getattr(self.rotary_emb, "mrope_section", None)
         supports_mrope = bool(
             type(self.rotary_emb) is MRotaryEmbedding
@@ -592,7 +590,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
             and supports_dtype
-            and (text_only or supports_mrope)
+            # Select on the checkpoint's RoPE layout, never on text-only mode:
+            # a language-model-only worker keeps the checkpoint's M-RoPE.
+            and (not mrope_section or supports_mrope)
         )
 
         self.layer_name = f"{prefix}.attn"
