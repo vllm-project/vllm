@@ -548,6 +548,10 @@ class KVCacheManager:
         num_local_computed_tokens = (
             request.num_computed_tokens + num_new_computed_tokens
         )
+        if num_new_computed_tokens > 0 and self.coordinator.has_unmaterialized_hit(
+            new_computed_block_list, num_local_computed_tokens
+        ):
+            return None
         total_computed_tokens = min(
             num_local_computed_tokens + num_external_computed_tokens,
             self.max_model_len,
