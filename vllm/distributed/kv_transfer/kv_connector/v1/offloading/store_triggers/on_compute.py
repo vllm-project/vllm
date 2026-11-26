@@ -24,7 +24,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.cand
     select_store_candidates,
 )
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
@@ -58,10 +57,12 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         # Skip prefix-hit chunks for block-level policy; for
         # request-level, the next stored chunk stays at 0 so all
         # chunks (including hits) are offloaded.
+        # Round down: after a partial-tail hit the last chunk is only
+        # checkpointed up to the hit, so it must still be offered.
         if req_status.offloading_context.policy != OffloadPolicy.CHUNK_LEVEL:
             return
         self._next_stored_chunk_idxs[req_status.req.request_id] = [
-            cdiv(num_cached_tokens, group_config.tokens_per_chunk)
+            num_cached_tokens // group_config.tokens_per_chunk
             for group_config in self._config.kv_group_configs
         ]
 

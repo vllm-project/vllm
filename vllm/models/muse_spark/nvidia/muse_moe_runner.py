@@ -6,7 +6,7 @@ Every expert backend stops after GEMM2 and hands its rows to the finalizer.
 """
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import torch
 
@@ -54,7 +54,10 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
@@ -67,6 +70,9 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
+)
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    Nvfp4OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -891,8 +897,39 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
         if isinstance(quant_config, ModelOptNvFp4Config) and not (
             quant_config.is_layer_excluded(prefix)
         ):
+            online_config = quant_config.online_quantization_config
+            if online_config is not None and online_config.resolve_quant_method_cls(
+                type(self), prefix
+            ):
+                raise NotImplementedError(
+                    f"MuseSpark cannot re-quantize the checkpoint's NVFP4 experts "
+                    f"({prefix}); online quantization targets may only match "
+                    "the BF16 experts."
+                )
             return MuseSparkModelOptNvFp4FusedMoE(quant_config, moe_config)
-        # MuseSpark NVFP4 keeps layers 0 and 61 in BF16.
+        # MuseSpark NVFP4 keeps layers 0 and 61 in BF16; online quantization
+        # targets may still quantize them.
+        if quant_config is not None:
+            quant_method = resolve_quant_method(quant_config, self, prefix)
+            if isinstance(quant_method, OnlineMoEMethodBase):
+                # Muse normalizes each expert's output before the top-k sum, so
+                # its experts must stop after GEMM2 and call `post_gemm2_hook`.
+                # Backends that finalize inside the kernel would skip the norm
+                # silently. On an NVFP4 checkpoint's BF16 layers, only TRT-LLM
+                # NVFP4 is validated with Muse's in-kernel MiniMax2 routing.
+                if not (
+                    isinstance(quant_method, Nvfp4OnlineMoEMethod)
+                    and quant_method.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+                ):
+                    raise NotImplementedError(
+                        "MuseSpark online MoE quantization supports only "
+                        "nvfp4_per_token on the FlashInfer TRT-LLM backend; got "
+                        f"{type(quant_method).__name__}."
+                    )
+                validate_deployment(
+                    moe_config, kernel_routes=not uses_modular_all2all(moe_config)
+                )
+                return quant_method
         return MuseSparkUnquantizedFusedMoE(moe_config)
 
 
@@ -916,17 +953,33 @@ class MuseMoERunner(MoERunner):
         self.post_expert_finalize = MusePostExpertFinalize(
             post_expert_norm, self.moe_config, fuse_all_reduce
         )
-        quant_method = cast(
-            MuseSparkModelOptNvFp4FusedMoE
-            | MuseSparkUnquantizedFusedMoE
-            | MuseSparkFp8FusedMoE,
-            routed_experts.quant_method,
-        )
-        quant_method.muse_post_expert_finalize = self.post_expert_finalize
+        quant_method = routed_experts.quant_method
+        # Online NVFP4 experts get the finalizer once they exist, after loading.
+        if isinstance(
+            quant_method,
+            (
+                MuseSparkModelOptNvFp4FusedMoE,
+                MuseSparkUnquantizedFusedMoE,
+                MuseSparkFp8FusedMoE,
+            ),
+        ):
+            quant_method.muse_post_expert_finalize = self.post_expert_finalize
 
     def process_weights_after_loading(self) -> None:
         super().process_weights_after_loading()
         self.post_expert_finalize.process_weights_after_loading()
+        quant_method = self.routed_experts.quant_method
+        if isinstance(quant_method, Nvfp4OnlineMoEMethod):
+            # Online quantization builds the experts while the weights load.
+            assert quant_method.moe_kernel is not None
+            experts = quant_method.moe_kernel.fused_experts
+            experts.post_gemm2_hook = self.post_expert_finalize
+            logger.info(
+                "MuseSpark %s: experts quantized online to NVFP4 with per-token "
+                "activation scales (%s).",
+                self.layer_name,
+                quant_method.nvfp4_backend.value,
+            )
 
     @property
     def _prepared_nvfp4_experts(self) -> MuseSparkTrtLlmNvFp4Experts | None:
