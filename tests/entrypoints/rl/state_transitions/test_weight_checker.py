@@ -269,8 +269,7 @@ class DraftWeightSyncClient(HTTPVLLMWeightSyncClient):
         self._post("start_draft_weight_update")
 
 
-def send_ipc_weights(url: str, module: nn.Module, *, is_draft: bool) -> None:
-    client = DraftWeightSyncClient(url) if is_draft else HTTPVLLMWeightSyncClient(url)
+def send_ipc_weights(client: HTTPVLLMWeightSyncClient, module: nn.Module) -> None:
     WeightTransferTrainerFactory.trainer_init(
         IPCTrainerInitInfo(rank=0), client=client, source=ModuleSource(module.cuda())
     ).send_weights()
@@ -289,10 +288,30 @@ def test_ipc_transfer_restores_target_and_draft_weights():
         target = checksums(url, "target")
         draft = checksums(url, "draft")
         both = {f"target:{key}": digest for key, digest in target.items()}
-        both.update({f"draft:{key}": digest for key, digest in draft.items()})
+        both.update(draft)
         assert target and draft
+        assert all(key.startswith("draft:") for key in draft)
         assert checksums(url) == target
         assert checksums(url, "both") == both
+        comparison = weight_checker(url, "compare", draft)
+        comparison.raise_for_status()
+        assert comparison.json() == {
+            "match": False,
+            "mismatches": sorted(target.keys() | draft.keys()),
+        }
+
+        class ResetCheckingDraftClient(DraftWeightSyncClient):
+            def start_weight_update(self) -> None:
+                super().start_weight_update()
+                for selection in ("target", "draft", "both"):
+                    response = weight_checker(url, "reset", model=selection)
+                    assert response.status_code == 409, response.text
+                    assert "while a weight update is active" in response.text
+
+        clients = {
+            "target": HTTPVLLMWeightSyncClient(url),
+            "draft": ResetCheckingDraftClient(url),
+        }
 
         trainer_model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME, torch_dtype=torch.bfloat16
@@ -313,11 +332,13 @@ def test_ipc_transfer_restores_target_and_draft_weights():
                 assert checksums(url, "target") == target
 
             for restored_model in restored_models:
-                send_ipc_weights(url, trainer_model, is_draft=restored_model == "draft")
+                send_ipc_weights(clients[restored_model], trainer_model)
 
             comparison = weight_checker(url, "compare", baseline, model=model)
             comparison.raise_for_status()
             assert comparison.json() == {"match": True, "mismatches": []}
+            if model == "draft":
+                assert checksums(url) == target
         requests.post(f"{url}/resume", timeout=30).raise_for_status()
         assert ok(gen(url))
 
@@ -433,18 +454,20 @@ def assert_eagle_mismatches(url, baseline, expected):
 def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints):
     _, _, target, draft = eagle_checkpoints
     with paused_eagle_server(eagle_checkpoints, pp_size=1) as (url, baseline, shared):
+        target_client = HTTPVLLMWeightSyncClient(url)
+        draft_client = DraftWeightSyncClient(url)
         target_keys = {key for key in baseline if key.startswith("target:")}
         draft_keys = baseline.keys() - target_keys
         target_shared = {key.replace("draft:", "target:", 1) for key in shared}
 
         weight_checker(url, "reset", model="target").raise_for_status()
         assert_eagle_mismatches(url, baseline, target_keys | shared)
-        send_ipc_weights(url, target, is_draft=False)
+        send_ipc_weights(target_client, target)
         assert_eagle_mismatches(url, baseline, set())
 
         weight_checker(url, "reset", model="draft").raise_for_status()
         assert_eagle_mismatches(url, baseline, draft_keys | target_shared)
-        send_ipc_weights(url, draft, is_draft=True)
+        send_ipc_weights(draft_client, draft)
         assert_eagle_mismatches(url, baseline, shared | target_shared)
         draft_with_shared = nn.ModuleDict(
             {
@@ -453,7 +476,7 @@ def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints):
                 "lm_head": target.lm_head,
             }
         )
-        send_ipc_weights(url, draft_with_shared, is_draft=True)
+        send_ipc_weights(draft_client, draft_with_shared)
         assert_eagle_mismatches(url, baseline, set())
 
         weight_checker(url, "reset", model="both").raise_for_status()
@@ -461,8 +484,8 @@ def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints):
         cleared = checksums(url, "both")
         weight_checker(url, "reset", model="both").raise_for_status()
         assert checksums(url, "both") == cleared
-        send_ipc_weights(url, target, is_draft=False)
-        send_ipc_weights(url, draft, is_draft=True)
+        send_ipc_weights(target_client, target)
+        send_ipc_weights(draft_client, draft)
         assert_eagle_mismatches(url, baseline, set())
 
 

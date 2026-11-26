@@ -444,6 +444,8 @@ class Worker(WorkerBase):
         )
 
     def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
+        if self._weight_update_active:
+            return "Cannot reset weights while a weight update is active."
         error = reset_model_weights(
             model,
             self.parallel_config,

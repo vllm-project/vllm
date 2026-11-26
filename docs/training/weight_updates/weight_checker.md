@@ -20,11 +20,11 @@ Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
 All three actions accept `"model": "target"`, `"draft"`, or `"both"`. Omitting
 `model` selects the target. Use the same selection for checksum and compare.
 
-For a single model, keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`.
-Selecting `both` adds a `target:` or `draft:` prefix to each key. With pipeline
-parallelism, the draft's `pp` rank identifies the last target stage, where the
-draft resides. Save the `checksums` mapping from the response and pass it as
-`baseline` when comparing.
+Target-only keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`.
+Draft keys always have a `draft:` prefix. Selecting `both` adds a `target:`
+prefix to the target keys. With pipeline parallelism, the draft's `pp` rank
+identifies the last target stage, where the draft resides. Save the
+`checksums` mapping from the response and pass it as `baseline` when comparing.
 
 A completed comparison returns HTTP 200 even when `match` is `false`.
 `mismatches` lists keys whose digest changed and keys missing from either side.
@@ -41,7 +41,8 @@ both models' keys.
 
 Reset is a destructive debugging operation. It clears the selected model's
 weights in place, and aliases in the other model reflect the same writes.
-Restore all affected weights before resuming inference.
+Restore all affected weights before resuming inference. A worker with an
+active weight update rejects reset with HTTP 409.
 
 | Reset selection | Weights cleared | Recovery |
 | --- | --- | --- |
@@ -67,23 +68,26 @@ reset, while `draft` and `both` resets return HTTP 409.
 ## RL weight-update check
 
 ```bash
-set -eo pipefail
 URL=http://localhost:8000
 MODEL=target  # For a resident drafter with PP=1, choose draft or both to reset it.
 
-# 1. Stop serving, then save the original digests.
-curl --fail-with-body -X POST "$URL/pause?mode=abort"
-curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
-  -d "{\"action\":\"checksum\",\"model\":\"$MODEL\"}" > baseline.json
+(
+  set -eo pipefail
 
-# 2. Zero the weights.
-curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
-  -d "{\"action\":\"reset\",\"model\":\"$MODEL\"}"
+  # 1. Stop serving, then save the original digests.
+  curl --fail-with-body -X POST "$URL/pause?mode=abort"
+  curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
+    -d "{\"action\":\"checksum\",\"model\":\"$MODEL\"}" > baseline.json
 
-# 3. Inspect which weights changed. Weights that were already zero can still match.
-jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
-  baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
-  -H 'Content-Type: application/json' -d @-
+  # 2. Zero the weights.
+  curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
+    -d "{\"action\":\"reset\",\"model\":\"$MODEL\"}"
+
+  # 3. Inspect which weights changed. Weights that were already zero can still match.
+  jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
+    baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' -d @-
+)
 ```
 
 While inference is paused, use your trainer to restore the selected weights.
@@ -95,10 +99,13 @@ the draft transfer.
 After recovery, run the following in the same shell to resume only on a match.
 
 ```bash
-jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
-  baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
-  -H 'Content-Type: application/json' -d @- | jq -e '.match == true' && \
+(
+  set -eo pipefail
+  jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
+    baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' -d @- | jq -e '.match == true'
   curl --fail-with-body -X POST "$URL/resume"
+)
 ```
 
 For a target-only update, save the target baseline while paused and before

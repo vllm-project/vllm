@@ -11352,6 +11352,11 @@ async fn weight_checker_route_merges_worker_checksums_and_compares() {
         ),
         (
             "compute_weight_checksums",
+            json!(["draft"]),
+            json!([{"draft:tp0:a":"1"}]),
+        ),
+        (
+            "compute_weight_checksums",
             json!(["both"]),
             json!([{"target:tp0:a":"1", "draft:tp0:a":"2"}]),
         ),
@@ -11373,6 +11378,15 @@ async fn weight_checker_route_merges_worker_checksums_and_compares() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({"checksums": {"tp0:a": "1", "tp1:a": "2"}}));
+
+    let (status, body) = post_json(
+        &mut app,
+        "/weight_checker",
+        json!({"action": "checksum", "model": "draft"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"checksums": {"draft:tp0:a": "1"}}));
 
     let baseline = json!({"target:tp0:a": "1", "draft:tp0:a": "9", "draft:tp2:a": "3"});
     let (status, body) = post_json(
@@ -11428,13 +11442,13 @@ async fn finish_weight_update_compares_weights_against_baseline() {
     let (status, body) = post_json(
         &mut app,
         "/finish_weight_update",
-        json!({"baseline": {"tp0:a": "9"}}),
+        json!({"baseline": {"draft:tp0:a": "1"}}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"message": "Weight update finished", "match": false, "mismatches": ["tp0:a"]})
+        json!({"message": "Weight update finished", "match": false, "mismatches": ["draft:tp0:a", "tp0:a"]})
     );
     engine_task.abort_and_join().await;
 }

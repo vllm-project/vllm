@@ -114,7 +114,7 @@ def compute_model_weight_checksums(
     prefix = _weight_checksum_prefix(parallel_config)
     checksums: dict[str, str] = {}
     for name, module in models:
-        model_prefix = f"{name}:" if model == "both" else ""
+        model_prefix = f"{name}:" if model != "target" else ""
         checksums.update(
             (model_prefix + prefix + key, digest)
             for key, digest in compute_tensor_digests(module).items()
