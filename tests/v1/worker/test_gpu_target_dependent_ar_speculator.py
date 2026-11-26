@@ -906,20 +906,56 @@ def test_q_only_draft_prefill_keeps_last_token_rows():
         torch.tensor([105, 0, 0, 0], dtype=torch.int32, device=device),
         max_reqs,
     )
-    hidden_states = torch.arange(
-        max_tokens * hidden_size, dtype=torch.float32, device=device
-    ).view(max_tokens, hidden_size)
+    target_hidden_states = torch.arange(
+        8 * hidden_size, dtype=torch.float32, device=device
+    ).view(8, hidden_size)
+    hidden_states = torch.zeros(max_tokens, hidden_size, device=device)
     rows = last_token_indices[:2].clone()
-    expected_hidden_states = hidden_states[rows].clone()
     assert rows.tolist() == [4, 6]
 
-    spec_module.compact_prefill_inputs(last_token_indices[:2], buffers, hidden_states)
+    spec_module.compact_prefill_inputs(
+        last_token_indices[:2], buffers, target_hidden_states, hidden_states
+    )
 
     assert buffers.input_ids[:2].tolist() == [105, 300]
     assert buffers.positions[:2].tolist() == [7, 21]
     torch.testing.assert_close(
-        hidden_states[:2], expected_hidden_states, rtol=0, atol=0
+        hidden_states[:2], target_hidden_states[rows], rtol=0, atol=0
     )
+    assert not hidden_states[2:].any()
     assert buffers.query_start_loc.tolist() == [0, 1, 2, 2, 2]
     assert buffers.seq_lens[:2].tolist() == (batch.seq_lens - num_rejected).tolist()
     assert last_token_indices[:2].tolist() == [0, 1]
+
+
+_LAST_TOKEN_PREFILL = dict(
+    advance_draft_positions=False,
+    cg_mode=CUDAGraphMode.PIECEWISE,
+    num_reqs=2,
+    num_tokens=8,
+    dummy_run=False,
+    is_profile=False,
+    dp_size=1,
+    has_pcp=False,
+    has_mm_inputs=False,
+)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({}, True),
+        ({"cg_mode": CUDAGraphMode.NONE}, True),
+        ({"cg_mode": CUDAGraphMode.FULL}, False),
+        ({"advance_draft_positions": True}, False),
+        ({"num_tokens": 2}, False),
+        ({"dummy_run": True}, False),
+        ({"is_profile": True}, False),
+        ({"dp_size": 2}, False),
+        ({"has_pcp": True}, False),
+        ({"has_mm_inputs": True}, False),
+    ],
+)
+def test_last_token_draft_prefill_gating(override, expected):
+    kwargs = _LAST_TOKEN_PREFILL | override
+    assert spec_module.use_last_token_draft_prefill(**kwargs) == expected

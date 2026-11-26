@@ -183,7 +183,6 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             if prefill is not None:
                 num_tokens = prefill.num_tokens
                 num_tokens_padded = prefill.num_tokens_after_padding
-        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
 
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
@@ -215,32 +214,34 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             else None
         )
 
-        # A drafter that writes no KV keeps only each request's last row of
-        # draft step 0, so unless a FULL graph replays the target batch anyway,
-        # run that step on those rows alone.
-        last_tokens_only = (
-            not self.advance_draft_positions
-            and prefill_batch_desc.cg_mode != CUDAGraphMode.FULL
-            and not dummy_run
-            and self.dp_size == 1
-            and self.pcp_manager is None
-            and mm_inputs is None
+        last_tokens_only = use_last_token_draft_prefill(
+            advance_draft_positions=self.advance_draft_positions,
+            cg_mode=prefill_batch_desc.cg_mode,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            dummy_run=dummy_run,
+            is_profile=is_profile,
+            dp_size=self.dp_size,
+            has_pcp=self.pcp_manager is not None,
+            has_mm_inputs=mm_inputs is not None,
         )
         self._prepare_eplb_forward(num_reqs if last_tokens_only else num_tokens)
 
         if last_tokens_only:
             prefill_batch_desc, attn_metadata, slot_mappings = (
-                self._prepare_last_token_prefill(input_batch, num_reqs)
+                self._prepare_last_token_prefill(input_batch, num_reqs, hidden_states)
             )
-        elif not skip_attn_for_dummy_run:
-            attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                prefill_batch_desc.cg_mode,
-                for_capture=dummy_run
-                and prefill_batch_desc.cg_mode == CUDAGraphMode.FULL,
-            )
+        else:
+            self.hidden_states[:num_tokens_padded].copy_(hidden_states)
+            if not skip_attn_for_dummy_run:
+                attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    prefill_batch_desc.cg_mode,
+                    for_capture=dummy_run
+                    and prefill_batch_desc.cg_mode == CUDAGraphMode.FULL,
+                )
 
         self.on_prefill_begin(num_reqs)
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -287,10 +288,17 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         return self.draft_tokens[:num_reqs]
 
     def _prepare_last_token_prefill(
-        self, input_batch: InputBatch, num_reqs: int
+        self,
+        input_batch: InputBatch,
+        num_reqs: int,
+        # [num_tokens, hidden_size]
+        target_hidden_states: torch.Tensor,
     ) -> tuple[BatchExecutionDescriptor, dict[str, Any], dict[str, torch.Tensor]]:
         compact_prefill_inputs(
-            self.last_token_indices[:num_reqs], self.input_buffers, self.hidden_states
+            self.last_token_indices[:num_reqs],
+            self.input_buffers,
+            target_hidden_states,
+            self.hidden_states,
         )
         assert self.prefill_cudagraph_manager is not None
         batch_desc = self.prefill_cudagraph_manager.dispatch(
@@ -613,10 +621,39 @@ def prepare_prefill_inputs(
     return last_token_indices
 
 
+def use_last_token_draft_prefill(
+    *,
+    advance_draft_positions: bool,
+    cg_mode: CUDAGraphMode,
+    num_reqs: int,
+    num_tokens: int,
+    dummy_run: bool,
+    is_profile: bool,
+    dp_size: int,
+    has_pcp: bool,
+    has_mm_inputs: bool,
+) -> bool:
+    """Whether draft step 0 runs on each request's last row only. A drafter
+    that writes no KV keeps only those rows, unless a FULL graph replays the
+    target batch anyway or the batch has one token per request."""
+    return (
+        not advance_draft_positions
+        and cg_mode != CUDAGraphMode.FULL
+        and num_tokens > num_reqs
+        and not dummy_run
+        and not is_profile
+        and dp_size == 1
+        and not has_pcp
+        and not has_mm_inputs
+    )
+
+
 def compact_prefill_inputs(
     # [num_reqs]
     last_token_indices: torch.Tensor,
     input_buffers: InputBuffers,
+    # [num_tokens, hidden_size]
+    target_hidden_states: torch.Tensor,
     # [max_num_tokens, hidden_size]
     hidden_states: torch.Tensor,
 ) -> None:
@@ -626,7 +663,7 @@ def compact_prefill_inputs(
     positions = input_buffers.positions[last_token_indices]
     input_buffers.input_ids[:num_reqs] = input_buffers.input_ids[last_token_indices]
     input_buffers.positions[:num_reqs] = positions
-    hidden_states[:num_reqs] = hidden_states[last_token_indices]
+    hidden_states[:num_reqs] = target_hidden_states[last_token_indices]
 
     query_start_loc = input_buffers.query_start_loc
     arange = torch.arange(query_start_loc.shape[0], device=query_start_loc.device)

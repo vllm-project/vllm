@@ -75,11 +75,13 @@ def test_mtp_correctness(
 
 @single_gpu_only
 def test_draft_prefill_runs_on_last_tokens_only(
-    sampling_config: SamplingParams, vllm_runner
+    sampling_config: SamplingParams, vllm_runner, monkeypatch: pytest.MonkeyPatch
 ):
     """The Gemma4 drafter reads the target's KV and writes none, so draft step 0
     of a step that prefills prompts runs on one row per request, not on every
-    prompt token, and its drafts are still accepted."""
+    prompt token, with no implicit GPU sync, and its drafts are still accepted."""
+    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     prompts = get_test_prompts(mm_enabled=False, num_prompts=8)
     with vllm_runner(
         "google/gemma-4-E4B-it",
