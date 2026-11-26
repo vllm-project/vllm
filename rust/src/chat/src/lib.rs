@@ -17,7 +17,7 @@ pub use backend::{
     ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, LoadModelBackendsOptions,
     LoadedModelBackends, NewChatOutputProcessorOptions, load_model_backends,
 };
-pub use error::{Error, Result};
+pub use error::{Error, ErrorKind, Result};
 pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
     AssistantToolCall, ChatEvent, ChatTokenUsage,
