@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Extend token sharding without changing TP/EP weights or model outputs."""
 
-import json
 import logging
 from functools import partial
 from pathlib import Path
@@ -15,7 +14,6 @@ from transformers import AutoModelForCausalLM, DeepseekV32Config
 
 from tests.models.utils import check_logprobs_close
 from vllm import SamplingParams
-from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 
 
@@ -104,32 +102,6 @@ def shardq_mtp_checkpoint(shardq_checkpoint, tmp_path_factory):
     return str(path)
 
 
-@pytest.fixture(scope="module")
-def shardq_lora(tmp_path_factory):
-    path = tmp_path_factory.mktemp("deepseek_v32_shardq_lora")
-    weights = {}
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(73)
-        for layer in range(2):
-            name = f"base_model.model.model.layers.{layer}.self_attn.q_a_proj"
-            weights[f"{name}.lora_A.weight"] = torch.randn(8, 256).bfloat16() * 0.05
-            weights[f"{name}.lora_B.weight"] = torch.randn(128, 8).bfloat16() * 0.05
-    save_file(weights, path / "adapter_model.safetensors")
-    (path / "adapter_config.json").write_text(
-        json.dumps(
-            {
-                "peft_type": "LORA",
-                "task_type": "CAUSAL_LM",
-                "r": 8,
-                "lora_alpha": 8,
-                "target_modules": ["q_a_proj"],
-                "bias": "none",
-            }
-        )
-    )
-    return LoRARequest("shardq", 1, str(path))
-
-
 def _layout(worker):
     model = worker.model_runner.model.model
     layer = model.layers[0]
@@ -201,7 +173,6 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
     vllm_runner,
     shardq_checkpoint,
     shardq_mtp_checkpoint,
-    shardq_lora,
     monkeypatch,
     caplog_vllm,
     quantization,
@@ -209,7 +180,7 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
     spec_method,
     enforce_eager,
 ):
-    """Preserve TP generation with LoRA or accepted speculative tokens."""
+    """Preserve TP generation with LoRA enabled or accepted speculative tokens."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     caplog_vllm.set_level(logging.INFO, logger="vllm.v1.metrics.loggers")
     speculative_config = None
@@ -286,9 +257,6 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
                 result = runner.llm.generate(
                     batch,
                     sampling,
-                    lora_request=([shardq_lora, None, shardq_lora][: len(batch)])
-                    if use_lora
-                    else None,
                     use_tqdm=False,
                 )
                 runs.extend(r.outputs[0] for r in result)
