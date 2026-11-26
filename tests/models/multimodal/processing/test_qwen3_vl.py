@@ -566,57 +566,65 @@ def test_processor_video_embeds_missing_timestamps(model_id: str) -> None:
         processor.info.parse_mm_data(mm_data)
 
 
-@pytest.mark.parametrize("model_id", [MODEL_ID])
-def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> None:
-    """Regression test for memory profiling with `cap_pixels_per_frame`.
-
-    With the HF per-frame pixel cap enabled (transformers#48071) and a
-    raised video budget, a 2-frame profiling dummy would be processed at
-    only 2 * cap pixels, underestimating the largest possible video (a
-    fully sampled one still fills the whole `longest_edge` budget). The
-    dummy builder must spread the budget over enough frames that the cap
-    is not binding.
-    """
-    # 16 capped frames' worth of budget on top of the default per-frame
-    # ceiling (max_video_tokens=768 at patch 16, merge 2 -> 786,432
-    # pixels per frame).
+@pytest.mark.parametrize(
+    ("video_kwargs", "expected_frames"),
+    [
+        ({}, 2),
+        ({"cap_pixels_per_frame": True}, 4),
+        ({"cap_pixels_per_frame": True, "max_video_tokens": 1536}, 4),
+    ],
+)
+def test_dummy_video_spreads_budget_when_frame_cap_enabled(
+    video_kwargs: dict[str, object], expected_frames: int
+) -> None:
+    """Spread the profiling budget over frames using the actual HF ceiling."""
+    # The processor instance uses 768 tokens per frame at patch 16, merge 2.
     per_frame_cap = 768 * (16 * 2) ** 2
-    budget = per_frame_cap * 16
-    size = {"longest_edge": budget, "shortest_edge": 4096}
-
-    capped_ctx = build_model_context(
-        model_id,
+    size = {"longest_edge": per_frame_cap * 4, "shortest_edge": 4096}
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-VL-Reranker-2B",
         mm_processor_kwargs={
             "videos_kwargs": {
                 "size": size,
-                "cap_pixels_per_frame": True,
+                **video_kwargs,
             },
         },
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
-    capped = MULTIMODAL_REGISTRY.create_processor(capped_ctx.model_config)
-    capped_dummy = capped.dummy_inputs.get_dummy_mm_data(
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    dummy = processor.dummy_inputs.get_dummy_mm_data(
         1024, {"video": 1}, MultiModalDummyOptions()
     )
-    capped_videos = capped_dummy["video"]
-    assert isinstance(capped_videos, list)
-    capped_frames = capped_videos[0][0].shape[0]
-    assert capped_frames == 16, (
-        f"Expected the dummy to spread the budget over 16 frames, got {capped_frames}"
+    videos = dummy["video"]
+    assert isinstance(videos, list)
+    assert videos[0][0].shape[0] == expected_frames
+
+
+def test_dummy_video_covers_request_when_shortest_edge_floor_exceeds_cap() -> None:
+    """The shortest-edge floor can raise the cost of each frame in a real clip."""
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-VL-Reranker-2B",
+        mm_processor_kwargs={
+            "max_video_tokens": 4,
+            "videos_kwargs": {
+                "cap_pixels_per_frame": True,
+                "size": {"shortest_edge": 5120, "longest_edge": 10240},
+            },
+        },
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        mm_processor_cache_gb=0,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    profiled = processor.get_dummy_mm_inputs({"video": 1})
+    data = _build_video_mm_data(num_frames=4, width=64, height=64, original_fps=2.0)
+    data["video"][0][1]["do_sample_frames"] = False
+    processed = processor(
+        "<|vision_start|><|video_pad|><|vision_end|>",
+        mm_items=processor.info.parse_mm_data(data),
+        hf_processor_mm_kwargs={},
     )
 
-    uncapped_ctx = build_model_context(
-        model_id,
-        mm_processor_kwargs={"videos_kwargs": {"size": size}},
-        limit_mm_per_prompt={"image": 0, "video": 1},
-    )
-    uncapped = MULTIMODAL_REGISTRY.create_processor(uncapped_ctx.model_config)
-    uncapped_dummy = uncapped.dummy_inputs.get_dummy_mm_data(
-        1024, {"video": 1}, MultiModalDummyOptions()
-    )
-    uncapped_videos = uncapped_dummy["video"]
-    assert isinstance(uncapped_videos, list)
-    uncapped_frames = uncapped_videos[0][0].shape[0]
-    assert uncapped_frames == 2, (
-        f"Expected the uncapped dummy to keep 2 frames, got {uncapped_frames}"
-    )
+    (profiled_video,) = profiled["mm_placeholders"]["video"]
+    (processed_video,) = processed["mm_placeholders"]["video"]
+    assert processed_video.get_num_embeds() == 8
+    assert profiled_video.get_num_embeds() >= processed_video.get_num_embeds()

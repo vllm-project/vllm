@@ -270,7 +270,7 @@ class CoreEngineProcManager:
         local_client: bool,
         handshake_address: str,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
@@ -281,7 +281,7 @@ class CoreEngineProcManager:
             "local_client": local_client,
             "handshake_address": handshake_address,
             "executor_class": executor_class,
-            "log_stats": log_stats,
+            "collect_stats": collect_stats,
             "tensor_queue": tensor_queue,
         }
 
@@ -524,7 +524,7 @@ class CoreEngineActorManager:
         vllm_config: VllmConfig,
         addresses: EngineZmqAddresses,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
     ):
@@ -558,7 +558,7 @@ class CoreEngineActorManager:
 
         self.addresses = addresses
         self.executor_class = executor_class
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
         self.manager_stopped = threading.Event()
@@ -639,7 +639,7 @@ class CoreEngineActorManager:
                 .remote(
                     vllm_config=dp_vllm_config,
                     executor_class=executor_class,
-                    log_stats=log_stats,
+                    collect_stats=collect_stats,
                     local_client=local_client,
                     addresses=addresses,
                     dp_rank=index,
@@ -1034,7 +1034,7 @@ class CoreEngineActorManager:
                 .remote(
                     vllm_config=dp_vllm_config,
                     executor_class=self.executor_class,
-                    log_stats=self.log_stats,
+                    collect_stats=self.collect_stats,
                     local_client=local_client,
                     addresses=self.addresses,
                     dp_rank=rank,
@@ -1223,7 +1223,7 @@ class CoreEngineLaunch:
 def launch_core_engines(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
-    log_stats: bool,
+    collect_stats: bool,
     addresses: EngineZmqAddresses,
 ) -> Generator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
@@ -1322,7 +1322,7 @@ def launch_core_engines(
             vllm_config=vllm_config,
             addresses=addresses,
             executor_class=executor_class,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
         )
 
         yield CoreEngineLaunch(
@@ -1384,7 +1384,7 @@ def launch_core_engines(
             local_engine_manager = CoreEngineProcManager(
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=log_stats,
+                collect_stats=collect_stats,
                 handshake_address=handshake_address,
                 client_handshake_address=client_handshake_address,
                 local_client=True,
