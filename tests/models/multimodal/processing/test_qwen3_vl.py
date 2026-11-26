@@ -628,3 +628,102 @@ def test_dummy_video_covers_request_when_shortest_edge_floor_exceeds_cap() -> No
     (processed_video,) = processed["mm_placeholders"]["video"]
     assert processed_video.get_num_embeds() == 8
     assert profiled_video.get_num_embeds() >= processed_video.get_num_embeds()
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_processor_per_video_hashes_survive_partitioning(
+    model_id: str, scoped: bool
+) -> None:
+    """A one-video encoder child must hash its video like the full request.
+
+    The Python EPD proxy fans multi-video requests out to one-video encoder
+    children, slicing per-video lists to the videos each child carries. The
+    cache key of a video may then depend only on its own per-video element,
+    not on the raw list, or the producer and consumer hash the same video
+    differently and every EC transfer misses.
+    """
+    kwargs: dict[str, Any] = {"num_frames": [8, 16]}
+    if scoped:
+        kwargs = {"videos_kwargs": dict(kwargs)}
+
+    def scoped_form(flat: dict[str, Any]) -> dict[str, Any]:
+        return {"videos_kwargs": dict(flat)} if scoped else dict(flat)
+
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_cache_gb=1,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    videos = [
+        _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+        for _ in range(2)
+    ]
+    for i, (frames, _) in enumerate(videos):
+        frames.fill(i)
+
+    def run(count: int, items, hf_kwargs, uuids):
+        return processor(
+            "<|vision_start|><|video_pad|><|vision_end|>" * count,
+            mm_items=processor.info.parse_mm_data({"video": items}),
+            mm_uuid_items={"video": uuids},
+            hf_processor_mm_kwargs=hf_kwargs,
+        )
+
+    full = run(2, videos, kwargs, ["v0", "v1"])
+    child0 = run(1, [videos[0]], scoped_form({"num_frames": [8]}), ["v0"])
+    child1 = run(1, [videos[1]], scoped_form({"num_frames": [16]}), ["v1"])
+    assert child0["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+    assert child1["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][1]
+
+    # Entries beyond the video count never affect processing, so they must
+    # not affect the cache key either.
+    tail = run(2, videos, scoped_form({"num_frames": [8, 16, 32]}), ["v0", "v1"])
+    assert tail["mm_hashes"] == full["mm_hashes"]
+
+    # Changing only the second video's effective value must invalidate only its key.
+    changed = run(2, videos, scoped_form({"num_frames": [8, 24]}), ["v0", "v1"])
+    assert changed["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+    assert changed["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize("form", ["flat", "scoped", "shadowed"])
+@pytest.mark.skip_global_cleanup
+def test_processor_image_hash_survives_video_partitioning(
+    model_id: str, form: str
+) -> None:
+    """Image child and mixed parent must agree after slicing video lists."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = np.zeros((128, 128, 3), dtype=np.uint8)
+    video = _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+    kwargs: dict[str, Any] = {"num_frames": [8]}
+    child_kwargs: dict[str, Any] = {}
+    if form != "flat":
+        kwargs = {"videos_kwargs": kwargs}
+        child_kwargs = {"videos_kwargs": {}}
+    if form == "shadowed":
+        kwargs["num_frames"] = 16
+        child_kwargs["num_frames"] = 16
+
+    image_prompt = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    parent = processor(
+        image_prompt + video_prompt,
+        mm_items=processor.info.parse_mm_data({"image": [image], "video": [video]}),
+        mm_uuid_items={"image": ["i0"], "video": ["v0"]},
+        hf_processor_mm_kwargs=kwargs,
+    )
+    child = processor(
+        image_prompt,
+        mm_items=processor.info.parse_mm_data({"image": [image]}),
+        mm_uuid_items={"image": ["i0"]},
+        hf_processor_mm_kwargs=child_kwargs,
+    )
+    assert parent["mm_hashes"]["image"] == child["mm_hashes"]["image"]

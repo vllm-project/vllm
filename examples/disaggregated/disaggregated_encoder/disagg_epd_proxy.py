@@ -410,6 +410,13 @@ EMBEDS_TYPES = {
     "video_url": "video_embeds",
 }
 
+# Processor kwargs whose list value applies element-wise to a request's videos
+# in order (Qwen3-VL `fps`/`num_frames`). A child
+# request that carries a subset of the videos must carry the matching subset
+# of the list, or the encoder samples every child with the first element and
+# publishes under a hash the consumer never looks up.
+PER_VIDEO_MM_KWARGS = ("fps", "num_frames")
+
 
 def encoder_rr_assignment(
     e_urls: list[str], start: int, count: int
@@ -573,6 +580,51 @@ def extract_mm_items(request_data: dict) -> list[dict]:
     return items
 
 
+def _slice_mm_processor_kwargs(
+    mm_kwargs: Any, video_indices: list[int], num_videos: int
+) -> Any:
+    """Slice per-video list kwargs down to the videos a child carries.
+
+    `video_indices` are the positions of those videos among the original
+    request's videos. Scalars and unrelated kwargs pass through unchanged, in
+    whatever scope (flat or `videos_kwargs`) the request used; a child
+    without videos drops the per-video lists if the original request has videos.
+    An image-only original request retains its kwargs. `mm_kwargs` itself is
+    never modified, and the sliced value stays a list so both sides of the
+    transfer fold the same element into the cache hash.
+    """
+    if not isinstance(mm_kwargs, dict) or not num_videos:
+        return mm_kwargs
+
+    child = dict(mm_kwargs)
+    scoped = mm_kwargs.get("videos_kwargs")
+    if isinstance(scoped, dict):
+        child["videos_kwargs"] = dict(scoped)
+    else:
+        scoped = {}
+
+    for key in PER_VIDEO_MM_KWARGS:
+        # An explicit scoped value takes precedence over the flat spelling.
+        # Leave the shadowed value untouched so the base hash stays consistent.
+        scope = child["videos_kwargs"] if key in scoped else child
+        value = scope.get(key)
+        if not isinstance(value, list):
+            continue
+        if len(value) < num_videos:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"mm_processor_kwargs: {key} needs at least {num_videos}"
+                    " entries, one per video."
+                ),
+            )
+        if video_indices:
+            scope[key] = [value[i] for i in video_indices]
+        else:
+            scope.pop(key)
+    return child
+
+
 async def fanout_encoder_primer(
     orig_request: dict,
     e_urls: list[str],
@@ -600,6 +652,13 @@ async def fanout_encoder_primer(
         return {}, {}  # nothing to do
 
     logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
+
+    # Per-video kwargs index by position among the videos, not among all
+    # media items, so images interleaved with videos do not shift them.
+    video_positions: dict[int, int] = {}
+    for idx, item in enumerate(mm_items):
+        if item["type"] == "video_url":
+            video_positions[idx] = len(video_positions)
 
     tasks = []
     item_uuids: dict[int, str] = {}
@@ -670,8 +729,13 @@ async def fanout_encoder_primer(
             # once the prompt is encoded and its embeddings are published.
             "stream": False,
         }
+        if "mm_processor_kwargs" in orig_request:
+            encoder_req["mm_processor_kwargs"] = _slice_mm_processor_kwargs(
+                orig_request["mm_processor_kwargs"],
+                [video_positions[idx] for idx in indices if idx in video_positions],
+                len(video_positions),
+            )
         for key in (
-            "mm_processor_kwargs",
             "media_io_kwargs",
             "priority",
             "session_id",
