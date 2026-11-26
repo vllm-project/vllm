@@ -9,6 +9,7 @@ use vllm_chat::multimodal::MmModality;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_managed_engine::data_parallel::DataParallelTopology;
 use vllm_server::{
     AdmissionLimits, EngineCoreConfig, FingerprintMode, GenerationConfigMode, HttpListenerMode,
     LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
@@ -18,9 +19,22 @@ use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
-    BenchCommand, Cli, Command, DtypeArg, FrontendConfig, LlmSource, LogStatsInterval,
+    BenchCommand, Cli, Command, DtypeArg, FrontendConfig, LogStatsInterval, ServeArgs,
     SharedRuntimeArgs, parse_int_flag, parse_runtime_args_json,
 };
+
+impl ServeArgs {
+    fn to_frontend_config(
+        &self,
+        handshake_address: String,
+        topology: &DataParallelTopology,
+    ) -> FrontendConfig {
+        FrontendConfig {
+            server: self.to_server_config(),
+            engine_core: self.to_engine_core_config(handshake_address, topology),
+        }
+    }
+}
 
 impl FrontendConfig {
     /// Validate both halves, as the server does before starting.
@@ -31,7 +45,7 @@ impl FrontendConfig {
 }
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
-fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
+fn topology(args: &ServeArgs) -> DataParallelTopology {
     args.data_parallel_lb.resolve(&args.managed_engine, args.headless).unwrap()
 }
 
@@ -1444,12 +1458,14 @@ fn serve_accepts_remote_generation_with_an_optional_model_limit() {
         let Command::Serve(serve) = cli.command else {
             panic!("expected serve args");
         };
-        let Some((server, LlmSource::RemoteGrpc(url))) = serve.remote_frontend_config().unwrap()
-        else {
-            panic!("expected a frontend with a remote gRPC source");
-        };
-        assert_eq!(url, "unix:///run/vllm/generation.sock");
-        assert_eq!(server.max_model_len.map(|n| n.get()), expected);
+        assert_eq!(
+            serve.remote_generation_url.as_deref(),
+            Some("unix:///run/vllm/generation.sock")
+        );
+        assert_eq!(
+            serve.remote_max_model_len().unwrap().map(|n| n.get()),
+            expected
+        );
     }
 }
 

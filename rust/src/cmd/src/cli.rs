@@ -1119,104 +1119,43 @@ impl SharedRuntimeArgs {
         }
     }
 
-    /// Build the OpenAI-server config for the managed `serve` path that still
-    /// owns the startup handshake and binds its own HTTP listener.
-    fn to_managed_config(
+    /// Build the engine-core client config for the `serve` path that owns
+    /// the startup handshake.
+    fn to_engine_core_config(
         &self,
-        listener_mode: HttpListenerMode,
-        grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
         topology: &DataParallelTopology,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
         manages_engine: bool,
-    ) -> FrontendConfig {
+    ) -> EngineCoreConfig {
         let ready_timeout = self.ready_timeout();
         let log_stats_interval = self.log_stats_interval();
         let admission_limits = self.admission_limits();
         let profiler = self.profiler();
-
-        FrontendConfig {
-            server: self.to_server_config(listener_mode, grpc_listener_mode),
-            engine_core: EngineCoreConfig {
-                transport_mode: TransportMode::HandshakeOwner {
-                    handshake_address,
-                    advertised_host,
-                    engine_start_index: topology.frontend_engine_start_index(),
-                    engine_count: topology.frontend_engine_count(),
-                    data_parallel_size: topology.data_parallel_size,
-                    ready_timeout,
-                    local_input_address,
-                    local_output_address,
-                },
-                coordinator_mode: CoordinatorMode::MaybeInProc,
-                lora_modules: self.lora_modules.clone(),
-                default_mm_loras: self.default_mm_loras.clone(),
-                stream_interval: self.stream_interval,
-                admission_limits,
-                disable_log_stats: self.disable_log_stats,
-                log_stats_interval,
-                custom_histogram_buckets: self.custom_histogram_buckets.clone(),
-                disable_request_id_randomization: self.disable_request_id_randomization,
-                manages_engine,
-                profiler,
+        EngineCoreConfig {
+            transport_mode: TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host,
+                engine_start_index: topology.frontend_engine_start_index(),
+                engine_count: topology.frontend_engine_count(),
+                data_parallel_size: topology.data_parallel_size,
+                ready_timeout,
+                local_input_address,
+                local_output_address,
             },
-        }
-    }
-
-    fn to_server_config(
-        &self,
-        listener_mode: HttpListenerMode,
-        grpc_listener_mode: Option<HttpListenerMode>,
-    ) -> ServerConfig {
-        let ModelFileSources {
-            model,
-            tokenizer,
-            hf_config,
-            skip_tokenizer_init,
-            hf_token,
-        } = self.model_args().file_sources();
-
-        ServerConfig {
-            model: model.id,
-            max_model_len: None,
-            revision: model.revision,
-            tokenizer,
-            hf_config,
-            skip_tokenizer_init,
-            hf_token,
-            hf_overrides: self.hf_overrides.clone(),
-            generation_config: self.generation_config,
-            override_generation_config: self.override_generation_config.clone(),
-            served_model_name: self.served_model_name.clone(),
-            listener_mode,
-            grpc_listener_mode,
-            tool_call_parser: self.tool_call_parser.clone(),
-            reasoning_parser: self.reasoning_parser.clone(),
-            tool_strict_level: self.tool_strict_level,
-            structured_outputs_backend: self.structured_outputs_backend(),
-            renderer: self.renderer,
-            language_model_only: self.language_model_only,
-            chat_template: self.chat_template.clone(),
-            default_chat_template_kwargs: self.default_chat_template_kwargs.clone(),
-            reasoning_effort_map: self.reasoning_effort_map.clone().unwrap_or_default(),
-            trust_request_chat_template: self.trust_request_chat_template,
-            exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
-            limit_mm_per_prompt: self.limit_mm_per_prompt.clone(),
-            mm_processor_kwargs: self.mm_processor_kwargs.clone(),
-            chat_template_content_format: self.chat_template_content_format,
-            max_logprobs: self.max_logprobs,
-            api_server_options: self.api_server_options(),
-            fingerprint_mode: self.fingerprint_mode_config(),
-            cors: self.cors_config(),
-            access_log: self.access_log_config(),
-            tls: self.ssl.tls_config(),
-            root_path: self.root_path.clone().filter(|root_path| !root_path.is_empty()),
-            api_keys: self.api_key.clone(),
-            shutdown_timeout: self.shutdown_timeout(),
-            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
-            keep_alive_timeout: self.keep_alive_timeout(),
+            coordinator_mode: CoordinatorMode::MaybeInProc,
+            lora_modules: self.lora_modules.clone(),
+            default_mm_loras: self.default_mm_loras.clone(),
+            stream_interval: self.stream_interval,
+            admission_limits,
+            disable_log_stats: self.disable_log_stats,
+            log_stats_interval,
+            custom_histogram_buckets: self.custom_histogram_buckets.clone(),
+            disable_request_id_randomization: self.disable_request_id_randomization,
+            manages_engine,
+            profiler,
         }
     }
 
@@ -1586,44 +1525,83 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Build the frontend configuration when generation runs on a remote gRPC endpoint.
-    pub(super) fn remote_frontend_config(
-        &self,
-    ) -> anyhow::Result<Option<(ServerConfig, LlmSource)>> {
-        let Some(url) = self.remote_generation_url.as_ref() else {
-            return Ok(None);
-        };
-
+    pub(super) fn to_server_config(&self) -> ServerConfig {
         let (listener_mode, grpc_listener_mode) = self.listener_modes();
-        let mut server = self.runtime.to_server_config(listener_mode, grpc_listener_mode);
-        if let Some(value) = self.managed_engine.max_model_len.as_deref() {
-            let Some(limit) = parse_human_readable_int(value)
-                .and_then(|n| u32::try_from(n).ok())
-                .and_then(NonZeroU32::new)
-            else {
-                anyhow::bail!("remote --max-model-len must be a positive token count");
-            };
-            server.max_model_len = Some(limit);
-        }
+        let runtime = &self.runtime;
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
+        } = runtime.model_args().file_sources();
 
-        Ok(Some((server, LlmSource::RemoteGrpc(url.clone()))))
+        ServerConfig {
+            model: model.id,
+            max_model_len: None,
+            revision: model.revision,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
+            hf_overrides: runtime.hf_overrides.clone(),
+            generation_config: runtime.generation_config,
+            override_generation_config: runtime.override_generation_config.clone(),
+            served_model_name: runtime.served_model_name.clone(),
+            listener_mode,
+            grpc_listener_mode,
+            tool_call_parser: runtime.tool_call_parser.clone(),
+            reasoning_parser: runtime.reasoning_parser.clone(),
+            tool_strict_level: runtime.tool_strict_level,
+            structured_outputs_backend: runtime.structured_outputs_backend(),
+            renderer: runtime.renderer,
+            language_model_only: runtime.language_model_only,
+            chat_template: runtime.chat_template.clone(),
+            default_chat_template_kwargs: runtime.default_chat_template_kwargs.clone(),
+            reasoning_effort_map: runtime.reasoning_effort_map.clone().unwrap_or_default(),
+            trust_request_chat_template: runtime.trust_request_chat_template,
+            exclude_tools_when_tool_choice_none: runtime.exclude_tools_when_tool_choice_none,
+            limit_mm_per_prompt: runtime.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: runtime.mm_processor_kwargs.clone(),
+            chat_template_content_format: runtime.chat_template_content_format,
+            max_logprobs: runtime.max_logprobs,
+            api_server_options: runtime.api_server_options(),
+            fingerprint_mode: runtime.fingerprint_mode_config(),
+            cors: runtime.cors_config(),
+            access_log: runtime.access_log_config(),
+            tls: runtime.ssl.tls_config(),
+            root_path: runtime.root_path.clone().filter(|root_path| !root_path.is_empty()),
+            api_keys: runtime.api_key.clone(),
+            shutdown_timeout: runtime.shutdown_timeout(),
+            keep_alive_on_engine_death: runtime.keep_alive_on_engine_death,
+            keep_alive_timeout: runtime.keep_alive_timeout(),
+        }
     }
 
-    /// Build the OpenAI-server runtime config used after the managed Python
-    /// engine starts.
-    pub fn to_frontend_config(
+    pub(super) fn remote_max_model_len(&self) -> anyhow::Result<Option<NonZeroU32>> {
+        self.managed_engine
+            .max_model_len
+            .as_deref()
+            .map(|value| {
+                parse_human_readable_int(value)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .and_then(NonZeroU32::new)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("remote --max-model-len must be a positive token count")
+                    })
+            })
+            .transpose()
+    }
+
+    pub(super) fn to_engine_core_config(
         &self,
         handshake_address: String,
         topology: &DataParallelTopology,
-    ) -> FrontendConfig {
+    ) -> EngineCoreConfig {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
             topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
-        let (listener_mode, grpc_listener_mode) = self.listener_modes();
-
-        self.runtime.to_managed_config(
-            listener_mode,
-            grpc_listener_mode,
+        self.runtime.to_engine_core_config(
             handshake_address,
             self.managed_engine.handshake_host.clone(),
             topology,
