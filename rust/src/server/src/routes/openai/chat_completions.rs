@@ -277,10 +277,7 @@ async fn collect_chat_completion(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref(),
-            &prompt_token_ids,
-        )?)
+        Some(prompt_logprobs_to_maps(prompt_logprobs.as_ref()))
     } else {
         None
     };
@@ -289,6 +286,7 @@ async fn collect_chat_completion(
         timestamps,
         usage.output_token_count,
         spec_decode_metrics,
+        None,
     );
     let usage = Usage::from_token_usage(
         usage.engine,
@@ -575,6 +573,7 @@ async fn chat_completion_chunk_stream(
                 message,
                 usage: final_usage,
                 timestamps,
+                first_content_token_ts,
                 spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
@@ -653,6 +652,7 @@ async fn chat_completion_chunk_stream(
                         timestamps,
                         final_usage.output_token_count,
                         spec_decode_metrics.map(|value| *value),
+                        first_content_token_ts,
                     );
                     y.yield_ok(usage_chunk(
                         &envelope,
@@ -1264,6 +1264,7 @@ mod tests {
                     first_token_ts: 10.5,
                     last_token_ts: 11.0,
                 },
+                first_content_token_ts: Some(10.75),
                 spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                     num_spec_tokens: 3,
                     histogram: vec![0, 1, 1, 0],
@@ -1322,6 +1323,7 @@ mod tests {
         );
         assert!(chunks[..3].iter().all(|chunk| chunk.metrics.is_none()));
         let metrics = chunks[3].metrics.as_ref().expect("per-request metrics");
+        assert!((metrics.time_to_first_content_token_ms.unwrap() - 550.0).abs() < 1e-9);
         assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
         assert!((metrics.tokens_per_second.unwrap() - 1.25).abs() < 1e-9);
         assert_eq!(
@@ -1368,6 +1370,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1423,6 +1426,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: None,
@@ -1491,6 +1495,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1578,6 +1583,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1717,6 +1723,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 4, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1802,6 +1809,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1870,6 +1878,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(3, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1956,6 +1965,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2034,6 +2044,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2101,6 +2112,7 @@ mod tests {
                     message: Default::default(),
                     usage: done_usage(1, 1, 0),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: None,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,

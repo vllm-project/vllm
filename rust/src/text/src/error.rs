@@ -159,6 +159,8 @@ impl Error {
                 LlmError::SamplingMaskTokenCountMismatch { .. }
                 | LlmError::AuxOutputRows(_)
                 | LlmError::Unavailable { .. }
+                | LlmError::QueueFull
+                | LlmError::PrefillBacklogFull
                 | LlmError::Remote { .. } => ErrorKind::Internal,
             },
             Self::EngineCore(error) => engine_core_error_kind(error),
@@ -168,7 +170,12 @@ impl Error {
     /// Whether the request could not be taken now, so retrying later may
     /// succeed.
     pub fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Llm(LlmError::Unavailable { .. }))
+        matches!(
+            self,
+            Self::Llm(
+                LlmError::Unavailable { .. } | LlmError::QueueFull | LlmError::PrefillBacklogFull
+            )
+        )
     }
 }
 

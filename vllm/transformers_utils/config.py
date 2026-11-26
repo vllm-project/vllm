@@ -121,7 +121,7 @@ CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "num_attention_groups",  # Step3p5
     ),
     "num_experts": (
-        "num_experts",  # Jamba
+        "num_experts",  # Qwen3-MoE
         "moe_num_experts",  # Dbrx
         "n_routed_experts",  # DeepSeek
         "num_local_experts",  # Mixtral
