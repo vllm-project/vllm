@@ -66,6 +66,14 @@ class EEPNotificationType(enum.Enum):
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
+class EngineHealthState(enum.StrEnum):
+    """EngineCore answer to a `check_health_generate` utility call."""
+
+    OK = "ok"
+    BUSY = "busy"
+    SLEEPING = "sleeping"
+
+
 class FinishReason(enum.IntEnum):
     """Reason a request finished - stop, length, abort, error, or repetition.
 
@@ -159,6 +167,17 @@ class EngineCoreReadyResponse:
     # hashing failed) and whether expert parallelism is enabled.
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    # Whether the engine computes prompt logprobs, for frontends without a
+    # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
+    # which skips prompt tokens in some layers.
+    supports_prompt_logprobs: bool = True
+    # Whether a disaggregated consumer accepts placeholder metadata without
+    # embedding tensors.
+    allow_missing_mm_embeddings: bool = False
+    # Encoder cache tokens a request's distinct multimodal items may need in
+    # total, for frontends without a VllmConfig (the Rust frontend). Set
+    # without chunked prefill, when they are all encoded in one step.
+    max_mm_embeds_per_request: int | None = None
 
 
 class EngineCoreRequest(

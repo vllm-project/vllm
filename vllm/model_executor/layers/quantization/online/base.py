@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.quantization import (
     _ONLINE_SHORTHANDS,
     QuantizationConfigArgs,
@@ -53,6 +54,9 @@ from vllm.model_executor.layers.quantization.online.int8 import (
 from vllm.model_executor.layers.quantization.online.lm_head import (
     OnlineLMHeadMethodBase,
 )
+from vllm.model_executor.layers.quantization.online.loading import (
+    checkpoint_method,
+)
 from vllm.model_executor.layers.quantization.online.lut_b import (
     LutBOnlineMoEMethod,
 )
@@ -67,6 +71,7 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    Nvfp4WeightOnlyOnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     find_matching_patterns,
@@ -109,6 +114,7 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+    kNvfp4Static: Nvfp4WeightOnlyOnlineLinearMethod,
     # lm_head only (`OnlineLMHeadMethodBase`).
     kInt4Static32Asym: Int4PerGroup32AsymLMHeadMethod,
 }
@@ -510,6 +516,15 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 target_pattern,
             )
             assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
+            default = getattr(quant_method_cls, "activation_quant_key", None)
+            if envs.VLLM_RELOAD_MODE == "direct":
+                method = checkpoint_method(layer, quant_spec, default)
+                if method is None:
+                    raise NotImplementedError(
+                        f"{prefix}: online {quant_key_str} does not support "
+                        "VLLM_RELOAD_MODE=direct"
+                    )
+                return method
             kwargs = {}
             if quant_method_cls.accepts_activation_override:
                 kwargs["activation_quant_key"] = quant_spec.activation

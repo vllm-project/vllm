@@ -68,13 +68,18 @@ from vllm.models.deepseek_v4.amd.mega_moe import finalize_mega_moe_weights
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
+from vllm.models.deepseek_v4.amd.model import takes_rocm_mxfp8_input
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
+    MHC_SEAM_MIN_TOKENS,
     MHCOverlapStream,
+    mhc_pre_delayed_mxfp8,
     mhc_pre_delayed_overlap,
+    mhc_pre_delayed_seam,
     supports_mhc_overlap,
+    supports_mhc_seam,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import (
     MonoDecodeLayer,
@@ -84,6 +89,7 @@ from vllm.models.deepseek_v41.amd.mono_decode import flush as mono_flush
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
+from vllm.platforms.rocm import on_gfx942
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -336,6 +342,23 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.hc_attn_fn_packed: torch.Tensor | None = None
         self.hc_ffn_fn_packed: torch.Tensor | None = None
+        # Set at load: whether the attention / FFN seam also writes its layer
+        # input as MXFP8 for the first GEMM (fused_wqa_wkv / shared gate_up).
+        self.attn_seam_mxfp8 = False
+        self.ffn_seam_mxfp8 = False
+        # On gfx942, seams with a post block run as one AITER call
+        # from MHC_SEAM_MIN_TOKENS tokens.
+        self.mhc_seam = (
+            partial(mhc_pre_delayed_seam, self.mhc_pre_delayed)
+            if not self.fuse_seam_norm
+            and supports_mhc_seam(self.hidden_size, self.hc_mult)
+            else None
+        )
+        if self.mhc_seam is not None:
+            logger.info_once(
+                "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",
+                MHC_SEAM_MIN_TOKENS,
+            )
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
@@ -355,6 +378,17 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self,
                 f"{name}_packed",
                 rocm_aiter_ops.mega_mhc_pack_fn(getattr(self, name)),
+            )
+        # Quantizing inside Mega-MHC is cheaper than a separate quant launch,
+        # but only where the GEMM reads row-major MXFP8 as is. Sequence
+        # parallel gathers the layer input first, which drops the copy.
+        if not self.use_sequence_parallel:
+            self.attn_seam_mxfp8 = takes_rocm_mxfp8_input(self.attn.fused_wqa_wkv)
+            shared = self.ffn.shared_experts
+            self.ffn_seam_mxfp8 = (
+                self.ffn.use_mega_moe
+                and shared is not None
+                and takes_rocm_mxfp8_input(shared.gate_up_proj)
             )
         if self.mhc_overlap is not None:
             self.mhc_overlap.prepare_mega_mhc(self.hidden_size, self.hc_ffn_fn.device)
@@ -390,10 +424,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
             if out is not None:
                 return out
-        # Layer 0's attention seam projects the 2-D embedding with the folded
-        # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
-        # The fused kernel only takes the latter, so that seam keeps the
-        # separate attn_norm.
+        # Layer 0's attention seam keeps the separate attn_norm: where the fused
+        # kernel exists (gfx950), that seam projects the 2-D embedding with the
+        # folded hc_attn_fn_broadcast, which the fused kernel does not take.
         fuse_attn_norm = self.fuse_seam_norm and not (residual is None and x.dim() == 2)
         mhc_overlap = self.mhc_overlap
         if mhc_overlap is not None and (
@@ -407,7 +440,15 @@ class DeepseekV4DecoderLayer(nn.Module):
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap)
             if mhc_overlap is not None
-            else self.mhc_pre_delayed
+            else self.mhc_seam or self.mhc_pre_delayed
+        )
+        # The overlap's layer input comes from the Triton collapse, not Mega-MHC.
+        mxfp8_pre = partial(mhc_pre_delayed_mxfp8, self.mhc_pre_delayed)
+        attn_pre_fn = (
+            mxfp8_pre if mhc_overlap is None and self.attn_seam_mxfp8 else mhc_pre
+        )
+        ffn_pre_fn = (
+            mxfp8_pre if mhc_overlap is None and self.ffn_seam_mxfp8 else mhc_pre
         )
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
@@ -416,18 +457,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             if x.dim() == 2:
                 # First layer: the stream is the embedding broadcast to hc
                 # copies and the identity pre-mix selects copy 0.
-                assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                # When layer 0 is a whole mono layer (gfx942), the
-                # entry seam projects the expanded residual with the
-                # unfolded hc_attn_fn, as K1 does, instead of the embedding
-                # with the folded copy. The hc copies are equal, so the
-                # products are the same and only their order of addition
-                # changes, and pre_mix None still selects copy 0 as the
-                # layer input. The AITER op mhc_pre_delayed_aiter takes this
-                # form. The folded form has no AITER kernel on gfx942 and runs
-                # the eager reference instead, about 120 small kernels a step.
-                unfolded = self.mono is not None and self.mono.unfolded_entry
+                # gfx942 projects the expanded residual with the unfolded hc_attn_fn,
+                # which AITER takes; the equal hc copies only reorder the additions.
+                unfolded = on_gfx942()
+                if not unfolded:
+                    assert self.hc_attn_fn_broadcast is not None
                 residual, post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn if unfolded else self.hc_attn_fn_broadcast,
@@ -442,7 +477,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
-                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
+                residual, post_mix, res_mix, x, attn_pre = attn_pre_fn(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -480,7 +515,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_hashes[:, self.engram.layer_hash_index],
                     engram_mask,
                 )
-                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
+                residual, post_mix, res_mix, x, attn_pre = attn_pre_fn(
                     residual,
                     *pre_args,
                     pre_mix=pre_mix,
@@ -495,7 +530,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     res_mix,
                     x,
                     attn_pre,
-                ) = mhc_pre(
+                ) = attn_pre_fn(
                     residual,
                     *pre_args,
                     pre_mix=pre_mix,
@@ -523,7 +558,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 return out
             x = tensor_model_parallel_all_reduce(x)
 
-        residual, post_mix, res_mix, x, ffn_pre = mhc_pre(
+        residual, post_mix, res_mix, x, ffn_pre = ffn_pre_fn(
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -563,7 +598,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
         fuse_attn_norm = self.fuse_seam_norm
-        residual, post_mix, res_mix, x, _attn_pre = self.mhc_pre_delayed(
+        pre_fn = (
+            partial(mhc_pre_delayed_mxfp8, self.mhc_pre_delayed)
+            if self.attn_seam_mxfp8
+            else self.mhc_seam or self.mhc_pre_delayed
+        )
+        residual, post_mix, res_mix, x, _attn_pre = pre_fn(
             residual,
             self.hc_attn_fn,
             self.hc_attn_scale,

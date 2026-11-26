@@ -5,6 +5,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
+import numpy as np
+from numpy.typing import NDArray
+
 
 class TransferOp(Enum):
     READ = "read"
@@ -35,8 +38,17 @@ class TransferEvent:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BatchTransferResult:
+    """Terminal outcome covering `num_ranges`, not a count of successful ranges."""
+
+    num_ranges: int
+    state: TransferState
+    error: str | None = None
+
+
 class TransferBackend(ABC):
-    """Moves KV blocks between two workers and reports per-range outcomes."""
+    """Moves KV blocks between two workers synchronously."""
 
     @property
     @abstractmethod
@@ -68,6 +80,27 @@ class TransferBackend(ABC):
         returns an empty list. Blocks until every range reached a terminal
         state. Called from worker threads, so an implementation must accept
         concurrent calls.
+        """
+
+    @abstractmethod
+    def transfer_sync_arrays(
+        self,
+        peer: str,
+        op: TransferOp,
+        local_addrs: NDArray[np.uint64],
+        remote_addrs: NDArray[np.uint64],
+        lengths: NDArray[np.uint64],
+    ) -> BatchTransferResult:
+        """Moves equal-length, 1D, contiguous native uint64 columns.
+
+        Blocks until all ranges are terminal, holding the input buffers for the
+        duration of the call. Callers must not modify them meanwhile. Concurrent
+        calls keep their own inputs and results. Empty input completes without
+        engine work. COMPLETED means all ranges succeeded; FAILED does not mean
+        all failed. Use the first failure in input order when available.
+
+        Returns one batch summary without constructing per-range requests,
+        events or status arrays. Invalid inputs and engine exceptions propagate.
         """
 
     @abstractmethod

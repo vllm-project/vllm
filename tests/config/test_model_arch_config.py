@@ -23,23 +23,18 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 
 BASE_TRUST_REMOTE_CODE_MODELS = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "XiaomiMiMo/MiMo-7B-RL",
-    "stepfun-ai/Step-3.5-Flash",
     # Excluded: Not available online right now
     # "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
-    "meituan-longcat/LongCat-Flash-Chat",
 }
 
 BASE_MODELS_TO_TEST = [
-    "state-spaces/mamba-130m-hf",
+    "vllm-project/mamba2-130m-hf",
     "mistralai/Mamba-Codestral-7B-v0.1",
     # Excluded: terratorch/torchgeo version mismatch in CPU CI environment
     # (NonGeoDataset import error). Tested in model initialization tests.
     # "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
     "Zyphra/Zamba2-7B-instruct",
-    # FIXME: databricks/dbrx-instruct has been deleted
-    # "databricks/dbrx-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
     "vllm-project/deepseek_mtp_main_random",
@@ -51,26 +46,17 @@ BASE_MODELS_TO_TEST = [
     "lmsys/gpt-oss-20b-bf16",
     "deepseek-ai/DeepSeek-V3.2-Exp",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "stepfun-ai/Step-3.5-Flash",
+    "meituan-longcat/LongCat-Flash-Chat",
 ] + list(BASE_TRUST_REMOTE_CODE_MODELS)
 
-# (target_model, draft_model, trust_remote_code)
+# (target_model, draft_model)
 SPECULATIVE_MODELS = [
-    (
-        "vllm-project/deepseek_mtp_main_random",
-        "vllm-project/deepseek_mtp_draft_random",
-        True,
-    ),
-    ("vllm-project/deepseek-v3-random", "vllm-project/eagle-deepseek-v3-random", True),
-    (
-        "meta-llama/Meta-Llama-3-8B-Instruct",
-        "vllm-project/EAGLE-LLaMA3-Instruct-8B",
-        True,
-    ),
-    (
-        "meta-llama/Llama-3.1-8B-Instruct",
-        "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B",
-        True,
-    ),
+    ("vllm-project/deepseek_mtp_main_random", "vllm-project/deepseek_mtp_draft_random"),
+    ("vllm-project/deepseek-v3-random", "vllm-project/eagle-deepseek-v3-random"),
+    ("meta-llama/Meta-Llama-3-8B-Instruct", "vllm-project/EAGLE-LLaMA3-Instruct-8B"),
+    ("meta-llama/Llama-3.1-8B-Instruct", "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B"),
 ]
 
 
@@ -204,6 +190,27 @@ def test_head_size_falls_back_when_head_dim_is_zero():
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_head_size() == 128
+
+
+@pytest.mark.parametrize(
+    ("kv_lora_rank", "qk_rope_head_dim", "is_mla", "head_size"),
+    [(512, 64, True, 576), (256, 32, False, 64)],
+)
+def test_transformers_backend_mla_from_kv_lora_rank(
+    kv_lora_rank, qk_rope_head_dim, is_mla, head_size
+):
+    """On the Transformers backend, any model type with a `kv_lora_rank` uses MLA,
+    unless no MLA kernel supports its latent size (e.g. MiniCPM3's 288)."""
+    hf_config = PreTrainedConfig(
+        model_type="unlisted_mla",
+        head_dim=64,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+    )
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+    convertor.transformers_backend = True
+    assert convertor.is_deepseek_mla() == is_mla
+    assert convertor.get_head_size() == head_size
 
 
 def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.MonkeyPatch):
@@ -527,17 +534,13 @@ def test_base_model_arch_config(model: str):
     _assert_model_config_methods(model_config, expected)
 
 
-@pytest.mark.parametrize(
-    "target_model,draft_model,trust_remote_code", SPECULATIVE_MODELS
-)
-def test_draft_model_arch_config(
-    target_model: str, draft_model: str, trust_remote_code: bool
-):
+@pytest.mark.parametrize("target_model,draft_model", SPECULATIVE_MODELS)
+def test_draft_model_arch_config(target_model: str, draft_model: str):
     """Test model architecture config for draft/speculative models."""
     groundtruth = _load_groundtruth("draft_model_arch_groundtruth.json")
     expected = groundtruth[draft_model]
 
-    target_model_config = ModelConfig(target_model, trust_remote_code=trust_remote_code)
+    target_model_config = ModelConfig(target_model)
     speculative_config = SpeculativeConfig(
         model=draft_model,
         num_speculative_tokens=1,

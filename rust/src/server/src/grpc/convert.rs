@@ -120,9 +120,7 @@ pub fn to_text_request(
     }
 
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: response
-            .and_then(|options| options.skip_special_tokens)
-            .unwrap_or(true),
+        skip_special_tokens: response.and_then(|options| options.skip_special_tokens),
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
@@ -164,17 +162,12 @@ fn build_sampling_params(
     stopping: Option<&pb::StoppingCriteria>,
     response: Option<&pb::ResponseOptions>,
 ) -> Result<SamplingParams, Status> {
-    // Temperature is a top-level GenerateRequest field. Default to greedy (0.0) for
-    // the gRPC API when the caller does not specify a value. This differs from
-    // the HTTP/OpenAI API (which defaults to 1.0) and matches the convention of
-    // programmatic generation APIs.
-    let temperature = temperature.or(Some(0.0));
+    // Preserve explicit values; omitted fields inherit model defaults during lowering.
     let mut params = SamplingParams {
         temperature,
         ..SamplingParams::default()
     };
 
-    // Preserve explicit values; omitted fields inherit model defaults during lowering.
     if let Some(s) = sampling {
         // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
         // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
@@ -683,6 +676,42 @@ mod tests {
         }
     }
 
+    /// An omitted `skip_special_tokens` takes the generation-config default, as
+    /// on the HTTP routes; an explicit value wins.
+    #[test]
+    fn grpc_skip_special_tokens_defaults_to_generation_config() {
+        let mut resolved = Vec::new();
+        for skip_special_tokens in [None, Some(true)] {
+            let request = pb::GenerateRequest {
+                response: Some(pb::ResponseOptions {
+                    skip_special_tokens,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let text = to_text_request(request, false, &served()).unwrap();
+            let prepared = vllm_text::lower_text_request(
+                text,
+                vec![1],
+                SamplingHints {
+                    default_skip_special_tokens: Some(false),
+                    ..Default::default()
+                },
+                SamplingLimits {
+                    max_model_len: 256,
+                    max_logprobs: 20,
+                    model_vocab_size: 512,
+                    tokenizer_vocab_size: 512,
+                },
+                StructuredOutputBackend::Xgrammar,
+                &TestTokenizer::new(),
+            )
+            .unwrap();
+            resolved.push(prepared.text_request.decode_options.skip_special_tokens);
+        }
+        assert_eq!(resolved, [Some(false), Some(true)]);
+    }
+
     /// Clients built before `decoding.structured_output` still set the legacy
     /// inline fields, which must keep constraining generation; setting both is
     /// ambiguous and rejected.
@@ -871,13 +900,6 @@ mod tests {
             hints.actions[0].payload.get("source"),
             Some(&serde_json::json!("g2"))
         );
-    }
-
-    #[test]
-    fn unset_temperature_defaults_to_greedy() {
-        let text = to_text_request(base_request(), false, &served()).expect("convert ok");
-        // The gRPC API defaults to greedy (0.0) when temperature is not specified.
-        assert_eq!(text.sampling_params.temperature, Some(0.0));
     }
 
     #[test]

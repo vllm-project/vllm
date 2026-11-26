@@ -76,6 +76,7 @@ def _make_offloading_config(
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=world_size,
+            local_world_size=world_size,
             tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
@@ -312,6 +313,28 @@ def lookup_and_wait(
 def test_invalid_locality_raises_at_construction(locality):
     with pytest.raises(ValueError, match="Locality"):
         _make_tier(locality=locality)
+
+
+@pytest.mark.parametrize("access_mode", ["both", "ro", ""])
+def test_invalid_access_mode_raises_at_construction(access_mode):
+    with pytest.raises(ValueError, match="Invalid access_mode"):
+        _make_tier(access_mode=access_mode)
+
+
+@pytest.mark.parametrize(
+    "access_mode, can_read, can_write",
+    [
+        (None, True, True),
+        ("readwrite", True, True),
+        ("read", True, False),
+        ("write", False, True),
+    ],
+)
+def test_access_mode_sets_can_read_and_can_write(access_mode, can_read, can_write):
+    kwargs = {} if access_mode is None else {"access_mode": access_mode}
+    tier, _ = _make_tier(**kwargs)
+    assert tier.access_mode.can_read is can_read
+    assert tier.access_mode.can_write is can_write
 
 
 class TestMockObjTierBasic:

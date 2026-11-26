@@ -478,11 +478,18 @@ def test_moe_up_gate_matches_float64():
     assert _rel_err(got, ref) < 1e-5
 
 
-def _build_down(s, experts):
-    d = SimpleNamespace(inter_real=576, inter=640, mid_words=160)
+def _build_down(s, experts, inter_real):
+    inter = -(-inter_real // 128) * 128
+    d = SimpleNamespace(inter_real=inter_real, inter=inter, mid_words=inter // 4)
 
-    @flyc.kernel(name=f"test_down942_{s}", known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(
+        name=f"test_down942_{s}_{inter_real}", known_block_size=[THREADS, 1, 1]
+    )
     def kern(w2: Int64, w2s: Int64, mid: Int64, mids: Int64, out: Int64):
+        # FlyDSL keys its compile cache on the source and the scalar closure
+        # values. `d` is not a scalar, so `inter_real` is read here as one:
+        # otherwise the TP8 build would reuse the TP4 kernel.
+        assert d.inter_real == inter_real
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
         lane, wave = tid % 64, tid // 64
@@ -522,26 +529,32 @@ def _build_down(s, experts):
     return launch
 
 
-def test_moe_down_matches_float64():
+@pytest.mark.parametrize("tp", [4, 8])
+def test_moe_down_matches_float64(tp):
     """down_weights_942, mid_operands_942 and fp4_mfma_942 with w2 in the
     copy's fp4_tile_major byte order, against intermediate rows in the layout
-    that ug_mid_store_942 writes."""
+    that ug_mid_store_942 writes. At TP8 a w2 row is 288 wide and ends in one
+    K block, which takes the one-dword tail load. This runs on one GPU, so CI
+    covers the TP8 width without an 8-GPU node."""
     s, experts = 6, 2
+    inter_real = 2304 // tp
+    inter = -(-inter_real // 128) * 128
     g = torch.Generator(device="cuda").manual_seed(3)
-    wq, code, deq = _fp4_weights(experts * HIDDEN, 576, g)
-    y = torch.randn(s, 576, device="cuda", generator=g)
+    wq, code, deq = _fp4_weights(experts * HIDDEN, inter_real, g)
+    y = torch.randn(s, inter_real, device="cuda", generator=g)
     y[:, 7] = -50.0
     y8, ycode, ydeq = _fnuz_rows(y, q_order=False)
-    mid = torch.zeros(s, 640, device="cuda", dtype=torch.uint8)
-    mid[:, :576] = y8
+    mid = torch.zeros(s, inter, device="cuda", dtype=torch.uint8)
+    mid[:, :inter_real] = y8
     # Within each 128-byte step, the four 8-byte chunks of lane group j are
     # together, and each chunk holds the even K first.
-    mid = mid.view(s, 5, 4, 4, 8)[..., EVEN_ODD].permute(0, 1, 3, 2, 4)
-    mid = mid.contiguous().view(s, 640)
-    mids = torch.full((s, 20), 127, device="cuda", dtype=torch.int32)
-    mids[:, :18] = ycode
+    steps = inter // 128
+    mid = mid.view(s, steps, 4, 4, 8)[..., EVEN_ODD].permute(0, 1, 3, 2, 4)
+    mid = mid.contiguous().view(s, inter)
+    mids = torch.full((s, inter // 32), 127, device="cuda", dtype=torch.int32)
+    mids[:, : inter_real // 32] = ycode
     out = torch.zeros(s, experts * HIDDEN, device="cuda", dtype=torch.float32)
-    _build_down(s, experts)(
+    _build_down(s, experts, inter_real)(
         fp4_tile_major(wq).data_ptr(),
         code.data_ptr(),
         mid.data_ptr(),
