@@ -122,6 +122,16 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
         return output.view(*output_shape)
 
 
+def _is_xpu_woq_supported(kernel_name: str) -> tuple[bool, str | None]:
+    if not current_platform.is_xpu():
+        return False, f"{kernel_name} only support on XPU"
+    from vllm._xpu_ops import xpu_ops
+
+    if xpu_ops.supports_fp8_compute():
+        return False, f"{kernel_name} is only used on XPUs without native FP8"
+    return True, None
+
+
 class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def executed_activation_key(
@@ -133,9 +143,7 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.is_xpu():
-            return False, "XPUW8A16FP8Linear only support on XPU"
-        return True, None
+        return _is_xpu_woq_supported("XPUW8A16FP8Linear")
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -307,6 +315,12 @@ class XPUFp8W8A16BlockScaledMMKernel(XPUFp8BlockScaledMMKernel):
     """
 
     apply_input_quant = False
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return _is_xpu_woq_supported("XPUFp8W8A16BlockScaledMM")
 
     @classmethod
     def executed_activation_key(

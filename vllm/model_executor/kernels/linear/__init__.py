@@ -541,8 +541,8 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         CPUFp8BlockScaledMMKernel,
     ],
     PlatformEnum.XPU: [
-        XPUFp8BlockScaledMMKernel,
         XPUFp8W8A16BlockScaledMMKernel,
+        XPUFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -678,35 +678,6 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
 _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
 _LinearKernelT = TypeVar("_LinearKernelT", bound=LinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
-
-
-def _with_xpu_fp8_preference(
-    possible_kernels: dict[PlatformEnum, list[type[_KernelT]]],
-    quantization: str,
-    w8a8_kernel: type[_KernelT],
-    w8a16_kernel: type[_KernelT],
-) -> dict[PlatformEnum, list[type[_KernelT]]]:
-    """Xe3p computes FP8 natively and prefers W8A8. Other XPUs have no FP8
-    compute units and run faster weight-only, so they prefer W8A16 (no
-    activation quantization). Returns `possible_kernels` unchanged when
-    --linear-backend is set, and falls back along the list if the preferred
-    kernel cannot be used.
-    """
-    if _get_linear_backend(quantization=quantization) != "auto":
-        return possible_kernels
-    from vllm._xpu_ops import xpu_ops
-
-    preferred = w8a8_kernel if xpu_ops.supports_fp8_compute() else w8a16_kernel
-    xpu_kernels = possible_kernels[PlatformEnum.XPU]
-    if xpu_kernels[0] is preferred:
-        return possible_kernels
-    return {
-        **possible_kernels,
-        PlatformEnum.XPU: [
-            preferred,
-            *[k for k in xpu_kernels if k is not preferred],
-        ],
-    }
 
 
 def _check_activation_fallback(
@@ -902,24 +873,16 @@ def init_fp8_linear_kernel(
     )
 
     if activation_quant_key.scale.group_shape.is_per_group():
-        possible_block_kernels = _POSSIBLE_FP8_BLOCK_KERNELS
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
             force_kernel = _batch_invariant_fp8_kernel(
                 TritonFp8BlockScaledMMKernel,
                 scaled_mm_linear_kernel_config,
                 "fp8_block_w8a8",
             )
-        elif current_platform._enum == PlatformEnum.XPU and force_kernel is None:
-            possible_block_kernels = _with_xpu_fp8_preference(
-                possible_block_kernels,
-                "fp8_block_w8a8",
-                XPUFp8BlockScaledMMKernel,
-                XPUFp8W8A16BlockScaledMMKernel,
-            )
 
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
-            possible_kernels=possible_block_kernels,  # type: ignore[misc]
+            possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
             quantization="fp8_block_w8a8",
             force_kernel=force_kernel,
             activation_quant_key=activation_quant_key,
@@ -950,24 +913,16 @@ def init_fp8_linear_kernel(
         )
 
     else:
-        possible_fp8_kernels = _POSSIBLE_FP8_KERNELS
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
             force_kernel = _batch_invariant_fp8_kernel(
                 TritonFP8ScaledMMLinearKernel,
                 scaled_mm_linear_kernel_config,
                 "fp8_w8a8",
             )
-        elif current_platform._enum == PlatformEnum.XPU and force_kernel is None:
-            possible_fp8_kernels = _with_xpu_fp8_preference(
-                possible_fp8_kernels,
-                "fp8_w8a8",
-                XPUW8A8FP8LinearKernel,
-                XPUW8A16FP8LinearKernel,
-            )
 
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
-            possible_kernels=possible_fp8_kernels,  # type: ignore[arg-type]
+            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
             quantization="fp8_w8a8",
             force_kernel=force_kernel,
             activation_quant_key=activation_quant_key,

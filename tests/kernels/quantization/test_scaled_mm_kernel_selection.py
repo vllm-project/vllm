@@ -439,71 +439,75 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     assert kernels == original
 
 
-def _stub_xpu_ops(native_fp8: bool):
-    # vllm._xpu_ops needs vllm_xpu_kernels, so stub it for non-XPU CI.
-    return patch.dict(
+def _stub_xpu_ops(monkeypatch, native_fp8: bool) -> None:
+    # vllm._xpu_ops needs vllm_xpu_kernels, so stub only that module entry
+    # (avoid patch.dict(sys.modules), which would evict unrelated lazy imports).
+    monkeypatch.setitem(
         sys.modules,
-        {
-            "vllm._xpu_ops": MagicMock(
-                xpu_ops=MagicMock(
-                    supports_fp8_compute=MagicMock(return_value=native_fp8)
-                )
-            )
-        },
+        "vllm._xpu_ops",
+        MagicMock(
+            xpu_ops=MagicMock(supports_fp8_compute=MagicMock(return_value=native_fp8))
+        ),
     )
 
 
 @pytest.mark.parametrize("backend", ["auto", "xpu", "xpu_woq"])
 @pytest.mark.parametrize("native_fp8", [False, True])
 @pytest.mark.parametrize("block", [False, True])
-@patch.object(XPUFp8W8A16BlockScaledMMKernel, "is_supported", return_value=(True, None))
-@patch.object(XPUFp8BlockScaledMMKernel, "is_supported", return_value=(True, None))
-@patch.object(XPUW8A16FP8LinearKernel, "is_supported", return_value=(True, None))
-@patch.object(XPUW8A8FP8LinearKernel, "is_supported", return_value=(True, None))
+@patch("vllm.model_executor.kernels.linear.scaled_mm.xpu.current_platform")
 @patch("vllm.model_executor.kernels.linear.current_platform")
 def test_xpu_fp8_kernel_preference(
-    platform_mock, _w8a8, _w8a16, _blk, _blk16, block, native_fp8, backend
+    platform_mock, xpu_platform_mock, monkeypatch, block, native_fp8, backend
 ):
-    """Xe3p (native FP8) prefers W8A8; other XPUs prefer weight-only W8A16.
-
-    --linear-backend=xpu forces W8A8 on all XPUs; xpu_woq keeps W8A16 on Xe3p.
+    """Xe3p (native FP8) uses W8A8; other XPUs use weight-only W8A16 by default
+    and allow --linear-backend=xpu to select W8A8.
     """
-    platform_mock._enum = PlatformEnum.XPU
-    platform_mock.is_xpu.return_value = True
-    use_w8a8 = backend == "xpu" or (backend == "auto" and native_fp8)
-    if block:
-        act_key, w_key = kFp8Dynamic128Sym, kFp8Static128BlockSym
-        expected = (
-            XPUFp8BlockScaledMMKernel if use_w8a8 else XPUFp8W8A16BlockScaledMMKernel
-        )
-    else:
-        act_key = w_key = kFp8StaticTensorSym
-        expected = XPUW8A8FP8LinearKernel if use_w8a8 else XPUW8A16FP8LinearKernel
+    for mock_p in (platform_mock, xpu_platform_mock):
+        mock_p._enum = PlatformEnum.XPU
+        mock_p.is_xpu.return_value = True
 
+    act_key, w_key = (
+        (kFp8Dynamic128Sym, kFp8Static128BlockSym)
+        if block
+        else (kFp8StaticTensorSym, kFp8StaticTensorSym)
+    )
     config = VllmConfig(kernel_config=KernelConfig(linear_backend=backend))
-    with _stub_xpu_ops(native_fp8), set_current_vllm_config(config):
-        kernel = init_fp8_linear_kernel(
+    _stub_xpu_ops(monkeypatch, native_fp8)
+
+    def init_kernel():
+        return init_fp8_linear_kernel(
             activation_quant_key=act_key,
             weight_quant_key=w_key,
             input_dtype=torch.bfloat16,
             out_dtype=torch.bfloat16,
             weight_shape=(128, 128),
         )
+
+    with set_current_vllm_config(config):
+        if native_fp8 and backend == "xpu_woq":
+            with pytest.raises(ValueError, match="without native FP8"):
+                init_kernel()
+            return
+        kernel = init_kernel()
+
+    use_w8a8 = native_fp8 or backend == "xpu"
+    if block:
+        expected = (
+            XPUFp8BlockScaledMMKernel if use_w8a8 else XPUFp8W8A16BlockScaledMMKernel
+        )
+    else:
+        expected = XPUW8A8FP8LinearKernel if use_w8a8 else XPUW8A16FP8LinearKernel
     assert type(kernel) is expected
 
 
 @pytest.mark.parametrize("block", [False, True])
-@patch.object(XPUFp8W8A16BlockScaledMMKernel, "is_supported", return_value=(True, None))
-@patch.object(XPUFp8BlockScaledMMKernel, "is_supported", return_value=(True, None))
-@patch.object(XPUW8A16FP8LinearKernel, "is_supported", return_value=(True, None))
-@patch.object(XPUW8A8FP8LinearKernel, "is_supported", return_value=(True, None))
+@patch("vllm.model_executor.kernels.linear.scaled_mm.xpu.current_platform")
 @patch("vllm.model_executor.kernels.linear.current_platform")
-def test_xpu_fp8_fallback_to_w8a8(
-    platform_mock, _w8a8, _w8a16, _blk, _blk16, monkeypatch, block
-):
+def test_xpu_fp8_fallback_to_w8a8(platform_mock, xpu_platform_mock, monkeypatch, block):
     """Non-Xe3p falls back to W8A8 when W8A16 cannot run (strict mode or fp32)."""
-    platform_mock._enum = PlatformEnum.XPU
-    platform_mock.is_xpu.return_value = True
+    for mock_p in (platform_mock, xpu_platform_mock):
+        mock_p._enum = PlatformEnum.XPU
+        mock_p.is_xpu.return_value = True
     act_key, w_key = (
         (kFp8Dynamic128Sym, kFp8Static128BlockSym)
         if block
@@ -512,7 +516,8 @@ def test_xpu_fp8_fallback_to_w8a8(
     expected = XPUFp8BlockScaledMMKernel if block else XPUW8A8FP8LinearKernel
 
     config = VllmConfig(kernel_config=KernelConfig(linear_backend="auto"))
-    with _stub_xpu_ops(False), set_current_vllm_config(config):
+    _stub_xpu_ops(monkeypatch, False)
+    with set_current_vllm_config(config):
         monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", "1")
         kernel = init_fp8_linear_kernel(
             activation_quant_key=act_key,

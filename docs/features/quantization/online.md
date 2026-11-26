@@ -107,7 +107,7 @@ declares. An explicitly configured `activation: null` is not the same as an
 omitted activation: it requests unquantized (BF16) activations instead of the
 method's default.
 
-On XPU, FP8 scaled-mm linear layers (both non-block and block) default to W8A8 on Xe3p (native FP8) and W8A16 elsewhere; setting `--linear-backend xpu` forces W8A8, and `--linear-backend xpu_woq` forces weight-only quantization (W8A16). Setting `--linear-backend torch` also forces W8A8 but runs the GEMM through `torch._scaled_mm` instead of the custom XPU kernel.
+On XPU, FP8 scaled-mm linear layers (both non-block and block) use W8A8 on Xe3p (native FP8) and default to W8A16 elsewhere; on XPUs without native FP8, setting `--linear-backend xpu` forces W8A8 and `--linear-backend xpu_woq` explicitly selects weight-only quantization (W8A16). Setting `--linear-backend torch` also forces W8A8 but runs the GEMM through `torch._scaled_mm` instead of the custom XPU kernel.
 
 The CLI accepts the same shape as JSON or as dotted keys:
 
