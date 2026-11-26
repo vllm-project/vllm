@@ -224,6 +224,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics
+- `/set_log_level` - Change the `vllm` logger level, or one module logger, in the receiving API process, every EngineCore managed by that process, and every worker of those EngineCores. With `--api-server-count > 1`, peer API-server frontends are not updated. Always registered; does not require `VLLM_SERVER_DEV_MODE`.
 
 **Tokenizer information endpoint (only when `--enable-tokenizer-info-endpoint` is set):**
 
@@ -242,7 +243,6 @@ These endpoints are **only available when the environment variable `VLLM_SERVER_
 - `/sleep` - Put engine to sleep (causes denial of service)
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
-- `/set_log_level` - Change the `vllm` logger level (or a module logger) in the API process, every EngineCore, and every worker
 - `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
 
 **Profiler endpoints (only when profiling is enabled via `--profiler-config`):**

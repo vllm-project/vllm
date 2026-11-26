@@ -221,7 +221,10 @@ class EngineClient(ABC):
     async def set_log_level(
         self, level: str | int, logger_name: str | None = None
     ) -> dict[str, str]:
-        """Set a logger level in this process and every EngineCore / worker."""
+        """Set a logger level in this process and every managed EngineCore/worker.
+
+        Peer API-server frontends (``--api-server-count > 1``) are not updated.
+        """
         raise NotImplementedError
 
     @abstractmethod

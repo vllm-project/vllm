@@ -24,11 +24,16 @@ async def set_log_level(
     level: Annotated[str, Query()],
     logger_name: Annotated[str | None, Query(alias="logger")] = None,
 ) -> JSONResponse:
-    """Set a logger level in the API process, every EngineCore, and every worker.
+    """Set a logger level in the receiving API process and its engines/workers.
+
+    Updates this frontend process, every EngineCore managed by this client,
+    and every worker of those EngineCores. With ``--api-server-count > 1``,
+    peer API-server frontends are not notified.
 
     Omit ``logger`` (or pass ``root`` / ``vllm``) to update the ``vllm`` root
     logger and its handlers. Pass a module logger name to update only that
-    logger. Requires ``VLLM_SERVER_DEV_MODE=1``.
+    logger. This route is always registered and does not require
+    ``VLLM_SERVER_DEV_MODE``.
     """
     try:
         parse_log_level(level)

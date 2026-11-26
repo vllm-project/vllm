@@ -39,6 +39,11 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
+    # Always registered. Log-level changes do not depend on VLLM_SERVER_DEV_MODE.
+    from .dev.logging.api_router import attach_router as attach_logging_router
+
+    attach_logging_router(app)
+
 
 def register_vllm_dev_api_routers(app: FastAPI):
     logger.warning(
@@ -63,7 +68,3 @@ def register_vllm_dev_api_routers(app: FastAPI):
     from .dev.sleep.api_router import attach_router as attach_sleep_router
 
     attach_sleep_router(app)
-
-    from .dev.logging.api_router import attach_router as attach_logging_router
-
-    attach_logging_router(app)

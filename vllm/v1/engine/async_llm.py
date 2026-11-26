@@ -1228,7 +1228,10 @@ class AsyncLLM(EngineClient):
     async def set_log_level(
         self, level: str | int, logger_name: str | None = None
     ) -> dict[str, str]:
-        """Set log level in the API process, every EngineCore, and every worker."""
+        """Set log level in this API process and every managed EngineCore/worker.
+
+        Peer API-server frontends (``--api-server-count > 1``) are not updated.
+        """
         from vllm.logger import set_logger_level
 
         applied = set_logger_level(level, logger_name)

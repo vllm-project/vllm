@@ -166,6 +166,14 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/detokenize` - Detokenize tokens
 - `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
 
+## Log level
+
+`POST /set_log_level` is always available. It does not require `VLLM_SERVER_DEV_MODE`.
+
+- `/set_log_level` - Change the `vllm` logger level, or a module logger, in the API process that receives the request, every EngineCore managed by that process, and every worker of those EngineCores (e.g. `curl -X POST 'http://localhost:8000/set_log_level?level=DEBUG'` or `...?level=DEBUG&logger=vllm.v1.worker`)
+
+With `--api-server-count > 1`, only the receiving frontend process is updated. Peer API-server processes keep their previous logger levels; repeating the POST through the shared listener does not target each frontend.
+
 ## Elastic Expert Parallelism (EEP)
 
 - `/scale_elastic_ep` - Trigger scaling operations
@@ -214,7 +222,6 @@ For further details on sleep mode, please refer to [this page](../../features/sl
 - `/sleep` - Put engine to sleep (causes denial of service)
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
-- `/set_log_level` - Change the `vllm` logger level, or a module logger, in the API process, every EngineCore, and every worker (e.g. `curl -X POST 'http://localhost:8000/set_log_level?level=DEBUG'` or `...?level=DEBUG&logger=vllm.v1.worker`)
 
 ## Chat Template
 
