@@ -17,6 +17,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.deepseek_v41.amd import mono_decode as md
+from vllm.platforms import current_platform
 
 M = 6
 
@@ -202,6 +203,49 @@ def test_index_source_selects_between_the_kernels(run):
     between K1 and K2."""
     out, calls = run(layer=_layer(indexer=object()))
     assert out == ("mono outputs",) and callable(calls[0][1]["select"])
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+def test_index_source_compressor_writes_its_main_cache_rows():
+    calls = []
+    rotary, indexer_rotary = object(), object()
+
+    class Compressor:
+        fused_wkv_wgate = SimpleNamespace(
+            weight=torch.randn(4, 16, dtype=torch.bfloat16, device="cuda")
+        )
+
+        def __call__(self, kv_score, positions, *args):
+            calls.append(("compress", kv_score.dtype, args))
+            return "latent"
+
+        def insert_cache(self, *args):
+            calls.append(("insert_cache",))
+
+    indexer = SimpleNamespace(
+        _produce_k=lambda latent, positions, rope: calls.append(
+            ("produce_k", latent, rope)
+        ),
+        weights_proj=lambda normed: ("weights", None),
+        forward_q=lambda qr, qr_scale, weights, positions, rope: ("q", None, weights),
+        indexer_op=lambda *args: calls.append(("indexer_op",)),
+    )
+    attn = SimpleNamespace(
+        compressor=Compressor(),
+        indexer=indexer,
+        rotary_emb=rotary,
+        indexer_rotary_emb=indexer_rotary,
+    )
+    normed = torch.randn(7, 16, dtype=torch.bfloat16, device="cuda")
+    md._select(
+        SimpleNamespace(attn=attn), torch.arange(7, device="cuda"), normed, normed
+    )
+
+    assert calls == [
+        ("compress", torch.float32, (rotary,)),
+        ("produce_k", "latent", indexer_rotary),
+        ("indexer_op",),
+    ]
 
 
 def test_padded_decode_step_runs_mono(run):

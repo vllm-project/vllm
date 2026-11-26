@@ -26,7 +26,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, Self
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -141,6 +141,7 @@ class TestPushScheduler:
         sched.on_new_request(request)
 
         assert len(request.prompt_token_ids) == original_len - 1
+        assert request.kv_transfer_params is not None
         assert request.kv_transfer_params["_p_side_truncated"] is True
 
         with patch.object(
@@ -337,8 +338,11 @@ class _StubWriterWorker(NixlPushConnectorWorker):
     """Construct a worker without invoking `__init__` so we can drive
     the matching/notif logic without bringing up NIXL or torch."""
 
+    start_push_calls: list[tuple[str, tuple[list[int], ...], dict[str, object]]]
+    writes: list[str]
+
     @classmethod
-    def fresh(cls) -> _StubWriterWorker:
+    def fresh(cls) -> Self:
         w = object.__new__(cls)
 
         # Push-specific state managed by NixlPushConnectorWorker.
@@ -388,6 +392,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._failed_remote_engines = set()
+        w._disconnected_remote_engines = set()
         w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
@@ -399,9 +404,11 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}
+        w._inflight_pushes = {}
+        w._next_held_lease_check = 0.0
 
         # Track _do_start_push_kv invocations.
-        calls: list[tuple[str, Any, dict[str, Any]]] = []
+        calls: list[tuple[str, tuple[list[int], ...], dict[str, object]]] = []
         w.start_push_calls = calls
         return w
 
@@ -448,15 +455,19 @@ class TestPushWriterRegSend:
     send can't race the handshake done-callback's insert or a concurrent
     stale-engine eviction (X1)."""
 
-    def _reg_send_worker(self) -> tuple[_StubWriterWorker, list]:
+    def _reg_send_worker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[_StubWriterWorker, list]:
         w = _StubWriterWorker.fresh()
         w.nixl_wrapper = MagicMock()
         failures: list = []
-        w._handle_failed_transfer = lambda *a: failures.append(a)
+        monkeypatch.setattr(w, "_handle_failed_transfer", lambda *a: failures.append(a))
         return w, failures
 
-    def test_sends_to_all_agents_with_prefix_and_payload(self):
-        w, failures = self._reg_send_worker()
+    def test_sends_to_all_agents_with_prefix_and_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        w, failures = self._reg_send_worker(monkeypatch=monkeypatch)
         w._remote_agents["prefill-engine"] = {(0, 0): "agent-0", (0, 1): "agent-1"}
         rd = _registration_data("req-1")
 
@@ -478,8 +489,10 @@ class TestPushWriterRegSend:
                 list(group) for group in rd["local_block_ids"]
             ]
 
-    def test_queues_failed_request_when_engine_not_handshaked(self):
-        w, failures = self._reg_send_worker()
+    def test_queues_failed_request_when_engine_not_handshaked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        w, failures = self._reg_send_worker(monkeypatch=monkeypatch)
 
         w._do_send_reg_notif("req-1", _registration_data("req-1"))
 
@@ -488,11 +501,13 @@ class TestPushWriterRegSend:
         assert w._failed_recv_reqs.empty()
         w.nixl_wrapper.send_notif.assert_not_called()
 
-    def test_agent_read_is_serialized_with_handshake_lock(self):
+    def test_agent_read_is_serialized_with_handshake_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """While another thread holds `_handshake_lock` (as the handshake
         done-callback does while writing `_remote_agents`), the writer's
         check-then-send must not run ahead of the critical section."""
-        w, failures = self._reg_send_worker()
+        w, failures = self._reg_send_worker(monkeypatch=monkeypatch)
         w._remote_agents["prefill-engine"] = {(0, 0): "agent-0"}
         rd = _registration_data("req-1")
 
@@ -624,15 +639,15 @@ class TestPushWriterStartLoadKv:
         assert w.start_push_calls[0][0] == "req-C"
         assert "req-C" not in w._pending_d_registrations
 
-    def test_start_load_kv_enqueues_to_writer(self):
+    def test_start_load_kv_enqueues_to_writer(self, monkeypatch: pytest.MonkeyPatch):
         """`start_load_kv` should hand registrations + finished blocks
         to the writer queues without doing matching itself."""
         w = _StubWriterWorker.fresh()
         # Stub heartbeats to a no-op; tests don't exercise the heartbeat
         # path here.
-        w._send_heartbeats = lambda metadata: None
+        monkeypatch.setattr(w, "_send_heartbeats", lambda metadata: None)
         # Stub logical-to-kernel mapping used by reqs_to_recv.
-        w._logical_to_kernel_block_ids = lambda x, ratio: x
+        monkeypatch.setattr(w, "_logical_to_kernel_block_ids", lambda x, ratio: x)
 
         meta = NixlConnectorMetadata()
         meta.push_registrations = {
@@ -651,11 +666,13 @@ class TestPushWriterStartLoadKv:
         assert w.start_push_calls == []
 
     @pytest.mark.parametrize("sharded", [False, True])
-    def test_noncanonical_pcp_rank_only_pushes_distinct_shards(self, sharded):
+    def test_noncanonical_pcp_rank_only_pushes_distinct_shards(
+        self, sharded, monkeypatch: pytest.MonkeyPatch
+    ):
         w = _StubWriterWorker.fresh()
         w.pcp_rank = 1
         w.pcp_dcp_sharded = sharded
-        w._send_heartbeats = MagicMock()
+        monkeypatch.setattr(w, "_send_heartbeats", MagicMock())
 
         meta = NixlConnectorMetadata()
         meta.push_finished_blocks["req"] = ([1, 2],)
@@ -668,6 +685,7 @@ class TestPushWriterStartLoadKv:
         assert ("req" in w._reqs_to_process) is sharded
         assert ("req" in w._reqs_to_send) is sharded
         assert w._push_writer_wake.is_set() is sharded
+        assert isinstance(w._send_heartbeats, MagicMock)
         assert w._send_heartbeats.called is sharded
 
 
@@ -676,22 +694,24 @@ class TestPushWriterStartLoadKv:
 # handshake resolves, then re-drives via ``_deferred_push_inbox``. These call
 # the *real* ``_do_start_push_kv`` (the stub overrides it for matching tests).
 def _real_do_start_push_kv(w, *args):
-    return NixlPushConnectorWorker._do_start_push_kv(w, *args)
+    return NixlPushConnectorWorker._start_push_kv(w, *args)
 
 
-def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
+def test_do_start_push_kv_defers_then_writes_when_handshake_ready(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Full happy-path lifecycle: an in-flight handshake defers the WRITE (no
     NIXL op from the writer or the executor callback); once it resolves the
     request is re-queued on `_deferred_push_inbox` with the wake set; and on
     re-drive with the handshake ready the WRITE is issued with a correct
     ReqMeta."""
     w = _StubWriterWorker.fresh()
-    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    monkeypatch.setattr(w, "_logical_to_kernel_block_ids", lambda x, ratio: x)
     xfer_calls: list[dict[str, Any]] = []
-    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    monkeypatch.setattr(w, "_xfer_blocks_for_req", lambda **kw: xfer_calls.append(kw))
 
     fut: Future = Future()
-    w._ensure_handshake = lambda *a, **k: fut
+    monkeypatch.setattr(w, "_ensure_handshake", lambda *a, **k: fut)
 
     rd = _registration_data("req-hs", decode_engine_id="decode-engine")
     _real_do_start_push_kv(w, "req-hs", ([1, 2, 3],), rd)
@@ -710,7 +730,7 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     assert (rid, blocks, reg) == ("req-hs", ([1, 2, 3],), rd)
 
     # Re-drive on the writer with the handshake now ready -> WRITE issued.
-    w._ensure_handshake = lambda *a, **k: None
+    monkeypatch.setattr(w, "_ensure_handshake", lambda *a, **k: None)
     _real_do_start_push_kv(w, rid, blocks, reg)
     assert len(xfer_calls) == 1
     assert xfer_calls[0]["req_id"] == "req-hs"
@@ -721,19 +741,21 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     assert meta.remote.request_id == "req-hs"
 
 
-def test_do_start_push_kv_drops_request_on_handshake_failure():
+def test_do_start_push_kv_drops_request_on_handshake_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Handshake raises: the request is dropped (not re-queued, no WRITE) and
     the failure is logged. Blocks are reclaimed by the lease/watchdog, matching
     the old blocking behaviour."""
     w = _StubWriterWorker.fresh()
-    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    monkeypatch.setattr(w, "_logical_to_kernel_block_ids", lambda x, ratio: x)
     xfer_calls: list[dict[str, Any]] = []
-    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    monkeypatch.setattr(w, "_xfer_blocks_for_req", lambda **kw: xfer_calls.append(kw))
     failures: list[dict[str, Any]] = []
-    w._log_failure = lambda **kw: failures.append(kw)
+    monkeypatch.setattr(w, "_log_failure", lambda **kw: failures.append(kw))
 
     fut: Future = Future()
-    w._ensure_handshake = lambda *a, **k: fut
+    monkeypatch.setattr(w, "_ensure_handshake", lambda *a, **k: fut)
 
     _real_do_start_push_kv(w, "req-fail", ([9],), _registration_data("req-fail"))
     fut.set_exception(RuntimeError("handshake boom"))
@@ -781,7 +803,9 @@ def test_writer_loop_drains_deferred_push_inbox():
     assert w.start_push_calls[0][0] == "req-retry"
 
 
-def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
+def _eviction_worker(
+    engine_ttl: float, monkeypatch: pytest.MonkeyPatch
+) -> _StubWriterWorker:
     """A push worker wired to drive the base `_ensure_handshake` eviction
     path (`_evict_stale_engines` + `_cleanup_remote_engine`)."""
     w = _StubWriterWorker.fresh()
@@ -795,17 +819,19 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w.dst_num_blocks = {}
     w.source_ranks = {}
     w.transfer_topo = None
-    w._logical_to_kernel_block_ids = lambda blocks, ratio: blocks
+    monkeypatch.setattr(w, "_logical_to_kernel_block_ids", lambda blocks, ratio: blocks)
     w.writes = []
-    w._xfer_blocks_for_req = lambda req_id, meta: w.writes.append(req_id)
+    monkeypatch.setattr(
+        w, "_xfer_blocks_for_req", lambda req_id, meta: w.writes.append(req_id)
+    )
     return w
 
 
-def test_active_push_refreshes_engine_last_active():
+def test_active_push_refreshes_engine_last_active(monkeypatch: pytest.MonkeyPatch):
     """The base `_ensure_handshake` refreshes liveness only on a new
     handshake, so an active push to an already-connected engine must refresh
     `_engine_last_active` itself or it is reaped mid-stream (S1)."""
-    w = _eviction_worker(engine_ttl=3600.0)
+    w = _eviction_worker(engine_ttl=3600.0, monkeypatch=monkeypatch)
     # Already-connected D -> _ensure_handshake returns None, WRITE runs inline.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
     stale = time.perf_counter() - 5.0
@@ -817,28 +843,35 @@ def test_active_push_refreshes_engine_last_active():
     assert w.writes == ["req"]
 
 
-def test_stale_engine_evicted_on_push():
+@pytest.mark.parametrize("inflight", [False, True])
+def test_stale_engine_evicted_on_push(inflight, monkeypatch: pytest.MonkeyPatch):
     """A push drives `_ensure_handshake` -> `_evict_stale_engines`, so a D
     engine silent past its TTL is reaped -- no _remote_agents / NIXL agent leak
-    across D scale up/down (S1)."""
-    w = _eviction_worker(engine_ttl=30.0)
+    across D scale up/down (S1) -- unless WRITEs to it are still in flight."""
+    w = _eviction_worker(engine_ttl=30.0, monkeypatch=monkeypatch)
     w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
     w._engine_last_active["D-old"] = time.perf_counter() - 10_000.0
+    if inflight:
+        w._sending_transfers["req-old"] = [7]
+        w._inflight_pushes["req-old"] = "D-old"
     # The engine being pushed to is already connected.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
 
     _real_do_start_push_kv(w, "req", ([1, 2, 3],), _registration_data("req"))
 
-    assert "D-old" not in w._remote_agents
-    assert "D-old" not in w._engine_last_active
-    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
+    assert w.writes == ["req"]
+    assert ("D-old" in w._remote_agents) is inflight
+    assert ("D-old" in w._engine_last_active) is inflight
+    assert w.nixl_wrapper.remove_remote_agent.call_count == (not inflight)
 
 
-def test_cleanup_remote_engine_pops_under_handshake_lock():
+def test_cleanup_remote_engine_pops_under_handshake_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Regression (X1): eviction must not remove `_remote_agents` entries
     while another thread is inside the lock's critical section (e.g. the
     push writer reading the map to send a registration)."""
-    w = _eviction_worker(engine_ttl=30.0)
+    w = _eviction_worker(engine_ttl=30.0, monkeypatch=monkeypatch)
     w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
 
     w._handshake_lock.acquire()
@@ -875,15 +908,17 @@ def _recv_metadata(remote_engine_id: str, req_id: str = "req") -> NixlConnectorM
     return meta
 
 
-def test_start_load_kv_refreshes_engine_last_active_on_d_side():
+def test_start_load_kv_refreshes_engine_last_active_on_d_side(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """D receiving a push refreshes `_engine_last_active` for the prefill
     remote, but only once that engine is connected (handshaked into
     `_remote_agents` via heartbeats), mirroring the P-side refresh which runs
     after `_ensure_handshake`. Without it the prefill engine is reaped
     mid-stream once it passes its TTL."""
     w = _StubWriterWorker.fresh()
-    w._send_heartbeats = lambda metadata: None
-    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    monkeypatch.setattr(w, "_send_heartbeats", lambda metadata: None)
+    monkeypatch.setattr(w, "_logical_to_kernel_block_ids", lambda x, ratio: x)
     # Connected prefill engine (already handshaked in).
     w._remote_agents["prefill-engine"] = {(0, 0): "agent-p"}
 
@@ -896,14 +931,16 @@ def test_start_load_kv_refreshes_engine_last_active_on_d_side():
     assert "req" in w._recving_metadata
 
 
-def test_start_load_kv_skips_liveness_for_unconnected_engine():
+def test_start_load_kv_skips_liveness_for_unconnected_engine(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """If the prefill engine was never handshaked into `_remote_agents` (e.g.
     its heartbeat handshake never succeeded), the D-side refresh must NOT record
     an `_engine_last_active` entry -- otherwise a later eviction pass hits the
     `_remote_agents` invariant in `_cleanup_remote_engine` and crashes on
     the D node."""
-    w = _eviction_worker(engine_ttl=30.0)
-    w._send_heartbeats = lambda metadata: None
+    w = _eviction_worker(engine_ttl=30.0, monkeypatch=monkeypatch)
+    monkeypatch.setattr(w, "_send_heartbeats", lambda metadata: None)
 
     w.start_load_kv(_recv_metadata("prefill-engine"))
 
@@ -973,6 +1010,7 @@ class TestPushWriterNotifs:
     def _make_sending_req(self, w: _StubWriterWorker) -> str:
         request_id = "req-send-1"
         w._sending_transfers[request_id] = [101, 102]
+        w._inflight_pushes[request_id] = "decode-engine"
         w._reqs_to_send[request_id] = time.perf_counter() + 60
         w._reqs_to_process.add(request_id)
         return request_id
@@ -1023,6 +1061,7 @@ class TestPushWriterNotifs:
         assert w.get_transfer_results().finished_sending == set()
         assert w._evict_finished_inbox.empty()
         assert w.nixl_wrapper.release_xfer_handle.call_count == 2
+        assert isinstance(w.xfer_stats, MagicMock)
         w.xfer_stats.record_kv_expired_req.assert_not_called()
 
     @pytest.mark.parametrize("sibling_state", ["ERR", "DONE"])
@@ -1047,7 +1086,7 @@ class TestPushWriterNotifs:
 
     @pytest.mark.parametrize("release_fails", [False, True])
     def test_push_submission_failure_is_remembered_after_sibling_success(
-        self, release_fails
+        self, release_fails, monkeypatch: pytest.MonkeyPatch
     ):
         """A submission error remains a failure even if later polls succeed."""
         w = self._pollable_worker()
@@ -1087,7 +1126,11 @@ class TestPushWriterNotifs:
 
     @pytest.mark.parametrize("first_state", ["ERR", "DONE"])
     def test_push_completion_after_expiry_is_not_reported_twice(self, first_state):
-        """A WRITE finishing after lease expiry must not complete the request again."""
+        """An expired lease waits for in-flight WRITEs, then completes once.
+
+        Releasing the blocks while a WRITE still reads them would let the
+        scheduler reuse memory that is on the wire.
+        """
         w = self._pollable_worker()
         request_id = self._make_sending_req(w)
         w.nixl_wrapper.check_xfer_state.side_effect = [
@@ -1100,13 +1143,84 @@ class TestPushWriterNotifs:
 
         w.expected_consumer_notifications_by_req = {}
         w._reqs_to_send[request_id] = time.perf_counter() - 1
-        assert w.get_transfer_results().finished_sending == {request_id}
+        # The second WRITE is still in flight: the lease does not expire yet.
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id in w._reqs_to_send
+        assert w._evict_finished_inbox.empty()
+
+        reported = w.get_transfer_results().finished_sending
+        if first_state == "ERR":
+            # A failed WRITE is not success; the expired lease reclaims it.
+            assert reported == set()
+            reported = w.get_transfer_results().finished_sending
+        assert reported == {request_id}
         assert w._evict_finished_inbox.get_nowait() == request_id
 
         assert w.get_transfer_results().finished_sending == set()
+        assert request_id not in w._reqs_to_send
         assert request_id not in w._sending_transfers
         assert request_id not in w._send_failures
         assert w._evict_finished_inbox.empty()
+
+    def test_expired_lease_waits_for_submission(self, monkeypatch: pytest.MonkeyPatch):
+        """A lease expiring while the request's WRITEs are being submitted
+        keeps its blocks until the submission ends."""
+        w = self._pollable_worker()
+        request_id = "req-submit"
+        w._reqs_to_send[request_id] = time.perf_counter() - 1
+        w._reqs_to_process.add(request_id)
+        w.expected_consumer_notifications_by_req = {}
+        during: list[set[str]] = []
+
+        def submit(*args):
+            during.append(w.get_transfer_results().finished_sending)
+
+        monkeypatch.setattr(w, "_start_push_kv", submit)
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+
+        assert during == [set()]
+        assert w.get_transfer_results().finished_sending == {request_id}
+
+    def test_released_request_is_not_pushed(self, monkeypatch: pytest.MonkeyPatch):
+        """A registration arriving after the request's blocks were released
+        must not WRITE from them."""
+        w = self._pollable_worker()
+        request_id = "req-late"
+        start_push_kv = MagicMock()
+        monkeypatch.setattr(w, "_start_push_kv", start_push_kv)
+
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+
+        start_push_kv.assert_not_called()
+        assert not w._inflight_pushes
+
+    def test_push_dst_engine_tracked_until_writes_finish(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """TTL eviction keeps a D engine while WRITEs to it are in flight."""
+        w = self._pollable_worker()
+        request_id = "req-dst"
+        w._reqs_to_send[request_id] = time.perf_counter() + 60
+        w._reqs_to_process.add(request_id)
+        w.expected_consumer_notifications_by_req = {}
+        monkeypatch.setattr(
+            w,
+            "_start_push_kv",
+            lambda rid, *_: w._sending_transfers[rid].append(101),
+        )
+
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+        assert w._engines_with_inflight_transfers() == {"decode-engine"}
+
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+        assert w.get_transfer_results().finished_sending == {request_id}
+        assert w._engines_with_inflight_transfers() == set()
 
 
 # ----------------------------------------------------------------- #
@@ -1310,12 +1424,14 @@ class TestPushWriterNegative:
         # Wake set so the writer drains NIXL notifs even when idle.
         assert w._push_writer_wake.is_set()
 
-    def test_failed_push_transfer_does_not_evict_writer_state(self):
+    def test_failed_push_transfer_does_not_evict_writer_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         w = _StubWriterWorker.fresh()
         w.nixl_wrapper = MagicMock()
         w.nixl_wrapper.check_xfer_state.return_value = "ERR"
         w.xfer_stats = MagicMock()
-        w._log_failure = MagicMock()
+        monkeypatch.setattr(w, "_log_failure", MagicMock())
         w._sending_transfers["req-failed"] = [17]
         w._reqs_to_send["req-failed"] = time.perf_counter() + 30
         w._reqs_to_process.add("req-failed")
@@ -1351,11 +1467,13 @@ class TestPushWriterNegative:
         assert "never-heard-of-you" not in w._recving_transfers
         assert w.xfer_stats.data["num_notifications_after_expiry"] == [1]
 
-    def test_start_load_kv_with_empty_metadata_is_noop(self):
+    def test_start_load_kv_with_empty_metadata_is_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """Empty metadata must not wake the writer or enqueue anything."""
         w = _StubWriterWorker.fresh()
-        w._send_heartbeats = lambda metadata: None
-        w._logical_to_kernel_block_ids = lambda x, ratio: x
+        monkeypatch.setattr(w, "_send_heartbeats", lambda metadata: None)
+        monkeypatch.setattr(w, "_logical_to_kernel_block_ids", lambda x, ratio: x)
 
         meta = NixlConnectorMetadata()
         w.start_load_kv(meta)
@@ -1500,7 +1618,7 @@ class TestPushWriterMlaReplication:
     leave the un-written ranks decoding against stale KV."""
 
     @staticmethod
-    def _mla_worker_writing_to(d_ranks):
+    def _mla_worker_writing_to(d_ranks, monkeypatch: pytest.MonkeyPatch):
         from types import SimpleNamespace
 
         engine_id = "decode-engine"
@@ -1591,7 +1709,9 @@ class TestPushPrefixCaching:
     """
 
     @staticmethod
-    def _worker_driving_xfer(engine_id: str = "decode-engine"):
+    def _worker_driving_xfer(
+        monkeypatch: pytest.MonkeyPatch, engine_id: str = "decode-engine"
+    ):
         from types import SimpleNamespace
 
         w = _StubWriterWorker.fresh()
@@ -1624,8 +1744,8 @@ class TestPushPrefixCaching:
         # computation and count assertions all run for real.
         w.nixl_wrapper = MagicMock()
         w.nixl_wrapper.make_prepped_xfer.return_value = 7
-        w._ensure_handshake = lambda *a, **k: None
-        w._logical_to_kernel_block_ids = lambda x, ratio: x
+        monkeypatch.setattr(w, "_ensure_handshake", lambda *a, **k: None)
+        monkeypatch.setattr(w, "_logical_to_kernel_block_ids", lambda x, ratio: x)
         return w, engine_id
 
     @staticmethod
@@ -1635,13 +1755,15 @@ class TestPushPrefixCaching:
         # ("WRITE", local_handle, local_descs, remote_handle, remote_descs)
         return list(args[2]), list(args[4])
 
-    def test_partial_prefix_hit_end_trims_producer_blocks(self):
+    def test_partial_prefix_hit_end_trims_producer_blocks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """D registered only its 2 uncomputed suffix blocks; P finished the
         full 5-block sequence. P must WRITE its LAST 2 blocks into D's slots."""
-        w, _ = self._worker_driving_xfer()
+        w, _ = self._worker_driving_xfer(monkeypatch=monkeypatch)
         reg = _registration_data("req-pc", local_block_ids=([500, 501],))
 
-        NixlPushConnectorWorker._do_start_push_kv(
+        NixlPushConnectorWorker._start_push_kv(
             w, "req-pc", ([10, 11, 12, 13, 14],), reg
         )
 
@@ -1650,12 +1772,14 @@ class TestPushPrefixCaching:
         assert local == [13, 14]
         assert remote == [500, 501]
 
-    def test_no_prefix_hit_leaves_blocks_untrimmed(self):
+    def test_no_prefix_hit_leaves_blocks_untrimmed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """Equal counts (no prefix cache hit on D): nothing is trimmed."""
-        w, _ = self._worker_driving_xfer()
+        w, _ = self._worker_driving_xfer(monkeypatch=monkeypatch)
         reg = _registration_data("req-full", local_block_ids=([500, 501, 502],))
 
-        NixlPushConnectorWorker._do_start_push_kv(w, "req-full", ([10, 11, 12],), reg)
+        NixlPushConnectorWorker._start_push_kv(w, "req-full", ([10, 11, 12],), reg)
 
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
@@ -1670,13 +1794,13 @@ class TestPushPrefixCaching:
 
         if not groups_match:
             with pytest.raises(NotImplementedError, match="cache-group layouts"):
-                NixlPushConnectorWorker._do_start_push_kv(
+                NixlPushConnectorWorker._start_push_kv(
                     w, "req-groups", ([10, 11],), reg
                 )
             w.nixl_wrapper.make_prepped_xfer.assert_not_called()
             return
 
-        NixlPushConnectorWorker._do_start_push_kv(w, "req-groups", ([10, 11],), reg)
+        NixlPushConnectorWorker._start_push_kv(w, "req-groups", ([10, 11],), reg)
 
         local, remote = self._written_block_ids(w)
         assert local == [10, 11]

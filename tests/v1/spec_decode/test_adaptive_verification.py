@@ -251,11 +251,76 @@ def test_manager_checks_target_varlen_cudagraph_bound(
             query_start_loc=object(),
             num_bonus_tokens=1,
             max_total_logits=1,
-            vllm_config=None,
+            vllm_config=SimpleNamespace(max_concurrent_batches=2),
             target_layer_names={"target"},
             additional_attn_cg_support=additional,
         )
         assert manager is created
+
+
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="needs an accelerator device"
+)
+def test_manager_uses_accelerator_generic_events_and_stream() -> None:
+    """The manager must not call CUDA-only APIs; NPU/XPU builds use torch.Event
+    and torch.accelerator streams."""
+    accelerator = torch.accelerator.current_accelerator()
+    assert accelerator is not None
+    device = torch.device(accelerator.type, torch.accelerator.current_device_index())
+    req_states = SimpleNamespace(
+        device=device,
+        num_speculative_steps=2,
+        max_num_reqs=2,
+    )
+    manager = AdaptiveVerificationManager(
+        req_states,
+        torch.zeros(3, dtype=torch.int32, device=device),
+        num_bonus_tokens=1,
+        max_total_logits=16,
+        copy_admitted_drafts_to_host=True,
+    )
+
+    manager._copy_events[0].record()
+    manager._copy_events[0].synchronize()
+    assert manager._admitted_drafts_event is not None
+    manager._admitted_drafts_event.record()
+    manager._admitted_drafts_event.synchronize()
+
+
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="needs an accelerator device"
+)
+def test_budgets_read_confidences_of_oldest_in_flight_step() -> None:
+    """With 3 batches in flight, budgets read the confidences recorded 2 steps
+    earlier, and a request added since then reads as fully confident."""
+    accelerator = torch.accelerator.current_accelerator()
+    assert accelerator is not None
+    device = torch.device(accelerator.type, torch.accelerator.current_device_index())
+    req_states = SimpleNamespace(device=device, num_speculative_steps=1, max_num_reqs=2)
+    manager = AdaptiveVerificationManager(
+        req_states,
+        torch.zeros(3, dtype=torch.int32, device=device),
+        num_bonus_tokens=1,
+        max_total_logits=16,
+        max_concurrent_batches=3,
+    )
+    batch = SimpleNamespace(num_reqs=2, idx_mapping=torch.arange(2, device=device))
+
+    def record_and_read(step: int) -> list[float]:
+        probs = torch.full((2, 1), step / 10, dtype=torch.float32, device=device)
+        manager.record_confidences(probs, batch)  # type: ignore[arg-type]
+        return manager._stale_confidences[manager._stale_idx].np[:, 0].tolist()
+
+    assert record_and_read(1) == [1.0, 1.0]
+    assert record_and_read(2) == [1.0, 1.0]
+    assert record_and_read(3) == pytest.approx([0.1, 0.1])
+    assert record_and_read(4) == pytest.approx([0.2, 0.2])
+    # Slots copied before the add hold the previous request's row.
+    manager.add_request(1)
+    assert record_and_read(5) == pytest.approx([0.3, 1.0])
+    assert record_and_read(6) == pytest.approx([0.4, 1.0])
+    # Copied after the add: the new request's own confidences.
+    assert record_and_read(7) == pytest.approx([0.5, 0.5])
 
 
 def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():

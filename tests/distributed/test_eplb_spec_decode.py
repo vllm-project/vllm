@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.utils import large_gpu_mark
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
@@ -50,8 +51,6 @@ def get_model_args(
         "enable_eplb": True,
         "max_model_len": model_max_len,
     }
-    if spec_method == "dspark":
-        model_args["trust_remote_code"] = True
     return model_args
 
 
@@ -83,7 +82,7 @@ def dspark_vllm_config():
             enable_eplb=True,
             enable_elastic_ep=False,
         ),
-        speculative_config=SimpleNamespace(
+        speculative_config=fake_speculative_config(
             method="dspark",
             draft_model_config=draft_model_config,
         ),

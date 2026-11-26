@@ -7,7 +7,6 @@ contiguous in memory.  Each D rank reads its slices via separate
 RDMA transfers — no P-side permutation needed.
 
 Supported model types:
-  - Mamba1: conv = [x], temporal = (intermediate_size, state_size)
   - Mamba2: conv = [x, B, C], temporal = (num_heads, head_dim)
   - GDN (Gated Delta Net): conv = [Q, K, V] (dim(Q)==dim(K)),
     temporal = (num_v_heads, v_dim, k_dim)
@@ -30,14 +29,12 @@ class MambaConvSplitInfo:
     All fields are LOCAL to this engine's TP (already divided by TP size).
 
     DS memory layout within one page (contiguous):
-      Mamba1: |---- x ----|  (single sub-projection, no decomposition)
       Mamba2: |-- x --|- B -|- C -|  (B == C)
       GDN:    |- Q -|- K -|-- V --|  (dim(Q)==dim(K), V may differ)
     """
 
     conv_rows: int  # conv_kernel - 1 (typically 3)
-    # Per-rank column counts per sub-projection:
-    # 1 entry for Mamba1, 3 for Mamba2/GDN.
+    # Per-rank column counts per sub-projection (x, B, C or Q, K, V).
     local_proj_dims: tuple[int, ...]
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)

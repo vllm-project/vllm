@@ -83,6 +83,11 @@ def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
 _RANDOM_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
 
 
+def kv_lease_extension(kv_lease_duration: int) -> int:
+    """Seconds a heartbeat extends a KV lease by (P's renewal and D's model)."""
+    return kv_lease_duration * 2 // 3
+
+
 def get_base_request_id(request_id: str) -> str:
     """Strip the per-request `-<8 hex>` randomization suffix, if present."""
     return _RANDOM_SUFFIX_RE.sub("", request_id)

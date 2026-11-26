@@ -225,19 +225,22 @@ class DeepseekV32Model(torch.nn.Module):
             prefix=f"{prefix}.layers",
         )
         speculative_config = vllm_config.speculative_config
+        attention_config = vllm_config.attention_config
+        self.residual_sp_min_tokens = envs.VLLM_RESIDUAL_SP_MIN_TOKENS
         # Preserve LoRA's global row mapping and auxiliary-state layouts.
-        self.shardq_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
+        self.use_residual_sequence_parallel = (
+            self.residual_sp_min_tokens > 0
+            and parallel_config.tensor_parallel_size > 1
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
             and vllm_config.lora_config is None
+            and attention_config.hisparse_config is None
             and (
                 speculative_config is None
                 or not speculative_config.uses_aux_hidden_states
             )
             and not envs.VLLM_BATCH_INVARIANT
-            and all(layer.self_attn.use_shardq for layer in self.layers)
-        )
-        self.shardq_min_tokens = (
-            vllm_config.attention_config.sparse_mla_shard_q_min_tokens
         )
 
         if get_pp_group().is_last_rank:
@@ -266,9 +269,9 @@ class DeepseekV32Model(torch.nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         full_num_tokens = positions.shape[0]
         use_sequence_parallel = self.use_sequence_parallel or (
-            self.shardq_sequence_parallel
+            self.use_residual_sequence_parallel
             and is_sequence_parallel_active(
-                True, full_num_tokens, self.shardq_min_tokens
+                True, full_num_tokens, self.residual_sp_min_tokens
             )
         )
         attn_in = None
@@ -457,6 +460,10 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     model_cls = DeepseekV32Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        self.packed_modules_mapping = {
+            **self.packed_modules_mapping,
+            "wk_weights_proj": ["wk", "weights_proj"],
+        }
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)

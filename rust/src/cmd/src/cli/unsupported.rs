@@ -26,10 +26,7 @@ impl FromStr for Unsupported {
     fn from_str(_s: &str) -> Result<Self, Self::Err> {
         Err("argument is not implemented in Rust frontend yet
 
-Remove this unsupported argument to continue.
-
-Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-This may lead to unexpected behavior as the Rust frontend will completely ignore that argument."
+Remove this argument, or unset the environment variable bound to it, to continue."
             .to_string())
     }
 }
@@ -107,25 +104,40 @@ impl UnsupportedArgs {
     pub(crate) fn check(&self) -> Result<(), String> {
         let value = serde_json::to_value(self).unwrap();
         let map = value.as_object().unwrap();
+        let cmd = Self::augment_args(clap::Command::new("unsupported"));
         let mut unsupported = Vec::new();
+        let mut env_bound = false;
 
         for (key, value) in map {
             if value.is_null() {
                 noop_warn(key);
-            } else {
-                unsupported.push(key.as_str());
+                continue;
             }
+            // Python resolves an environment variable into the argument bound
+            // to it, so name the variable too.
+            let env = (cmd.get_arguments())
+                .find(|arg| arg.get_id() == key)
+                .and_then(|arg| arg.get_env());
+            env_bound |= env.is_some();
+            unsupported.push(match env {
+                Some(env) => format!("{key} ({})", env.to_string_lossy()),
+                None => key.clone(),
+            });
         }
 
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
             let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
+            let remove = if env_bound {
+                "Remove these arguments, or unset the environment variables bound to them, to continue."
+            } else {
+                "Remove these arguments to continue."
+            };
             return Err(format!(
-                "
-The following arguments are not implemented in Rust frontend yet:
+                "The following arguments are not implemented in Rust frontend yet:
 {bullets}
 
-Remove these arguments to continue."
+{remove}"
             ));
         }
 
@@ -196,18 +208,10 @@ pub struct EngineUnsupportedArgs {
     /// passed. Only enable this flag for trusted users!
     #[arg(
         long,
-        visible_alias = "no-enable-prompt-embeds",
         default_missing_value = "true",
         num_args = 0..=1
     )]
     pub enable_prompt_embeds: Option<Unsupported>,
-
-    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
-    /// used with `--generation-config auto`, the override parameters will be
-    /// merged with the default config from the model. If used with
-    /// `--generation-config vllm`, only the override parameters are used.
-    #[arg(long)]
-    pub override_generation_config: Option<Unsupported>,
 
     /// IOProcessor plugin name to load at model startup
     #[arg(long)]
@@ -229,7 +233,6 @@ pub struct EngineUnsupportedArgs {
     /// down fault DPEngineCore.
     #[arg(
         long,
-        visible_alias = "no-enable-fault-tolerance",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -238,7 +241,6 @@ pub struct EngineUnsupportedArgs {
     /// Enable elastic expert parallelism with stateless NCCL groups for DP/EP.
     #[arg(
         long,
-        visible_alias = "no-enable-elastic-ep",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -249,7 +251,6 @@ pub struct EngineUnsupportedArgs {
     /// and currently only supports some MM models such as the Qwen VL series.
     #[arg(
         long,
-        visible_alias = "no-enable-tower-connector-lora",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -258,11 +259,6 @@ pub struct EngineUnsupportedArgs {
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
     pub media_io_kwargs: Option<Unsupported>,
-
-    /// Arguments to be forwarded to the model's processor for multi-modal data,
-    /// e.g., image processor.
-    #[arg(long)]
-    pub mm_processor_kwargs: Option<Unsupported>,
 
     /// The size (in GiB) of the multi-modal processor cache.
     #[arg(long)]
@@ -302,21 +298,13 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
 
-    /// Maximum number of requests that can be in-flight (waiting or running)
-    /// at the same time. When the limit is reached, new requests are rejected
-    /// with HTTP 503 so the client can retry on another instance.
-    #[arg(long)]
-    pub max_num_queued_reqs: Option<Unsupported>,
-
-    /// Maximum total prompt tokens of requests currently in the prefill phase.
-    /// When the limit is reached, new requests are rejected with HTTP 503.
-    #[arg(long)]
-    pub max_num_queued_tokens: Option<Unsupported>,
-
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub aggregate_engine_logging: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend's periodic stats line always
+    /// aggregates across engines.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1, hide = true)]
+    pub aggregate_engine_logging: Option<Noop>,
 }
 
 /// Frontend-owned Python OpenAI server arguments that `vllm-rs` recognizes but
@@ -325,6 +313,8 @@ pub struct EngineUnsupportedArgs {
 /// Source of truth in Python vLLM:
 /// - `vllm.entrypoints.common.cli_args.BaseFrontendArgs`
 /// - `vllm.entrypoints.common.cli_args.FrontendArgs`
+/// - `vllm.envs`, for switches that Python exposes only as environment
+///   variables, which `vllm-rs` binds to hidden flags
 ///
 /// These are not engine args. They belong to the Python OpenAI-compatible
 /// frontend / API-server layer itself, for example chat-template configuration,
@@ -338,7 +328,6 @@ pub struct ServerUnsupportedArgs {
     /// because they can change multimodal preprocessing resource usage.
     #[arg(
         long,
-        visible_alias = "no-trust-request-mm-kwargs",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -352,7 +341,6 @@ pub struct ServerUnsupportedArgs {
     /// to specify which parser to use.
     #[arg(
         long,
-        visible_alias = "no-enable-auto-tool-choice",
         default_missing_value = "true",
         num_args = 0..=1,
         hide = true
@@ -374,37 +362,23 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub tool_server: Option<Unsupported>,
 
-    /// Path to logging config JSON file for both vllm and uvicorn
-    #[arg(long, /* env = "VLLM_LOGGING_CONFIG_PATH" */)]
-    pub log_config_file: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
-        visible_alias = "no-enable-server-load-tracking",
         default_missing_value = "true",
         num_args = 0..=1
     )]
     pub enable_server_load_tracking: Option<Noop>,
 
-    /// If set to True, only enable the Tokens In<>Out endpoint.
-    /// This is intended for use in a Disaggregated Everything setup.
-    #[arg(
-        long,
-        visible_alias = "no-tokens-only",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub tokens_only: Option<Unsupported>,
-
     /// Log level for uvicorn.
-    #[arg(long)]
-    pub uvicorn_log_level: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend does not run uvicorn.
+    #[arg(long, hide = true)]
+    pub uvicorn_log_level: Option<Noop>,
 
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
         long,
-        visible_alias = "no-enable-ssl-refresh",
         default_missing_value = "true",
         num_args = 0..=1
     )]
@@ -424,7 +398,6 @@ pub struct ServerUnsupportedArgs {
     /// endpoints at all.
     #[arg(
         long,
-        visible_alias = "no-disable-fastapi-docs",
         default_missing_value = "true",
         num_args = 0..=1,
         hide = true
@@ -441,23 +414,51 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub h11_max_header_count: Option<Unsupported>,
 
+    /// Maximum number of tokens allowed in /tokenize, /detokenize, and
+    /// /v1/messages/count_tokens requests. Like Python, it can also be set
+    /// through `VLLM_MAX_TOKENIZE_TOKENS`.
+    #[arg(long, env = "VLLM_MAX_TOKENIZE_TOKENS")]
+    pub max_tokenize_tokens: Option<Unsupported>,
+
     /// Enable offline FastAPI documentation for air-gapped environments.
     /// Uses vendored static assets bundled with vLLM.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not serve these docs
+    /// endpoints at all.
     #[arg(
         long,
-        visible_alias = "no-enable-offline-docs",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_offline_docs: Option<Unsupported>,
+    pub enable_offline_docs: Option<Noop>,
 
     /// If set, run pooling score MaxSim on GPU in the API server process.
     /// Can significantly improve late-interaction scoring performance.
     #[arg(
         long,
-        visible_alias = "no-enable-flash-late-interaction",
         default_missing_value = "true",
         num_args = 0..=1
     )]
     pub enable_flash_late_interaction: Option<Noop>,
+
+    /// Enable the `/tokenizer_info` endpoint. May expose chat
+    /// templates and other tokenizer configuration.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_tokenizer_info_endpoint: Option<Unsupported>,
+
+    /// Expose the Cohere Chat v2 API at `/cohere/v2/chat`. Like Python, it is
+    /// set only through `VLLM_ENABLE_COHERE_API`.
+    #[arg(long, hide = true, env = "VLLM_ENABLE_COHERE_API")]
+    pub enable_cohere_api: Option<Unsupported>,
+
+    /// Keep Responses API responses in memory for retrieval, `background`, and
+    /// `previous_response_id`. Like Python, it is set only through
+    /// `VLLM_ENABLE_RESPONSES_API_STORE`.
+    #[arg(long, hide = true, env = "VLLM_ENABLE_RESPONSES_API_STORE")]
+    pub enable_responses_api_store: Option<Unsupported>,
 }

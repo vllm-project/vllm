@@ -53,7 +53,8 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "nvfp4_per_token": kNvfp4DynamicToken,
     "int8_per_channel_static": kInt8StaticChannelSym,
     "lut_b": kLutBStatic,
-    # Dynamic per-32-element int8 activations (RDNA3 MXFP4 W4A8 GEMV).
+    # Dynamic per-32-element int8 activations (RDNA3 MXFP4 W4A8 GEMV and
+    # int4 MoE decode).
     "int8_per_group_32": kInt8Dynamic32Sym,
     # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
     "int4_per_group_32": kInt4Static32,
@@ -310,6 +311,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # FlashInfer TRTLLM only); linear stays unquantized (no `linear` field).
     "nvfp4_per_token": QuantizationConfigArgs(
         moe=QuantSpec(weight=kNvfp4Static),
+    ),
+    # Weight-only NVFP4 (W4A16) linear on the platform's W4A16 kernel; MoE
+    # stays unquantized (no `moe` field).
+    "nvfp4_weight_only": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kNvfp4Static),
     ),
     # LUT-B routed experts with MXFP8 activations; native on Rubin (SM107),
     # emulated elsewhere. Dense layers stay unquantized.

@@ -68,10 +68,6 @@ from .utils import (
 
 logger = init_logger(__name__)
 
-# This should be based on model config but we hardcode them for now.
-TOKENS_PER_IMAGE = 256
-TOKENS_PER_AUDIO = 188
-
 
 class Gemma3nImagePixelInputs(TensorSchema):
     """Dimensions:
@@ -173,11 +169,6 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "audio": None}
-
-    def get_max_tokens_per_item(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> Mapping[str, int] | None:
-        return {"image": TOKENS_PER_IMAGE, "audio": TOKENS_PER_AUDIO}
 
     def get_image_repl(
         self,

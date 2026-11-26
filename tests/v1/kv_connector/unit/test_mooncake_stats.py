@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -224,7 +225,7 @@ def _bare_worker() -> MooncakeConnectorWorker:
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
     worker._kv_lease_duration = None
-    worker._expired_transfer_ids = {}
+    worker._expired_transfer_ids = OrderedDict()
     return worker
 
 
@@ -362,7 +363,7 @@ def _build_prom_metrics(
     per_engine_labelvalues: dict[int, list[object]],
 ) -> MooncakePromMetrics:
     prom_metrics = MooncakeConnector.build_prom_metrics(
-        vllm_config=_fake_vllm_config(),  # type: ignore[arg-type]
+        vllm_config=_fake_vllm_config(),
         metric_types={Gauge: Gauge, Counter: Counter, Histogram: Histogram},
         labelnames=["model_name", "engine"],
         per_engine_labelvalues=per_engine_labelvalues,

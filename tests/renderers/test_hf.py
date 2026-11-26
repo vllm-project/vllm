@@ -632,7 +632,6 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         ("template_falcon_180b.jinja", "string"),
         ("template_falcon.jinja", "string"),
         ("template_inkbot.jinja", "string"),
-        ("template_teleflm.jinja", "string"),
         ("pooling/embed/template/dse_qwen2_vl.jinja", "openai"),
         ("pooling/embed/template/vlm2vec_phi3v.jinja", "openai"),
         ("pooling/embed/template/vlm2vec_qwen2vl.jinja", "openai"),
@@ -647,16 +646,9 @@ def test_resolve_content_format_fallbacks(model, expected_format):
 )
 def test_resolve_content_format_examples(template_path, expected_format):
     model = "Qwen/Qwen2-VL-2B-Instruct"  # Dummy
-    model_config = ModelConfig(
-        model,
-        tokenizer=model,
-        trust_remote_code=True,
-    )
+    model_config = ModelConfig(model, tokenizer=model)
 
-    dummy_tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    dummy_tokenizer = get_tokenizer(model)
     # Clear the HF tokenizer's own template so resolution falls back to the
     # one loaded below; ``chat_template`` is not part of ``TokenizerLike``.
     dummy_tokenizer.chat_template = None  # type: ignore[attr-defined]

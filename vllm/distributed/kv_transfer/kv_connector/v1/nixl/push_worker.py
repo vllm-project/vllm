@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     _RemoteStage,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HB_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
     RemoteMeta,
@@ -74,6 +75,8 @@ logger = init_logger(__name__)
 # main thread (start_load_kv / get_finished). Smaller -> lower latency
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
+# Interval (s) between warnings about expired leases held for in-flight WRITEs.
+_HELD_LEASE_WARNING_INTERVAL_S = 30.0
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
@@ -81,6 +84,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # Distinguishes push from pull in the NIXL compatibility hash.
     _TRANSFER_MODE: str = "push"
+
+    # With UCX worker threads, posting a large WRITE waits on them.
+    _DEFAULT_NUM_THREADS: int = 0
 
     _supports_pp_hma = True
 
@@ -112,6 +118,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # P-side: D registrations received via NIXL notification that have
         # not yet been matched with a finished P request.
         self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
+        # Requests being submitted or with WRITEs in flight -> destination
+        # engine. Guarded by ``_sending_transfers_lock``.
+        self._inflight_pushes: dict[ReqId, EngineId] = {}
+        self._next_held_lease_check = 0.0
 
         # Cross-thread channels.
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
@@ -163,6 +173,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
             self._send_failures.clear()
+            self._inflight_pushes.clear()
         super().shutdown()
 
     # --- Engine-main-thread entry point -------------------------------- #
@@ -201,12 +212,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reg_send_inbox.put((req_id, reg_data))
             self._push_writer_wake.set()
 
-        # --- P-side: newly finished blocks awaiting a D registration match ---
-        if metadata.push_finished_blocks:
-            for req_id, block_ids in metadata.push_finished_blocks.items():
-                self._finished_blocks_inbox.put((req_id, block_ids))
-            self._push_writer_wake.set()
-
         # Batch + lease tracking (same as pull).
         for req_id in metadata.reqs_in_batch:
             self._reqs_to_process.add(req_id)
@@ -226,6 +231,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Heartbeats still leave from the main thread (base worker behaviour).
         self._send_heartbeats(metadata)
+
+        # --- P-side: newly finished blocks awaiting a D registration match ---
+        # After lease tracking, so the writer can tell a released request.
+        if metadata.push_finished_blocks:
+            for req_id, block_ids in metadata.push_finished_blocks.items():
+                self._finished_blocks_inbox.put((req_id, block_ids))
+            self._push_writer_wake.set()
 
     # --- Writer thread ------------------------------------------------- #
 
@@ -428,7 +440,63 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # --- WRITE transfer logic (writer thread) ------------------------- #
 
+    def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
+        with self._sending_transfers_lock:
+            super()._reap_expired_send_leases(done_sending)
+        now = time.perf_counter()
+        if now < self._next_held_lease_check:
+            return
+        self._next_held_lease_check = now + _HELD_LEASE_WARNING_INTERVAL_S
+        # Expired leases left after reaping are held for in-flight WRITEs.
+        held = [(t, r) for r, t in self._reqs_to_send.items() if now >= t]
+        if held:
+            expires, req_id = min(held)
+            logger.warning(
+                "%d expired KV lease(s) held until their in-flight WRITEs end; "
+                "the oldest, request %s, expired %.0fs ago.",
+                len(held),
+                req_id,
+                now - expires,
+            )
+
+    def _has_inflight_send(self, req_id: str) -> bool:
+        # Called by the reaper above, under ``_sending_transfers_lock``.
+        return req_id in self._inflight_pushes
+
+    def _evict_stale_engines(self) -> None:
+        # The writer and engine threads both start handshakes. The lock
+        # serializes their evictions and keeps a push from starting meanwhile.
+        with self._sending_transfers_lock:
+            super()._evict_stale_engines()
+
+    def _engines_with_inflight_transfers(self) -> set[EngineId]:
+        # Called by the eviction above, under ``_sending_transfers_lock``.
+        busy = super()._engines_with_inflight_transfers()
+        return busy | set(self._inflight_pushes.values())
+
     def _do_start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        registration_data: dict[str, Any],
+    ) -> None:
+        with self._sending_transfers_lock:
+            # Released requests have left both; their blocks may be reused.
+            if (
+                request_id not in self._reqs_to_send
+                and request_id not in self._reqs_to_process
+            ):
+                logger.warning("Not pushing KV for %s: already released.", request_id)
+                return
+            self._inflight_pushes[request_id] = registration_data["decode_engine_id"]
+        try:
+            self._start_push_kv(request_id, local_block_ids, registration_data)
+        finally:
+            with self._sending_transfers_lock:
+                if not self._sending_transfers.get(request_id):
+                    self._inflight_pushes.pop(request_id, None)
+
+    def _start_push_kv(
         self,
         request_id: str,
         local_block_ids: BlockIds,
@@ -683,8 +751,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 break
 
             msg = notif.decode("utf-8")
-            if msg.startswith("HB:"):
-                self._handle_heartbeat(msg[3:])
+            if msg.startswith(HB_NOTIF_PREFIX):
+                self._handle_heartbeat(msg[len(HB_NOTIF_PREFIX) :])
                 continue
 
             req_id = msg.rsplit(":", 1)[0]
@@ -724,6 +792,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             done_pushing, failed_pushing = self._pop_done_transfers(
                 self._sending_transfers
             )
+            for req_id in done_pushing:
+                self._inflight_pushes.pop(req_id, None)
             # Remember failures until the final sibling WRITE completes.
             self._send_failures.update(failed_pushing)
             successful = {

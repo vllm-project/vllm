@@ -23,6 +23,7 @@ import regex as re
 import torch
 import zmq
 
+from vllm.config import get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
@@ -50,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    HB_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
@@ -66,6 +68,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _is_ssm_spec,
     get_dcp_replicated_group_ids,
     get_representative_spec_type,
+    kv_lease_extension,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.validation import (
@@ -79,6 +82,8 @@ from vllm.distributed.nixl_utils import (
     NixlWrapper,
     check_nixl_version,
     nixl_agent_config,
+    nixl_thread_sync_t,
+    nixlRemoteDisconnectError,
 )
 from vllm.distributed.parallel_state import (
     get_pcp_group,
@@ -86,6 +91,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_up
@@ -95,12 +101,14 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     FullAttentionManager,
 )
+from vllm.v1.hisparse.runtime import get_hisparse_host_leader_rank
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.worker.utils import select_common_block_size
@@ -130,6 +138,11 @@ def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
 # (remote region, local region, local cache group) of a pair of regions holding
 # the same layers. A region shared by several cache groups pairs once per group.
 RegionPair = tuple[int, int, int]
+
+
+# Max slack (s) kept before a remote lease deadline when heartbeating or reading:
+# absorbs clock-offset estimation error and notification/read latency.
+_KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
 @dataclass(slots=True)
@@ -191,6 +204,9 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
+
+    # Default UCX `num_threads` (kv_connector_extra_config can override it).
+    _DEFAULT_NUM_THREADS: int = 4
 
     # Push additionally supports MLA HMA and packed PP; attention-only HMA
     # pull uses the shared layer pairing without these paths.
@@ -432,6 +448,33 @@ class NixlBaseConnectorWorker:
             return empty, empty
         return np.concatenate(local_ids), np.concatenate(remote_ids)
 
+    def _compat_backend_name(self) -> str:
+        """Attention backend name folded into the compatibility hash.
+
+        Backends of indexer caches do not count: a model may build indexers on
+        some layers only, so a PP stage may start on, or hold only, layers
+        without one.
+        """
+        indexer_layers = [
+            name
+            for group in self.kv_cache_config.kv_cache_groups
+            for name, spec in group.kv_cache_specs.items()
+            if isinstance(spec, AttentionSpec)
+            and spec.cache_role is SparseCacheRole.INDEXER
+        ]
+        layer_type = cast(type[Any], AttentionLayerBase)
+        indexer_backends = {
+            layer.get_attn_backend()
+            for layer in get_layers_from_vllm_config(
+                self.vllm_config, layer_type, indexer_layers
+            ).values()
+        }
+        backends = [b for b in self.attn_backends if b not in indexer_backends]
+        if self._supports_pp_hma and self._has_packed_cache:
+            # PP can reorder the same backends across stages of a packed model.
+            return ",".join(sorted({backend.get_name() for backend in backends}))
+        return backends[0].get_name()
+
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
         self.region_members: list[list[str]] = region_layers
         self._region_by_layer: dict[str, int] = {
@@ -557,7 +600,12 @@ class NixlBaseConnectorWorker:
             "kv_lease_duration", 30
         )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
-        self._lease_extension = kv_lease_duration * 2 // 3
+        self._lease_extension = kv_lease_extension(kv_lease_duration)
+        # At most the heartbeat interval so heartbeats can keep a short lease
+        # alive (assumes both sides share kv_lease_duration, like the interval).
+        self._lease_safety_margin = min(
+            _KV_BLOCKS_EXPIRY_SAFETY_MARGIN, kv_lease_duration / 6
+        )
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -589,6 +637,14 @@ class NixlBaseConnectorWorker:
                 for g in kv_cache_config.transfer_groups
             )
         )
+        # A failed load also reports the request's blocks only when the
+        # scheduler can map them back to requests: one KV cache group, counting
+        # groups outside the transfer (e.g. HiSparse). Otherwise the scheduler
+        # raises on invalid_block_ids, so failures go through failed_recving.
+        # TODO: Drop this once _handle_invalid_blocks supports several groups.
+        self._report_invalid_block_ids = (
+            not self._is_hma_required and len(kv_cache_config.kv_cache_groups) == 1
+        )
 
         # ---- Model state (derived from model config) ----
         self._has_mamba = any(
@@ -609,7 +665,7 @@ class NixlBaseConnectorWorker:
         # initialization with "mlx5dv_devx_alloc_uar" errors.
         # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
-            "num_threads", 4
+            "num_threads", self._DEFAULT_NUM_THREADS
         )
         if nixl_agent_config is None:
             config = None
@@ -631,6 +687,10 @@ class NixlBaseConnectorWorker:
         )
         if sleep_mode or explicit_backends:
             config = nixl_agent_config(backends=[], capture_telemetry=True)
+        if config is not None and nixl_thread_sync_t is not None:
+            # Handshake threads load remote agents while others post, and NIXL
+            # only locks the agent given a sync mode. RW keeps posting concurrent.
+            config.sync_mode = nixl_thread_sync_t.NIXL_THREAD_SYNC_RW
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         if sleep_mode:
             # Keep slept pages unpinned, for this agent only; UCX_* env vars win.
@@ -657,12 +717,17 @@ class NixlBaseConnectorWorker:
         )
         # Failed reads need a local metadata probe; invalid peers wait for drain.
         self._failed_remote_engines: set[EngineId] = set()
+        # Failed reads that NIXL reported as a lost connection. Their metadata
+        # can still be loaded, so they are invalidated without the probe.
+        self._disconnected_remote_engines: set[EngineId] = set()
         self._invalid_remote_engines: set[EngineId] = set()
         # Invalid engine -> (backoff, earliest release time). Kept across release
         # so that repeat invalidations back off.
         self._invalid_engine_backoff: dict[EngineId, tuple[float, float]] = {}
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
+        # (remote engine, remote req id) -> lease deadline renewed by our heartbeats.
+        self._remote_leases: dict[tuple[EngineId, str], float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -752,8 +817,8 @@ class NixlBaseConnectorWorker:
         self.region_group_ids: list[int] = []
         self.region_num_blocks: list[int] = []
         self._mixed_mem_types = False
-        # True on TP ranks that share a HiSparse host pool with TP rank 0 and
-        # leave its NIXL registration and DRAM reads to rank 0.
+        # True on TP ranks that share a HiSparse host pool with their node's
+        # host leader and leave its NIXL registration and DRAM reads to it.
         self._skip_dram_xfer = False
 
         # PP>1: this worker holds a contiguous layer slice. Push transfers it
@@ -1316,6 +1381,10 @@ class NixlBaseConnectorWorker:
                         remote_agents, clock_offset = f.result()
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
+                        # Exported lease deadlines are rebased with this offset.
+                        logger.info(
+                            "NIXL clock offset to engine %s: %.3fs", eid, clock_offset
+                        )
                         self._engine_last_active[eid] = time.perf_counter()
                         self._track_remote_engine_replacement(eid, host, port)
                     except Exception as e:
@@ -1406,15 +1475,9 @@ class NixlBaseConnectorWorker:
             else None,
             is_mamba=self._has_mamba,
         )
-        backend_name = self.backend_name
-        if self._supports_pp_hma and self._has_packed_cache:
-            # PP can reorder the same backends across stages.
-            backend_name = ",".join(
-                sorted({backend.get_name() for backend in self.attn_backends})
-            )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
-            backend_name,
+            self._compat_backend_name(),
             transfer_mode=self._TRANSFER_MODE,
         )
 
@@ -1574,7 +1637,7 @@ class NixlBaseConnectorWorker:
         self.region_mem_types = region_mem_types
         self._set_region_layers(region_layers)
         self._mixed_mem_types = len(set(region_mem_types)) > 1
-        self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
+        self._skip_dram_xfer = self._leaves_dram_xfer_to_host_leader()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (
                 "Mixed-device KV registration is only supported for MLA "
@@ -2301,22 +2364,25 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
-    def _leaves_dram_xfer_to_rank0(self) -> bool:
-        """Whether this rank leaves the DRAM regions' NIXL work to TP rank 0.
+    def _leaves_dram_xfer_to_host_leader(self) -> bool:
+        """Whether this rank leaves the DRAM regions' NIXL work to its node's
+        HiSparse host leader.
 
-        A HiSparse host pool shared by the local TP ranks (one mmap per DP
-        rank) is registered with NIXL and filled by TP rank 0 alone: every
-        rank would otherwise register the same pages on every NIC and READ the
-        same host KV into them. Private pools are unaffected.
+        A HiSparse host pool shared by a node's TP ranks (one mmap per node)
+        is registered with NIXL and filled by the node's host leader alone:
+        every rank would otherwise register the same pages on every NIC and
+        READ the same host KV into them. Private pools are unaffected.
         """
         if not (
             self._mixed_mem_types and self.kv_cache_config.hisparse_shared_host_pool
         ):
             return False
-        skip = self.tp_rank != 0
+        leader = get_hisparse_host_leader_rank(self.vllm_config, self.tp_rank)
+        skip = self.tp_rank != leader
         logger.info(
-            "HiSparse host pool: NIXL DRAM registration and reads on TP rank 0 "
-            "only (tp_rank=%d, skip=%s)",
+            "HiSparse host pool: NIXL DRAM registration and reads on host "
+            "leader TP rank %d only (tp_rank=%d, skip=%s)",
+            leader,
             self.tp_rank,
             skip,
         )
@@ -2359,6 +2425,10 @@ class NixlBaseConnectorWorker:
                     self._recv_failures.remove(req_id)
                     failed_recv_reqs.add(req_id)
             done_recving.update(failed_recv_reqs)
+        # KV read while the remote may have released the blocks must not be used.
+        failed_recv_reqs |= self._get_lease_lapsed_recvs(
+            done_recving - failed_recv_reqs
+        )
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -2381,8 +2451,7 @@ class NixlBaseConnectorWorker:
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
                 self._pending_recv_notifs.pop(req_id, None)
-                # TODO (NickLucche) handle failed transfer for HMA.
-                if not self._is_hma_required:
+                if self._report_invalid_block_ids:
                     self._invalid_block_ids.put(set(meta.local_block_ids[0]))
                 logger.warning(
                     "Skipping KV post-processing for failed request %s",
@@ -2480,6 +2549,10 @@ class NixlBaseConnectorWorker:
         """
         raise NotImplementedError
 
+    def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
+        """Completed receives whose remote lease may have lapsed mid-read."""
+        return set()
+
     def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
         """Reclaim expired send-side KV leases into `done_sending`.
 
@@ -2491,8 +2564,11 @@ class NixlBaseConnectorWorker:
         if not self._reqs_to_send:
             return
         now = time.perf_counter()
+        # Blocks still being sent stay leased until their transfer ends.
         expired = [
-            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+            req_id
+            for req_id, expires in self._reqs_to_send.items()
+            if now >= expires and not self._has_inflight_send(req_id)
         ]
         for req_id in expired:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
@@ -2507,6 +2583,10 @@ class NixlBaseConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+    def _has_inflight_send(self, req_id: str) -> bool:
+        """Whether this worker is still sending the request's KV blocks."""
+        return False
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.
@@ -2572,7 +2652,9 @@ class NixlBaseConnectorWorker:
                         req_id=req_id,
                         error=e,
                     )
-                    if not self._handle_failed_transfer(req_id, handle, failed_req_ids):
+                    if not self._handle_failed_transfer(
+                        req_id, handle, failed_req_ids, error=e
+                    ):
                         in_progress.append(handle)
 
             if not in_progress:
@@ -2603,6 +2685,7 @@ class NixlBaseConnectorWorker:
         handle: int | None,
         failed_req_ids: set[str] | None = None,
         record_failed_transfer: bool = True,
+        error: BaseException | None = None,
     ) -> bool:
         """Record a failure and release its handle, returning False to retain it.
 
@@ -2615,6 +2698,8 @@ class NixlBaseConnectorWorker:
                 transport-failure metric. Callers that already recorded a more
                 specific metric (eg KV expiry, reported separately from
                 transport failures) pass False.
+            error: The exception that failed the transfer, if any. A lost
+                connection invalidates the remote engine.
 
         """
         if record_failed_transfer:
@@ -2625,6 +2710,10 @@ class NixlBaseConnectorWorker:
                 and meta.remote is not None
             ):
                 self._failed_remote_engines.add(meta.remote.engine_id)
+                if nixlRemoteDisconnectError is not None and isinstance(
+                    error, nixlRemoteDisconnectError
+                ):
+                    self._disconnected_remote_engines.add(meta.remote.engine_id)
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
@@ -2647,6 +2736,7 @@ class NixlBaseConnectorWorker:
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """Send heartbeats to remote engines, extending the lease on KV blocks."""
+        now = time.perf_counter()
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.
@@ -2667,17 +2757,46 @@ class NixlBaseConnectorWorker:
             # Refresh the TTL: a heartbeat means the router still paired this P-D,
             # so requests are still waiting on this engine
             self._engine_last_active[engine_id] = time.perf_counter()
-            # Build the heartbeat message: "HB:req1,req2,..."
-            hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
+            hb_msg = (HB_NOTIF_PREFIX + ",".join(hb_info.req_ids)).encode()
+            all_sent = True
             for agent_name in self._remote_agents[engine_id].values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
                 except Exception:
+                    all_sent = False
                     logger.debug(
                         "Failed to send heartbeat to engine %s",
                         engine_id,
                         exc_info=True,
                     )
+            clock_offset = self._engine_clock_offset.get(engine_id)
+            if all_sent and clock_offset is not None:
+                # Only count rounds that reached every remote rank.
+                for remote_req_id, (expiry, extension) in hb_info.leases.items():
+                    if "," in remote_req_id:
+                        # Heartbeats are comma-separated: P can't match this id.
+                        continue
+                    self._record_heartbeat_sent(
+                        (engine_id, remote_req_id),
+                        now,
+                        expiry - clock_offset,
+                        extension,
+                    )
+        if metadata.heartbeat_by_engine:
+            # Expired leases no longer matter: the read is declined either way.
+            self._remote_leases = {
+                k: d for k, d in self._remote_leases.items() if d > now
+            }
+
+    def _record_heartbeat_sent(
+        self, key: tuple[EngineId, str], now: float, deadline: float, extension: int
+    ) -> None:
+        """Mirror the remote's `_handle_heartbeat` for a heartbeat sent at `now`:
+        a live lease (initial `deadline`, our clock) renews to `now + extension`;
+        a lapsed one stays lapsed, as its deadline no longer moves."""
+        lease = self._remote_leases.setdefault(key, deadline)
+        if now + self._lease_safety_margin <= lease:
+            self._remote_leases[key] = max(lease, now + extension)
 
     def _pair_blocks(
         self,
@@ -2929,9 +3048,16 @@ class NixlBaseConnectorWorker:
             return
 
         now = time.perf_counter()
+        stale = [
+            eid
+            for eid, last_active in list(self._engine_last_active.items())
+            if now - last_active > self._engine_ttl
+        ]
+        if not stale:
+            return
         busy = self._engines_with_inflight_transfers()
-        for eid, last_active in list(self._engine_last_active.items()):
-            if now - last_active > self._engine_ttl and eid not in busy:
+        for eid in stale:
+            if eid not in busy:
                 self._cleanup_remote_engine(eid)
 
     def _engines_with_inflight_transfers(self) -> set[EngineId]:
@@ -2943,7 +3069,8 @@ class NixlBaseConnectorWorker:
         """
         return {
             meta.remote.engine_id
-            for req_id in self._recving_transfers
+            # Snapshot: push evicts from its writer thread too.
+            for req_id in list(self._recving_transfers)
             if (meta := self._recving_metadata.get(req_id)) is not None
             and meta.remote is not None
         }
@@ -2980,6 +3107,15 @@ class NixlBaseConnectorWorker:
             replaced = self._remote_agents.keys() - self._engine_by_address.values()
         now = time.perf_counter()
         for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
+            if engine_id in self._disconnected_remote_engines:
+                # Skip an engine whose agents were already removed (no NIXL state left).
+                if engine_id in self._remote_agents:
+                    # The metadata may still be loaded; the connection is not.
+                    logger.warning(
+                        "NIXL lost the connection to remote engine %s.", engine_id
+                    )
+                    self._mark_remote_engine_invalid(engine_id, now)
+                continue
             agents = self._remote_agents.get(engine_id, {}).values()
             try:
                 # No descriptors: query local existence, not peer health.
@@ -2992,6 +3128,7 @@ class NixlBaseConnectorWorker:
                     exc_info=True,
                 )
         self._failed_remote_engines.clear()
+        self._disconnected_remote_engines.clear()
         # Invalid peers keep rejecting new reads until their backoff has elapsed.
         invalid = {
             engine_id
@@ -3068,6 +3205,7 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self._failed_remote_engines.discard(engine_id)
+        self._disconnected_remote_engines.discard(engine_id)
         self._invalid_remote_engines.discard(engine_id)
 
         self.kv_caches_base_addr.pop(engine_id, None)

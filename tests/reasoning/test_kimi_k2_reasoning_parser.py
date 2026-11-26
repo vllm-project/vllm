@@ -15,7 +15,7 @@ REASONING_MODEL_NAME = "moonshotai/Kimi-K2.5"
 
 @pytest.fixture(scope="module")
 def kimi_k2_tokenizer():
-    return get_tokenizer(tokenizer_name=REASONING_MODEL_NAME, trust_remote_code=True)
+    return get_tokenizer(tokenizer_name=REASONING_MODEL_NAME)
 
 
 def test_extract_reasoning_with_think_tags(kimi_k2_tokenizer):

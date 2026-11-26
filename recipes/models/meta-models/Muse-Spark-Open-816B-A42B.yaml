@@ -4,7 +4,7 @@ meta:
   provider: "Muse (Meta)"
   description: "Sparse MoE reasoning model with 816B total / 42B active parameters and a 1M-token context, built for long-horizon agentic coding. Native image and video perception, channel-scoped reasoning and tool calls via the `muse` parsers, and an optional DSpark draft model for speculative decoding."
   date_added: 2026-10-15
-  date_updated: 2026-11-13
+  date_updated: 2026-11-17
   tasks:
     - text
     - multimodal
@@ -23,10 +23,8 @@ meta:
 
 model:
   model_id: "meta-models/Muse-Spark-Open-816B-A42B"
-  # Support is not upstream yet: vllm-project/vllm#61879 lands it in the nightly
-  # wheel. Revise to the release that actually carries the merge.
+  # vllm-project/vllm#61879 shipped in v0.33.0.
   min_vllm_version: "0.33.0"
-  nightly_required: true
   docker_image:
     nvidia: "vllm/vllm-openai:muse-spark-open"
     amd: "vllm/vllm-openai-rocm:muse-spark-open"
