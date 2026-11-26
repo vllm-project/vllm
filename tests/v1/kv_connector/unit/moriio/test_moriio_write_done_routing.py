@@ -146,15 +146,7 @@ MLA_FANOUT = compute_write_tp_mapping(1, 2, 4, 1, True, False)
 
 
 def _real_wrapper() -> MoRIIOWrapper:
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
-    wrapper.lock = threading.Lock()
-    wrapper.done_req_ids = []
-    wrapper.done_remote_allocate_req_dict = {}
-    wrapper.done_write_cache_req_ids = []
-    wrapper._write_done_senders = {}
-    wrapper.failed_write_cache_req_ids = []
-    wrapper._terminal_transfer_ids = OrderedDict()
-    return wrapper
+    return MoRIIOWrapper()
 
 
 def test_execute_write_task_ip_is_per_task_under_overwrite():
@@ -286,7 +278,7 @@ def test_finalize_single_pod_port_uses_global_rank():
 
 
 def test_execute_write_task_writes_every_fanout_target():
-    info = RemoteAllocInfo(block_ids=[2], decode_dp_rank=0)
+    info = RemoteAllocInfo(block_ids=[[2]], decode_dp_rank=0)
     alloc = {"tA": info}
     worker = _fake_worker(alloc)
     session_engine_ids: list[str] = []
@@ -458,12 +450,26 @@ def test_write_blocks_for_req_schedules_mla_write_fanout():
     assert captured["remote_tp_size"] == 4
 
 
-def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
-    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+class _FanoutSaveWorker(MoRIIOConnectorWorker):
+    handshakes: list[str]
+    writes: list[str]
+
+    def _background_moriio_handshake(
+        self, req_id: str, remote_engine_id: str, meta: ReqMeta
+    ) -> None:
+        self.handshakes.append(req_id)
+
+    def _write_blocks_for_req(self, req_id: str, meta: ReqMeta, layer_name, kv_layer):
+        self.writes.append(req_id)
+
+
+def _fanout_save_worker(remote_agents: set[str]) -> _FanoutSaveWorker:
+    worker = _FanoutSaveWorker.__new__(_FanoutSaveWorker)
     worker.is_producer = True
     worker.mode = MoRIIOMode.WRITE
     worker.tp_rank = 0
     worker.world_size = 1
+    worker.pp_size = 1
     worker.use_mla = True
     worker._has_mamba = False
     worker._remote_agents = {engine_id: {"agent"} for engine_id in remote_agents}
@@ -474,12 +480,6 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker.moriio_config = SimpleNamespace(transfer_timeout=0.01)
     worker.handshakes = []
     worker.writes = []
-    worker._background_moriio_handshake = (  # type: ignore[method-assign]
-        lambda req_id, remote_engine_id, meta: worker.handshakes.append(req_id)
-    )
-    worker._write_blocks_for_req = (  # type: ignore[method-assign]
-        lambda req_id, meta, layer_name, kv_layer: worker.writes.append(req_id)
-    )
     return worker
 
 
@@ -557,11 +557,15 @@ def test_release_reaches_every_prefill_rank_and_no_other(params, expected_ports)
     assert sent == [("tA", "10.0.0.1", port) for port in expected_ports]
 
 
-def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
+def test_deferred_write_timeout_fails_transfer_on_every_decode_rank(
+    monkeypatch: pytest.MonkeyPatch,
+):
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
-    wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
-        (ip, port, message_type)
+    monkeypatch.setattr(
+        wrapper,
+        "send_notify",
+        lambda tid, ip, port, message_type: sent.append((ip, port, message_type)),
     )
     writer = make_moriio_writer(
         SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0, world_size=1)
@@ -595,11 +599,15 @@ def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
     assert wrapper.done_remote_allocate_req_dict == {}
 
 
-def test_deferred_write_timeout_notifies_every_fanout_target():
+def test_deferred_write_timeout_notifies_every_fanout_target(
+    monkeypatch: pytest.MonkeyPatch,
+):
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
-    wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
-        (ip, port, message_type)
+    monkeypatch.setattr(
+        wrapper,
+        "send_notify",
+        lambda tid, ip, port, message_type: sent.append((ip, port, message_type)),
     )
     writer = make_moriio_writer(
         SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0, world_size=1)
@@ -672,7 +680,9 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     assert list(worker._unmatched_write_failures) == ["tOtherRank"]
 
 
-def test_write_rejects_unmappable_tp_before_scheduling_any_layer():
+def test_write_rejects_unmappable_tp_before_scheduling_any_layer(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from unittest.mock import Mock
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
@@ -681,13 +691,14 @@ def test_write_rejects_unmappable_tp_before_scheduling_any_layer():
     worker.tp_rank = 0
     worker.world_size = 2
     worker.model_config = SimpleNamespace(get_total_num_kv_heads=lambda: 8)
-    worker.schedule_write_blocks = Mock()
+    monkeypatch.setattr(worker, "schedule_write_blocks", Mock())
 
     with pytest.raises(ValueError, match="multiple of the other"):
         worker._write_blocks_for_req(
             "req", _req_meta(tp_size=3), "attention", kv_layer=None
         )
 
+    assert isinstance(worker.schedule_write_blocks, Mock)
     worker.schedule_write_blocks.assert_not_called()
 
 

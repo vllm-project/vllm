@@ -83,6 +83,9 @@ else:
 
 logger = init_logger(__name__)
 
+# Default size of the renderer thread pool when --renderer-num-workers is not set.
+DEFAULT_RENDERER_NUM_WORKERS = 4
+
 # Process-local record of which (arch, target) model-class overrides have been
 # registered in *this* process. Must not live on ModelConfig: that instance is
 # pickled to each worker, so an instance flag would arrive already "registered"
@@ -433,16 +436,23 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
-    renderer_num_workers: int = 1
+    renderer_num_workers: int | None = None
     """Number of worker threads in the renderer thread pool. The pool is
     consumed by the async renderer path (e.g. the OpenAI-compatible API
     server started by `vllm serve`) to parallelize tokenization, chat
     template rendering, and multimodal preprocessing across concurrent
     requests.
 
+    If unset, defaults to 4 for the async renderer path, or to 1 for pooling
+    runners (their preprocessing runs on the renderer workers, which is not
+    compatible with the multimodal processor cache when multi-threaded). A
+    single worker serializes tokenization of long prompts in each API server
+    process and can cap the request rate well below what the engine can
+    sustain.
+
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
-    this setting has no effect there."""
+    this setting has no effect there (the offline default is 1)."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -493,6 +503,7 @@ class ModelConfig:
             "convert",
             "tokenizer",
             "tokenizer_mode",
+            "renderer_num_workers",
             "seed",
             "hf_config_path",
             "allowed_local_media_path",
@@ -500,6 +511,7 @@ class ModelConfig:
             "tokenizer_revision",
             "spec_target_max_model_len",
             "enforce_eager",
+            "allow_deprecated_quantization",
             "return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
@@ -541,8 +553,8 @@ class ModelConfig:
             # Adding modality into the hashing method to take multimodal
             # cache into consideration.
             factors["mm_limit_per_prompt"] = {
-                modality: (opts if isinstance(opts, int) else opts.count)
-                for modality, opts in self.multimodal_config.limit_per_prompt.items()
+                modality: self.multimodal_config.get_limit_per_prompt(modality)
+                for modality in self.multimodal_config.limit_per_prompt
             }
             factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return factors
@@ -736,6 +748,10 @@ class ModelConfig:
         self.runner_type = self._get_runner_type(
             architectures, self.runner, self.convert
         )
+        if self.renderer_num_workers is None:
+            self.renderer_num_workers = (
+                1 if self.runner_type == "pooling" else DEFAULT_RENDERER_NUM_WORKERS
+            )
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
         )
@@ -770,6 +786,11 @@ class ModelConfig:
         self._model_info = model_info
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
+
+        self._transformers_backend = self.using_transformers_backend()
+        if self._transformers_backend:
+            # MLA detection depends on the model implementation
+            self.model_arch_config = self.get_model_arch_config()
 
         # Backend pooling classes wrap encoders and decoders, so default per model
         if (
@@ -1090,6 +1111,7 @@ class ModelConfig:
             self.hf_text_config,
             revision=getattr(self, "revision", None),
         )
+        convertor.transformers_backend = getattr(self, "_transformers_backend", False)
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
@@ -1947,7 +1969,7 @@ class ModelConfig:
             block_configs = self.hf_config.block_configs
             return sum(not bc.attention.no_op for bc in block_configs[start:end])
         else:
-            # Hybrid model Jamba
+            # Hybrid models with `layers_block_type`, e.g. Zamba2
             layers_block_type_value = getattr(
                 self.hf_text_config, "layers_block_type", None
             )
@@ -2001,8 +2023,7 @@ class ModelConfig:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
-        # Since Mamba1 does not have a chunk notion
-        # we use a default chunk size of 2048.
+        # Models without a chunk notion use a default chunk size of 2048.
         if chunk_size is None:
             chunk_size = 2048
 
@@ -2278,11 +2299,6 @@ class ModelConfig:
     def use_mla(self) -> bool:
         if envs.VLLM_MLA_DISABLE:
             return False
-        if self.using_transformers_backend():
-            # kv_lora_rank indicates that a Transformers model implementation uses MLA
-            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
-        # Manually maintained list of model types for vLLM model implementations
-
         # Bidirectional DeepSeek variants (is_causal=False, used by some
         # embedding models) must use the non-MLA attention path, since the
         # MLA kernels only support causal attention.

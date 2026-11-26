@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES: int = 715_827_880
+    VLLM_MAX_MEDIA_PREPROCESSING_BYTES: int = 715_827_880
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -140,6 +141,7 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
+    VLLM_RESIDUAL_SP_MIN_TOKENS: int = 1024
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
@@ -190,7 +192,6 @@ if TYPE_CHECKING:
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
-    VLLM_ENABLE_PREGRAD_PASSES: bool = True
     VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
     VLLM_DP_MASTER_IP: str = "127.0.0.1"
     VLLM_DP_MASTER_PORT: int = 0
@@ -405,23 +406,13 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils.torch_version import is_torch_equal_or_newer
-
-    default_value = (
-        "1"
-        if is_torch_equal_or_newer("2.10.0") and not disable_compile_cache()
-        else "0"
-    )
+    default_value = "0" if disable_compile_cache() else "1"
 
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
 
 
 def use_mega_aot_artifact():
-    from vllm.utils.torch_version import is_torch_equal_or_newer
-
-    default_value = (
-        "1" if is_torch_equal_or_newer("2.12.0.dev") and use_aot_compile() else "0"
-    )
+    default_value = "1" if use_aot_compile() else "0"
 
     return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
 
@@ -769,7 +760,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
     # Applies to any tokenizer mode that loads an HF fast tokenizer
     # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
-    # Python package (>= 0.3.5) must be installed.
+    # Python package (>= 0.3.6) must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
@@ -789,19 +780,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")
     ),
     # Feature flag to enable/disable Inductor standalone compile.
-    # In torch <= 2.7 we ignore this flag; in torch >= 2.9 this is
-    # enabled by default.
     "VLLM_USE_STANDALONE_COMPILE": lambda: (
         os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1"
-    ),
-    # Inductor's pre-grad passes don't do anything for vLLM.
-    # The pre-grad passes get run even on cache-hit and negatively impact
-    # vllm cold compile times by O(1s)
-    # Can remove this after the following issue gets fixed
-    # TODO(luka): maybe_inplace requires this
-    # https://github.com/pytorch/pytorch/issues/174502
-    "VLLM_ENABLE_PREGRAD_PASSES": lambda: (
-        os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "1") == "1"
     ),
     # Experimental: breakable cudagraph does not rely on torch.compile
     "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
@@ -1089,6 +1069,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "715827880")
     ),
+    # Maximum estimated bytes per prompt in supported media preprocessors.
+    # Set to 0 to disable the preprocessing checks.
+    "VLLM_MAX_MEDIA_PREPROCESSING_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_PREPROCESSING_BYTES", "715827880")
+    ),
     "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", "256")
     ),
@@ -1332,6 +1317,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD", "True").lower()
         in ("true", "1")
     ),
+    # Minimum tokens per forward for residual sequence parallelism in supported
+    # models Default: 1024;
+    "VLLM_RESIDUAL_SP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_RESIDUAL_SP_MIN_TOKENS", "1024")
+    ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (
@@ -1355,7 +1345,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # many tokens keep the residual stream sharded by token across the TP ranks.
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
-        os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+        os.getenv(
+            "VLLM_ROCM_MUSE_SP_MIN_TOKENS",
+            os.getenv("VLLM_RESIDUAL_SP_MIN_TOKENS", "1024"),
+        )
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
@@ -1566,7 +1559,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set to "0", disable LayerName opaque type for layer_name
-    # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
+    # parameters in custom ops.
     "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
     # If set, use the Rust frontend binary instead of the Python API server
     # process(es).
@@ -2608,6 +2601,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB",
         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",
+        "VLLM_MAX_MEDIA_PREPROCESSING_BYTES",
         "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
@@ -2628,6 +2622,15 @@ def compile_factors() -> dict[str, object]:
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
+        # Install-time switches, like VLLM_SKIP_VERSION_SUFFIX above.
+        "VLLM_USE_PRECOMPILED",
+        "VLLM_USE_PRECOMPILED_RUST",
+        "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX",
+        # Frontend selection: the Python and Rust frontends drive the same
+        # engine graphs.
+        "VLLM_USE_RUST_FRONTEND",
+        "VLLM_USE_RUST_BENCH",
+        "VLLM_RUST_FRONTEND_PATH",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
         # Where Engram host tables live; the GPU views and graphs are the same.

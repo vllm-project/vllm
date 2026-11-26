@@ -11,9 +11,11 @@ import bisect
 import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Any, cast
 
+import cv2
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -69,6 +71,9 @@ from vllm.multimodal.video_decoders import (
     VideoTargetMetadata,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processors.nano_nemotron_vl import (
+    get_video_target_size_and_feature_size,
+)
 
 from .model import NemotronShortcutForCausalLM, check_sdsa_indexer_loaded
 from .sdsa import SdsaKVCacheGrouping
@@ -97,6 +102,26 @@ NEMOTRON_SHORTCUT_VIDEO_LOADER_BACKEND = "nemotron_shortcut_t2"
 _TRAINING_VIDEO_MAX_FRAMES = 64
 _TRAINING_VIDEO_MIN_FRAMES = 8
 _TRAINING_VIDEO_FPS = 2
+
+
+def resize_video_frame(
+    frame: object, width: int, height: int, image_processor: Any
+) -> torch.Tensor:
+    """Apply the training video transform at the planned frame size."""
+    if isinstance(frame, torch.Tensor):
+        frame = frame.detach().cpu().numpy()
+    array = np.asarray(frame)
+    if array.ndim != 3 or array.shape[-1] != 3:
+        raise ValueError(
+            "Nemotron Shortcut video frames must be RGB (height, width, 3)"
+        )
+    array = array.astype(np.float32) / np.float32(1.0 / image_processor.rescale_factor)
+    if array.shape[:2] != (height, width):
+        array = cv2.resize(array, (width, height), interpolation=cv2.INTER_AREA)
+    pixels = torch.from_numpy(np.ascontiguousarray(array)).permute(2, 0, 1)
+    mean = torch.tensor(image_processor.image_mean, dtype=torch.float32)[:, None, None]
+    std = torch.tensor(image_processor.image_std, dtype=torch.float32)[:, None, None]
+    return (pixels - mean) / std
 
 
 def get_video_temporal_patch_size(config: object) -> int:
@@ -277,7 +302,7 @@ def training_video_frame_times(
 class NemotronShortcutVideoBackend(VideoBackend):
     """Video loader that samples frames with the NeMo RL training rule.
 
-    For exports with `video_temporal_patch_size > 1`. It decodes only
+    For exports with either temporal patch size (1 or 2). It decodes only
     the frames that `training_video_frame_times` picks (unique, sorted) and
     adds to the metadata:
 
@@ -286,7 +311,7 @@ class NemotronShortcutVideoBackend(VideoBackend):
       repeats when two labels fall in one frame);
     - `frame_temporal_patch_size`: the T the count was rounded to.
 
-    The Nemotron Shortcut processor (T > 1) then uses these frames and labels as they
+    The Nemotron Shortcut processor then uses these frames and labels as they
     are. Options (`--media-io-kwargs '{"video": {...}}'`):
     `max_frames` (default 64, the training `video_max_num_frames`),
     `fps` (sampling rate, default 2), `min_frames` (default 8),
@@ -552,7 +577,7 @@ def profile_video_num_frames(
 class _TimedVideoProcessorItems(VideoProcessorItems):
     """Video items whose processor-cache key includes the loader metadata.
 
-    With T > 1 the prompt carries each frame's time, which comes from the
+    For every T the prompt carries each frame's time, which comes from the
     metadata (`fps`, `frames_indices`). The base class adds the metadata
     to the key only for `MediaWithBytes` items, so two raw-frame inputs with
     the same frames and a different fps would share cached timestamps.
@@ -567,7 +592,7 @@ class _TimedVideoProcessorItems(VideoProcessorItems):
 
 
 class _NemotronShortcutTimedVideoDataParser(MultiModalDataParser):
-    """Data parser for T > 1: video items use `_TimedVideoProcessorItems`."""
+    """Data parser whose video items use `_TimedVideoProcessorItems`."""
 
     def _parse_video_data(self, data):
         items = super()._parse_video_data(data)
@@ -578,8 +603,6 @@ class _NemotronShortcutTimedVideoDataParser(MultiModalDataParser):
 
 class NemotronShortcutProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self) -> MultiModalDataParser:
-        if self.get_video_temporal_patch_size() == 1:
-            return super().get_data_parser()
         return _NemotronShortcutTimedVideoDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
             allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
@@ -606,15 +629,12 @@ class NemotronShortcutProcessingInfo(BaseProcessingInfo):
     def get_max_video_frames(self) -> int:
         """The frame cap of one video, which the memory profile uses.
 
-        With T > 1 the cap counts the frames after the T padding, so it must
-        be at least T; the processor never emits more frames than the cap.
+        The cap counts the frames after the T padding, so it must be at least
+        T; the processor never emits more frames than the cap.
         """
         video_kwargs = self.ctx.get_mm_config().media_io_kwargs.get("video", {})
         temporal_patch_size = self.get_video_temporal_patch_size()
-        if (
-            video_kwargs.get("video_backend") == NEMOTRON_SHORTCUT_VIDEO_LOADER_BACKEND
-            and temporal_patch_size > 1
-        ):
+        if video_kwargs.get("video_backend") == NEMOTRON_SHORTCUT_VIDEO_LOADER_BACKEND:
             # That loader caps the frame count with max_frames, not num_frames.
             name = "max_frames"
             cap = video_kwargs.get(name, _TRAINING_VIDEO_MAX_FRAMES)
@@ -640,6 +660,33 @@ class NemotronShortcutProcessingInfo(BaseProcessingInfo):
         aligned_edge = -(-edge // multiple) * multiple
         return ImageSize(width=aligned_edge, height=aligned_edge)
 
+    def get_video_frame_size(self, width: int = 1, height: int = 1) -> ImageSize:
+        config = self.get_hf_config()
+        target = getattr(config, "video_target_num_patches", None)
+        target = 1024 if target is None else target
+        keep_aspect = getattr(config, "video_maintain_aspect_ratio", False)
+        keep_aspect = False if keep_aspect is None else keep_aspect
+        if type(target) is not int or target <= 0:
+            raise ValueError("video_target_num_patches must be a positive integer")
+        if not isinstance(keep_aspect, bool):
+            raise ValueError("video_maintain_aspect_ratio must be a boolean")
+        if not keep_aspect and math.isqrt(target) ** 2 != target:
+            raise ValueError("video_target_num_patches must be square")
+        get_size = partial(
+            get_video_target_size_and_feature_size,
+            target_patches=target,
+            maintain_aspect_ratio=keep_aspect,
+            patch_size=config.vision_config.patch_size,
+            downsample_ratio=1 / config.spatial_merge_size,
+        )
+        frame_width, frame_height, _ = get_size(width, height)
+        profile_width, profile_height, _ = get_size(1, 1)
+        if frame_width * frame_height > profile_width * profile_height:
+            raise ValueError(
+                "Video aspect ratio exceeds the profiled frame patch budget"
+            )
+        return ImageSize(width=frame_width, height=frame_height)
+
 
 class NemotronShortcutDummyInputsBuilder(Mistral3DummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -655,7 +702,7 @@ class NemotronShortcutDummyInputsBuilder(Mistral3DummyInputsBuilder):
         data = dict(super().get_dummy_mm_data(seq_len, mm_counts, mm_options))
         num_videos = mm_counts.get("video", 0)
         if num_videos:
-            width, height = self.info.get_image_size_with_most_features()
+            width, height = self.info.get_video_frame_size()
             processor = self.info.get_hf_processor()
             multiple = processor.patch_size * processor.spatial_merge_size
             tokens_per_frame = (width // multiple + 1) * (height // multiple)
@@ -684,22 +731,26 @@ class NemotronShortcutDummyInputsBuilder(Mistral3DummyInputsBuilder):
 
 
 class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
+    def _apply_prompt_updates_via_text(
+        self, token_ids, mm_prompt_updates, *, encode_segments_separately=False
+    ):
+        # Keep BPE merges across chat text from changing the video header.
+        return super()._apply_prompt_updates_via_text(
+            token_ids, mm_prompt_updates, encode_segments_separately=True
+        )
+
     def _get_cache_missing_items(self, cache, mm_data_items, mm_hashes):
         """Keep the loader metadata of the videos that miss the processor cache.
 
         The base class rebuilds the missing items from `items[idx]`, which
         holds the frames only, and parses them again. The metadata (`fps`,
-        `frames_indices`) is lost there, so with T > 1 a served video (the
-        processor cache is on by default) would get the fallback labels
-        "frame i at i seconds" instead of its real timestamps. T = 1 does not
-        read the metadata and keeps the base behaviour.
+        `frames_indices`, the loader labels) is lost there, so a served video
+        (the processor cache is on by default) would get the fallback labels
+        "frame i at i seconds" instead of its real timestamps.
         """
         mm_is_cached, mm_missing_items = super()._get_cache_missing_items(
             cache, mm_data_items, mm_hashes
         )
-        info = cast(NemotronShortcutProcessingInfo, self.info)
-        if info.get_video_temporal_patch_size() == 1:
-            return mm_is_cached, mm_missing_items
         videos = mm_data_items.get("video")
         missing = mm_missing_items.get("video")
         if (
@@ -740,15 +791,12 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
             max_frames = cast(
                 NemotronShortcutProcessingInfo, self.info
             ).get_max_video_frames()
-            training_selection = None
-            if temporal_patch_size > 1:
-                # Frames and labels sampled by the nemotron_shortcut_t2 loader with
-                # the training rule: use them as they are.
-                training_selection = loader_frame_selection(
-                    _video_metadata(videos, video_idx, video),
-                    len(frames),
-                    temporal_patch_size,
-                )
+            # Frames and labels sampled by the nemotron_shortcut_t2 loader with the
+            # training rule (any T): use them as they are.
+            metadata = _video_metadata(videos, video_idx, video)
+            training_selection = loader_frame_selection(
+                metadata, len(frames), temporal_patch_size
+            )
             if training_selection is not None:
                 frame_indices, timestamps = training_selection
                 selected_frames = [frames[i] for i in frame_indices]
@@ -765,51 +813,59 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                     torch.linspace(0, len(frames) - 1, num_selected).long().tolist()
                 )
                 selected_frames = [frames[i] for i in frame_indices]
-                if temporal_patch_size > 1:
-                    metadata = _video_metadata(videos, video_idx, video)
-                    loader_timestamps = video_frame_timestamps(frame_indices, metadata)
-                    if loader_timestamps is None:
-                        logger.warning_once(
-                            "Nemotron Shortcut video has no fps metadata; the prompt "
-                            "labels frame i with i seconds."
-                        )
-                        loader_timestamps = [float(i) for i in frame_indices]
-                    timestamps = loader_timestamps
-            if temporal_patch_size > 1:
-                # Only a video with fewer than T frames gets here with a count
-                # that is not a multiple of T. The training encoder pads it by
-                # repeating the last frame; the label repeats with it.
-                selected_frames = pad_to_temporal_multiple(
-                    selected_frames, temporal_patch_size
-                )
-                timestamps = pad_to_temporal_multiple(timestamps, temporal_patch_size)
-                if len(selected_frames) > max_frames:
-                    # Loader frames sampled with a larger max_frames than the
-                    # engine cap (for example a per-request media_io_kwargs).
-                    # More tubelets than the profiled video would exceed the
-                    # encoder budget, so fail instead of serving them.
-                    raise ValueError(
-                        f"Nemotron Shortcut video has {len(selected_frames)} frames, "
-                        f"more than the frame cap {max_frames} of the memory "
-                        "profile. Sample it with max_frames <= "
-                        f"{max_frames}, or start the server with a larger "
-                        "video max_frames."
+                # The training prompt labels every frame with its time, for
+                # every T (nemo_rl nemotron4_visual._video_prompt).
+                frame_timestamps = video_frame_timestamps(frame_indices, metadata)
+                if frame_timestamps is None:
+                    logger.warning_once(
+                        "Nemotron Shortcut video has no fps metadata; the prompt "
+                        "labels frame i with i seconds."
                     )
-                video_timestamps.append(torch.tensor(timestamps, dtype=torch.float64))
-            processed = image_processor(images=selected_frames, return_tensors="pt")
-            pixel_values_videos.append(
-                [
-                    pixels[:, :height, :width].to(
-                        dtype=self.info.ctx.model_config.dtype
-                    )
-                    for pixels, (height, width) in zip(
-                        processed["pixel_values"], processed["image_sizes"]
-                    )
-                ]
+                    frame_timestamps = [float(i) for i in frame_indices]
+                timestamps = frame_timestamps
+            # Only a video with fewer than T frames gets here with a count that
+            # is not a multiple of T. The training encoder pads it by repeating
+            # the last frame; the label repeats with it. No-op for T = 1.
+            selected_frames = pad_to_temporal_multiple(
+                selected_frames, temporal_patch_size
             )
+            timestamps = pad_to_temporal_multiple(timestamps, temporal_patch_size)
+            if len(selected_frames) > max_frames:
+                # Loader frames sampled with a larger max_frames than the
+                # engine cap (for example a per-request media_io_kwargs). More
+                # frames than the profiled video would exceed the encoder
+                # budget, so fail instead of serving them.
+                raise ValueError(
+                    f"Nemotron Shortcut video has {len(selected_frames)} frames, "
+                    f"more than the frame cap {max_frames} of the memory "
+                    "profile. Sample it with max_frames <= "
+                    f"{max_frames}, or start the server with a larger "
+                    "video max_frames."
+                )
+            video_timestamps.append(torch.tensor(timestamps, dtype=torch.float64))
+            frame_pixels = []
+            for frame in selected_frames:
+                if isinstance(frame, torch.Tensor):
+                    frame = frame.detach().cpu().numpy()
+                array = np.asarray(frame)
+                if (
+                    array.ndim == 3
+                    and array.shape[-1] not in (1, 3, 4)
+                    and array.shape[0] == 3
+                ):
+                    array = np.moveaxis(array, 0, -1)
+                height, width = array.shape[:2]
+                size = cast(
+                    NemotronShortcutProcessingInfo, self.info
+                ).get_video_frame_size(width, height)
+                frame_pixels.append(
+                    resize_video_frame(
+                        array, size.width, size.height, image_processor
+                    ).to(dtype=self.info.ctx.model_config.dtype)
+                )
+            pixel_values_videos.append(frame_pixels)
         output["pixel_values_videos"] = pixel_values_videos
-        if temporal_patch_size > 1:
-            output["video_timestamps"] = video_timestamps
+        output["video_timestamps"] = video_timestamps
         return output
 
     def _get_mm_fields_config(
@@ -822,8 +878,7 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
             "pixel_values_videos": MultiModalFieldConfig.batched("video"),
         }
         if "video_timestamps" in hf_inputs:
-            # Only with video_temporal_patch_size > 1: the per-tubelet prompt
-            # labels each frame with its time.
+            # The video prompt labels each frame with its time.
             fields["video_timestamps"] = MultiModalFieldConfig.batched("video")
         return fields
 
@@ -880,26 +935,6 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
             )
             return PromptUpdateDetails.select_token_id(tokens, processor.image_token_id)
 
-        def video_replacement(item_idx: int):
-            if temporal_patch_size > 1:
-                return tubelet_video_replacement(item_idx)
-            frames = out_mm_kwargs["video"][item_idx]["pixel_values_videos"].data
-            assert isinstance(frames, (list, tuple))
-            tokens: list[int] = []
-            frame_separator = processor.tokenizer.encode("\n", add_special_tokens=False)
-            for pixels in frames:
-                if tokens:
-                    tokens.extend(frame_separator)
-                assert isinstance(pixels, torch.Tensor)
-                height, width = pixels.shape[-2:]
-                image_tokens = processor.replace_image_token(
-                    {"image_sizes": [(height, width)]}, 0
-                )
-                tokens.extend(
-                    processor.tokenizer.encode(image_tokens, add_special_tokens=False)
-                )
-            return PromptUpdateDetails.select_token_id(tokens, processor.image_token_id)
-
         return [
             PromptReplacement(
                 modality="image",
@@ -912,7 +947,7 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                     cast(NemotronShortcutProcessingInfo, self.info).video_token,
                     add_special_tokens=False,
                 ),
-                replacement=video_replacement,
+                replacement=tubelet_video_replacement,
             ),
         ]
 

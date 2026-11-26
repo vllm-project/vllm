@@ -46,8 +46,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-def test_ilama_lora(ilama_lora_files):
-    llm = vllm.LLM(
+def test_ilama_lora(vllm_runner, ilama_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -55,14 +55,13 @@ def test_ilama_lora(ilama_lora_files):
         max_lora_rank=16,
         trust_remote_code=True,
         enable_chunked_prefill=True,
-    )
-
-    output1 = do_sample(llm, ilama_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i] == EXPECTED_LORA_OUTPUT[i]
-    output2 = do_sample(llm, ilama_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output2[i] == EXPECTED_LORA_OUTPUT[i]
+    ) as runner:
+        output1 = do_sample(runner.llm, ilama_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output1[i] == EXPECTED_LORA_OUTPUT[i]
+        output2 = do_sample(runner.llm, ilama_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
 @pytest.mark.skipif(
@@ -71,8 +70,8 @@ def test_ilama_lora(ilama_lora_files):
 )
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
-def test_ilama_lora_tp4(ilama_lora_files):
-    llm = vllm.LLM(
+def test_ilama_lora_tp4(vllm_runner, ilama_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -82,14 +81,13 @@ def test_ilama_lora_tp4(ilama_lora_files):
         trust_remote_code=True,
         fully_sharded_loras=False,
         enable_chunked_prefill=True,
-    )
-
-    output1 = do_sample(llm, ilama_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i] == EXPECTED_LORA_OUTPUT[i]
-    output2 = do_sample(llm, ilama_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output2[i] == EXPECTED_LORA_OUTPUT[i]
+    ) as runner:
+        output1 = do_sample(runner.llm, ilama_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output1[i] == EXPECTED_LORA_OUTPUT[i]
+        output2 = do_sample(runner.llm, ilama_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
 @pytest.mark.skipif(
@@ -98,8 +96,8 @@ def test_ilama_lora_tp4(ilama_lora_files):
 )
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
-def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
-    llm = vllm.LLM(
+def test_ilama_lora_tp4_fully_sharded_loras(vllm_runner, ilama_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -109,37 +107,10 @@ def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
         trust_remote_code=True,
         fully_sharded_loras=True,
         enable_chunked_prefill=True,
-    )
-    output1 = do_sample(llm, ilama_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i] == EXPECTED_LORA_OUTPUT[i]
-    output2 = do_sample(llm, ilama_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output2[i] == EXPECTED_LORA_OUTPUT[i]
-
-
-@create_new_process_for_each_test("spawn")
-def test_lora_on_input_embeddings_not_named_embed_tokens(tmp_path):
-    """GPT-NeoX's input embedding is `embed_in`, not `embed_tokens`."""
-    from peft import LoraConfig, get_peft_model
-    from transformers import AutoModelForCausalLM
-
-    model_path = "EleutherAI/pythia-70m"
-    lora_config = LoraConfig(r=8, target_modules=["embed_in"], init_lora_weights=False)
-    device = current_platform.device_type
-    hf_model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device)
-    get_peft_model(hf_model, lora_config).save_pretrained(tmp_path)
-
-    llm = vllm.LLM(
-        model_path,
-        enable_lora=True,
-        enable_lora_embedding_modules=True,
-        max_lora_rank=8,
-        max_model_len=256,
-    )
-    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=16)
-    lora_request = LoRARequest("embed_in", 1, str(tmp_path))
-    prompt = "The capital of France is"
-    base = llm.generate(prompt, sampling_params)
-    lora = llm.generate(prompt, sampling_params, lora_request=lora_request)
-    assert base[0].outputs[0].token_ids != lora[0].outputs[0].token_ids
+    ) as runner:
+        output1 = do_sample(runner.llm, ilama_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output1[i] == EXPECTED_LORA_OUTPUT[i]
+        output2 = do_sample(runner.llm, ilama_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output2[i] == EXPECTED_LORA_OUTPUT[i]
