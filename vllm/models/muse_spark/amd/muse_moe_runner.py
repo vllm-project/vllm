@@ -657,12 +657,7 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
         super().__init__(moe, weight_quant_key, activation_quant_key)
         if self.fp8_backend is Fp8MoeBackend.TRITON:
             self.experts_cls = MuseSparkTritonExperts
-        elif (
-            self.fp8_backend is Fp8MoeBackend.AITER
-            and AiterFp8ChannelExperts._supports_quant_scheme(
-                weight_quant_key, activation_quant_key
-            )
-        ):
+        elif self.experts_cls is AiterFp8ChannelExperts:
             self.experts_cls = MuseSparkAiterFp8Experts
         else:
             raise NotImplementedError(
@@ -988,7 +983,9 @@ class MuseMoERunner(MoERunner):
 __all__ = [
     "MuseMoERunner",
     "MuseSparkRouter",
+    "MuseSparkAiterFp8Experts",
     "MuseSparkAiterMxfp4Experts",
+    "MuseSparkAiterRouteExperts",
     "MuseSparkQuarkFp8MoEQuantConfig",
     "MuseSparkQuarkOCPMXFusedMoE",
     "MuseSparkQuarkW8A8Fp8FusedMoE",
