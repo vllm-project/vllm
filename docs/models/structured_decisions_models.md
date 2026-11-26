@@ -375,6 +375,35 @@ vllm serve vllm-sr/d3
 - `/classify` and `/pooling` return the raw logits of all 255 codes; only the
   first codes, one per option, belong to a question.
 
+### Drex v1.5
+
+[`nace-ai/drex-v1.5`](https://huggingface.co/nace-ai/drex-v1.5) is a Qwen3.5
+backbone with a trained pointer head: the `<decide>` token queries each
+option's closing delimiter, and the head turns those dot products into the
+question's option probabilities. vLLM detects the checkpoint's `head.pt` and
+serves it as a classification model, with no token generation.
+
+```bash
+vllm serve nace-ai/drex-v1.5
+```
+
+- A request is one read per question. The prompt is the packing the
+  checkpoint's `code/kev/model.py` writes: a state row, then the question's
+  instruction and options between the reused Qwen delimiters, ending at
+  `<decide>`. A JSON state is flattened the way `code/kev/api.py` renders it.
+- The pointer head scores each option from the hidden states at its closing
+  delimiter and at `<decide>`, so picks and probabilities match the reference
+  `model.probs()`.
+- A state is read to 384 tokens, a question to the row limit, and the packed
+  record to 2,048 tokens. A request over those limits, or over `max_model_len`,
+  returns 400. A question can have up to 255 options.
+- `instructions` returns 400, since the prompt is fixed. `chat_template_kwargs`
+  has no effect.
+- There are no labels, so `label_mass` is 1 and `confidence` is the chosen
+  option's probability. `usage.input_tokens` counts each question's prompt
+  once, and `output_tokens` is 0.
+- `images`, `audio` and `videos` are not accepted.
+
 ### Liquid d1
 
 [`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B) is LFM2.5-VL-3B
