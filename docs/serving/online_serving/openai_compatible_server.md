@@ -174,8 +174,9 @@ The following extra parameters are supported:
 #### Echo with prompt truncation
 
 `truncate_prompt_tokens` and `truncation_side` are vLLM extensions. In the Python
-Completions API, when `echo=true` and an explicit `truncation_side` causes
-post-tokenization truncation, the echoed text is rebuilt from the retained tokens.
+Completions API, when `echo=true` and `truncate_prompt_tokens` shortens a text
+prompt, with or without an explicit `truncation_side`, the echoed text is rebuilt
+from the retained tokens.
 Tokenizer-added special tokens are omitted from the text and echoed logprobs;
 special tokens supplied in the text are preserved. Model input IDs, prompt-token
 usage and `return_token_ids` responses retain the full truncated token sequence.

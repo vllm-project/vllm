@@ -527,6 +527,18 @@ class TokenizeParams:
 
         return slice(0, max_length)
 
+    def _tokenizer_truncated(self, num_tokens: int) -> bool:
+        """Whether the tokenizer may have truncated a text prompt itself.
+
+        Without an explicit `truncation_side`, `get_encode_kwargs` lets the
+        tokenizer truncate, so `_truncation_slice` never sees the cut.
+        """
+        if self.truncation_side is not None or self.truncate_prompt_tokens is None:
+            return False
+
+        max_length = self.get_encode_kwargs().get("max_length")
+        return max_length is not None and num_tokens >= max_length
+
     def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to prompt tokens if necessary."""
         truncation = self._truncation_slice(tokenizer, len(tokens))

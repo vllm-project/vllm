@@ -169,7 +169,7 @@ def hf_renderer_config(tmp_path):
 )
 @pytest.mark.parametrize(
     ("truncation_side", "expected"),
-    [("left", "<bos> Hello world"), ("right", "<bos> Hello")],
+    [("left", "<bos> Hello world"), ("right", "<bos> Hello"), (None, "<bos> Hello")],
 )
 async def test_native_hf_renderer_truncated_echo(
     hf_renderer_config, renderer_mode, truncation_side, expected

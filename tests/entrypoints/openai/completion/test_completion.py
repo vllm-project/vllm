@@ -130,22 +130,26 @@ async def test_completion_truncation_side_controls_prompt_truncation(
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("max_tokens", [0, 3])
 @pytest.mark.parametrize(
-    "prompt,keep,expected",
+    "prompt,keep,truncation_side,expected",
     [
-        ("Hello, my name is", 4, "Hello, my"),
-        ("</s>Hello, my name is", 4, "</s>Hello,"),
-        ("Hello, my name is", 1, ""),
+        ("Hello, my name is", 4, "right", "Hello, my"),
+        ("</s>Hello, my name is", 4, "right", "</s>Hello,"),
+        ("Hello, my name is", 1, "right", ""),
+        # Unset leaves truncation to the tokenizer, which defaults to the left.
+        ("Hello, my name is", 4, None, " my name is"),
+        ("Hello, my name is", 1, None, ""),
     ],
 )
 async def test_truncated_echo_excludes_only_added_special_tokens(
     client: openai.AsyncOpenAI,
     prompt: str,
     keep: int,
+    truncation_side: str | None,
     expected: str,
     stream: bool,
     max_tokens: int,
 ) -> None:
-    extra_body = {"truncate_prompt_tokens": keep, "truncation_side": "right"}
+    extra_body = {"truncate_prompt_tokens": keep, "truncation_side": truncation_side}
     generated = await client.completions.create(
         model="facebook/opt-125m",
         prompt=prompt,
@@ -154,7 +158,12 @@ async def test_truncated_echo_excludes_only_added_special_tokens(
         extra_body={**extra_body, "return_token_ids": True},
     )
     tokenizer = get_tokenizer("facebook/opt-125m")
-    assert generated.choices[0].prompt_token_ids == tokenizer.encode(prompt)[:keep]
+    expected_ids = (
+        tokenizer.encode(prompt)[:keep]
+        if truncation_side
+        else tokenizer.encode(prompt, truncation=True, max_length=keep)
+    )
+    assert generated.choices[0].prompt_token_ids == expected_ids
     assert generated.usage is not None
     assert generated.usage.prompt_tokens == keep
     response = await client.completions.create(
