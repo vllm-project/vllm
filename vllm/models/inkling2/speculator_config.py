@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import try_get_local_file
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
 if TYPE_CHECKING:
@@ -23,11 +25,14 @@ class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
         if callable(overrides):
             # A callable can distinguish the target from the converted draft.
             source = spec.draft_model_config
-            overrides = vars(draft)
-            if target.model == source.model and (
-                spec.revision is None or target.revision == source.revision
-            ):
-                overrides = vars(target.hf_config)
+            if target.model == source.model:
+                shared = spec.revision is None or target.revision == source.revision
+            else:
+                # In offline mode EngineArgs replaces the target repo with its
+                # cached snapshot path. An explicit draft still uses its repo ID.
+                file = try_get_local_file(source.model, "config.json", source.revision)
+                shared = file == Path(target.model) / "config.json"
+            overrides = vars(target.hf_config if shared else draft)
         draft.set_quantization(
             overrides.get(
                 "dspark_weight_quantization", draft.draft_weight_quantization
