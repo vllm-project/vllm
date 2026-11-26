@@ -800,10 +800,11 @@ def _verify_softmax(
         x = gl.fma(s, scale_log2, -(m_use * scale_log2)[:, None])
         p = gl.where(emu[None, :], _gl_ex2_emu(x), _gl_ex2(x))
         l_i = l_i * alpha + gl.sum(p, 1)
-        if i > 0 and gl.min(alpha, 0) < 1.0:
+        if i > 0:
             _bw.mbarrier.wait(o_done, i - 1 & 1)
-            o = o_tmem.load(o_layout)
-            o_tmem.store(o * gl.convert_layout(alpha, o_row_layout)[:, None])
+            if gl.min(alpha, 0) < 1.0:
+                o = o_tmem.load(o_layout)
+                o_tmem.store(o * gl.convert_layout(alpha, o_row_layout)[:, None])
         _verify_p(s_tmem, i % 2, BLOCK_M, BLOCK_N).store(p.to(gl.bfloat16))
         _bw.mbarrier.arrive(p_ready.index(i % 2), count=1)
 
@@ -820,8 +821,8 @@ def _verify_softmax(
     lse = gl.where(empty, float("-inf"), m_i * scale_log2 + _gl_lg2(l_i))
     o_valid = gl.convert_layout(row_valid, o_row_layout)
     offs_d = gl.arange(0, D, gl.SliceLayout(0, o_layout))
+    _bw.mbarrier.wait(o_final, 0)
     if num_iters > 0:
-        _bw.mbarrier.wait(o_final, 0)
         inv_l = _gl_rcp(gl.where(empty, 1.0, l_i))
         o = o_tmem.load(o_layout) * gl.convert_layout(inv_l, o_row_layout)[:, None]
     else:
