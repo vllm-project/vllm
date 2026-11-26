@@ -44,7 +44,6 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
-    StepResult,
     StoreTrigger,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
@@ -1216,7 +1215,7 @@ class TieringOffloadingManager(OffloadingManager):
         del self._req_state[req_id]
 
     @override
-    def on_schedule_end(self, context: ScheduleEndContext) -> StepResult:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """End-of-schedule hook: process finished jobs, flush deferred
         promotions, and reset the per-step gate.
 
@@ -1250,12 +1249,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             self._metrics.on_request_allocated(state.req_context)
 
-        return StepResult(
-            pending=self.has_pending_work(),
-            events=list(self.take_events()),
-            stats=self.get_stats(),
-        )
-
+    @override
     def has_pending_work(self) -> bool:
         """Report whether outstanding work needs an engine step to finish.
 
@@ -1276,6 +1270,7 @@ class TieringOffloadingManager(OffloadingManager):
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
 
+    @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         """Yield events owned by the primary and secondary tiers.
 
@@ -1354,6 +1349,7 @@ class TieringOffloadingManager(OffloadingManager):
     def on_reset_flushed(self) -> None:
         self._promotions_held = False
 
+    @override
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self.primary_tier.get_stats()
 
