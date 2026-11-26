@@ -11,7 +11,8 @@ pub(crate) mod token_ids;
 use logprobs::{lower_prompt_logprob_token_ids, validate_logprobs, validate_prompt_logprob_start};
 use sampling::{SamplingParamsError, validate_resolved_sampling_params};
 use token_ids::{
-    TokenIdsError, max_num_bad_words, validate_prompt_token_ids, validate_vocab_range,
+    TokenIdsError, max_num_bad_words, normalize_stop_token_ids, validate_prompt_token_ids,
+    validate_vocab_range,
 };
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
@@ -225,16 +226,12 @@ pub fn lower_sampling_params(
     }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
 
-    let mut stop_token_ids = stop_token_ids.unwrap_or_default();
+    let stop_token_ids = normalize_stop_token_ids(stop_token_ids.unwrap_or_default())?;
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
     if let Some(primary_eos_token_id) = primary_eos_token_id {
         all_stop_token_ids.insert(primary_eos_token_id);
     }
     all_stop_token_ids.extend(extra_eos_token_ids.iter().copied());
-
-    if !ignore_eos {
-        merge_unique_token_ids(&mut stop_token_ids, extra_eos_token_ids.iter().copied());
-    }
 
     let mut bad_words_token_ids = bad_words_token_ids.unwrap_or_default();
     let raw_bad_words_count = bad_words_token_ids.len();
@@ -268,6 +265,11 @@ pub fn lower_sampling_params(
         stop_token_ids,
         eos_token_id: (!ignore_eos).then_some(primary_eos_token_id).flatten(),
         all_stop_token_ids,
+        stop_token_ids_set: if ignore_eos {
+            BTreeSet::new()
+        } else {
+            extra_eos_token_ids
+        },
         // Like Python's `SamplingParams.from_optional`, clamp biases to
         // [-100, 100] instead of passing extreme values to the sampler.
         logit_bias: logit_bias.map(|logit_bias| {
@@ -434,19 +436,6 @@ pub fn resolve_max_tokens(
         return Err(SamplingParamsError::InvalidMaxTokens.into());
     }
     Ok(resolved)
-}
-
-fn merge_unique_token_ids(
-    stop_token_ids: &mut Vec<u32>,
-    extra_token_ids: impl Iterator<Item = u32>,
-) {
-    // Keep user-provided ordering stable while still folding in backend-derived EOS
-    // aliases.
-    for token_id in extra_token_ids {
-        if !stop_token_ids.contains(&token_id) {
-            stop_token_ids.push(token_id);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -864,15 +853,16 @@ mod tests {
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
                 repetition_detection: None,
-                stop_token_ids: [
-                    77,
-                ],
+                stop_token_ids: [],
                 eos_token_id: Some(
                     99,
                 ),
                 all_stop_token_ids: {
                     77,
                     99,
+                },
+                stop_token_ids_set: {
+                    77,
                 },
                 logit_bias: None,
                 allowed_token_ids: None,
@@ -929,6 +919,7 @@ mod tests {
                     77,
                     99,
                 },
+                stop_token_ids_set: {},
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
@@ -1114,15 +1105,16 @@ mod tests {
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
                 repetition_detection: None,
-                stop_token_ids: [
-                    151643,
-                ],
+                stop_token_ids: [],
                 eos_token_id: Some(
                     151645,
                 ),
                 all_stop_token_ids: {
                     151643,
                     151645,
+                },
+                stop_token_ids_set: {
+                    151643,
                 },
                 logit_bias: None,
                 allowed_token_ids: None,
@@ -1141,7 +1133,7 @@ mod tests {
     #[test]
     fn lower_sampling_params_preserves_explicit_stop_token_ids_in_all_stop_set() {
         let sampling_params = SamplingParams {
-            stop_token_ids: Some(vec![11, 77]),
+            stop_token_ids: Some(vec![11, 77, 11]),
             ..SamplingParams::default()
         };
 
@@ -1189,7 +1181,6 @@ mod tests {
                 stop_token_ids: [
                     11,
                     77,
-                    88,
                 ],
                 eos_token_id: Some(
                     99,
@@ -1199,6 +1190,10 @@ mod tests {
                     77,
                     88,
                     99,
+                },
+                stop_token_ids_set: {
+                    77,
+                    88,
                 },
                 logit_bias: None,
                 allowed_token_ids: None,
@@ -1271,6 +1266,7 @@ mod tests {
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},
+                stop_token_ids_set: {},
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
@@ -1437,6 +1433,34 @@ mod tests {
             rejects(None, Some(0)),
             rejects(Some(vec![vec![1]]), Some(2)),
         ]);
+    }
+
+    #[test]
+    fn lower_sampling_params_bounds_explicit_stop_token_ids() {
+        let lower = |stop_token_ids| {
+            lower_sampling_params(
+                SamplingParams {
+                    stop_token_ids: Some(stop_token_ids),
+                    ..Default::default()
+                },
+                sample_sampling_hints(),
+                sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
+                3,
+                &stub_tokenizer(),
+            )
+        };
+
+        let stop_token_ids: Vec<_> = (100..228).collect();
+        let params = lower(stop_token_ids.clone()).unwrap();
+        assert_eq!(params.stop_token_ids, stop_token_ids);
+        assert!(params.all_stop_token_ids.contains(&77));
+
+        let error = lower((100..229).collect()).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            crate::error::ErrorKind::invalid_param("stop_token_ids")
+        );
     }
 
     #[test]
@@ -1806,6 +1830,7 @@ mod tests {
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},
+                stop_token_ids_set: {},
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,

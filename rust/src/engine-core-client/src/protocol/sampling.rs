@@ -120,7 +120,7 @@ pub struct EngineCoreSamplingParams {
     /// Parameters for detecting repetitive N-gram patterns. `None` disables
     /// detection.
     pub repetition_detection: Option<RepetitionDetectionParams>,
-    /// Token IDs that stop generation.
+    /// Explicit token IDs that stop generation.
     pub stop_token_ids: Vec<u32>,
     /// Primary EOS token ID used by engine-core's dedicated EOS stop path.
     ///
@@ -136,6 +136,12 @@ pub struct EngineCoreSamplingParams {
     /// IDs.
     #[serde(rename = "_all_stop_token_ids")]
     pub all_stop_token_ids: BTreeSet<u32>,
+    /// Additional EOS IDs to include in engine-core's cached stop membership.
+    #[serde(
+        rename = "_stop_token_ids_set",
+        skip_serializing_if = "BTreeSet::is_empty"
+    )]
+    pub stop_token_ids_set: BTreeSet<u32>,
     /// Logit biases to apply during sampling.
     /// Keys are token IDs
     pub logit_bias: Option<HashMap<u32, f32>>,
@@ -193,6 +199,7 @@ impl EngineCoreSamplingParams {
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),
+            stop_token_ids_set: BTreeSet::new(),
             logit_bias: None,
             allowed_token_ids: None,
             bad_words_token_ids: None,
@@ -208,10 +215,32 @@ impl EngineCoreSamplingParams {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use rmpv::Value;
 
-    use crate::protocol::decode_msgpack;
+    use super::EngineCoreSamplingParams;
     use crate::protocol::request::EngineCoreRequest;
+    use crate::protocol::{decode_msgpack, decode_value, encode_msgpack};
+
+    #[test]
+    fn encodes_configured_eos_stops_separately_from_explicit_stop_ids() {
+        let sampling = EngineCoreSamplingParams {
+            stop_token_ids: vec![10],
+            stop_token_ids_set: BTreeSet::from([20]),
+            ..EngineCoreSamplingParams::for_test()
+        };
+        let encoded = decode_value(&encode_msgpack(&sampling).unwrap()).unwrap();
+        let fields = encoded.as_map().unwrap();
+        assert!(fields.contains(&(
+            Value::from("stop_token_ids"),
+            Value::Array(vec![Value::from(10u32)]),
+        )));
+        assert!(fields.contains(&(
+            Value::from("_stop_token_ids_set"),
+            Value::Array(vec![Value::from(20u32)]),
+        )));
+    }
 
     /// A real `sampling_params` is a sparse `omit_defaults` map; absent fields
     /// must fall back to defaults. `python_compat` can't catch this since Rust
@@ -268,5 +297,6 @@ mod tests {
         assert_eq!(sampling.prompt_logprobs, None);
         assert_eq!(sampling.eos_token_id, None);
         assert!(sampling.all_stop_token_ids.is_empty());
+        assert!(sampling.stop_token_ids_set.is_empty());
     }
 }
