@@ -1182,15 +1182,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         MambaModelConfig.verify_and_update_config(vllm_config)
 
 
-class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        pooler_config = model_config.pooler_config
-        assert pooler_config is not None
-        if pooler_config.use_activation is None:
-            pooler_config.use_activation = False
-
-
 class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
     """Config handler for Jina Embeddings V5 embedding models."""
 
@@ -1430,6 +1421,17 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
         if mm_config is not None:
             video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
             video_kwargs.setdefault("video_backend", "nemotron_vl")
+
+        # Super VL stores its video frame sizing in the image processor config.
+        vision_config = model_config.hf_config.vision_config
+        if (
+            getattr(vision_config, "video_target_num_patches", None) is None
+            and getattr(vision_config, "video_target_img_size", None) is None
+        ):
+            for key in ("video_target_num_patches", "video_maintain_aspect_ratio"):
+                value = model_config.hf_image_processor_config.get(key)
+                if value is not None:
+                    setattr(vision_config, key, value)
 
 
 class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -1927,7 +1929,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
-    "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
@@ -1942,7 +1943,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteForSequenceClassification": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
-    "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
@@ -1956,7 +1956,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
-    "MambaForCausalLM": MambaModelConfig,
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
