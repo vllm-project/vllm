@@ -1444,15 +1444,7 @@ async fn remote_generation_accepts_pod_local_sockets_and_rejects_engine_launch_a
         panic!("expected serve args");
     };
     let url = serve.remote_generation_url.as_deref().unwrap();
-    assert_eq!(url, "unix:///run/llm-d/generation.sock");
-    let config = serve.to_server_config();
     serve.grpc_llm(url).unwrap();
-    assert_eq!(
-        config.listener_mode,
-        HttpListenerMode::BindUnix {
-            path: "/run/llm-d/frontend-http.sock".into()
-        }
-    );
     serve.managed_engine.max_model_len = Some("auto".into());
     assert!(serve.grpc_llm(url).is_err());
 

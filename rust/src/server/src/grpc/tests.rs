@@ -889,7 +889,6 @@ fn grpc_llm_request() -> GenerateRequest {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn grpc_llm_round_trips_through_inference_to_engine_core() {
-    let (submitted, observed) = tokio::sync::oneshot::channel();
     let (inference, control, health, engine_task) = setup_grpc_service_with_backend(
         b"engine-grpc-llm-round-trip",
         vec![
@@ -900,8 +899,13 @@ async fn grpc_llm_round_trips_through_inference_to_engine_core() {
             tokenizer: Arc::new(PanickingTokenizer),
             ..Default::default()
         }),
-        move |request| {
-            submitted.send(request.clone()).expect("record engine request");
+        |request| {
+            assert_eq!(decode_prompt_token_ids(request).unwrap(), [21, 43]);
+            let sampling = request.sampling_params.as_ref().unwrap();
+            assert_eq!(sampling.seed, Some(9_007_199_254_740_993));
+            assert_eq!(sampling.temperature, 0.75);
+            assert_eq!(sampling.max_tokens, 8);
+            assert_eq!(sampling.stop_token_ids, [99]);
         },
     )
     .await;
@@ -909,32 +913,17 @@ async fn grpc_llm_round_trips_through_inference_to_engine_core() {
         start_grpc_test_server(inference, control, health, Default::default()).await;
     let llm = GrpcLlm::from_channel(channel, "test-model".into(), 512.try_into().unwrap());
     let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
-    let request = observed.await.expect("engine submission");
-    assert_eq!(decode_prompt_token_ids(&request).unwrap(), [21, 43]);
-    let sampling = request.sampling_params.as_ref().unwrap();
-    assert_eq!(sampling.seed, Some(9_007_199_254_740_993));
-    assert_eq!(sampling.temperature, 0.75);
-    assert_eq!(sampling.max_tokens, 8);
-    assert_eq!(sampling.stop_token_ids, [99]);
-    let mut tokens = Vec::new();
-    let mut first = true;
-    loop {
-        let output = stream.next().await.expect("missing terminal output").unwrap();
-        assert_eq!(output.request_id, "proof");
-        if first {
-            assert_eq!(
-                output.prompt_info.unwrap().prompt_token_ids.as_ref(),
-                &[21, 43]
-            );
-            first = false;
-        }
-        tokens.extend(output.token_ids);
-        if let Some(reason) = output.finish_reason {
-            assert_eq!(reason, FinishReason::Length);
-            break;
-        }
-    }
-    assert_eq!(tokens, [17, 31, 42]);
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        first.prompt_info.unwrap().prompt_token_ids.as_ref(),
+        &[21, 43]
+    );
+    assert_eq!(first.token_ids, [17]);
+    assert_eq!(first.finish_reason, None);
+    let last = stream.next().await.unwrap().unwrap();
+    assert_eq!(last.request_id, "proof");
+    assert_eq!(last.token_ids, [31, 42]);
+    assert_eq!(last.finish_reason, Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
     engine_task.await.expect("mock engine task");
     server_task.abort();
