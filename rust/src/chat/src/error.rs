@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use thiserror::Error;
-use thiserror_ext::{AsReport as _, Construct, Macro};
+use thiserror_ext::{Construct, Macro};
 pub use vllm_text::ErrorKind;
 
 use crate::RendererSelection;
