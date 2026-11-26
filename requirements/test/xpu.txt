@@ -5495,7 +5495,9 @@ pyyaml==6.0.3 \
 pyzes==0.1.3 \
     --hash=sha256:61e3f45d85f97e11de5a6714d29f1813fe9454cd650a10f600eb61de6dbdc518 \
     --hash=sha256:e9c617096551beb2cec0cd8714ccc641c39ea3fe2ff41575234c218e9bd5f874
-    # via torch
+    # via
+    #   -c requirements/xpu.txt
+    #   torch
 pyzmq==27.1.0 \
     --hash=sha256:01c0e07d558b06a60773744ea6251f769cd79a41a97d11b8bf4ab8f034b0424d \
     --hash=sha256:01f9437501886d3a1dd4b02ef59fb8cc384fa718ce066d52f175ee49dd5b7ed8 \
