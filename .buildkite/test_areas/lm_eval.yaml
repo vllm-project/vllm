@@ -206,6 +206,7 @@ steps:
       - vllm/v1/core/
       - vllm/config/
       - tests/evals/gsm8k/configs/models-mi3xx-fp8-and-mixed.txt
+      - vllm/model_executor/layers/fused_moe/experts/aiter_mxfp4_w4a16_moe.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/evals/gsm8k/
@@ -431,6 +432,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval ReplaySSM"
   key: lm-eval-replayssm-2xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   optional: true
@@ -456,6 +458,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-replayssm.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) LM Eval ReplaySSM"
       dind: false
       device: mi355_2
@@ -941,9 +944,10 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt -k "Qwen3-30B-A3B-BF16-triton"
 
-- label: ":nvidia: (B200) MoE Refactor DP Integration (DeepEP v2)"
+- label: ":nvidia: (B200) [Nightly] MoE Refactor DP Integration (DeepEP v2)"
   key: moe-refactor-dp-ep-test-b200-deepep-v2
   automatic_shard: true
+  optional: true
   device: b200-k8s
   # DeepEP v2 needs every rank on one NVLink node, and EP_DISABLE_GIN drops its
   # NCCL GIN/RDMA requirement at num_ranks > 1.

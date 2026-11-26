@@ -35,11 +35,11 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FunAudioChatConfig": "vllm.transformers_utils.configs.funaudiochat",
     "FunAudioChatAudioEncoderConfig": "vllm.transformers_utils.configs.funaudiochat",
     "HYV4Config": "vllm.transformers_utils.configs.hy_v4",
+    "HYV4FlashConfig": "vllm.models.hy_v4_flash.configs",
+    "HYV4FlashVLConfig": "vllm.models.hy_v4_flash.configs",
+    "HYV4VLConfig": "vllm.transformers_utils.configs.hy_v4",
+    "HYV4VLVisionConfig": "vllm.transformers_utils.configs.hy_v4",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
-    # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
-    # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
-    # `FalconConfig` class from the official HuggingFace transformers library.
-    "RWConfig": "vllm.transformers_utils.configs.falcon",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MingV3ASRConfig": "vllm.transformers_utils.configs.ming_v3_asr",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
@@ -70,7 +70,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
-    "RadioConfig": "vllm.transformers_utils.configs.radio",
     "RicursiveConfig": "vllm.transformers_utils.configs.ricursive",
     "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators",
     "UltravoxConfig": "vllm.transformers_utils.configs.ultravox",
@@ -82,10 +81,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Step5Config": "vllm.transformers_utils.configs.step5",
     "Step5VLConfig": "vllm.transformers_utils.configs.step5",
     "FlintConfig": "vllm.models.flint.configs",
-    "InklingModelConfig": "vllm.models.inkling.configs",
-    "InklingAudioConfig": "vllm.models.inkling.configs",
-    "InklingVisionConfig": "vllm.models.inkling.configs",
-    "InklingMMConfig": "vllm.models.inkling.configs",
+    "Inkling2ModelConfig": "vllm.models.inkling2.configs",
+    "Inkling2MMConfig": "vllm.models.inkling2.configs",
+    "Inkling2LoopMMConfig": "vllm.models.inkling2.configs",
     # Upstream Transformers classes registered in _CONFIG_REGISTRY
     "DeepseekV3Config": "transformers",
     "HyperCLOVAXConfig": "transformers",
@@ -118,7 +116,6 @@ __all__ = [
     "HYV4Config",
     "HyperCLOVAXConfig",
     "IsaacConfig",
-    "RWConfig",
     "MiDashengLMConfig",
     "MingV3ASRConfig",
     "MiniMaxM3MTPConfig",
@@ -147,7 +144,6 @@ __all__ = [
     "OpenVLAConfig",
     "OvisConfig",
     "PixelShuffleSiglip2VisionConfig",
-    "RadioConfig",
     "RicursiveConfig",
     "SpeculatorsConfig",
     "UltravoxConfig",
@@ -160,10 +156,9 @@ __all__ = [
     "Step5Config",
     "Step5VLConfig",
     "FlintConfig",
-    "InklingModelConfig",
-    "InklingAudioConfig",
-    "InklingVisionConfig",
-    "InklingMMConfig",
+    "Inkling2ModelConfig",
+    "Inkling2MMConfig",
+    "Inkling2LoopMMConfig",
 ]
 
 
