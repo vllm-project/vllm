@@ -297,6 +297,31 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             attn_metadata.rswa_prefix_lens = persistent_prefix_lens
             attn_metadata.rswa_window = self.rswa_window
 
+        attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        attn_metadata.seq_lens_cpu_ub = common_attn_metadata.seq_lens_cpu_upper_bound
+        attn_metadata.num_reqs = num_reqs
+
+        # Cascade (shared-prefix) decode: one planner fill per step for the
+        # group's cascade-enabled impls; they skip their own fills. Entirely
+        # inactive with the flags off: no allocation, no aiter dependency.
+        from vllm import envs
+
+        if not (envs.VLLM_ROCM_CASCADE_DECODE or envs.VLLM_ROCM_CASCADE_MIXED):
+            return attn_metadata
+        from vllm.v1.attention.ops import rocm_cascade_decode as cascade
+
+        st = cascade._state_for(
+            (),
+            block_table_tensor.device,
+            self.num_heads_q,
+            self.num_heads_kv,
+            self.headdim,
+            block_table_tensor.shape[1],
+            max(block_table_tensor.shape[0], seq_lens.shape[0]),
+        )
+        cascade.maybe_fill_step(
+            st, block_table_tensor, seq_lens, max_query_len
+        )
         return attn_metadata
 
     def update_draft_decode_metadata(self, _metadata: TritonAttentionMetadata) -> None:
@@ -707,6 +732,11 @@ class TritonAttentionImpl(AttentionImpl):
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
+        if attn_metadata.causal and self._run_cascade_decode(
+            layer, query, output, key_cache, value_cache, attn_metadata
+        ):
+            return output
+
         unified_attention(
             q=query[:num_actual_tokens],
             k=key_cache,
@@ -747,6 +777,114 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
         return output
+
+    def _run_cascade_decode(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        output: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        attn_metadata: TritonAttentionMetadata,
+    ) -> bool:
+        """Cascade (shared-prefix) decode attention for decode rows.
+
+        Returns True when the cascade op handled the step's decode
+        attention: pure-decode steps entirely, and the decode rows of
+        mixed steps when VLLM_ROCM_CASCADE_MIXED is set (chunk rows then
+        still go through the unified kernel, below). Everything it runs
+        is device-side and buffer-owned, so pure-decode steps stay
+        CUDA-graph safe.
+        """
+        from vllm.v1.attention.ops import rocm_cascade_decode as cascade
+
+        m = attn_metadata
+        num_tokens = m.num_actual_tokens
+        pure = m.max_query_len == 1
+        if pure:
+            if not cascade.eligible(self, m, mixed=False):
+                return False
+        else:
+            if not cascade.eligible(self, m, mixed=True):
+                return False
+            if torch.cuda.is_current_stream_capturing():
+                # Map-building uses dynamic-shape torch ops; skip mixed
+                # steps while capturing.
+                return False
+        # The Triton backend's K/V views are (B, N, H, D); cascade's
+        # plain-4D path wants (B, H, N, D) -- a zero-copy permutation.
+        k_cache = key_cache.permute(0, 2, 1, 3)
+        v_cache = value_cache.permute(0, 2, 1, 3)
+        st = cascade._state_for(
+            (id(self),),
+            output.device,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+            m.block_table.shape[1],
+            max(m.block_table.shape[0], m.seq_lens.shape[0]),
+        )
+        if pure:
+            st.run(
+                output[:num_tokens],
+                query[:num_tokens],
+                k_cache,
+                v_cache,
+                m.seq_lens[:num_tokens],
+                m.block_table,
+                self.scale,
+                self.sinks,
+            )
+            return True
+        dec_req, dec_q_map, chk_req, chk_tok, chk_cu, chk_len_k = (
+            cascade.decode_rows_maps(
+                m.query_start_loc, m.seq_lens, m.num_actual_tokens
+            )
+        )
+        if dec_req.numel() == 0:
+            return False
+        dec_tables = m.block_table.index_select(0, dec_req.long())
+        dec_lens = m.seq_lens.index_select(0, dec_req.long())
+        st.fill(st.ws, st.pl, dec_tables, dec_lens, q_map_of_req=dec_q_map)
+        st.pa_decode_cascade(
+            output[:num_tokens],
+            query[:num_tokens],
+            k_cache,
+            v_cache,
+            dec_lens,
+            dec_tables,
+            self.scale,
+            sinks=self.sinks,
+            workspace=st.ws,
+        )
+        if chk_req.numel() == 0:
+            return True
+        # Chunk rows keep the unified kernel, on their token subset.
+        chk_q = query.index_select(0, chk_tok.long())
+        chk_out = st.chunk_out(chk_q.shape[0], chk_q.shape, chk_q.dtype, chk_q.device)
+        unified_attention(
+            q=chk_q,
+            k=key_cache,
+            v=value_cache,
+            out=chk_out,
+            cu_seqlens_q=chk_cu,
+            max_seqlen_q=m.max_query_len,
+            seqused_k=chk_len_k,
+            max_seqlen_k=m.max_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            alibi_slopes=self.alibi_slopes,
+            use_alibi_sqrt=False,
+            window_size=self.sliding_window,
+            block_table=m.block_table.index_select(0, chk_req.long()),
+            softcap=self.logits_soft_cap,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            sinks=self.sinks,
+        )
+        output[:num_tokens].index_copy_(0, chk_tok.long(), chk_out)
+        return True
 
     def _pth_key_value_caches(
         self, kv_cache: torch.Tensor

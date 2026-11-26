@@ -170,6 +170,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_CASCADE_DECODE: bool = False
+    VLLM_ROCM_CASCADE_MIXED: bool = False
     VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
@@ -1503,6 +1505,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
+    # Decode-time shared-prefix (cascade) attention on ROCm, via AITER's
+    # pa_decode_cascade: decode rows only, off by default until validated.
+    "VLLM_ROCM_CASCADE_DECODE": lambda: (
+        os.getenv("VLLM_ROCM_CASCADE_DECODE", "False").lower() in ("true", "1")
+    ),
+    # Extend decode cascade to the decode rows of mixed prefill/decode
+    # steps. Requires VLLM_ROCM_CASCADE_DECODE.
+    "VLLM_ROCM_CASCADE_MIXED": lambda: (
+        os.getenv("VLLM_ROCM_CASCADE_MIXED", "False").lower() in ("true", "1")
     ),
     # Share DP-shared Engram host tables (EngramConfig.dp_shared_memory) as
     # HIP VMM host memory instead of /dev/shm. Disabled by default: on some
