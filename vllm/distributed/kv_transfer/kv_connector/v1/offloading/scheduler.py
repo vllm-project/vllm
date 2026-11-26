@@ -1398,7 +1398,9 @@ class OffloadingConnectorScheduler:
         req_status: RequestOffloadState,
         block_ids: tuple[list[int], ...],
     ) -> bool:
-        if not self._store_finished_decode or not block_ids:
+        if not block_ids or not self._store_finished_decode:
+            return False
+        if req_status.req.num_in_flight_tokens:
             return False
 
         recurrent_block_ids = {
