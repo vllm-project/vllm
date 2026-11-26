@@ -4,6 +4,7 @@
 import math
 
 import pytest
+import regex as re
 import torch
 
 from vllm import SamplingParams
@@ -130,7 +131,9 @@ def test_qwen3_vl_pruned_video_prefix_cache_hit(
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Decode graphs require CUDA or ROCm"
 )
-def test_qwen3_vl_full_decode_graph_matches_eager(vllm_runner, image_assets):
+def test_qwen3_vl_full_decode_graph_matches_eager(
+    vllm_runner, image_assets, caplog_vllm
+):
     """Full decode graphs preserve results for a batch with text and images."""
     prompts = [
         qwen3_vl_chat_template(
@@ -149,6 +152,8 @@ def test_qwen3_vl_full_decode_graph_matches_eager(vllm_runner, image_assets):
             max_model_len=4096,
             max_num_seqs=2,
             enforce_eager=enforce_eager,
+            disable_log_stats=False,
+            cudagraph_metrics=not enforce_eager,
             compilation_config={
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "cudagraph_capture_sizes": [1, 2],
@@ -158,7 +163,15 @@ def test_qwen3_vl_full_decode_graph_matches_eager(vllm_runner, image_assets):
         ) as model:
             config = model.llm.llm_engine.vllm_config.compilation_config
             assert config.cudagraph_mode.has_full_cudagraphs() is not enforce_eager
+            caplog_vllm.clear()
             outputs.append(model.generate_w_logprobs(prompts, params, images=images))
+            if not enforce_eager:
+                model.llm.llm_engine.do_log_stats()
+                # Both requests contributed one token to a FULL replay.
+                assert re.search(
+                    r"(?m)^\|\s+2\s+\|\s+2\s+\|\s+0\s+\|\s+FULL\s+\|",
+                    caplog_vllm.text,
+                ), "Expected a full decode graph replay with both requests"
     check_logprobs_close(
         outputs_0_lst=outputs[0],
         outputs_1_lst=outputs[1],
