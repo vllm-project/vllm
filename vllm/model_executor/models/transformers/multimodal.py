@@ -89,8 +89,8 @@ _MAX_FRAMES_PER_VIDEO = 16
 _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
 _MIN_DUMMY_SIDE = 224
-# Earlier versions write the kwargs of `_get_num_multimodal_tokens` into the processor
-# class's defaults, where a request's kwargs would stay for every later request
+# Transformers >= 5.23 no longer writes the kwargs of `_get_num_multimodal_tokens` into
+# the processor class's defaults, where a request's kwargs would stay for later requests
 _COUNT_TAKES_REQUEST_KWARGS = Version(transformers.__version__) >= Version("5.23.0")
 
 

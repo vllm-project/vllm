@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import transformers
+from packaging.version import Version
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -291,6 +293,10 @@ def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
     assert result["prompt_token_ids"] == hf_ids
 
 
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0"),
+    reason="Earlier versions count with the server's kwargs only",
+)
 def test_image_rows_counted_with_request_kwargs():
     """Each image's rows are counted with the request's processor kwargs, which here
     resize SmolVLM's images before they are split into tiles."""

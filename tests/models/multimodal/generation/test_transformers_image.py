@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import transformers
+from packaging.version import Version
 from transformers import AutoModelForImageTextToText
 
 from ....conftest import HfRunner, ImageTestAssets, VllmRunner
@@ -72,6 +74,10 @@ def test_transformers_image_deepstack(
 
 
 @pytest.mark.core_model
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0"),
+    reason="Earlier versions count with the server's kwargs only",
+)
 def test_transformers_image_request_kwargs(
     vllm_runner: type[VllmRunner], image_assets: ImageTestAssets
 ):
