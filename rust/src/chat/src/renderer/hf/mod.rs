@@ -1232,7 +1232,7 @@ mod tests {
             matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages."),
             "expected an exception thrown by the template, got: {error:?}"
         );
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 
     #[test]
@@ -1490,7 +1490,7 @@ mod tests {
 
         let error = renderer.render(&request).unwrap_err();
         assert!(matches!(error, Error::UntrustedRequestChatTemplate));
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
 
         request.chat_options.chat_template = None;
         assert_eq!(
