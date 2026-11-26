@@ -17,9 +17,11 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
@@ -28,6 +30,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -72,6 +75,69 @@ def get_transferred_mrope_position_delta(
         )
         return None
     return delta
+
+
+def validate_transferred_mrope_position_delta(
+    vllm_config: VllmConfig,
+    sampling_params: "SamplingParams | None",
+    prompt_token_ids: list[int] | None,
+    prompt_embeds: torch.Tensor | None,
+    position_limit: int | None,
+) -> None:
+    """Validate the offset and its resulting positions before worker dispatch."""
+    delta = get_transferred_mrope_position_delta(vllm_config, sampling_params)
+    if delta is None or not vllm_config.model_config.uses_mrope:
+        return
+
+    assert sampling_params is not None
+    prompt_len = length_from_prompt_token_ids_or_embeds(prompt_token_ids, prompt_embeds)
+    max_model_len = vllm_config.model_config.max_model_len
+    max_tokens = sampling_params.max_tokens
+    speculative_config = vllm_config.speculative_config
+    lookahead = (
+        (speculative_config.num_speculative_tokens or 0)
+        if speculative_config is not None
+        else 0
+    )
+    sequence_len = (
+        max_model_len
+        if max_tokens is None
+        else min(prompt_len + max_tokens + lookahead, max_model_len)
+    )
+    # Prefill positions and the delta are staged in signed 32-bit slots.
+    # Decode positions start at prompt_len + delta and index the RoPE cache.
+    limits = torch.iinfo(torch.int32)
+    min_delta = max(-prompt_len, limits.min)
+    max_position = limits.max + 1
+    if position_limit is not None:
+        max_position = min(max_position, position_limit)
+    max_delta = min(limits.max, max_position - sequence_len)
+    if not min_delta <= delta <= max_delta:
+        raise VLLMValidationError(
+            "The transferred M-RoPE positions exceed the decode worker's bounds.",
+            parameter=f"kv_transfer_params.{MROPE_POSITION_DELTA_KEY}",
+        )
+
+
+def get_mrope_position_limit(worker: "WorkerBase") -> int | None:
+    """Return the smallest rotary position table on this worker."""
+    from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
+
+    modules = worker.get_model().modules()
+    runner = getattr(worker, "model_runner", None)
+    get_draft_model = getattr(runner, "get_draft_model", None)
+    draft_model = get_draft_model() if get_draft_model is not None else None
+    if draft_model is not None:
+        modules = chain(modules, draft_model.modules())
+
+    return min(
+        (
+            module.cos_sin_cache.size(0)
+            for module in modules
+            if isinstance(module, MRotaryEmbedding)
+        ),
+        default=None,
+    )
 
 
 def get_max_offload_tokens(kv_transfer_params: dict[str, Any] | None) -> int | None:

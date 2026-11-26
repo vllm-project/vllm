@@ -33,6 +33,10 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_mrope_position_limit,
+    validate_transferred_mrope_position_delta,
+)
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -131,6 +135,8 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
+    _mrope_position_limit: int | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -178,6 +184,20 @@ class EngineCore:
 
             # Setup KV Caches and update CacheConfig after profiling.
             kv_cache_config = self._initialize_kv_caches(vllm_config)
+            kv_transfer_config = vllm_config.kv_transfer_config
+            if (
+                kv_transfer_config is not None
+                and kv_transfer_config.is_kv_consumer
+                and vllm_config.model_config.uses_mrope
+            ):
+                self._mrope_position_limit = min(
+                    (
+                        limit
+                        for limit in self.collective_rpc(get_mrope_position_limit)
+                        if limit is not None
+                    ),
+                    default=None,
+                )
         except BaseException:
             # Otherwise module-level state keeps an in-process model alive.
             try:
@@ -1290,6 +1310,17 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        if not request.mm_features or all(
+            feature.modality == "prompt_embeds" for feature in request.mm_features
+        ):
+            validate_transferred_mrope_position_delta(
+                self.vllm_config,
+                request.sampling_params,
+                request.prompt_token_ids,
+                request.prompt_embeds,
+                self._mrope_position_limit,
+            )
+
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
