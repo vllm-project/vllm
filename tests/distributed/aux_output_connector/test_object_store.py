@@ -114,8 +114,8 @@ def mooncake(tmp_path, monkeypatch):
         return clients[-1]
 
     store_module = types.ModuleType("mooncake.store")
-    store_module.MooncakeDistributedStore = make_client
-    store_module.ReplicateConfig = SimpleNamespace
+    store_module.MooncakeDistributedStore = make_client  # type: ignore[attr-defined]
+    store_module.ReplicateConfig = SimpleNamespace  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mooncake", types.ModuleType("mooncake"))
     monkeypatch.setitem(sys.modules, "mooncake.store", store_module)
     connected = []
@@ -260,10 +260,15 @@ def _writer(put, timeout_s=10.0):
 
 
 def test_writer_writes_a_batch_a_store_refused_once():
-    refusals = []
-    client, _, writer = _writer(
-        lambda keys: None if refusals else refusals.append(1) or -200
-    )
+    refusals: list[int] = []
+
+    def put(keys):
+        if refusals:
+            return None
+        refusals.append(1)
+        return -200
+
+    client, _, writer = _writer(put)
     start = time.monotonic()
     writer.put(_objects("g/0"))
     writer.put(_objects("h/0"))
@@ -325,15 +330,16 @@ def test_writer_drops_only_the_batch_it_cannot_write(monkeypatch, failure, reaso
 
 def test_writer_deadline_counts_from_queueing():
     # A batch queued behind a slow one keeps the deadline it was queued with.
-    refusals = []
-    client, _, writer = _writer(
-        lambda keys: (
+    refusals: list[float] = []
+
+    def put(keys):
+        if keys == ["g/0"]:
             time.sleep(0.4)
-            if keys == ["g/0"]
-            else refusals.append(time.monotonic()) or -200
-        ),
-        0.5,
-    )
+            return None
+        refusals.append(time.monotonic())
+        return -200
+
+    client, _, writer = _writer(put, 0.5)
     writer.put(_objects("g/0"))
     time.sleep(0.1)
     queued = time.monotonic()
@@ -361,9 +367,12 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
     monkeypatch.setattr(object_store, "logger", logger)
     release = threading.Event()
     calls = []
-    client, _, writer = _writer(
-        lambda keys: calls.append(keys) or (release.wait(10) and None), 0.5
-    )
+
+    def put(keys):
+        calls.append(keys)
+        return release.wait(10) and None
+
+    client, _, writer = _writer(put, 0.5)
     start = time.monotonic()
     writer.put(_objects("g/0"))
     writer.put(_objects("h/0"))

@@ -190,49 +190,49 @@ class _Engine:
         self.version = 0
         self.num_steps = 0
         self.num_hits = 0
-        self.kv = {}
-        self.tier = {}
+        self.kv: dict[Any, Any] = {}
+        self.tier: dict[Any, Any] = {}
         self.fail_loads_from = None
         # Loads the connector reports asynchronously, the whole prompt
         # included.
         self.async_loads = False
-        self._recving = set()
-        self.requests = {}
-        self.owners = {}
-        self.by_owner = {}
-        self.used = {}
-        self.computed = []
-        self.blocks = {}
-        self.hits = {}
-        self.sampled = {}
+        self._recving: set[Any] = set()
+        self.requests: dict[Any, Any] = {}
+        self.owners: dict[Any, Any] = {}
+        self.by_owner: dict[Any, Any] = {}
+        self.used: dict[Any, Any] = {}
+        self.computed: list[Any] = []
+        self.blocks: dict[Any, Any] = {}
+        self.hits: dict[Any, Any] = {}
+        self.sampled: dict[Any, Any] = {}
         # Rows computed over a draft token the request did not keep, or over
         # a position whose token was unknown when the output was dropped.
-        self.off_token = set()
+        self.off_token: set[Any] = set()
         # Steps that computed a request's rows over a failed load.
-        self.poisoned = set()
+        self.poisoned: set[Any] = set()
         # By owner: the end of the positions it computed, and, for those a
         # later run of it started behind, the computation whose KV it used
         # from then on: the KV it hit, or its own recomputation.
-        self.ends = {}
-        self.rerun = {}
+        self.ends: dict[Any, Any] = {}
+        self.rerun: dict[Any, Any] = {}
         # By owner: the step a later run of it started at, for the positions
         # it computes again; and the step before which each object's write
         # was sent.
-        self.resumed = {}
-        self.queued = {}
-        self.finals = []
-        self.listings = {}
-        self._tags = {}
-        self._in_flight = {}
-        self._loads = []
-        self._load_from = {}
+        self.resumed: dict[Any, Any] = {}
+        self.queued: dict[Any, Any] = {}
+        self.finals: list[Any] = []
+        self.listings: dict[Any, Any] = {}
+        self._tags: dict[Any, Any] = {}
+        self._in_flight: dict[Any, Any] = {}
+        self._loads: list[Any] = []
+        self._load_from: dict[Any, Any] = {}
         self._schedule = scheduler.schedule
         self._update = scheduler.update_from_output
-        scheduler.schedule = self.schedule
-        scheduler.update_from_output = self.update_from_output
+        scheduler.schedule = self.schedule  # type: ignore[method-assign]
+        scheduler.update_from_output = self.update_from_output  # type: ignore[method-assign]
         if scheduler.connector is not None:
-            scheduler.connector.get_num_new_matched_tokens = self._matched
-            scheduler.connector.update_state_after_alloc = self._allocated
+            scheduler.connector.get_num_new_matched_tokens = self._matched  # type: ignore[method-assign]
+            scheduler.connector.update_state_after_alloc = self._allocated  # type: ignore[method-assign]
             scheduler.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
     def _matched(self, request, num_computed_tokens):
@@ -290,6 +290,7 @@ class _Engine:
             block_ids = self.scheduler.kv_cache_manager.get_block_ids(request_id)[
                 self.connector._group_id
             ]
+            assert metadata is not None
             if request_id in (metadata.namespace_runs or {}):
                 self.hits[request_id] = start
                 self.num_hits += start > 0
@@ -438,7 +439,7 @@ class _Engine:
         }
 
     def run(self, after_step=None):
-        outputs = {}
+        outputs: dict[str, Any] = {}
         for _ in range(1000):
             if not self.scheduler.has_requests():
                 return outputs
@@ -615,7 +616,7 @@ def _engine_core(engine):
     core._kv_cache_reclaimable = False
     core._checkpoint_state = CheckpointState.RUNNING
     core.deferred_step = None
-    core.collective_rpc = lambda method, args=(): [getattr(worker, method)(*args)]
+    core.collective_rpc = lambda method, args=(): [getattr(worker, method)(*args)]  # type: ignore[method-assign, misc]
     return core
 
 
@@ -647,7 +648,12 @@ def _preempt(engine, request, drop=False):
 
 def _slow_puts(engine):
     put_batch = engine.client.put_batch
-    engine.client.put_batch = lambda *args: time.sleep(0.05) or put_batch(*args)
+
+    def slow_put_batch(*args):
+        time.sleep(0.05)
+        return put_batch(*args)
+
+    engine.client.put_batch = slow_put_batch
 
 
 @pytest.mark.parametrize(
@@ -674,7 +680,7 @@ def test_listings_resolve_under_preemption_and_weight_updates(
         preempted.append(request.request_id)
         return preempt_request(request, timestamp, **kwargs)
 
-    scheduler._preempt_request = preempt
+    scheduler._preempt_request = preempt  # type: ignore[method-assign]
 
     def before_step(step, _):
         engine.version = step // 4
@@ -1170,7 +1176,7 @@ def test_engine_core_pause_writes_the_objects_of_the_requests_it_preempts():
 
 
 def _done(value):
-    future = Future()
+    future: Future[Any] = Future()
     future.set_result(value)
     return future
 
@@ -1187,7 +1193,7 @@ def _stepping_engine_core(engine, batch_queue):
     core.batch_queue = deque() if batch_queue else None
     core.batch_queue_size = 2
     engine.scheduler.schedule = lambda throttle_prefills=False: engine.schedule()
-    scheduled = deque()
+    scheduled: deque[Any] = deque()
 
     def output(scheduler_output):
         return _model_output(scheduler_output, engine.complete(scheduler_output))
@@ -1561,7 +1567,7 @@ def test_namespace_keeps_its_writes_after_a_failed_batch():
     # objects of the namespace are still written and readable.
     engine = _Engine()
     put_batch = engine.client.put_batch
-    failed = []
+    failed: list[list[str]] = []
 
     def put(keys, values, config):
         if not failed:
@@ -1615,9 +1621,12 @@ def test_worker_puts_the_objects_of_a_step_at_once(rows_first):
     worker = _worker(store)
     puts = []
     put = worker._writer.put
-    worker._writer.put = lambda objects: (
-        puts.append([key for key, _ in objects]) or put(objects)
-    )
+
+    def record_put(objects):
+        puts.append([key for key, _ in objects])
+        return put(objects)
+
+    worker._writer.put = record_put
     worker.begin_step(
         AuxOutputConnectorMetadata(
             0,

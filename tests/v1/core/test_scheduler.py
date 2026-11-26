@@ -743,6 +743,7 @@ def test_aux_outputs_opt_out_is_not_recorded():
     scheduler.add_request(skipped)
     scheduler_output = scheduler.schedule()
     metadata = scheduler_output.aux_output_connector_metadata
+    assert metadata is not None
     assert metadata.requests == {"recorded": 0}
     assert set(metadata.block_hashes) == {"recorded"}
 
@@ -760,10 +761,13 @@ def test_aux_outputs_opt_out_is_not_recorded():
         ),
     )
     by_id = {output.request_id: output for output in outputs[0].outputs}
-    assert by_id["recorded"].routed_experts.shape == (32, 1, 1)
+    routed_experts = by_id["recorded"].routed_experts
+    assert routed_experts is not None
+    assert routed_experts.shape == (32, 1, 1)
     assert by_id["skipped"].routed_experts is None
 
     metadata = scheduler.schedule().aux_output_connector_metadata
+    assert metadata is not None
     assert metadata.finished_requests == ("recorded",)
 
 
@@ -1026,10 +1030,12 @@ def test_aux_outputs_flip_after_recording_delivers_finish():
     (request,) = create_requests(num_requests=1, num_tokens=32, max_tokens=4)
     scheduler.add_request(request)
     scheduler.schedule()
+    assert request.sampling_params is not None
     request.sampling_params.return_aux_outputs = False
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
 
     metadata = scheduler.schedule().aux_output_connector_metadata
+    assert metadata is not None
     assert metadata.finished_requests == (request.request_id,)
 
 
@@ -1064,6 +1070,7 @@ def test_aux_outputs_opt_out_skips_retention(return_aux_outputs):
 
     scheduler.add_request(second)
     metadata = scheduler.schedule().aux_output_connector_metadata
+    assert metadata is not None
 
     if return_aux_outputs:
         assert output.num_scheduled_tokens[first.request_id] == 80
@@ -2657,7 +2664,9 @@ def test_aux_outputs_opt_out_gets_no_sampling_mask():
     outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
 
     by_id = {out.request_id: out for out in outputs}
-    assert by_id["recorded"].new_sampling_mask.token_ids.tolist() == [1, 2]
+    sampling_mask = by_id["recorded"].new_sampling_mask
+    assert sampling_mask is not None
+    assert sampling_mask.token_ids.tolist() == [1, 2]
     assert by_id["skipped"].new_sampling_mask is None
 
 

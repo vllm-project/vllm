@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import queue
-import re
 import threading
 import time
 from collections import deque
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
+import regex as re
 from safetensors.numpy import load, save
 
 from vllm.distributed.aux_output_connector.store import BlockObjectStoreError

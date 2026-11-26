@@ -2198,5 +2198,6 @@ def test_aux_objects_reach_the_final_output(output_kind: RequestOutputKind):
     )
     final = queue.get_nowait()
     assert final is not None and final.finished
+    assert isinstance(final.outputs, list)
     assert final.outputs[0].token_ids == [10, 11]
     assert final.outputs[0].aux_objects == listing
