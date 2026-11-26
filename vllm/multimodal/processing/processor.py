@@ -898,6 +898,12 @@ def _apply_token_matches_with_placeholders(
         prev_end_idx = match.end_idx
 
     new_token_ids.extend(token_ids[prev_end_idx:])
+
+    # Items with distinct targets (e.g. `<|image_2|>` before `<|image_1|>`)
+    # can be matched out of order, but callers index placeholders by item
+    for modality_placeholders in placeholders.values():
+        modality_placeholders.sort(key=lambda p: p.item_idx)
+
     return new_token_ids, result, placeholders
 
 
