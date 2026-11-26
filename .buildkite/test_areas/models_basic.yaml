@@ -92,6 +92,7 @@ steps:
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
   - tests/models/test_muse_spark_rocm_mono.py
+  - tests/models/test_muse_spark_fp32_rope.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
   - tests/models/test_muse_spark_rocm_drafter.py
   - tests/models/hy_v4/test_dfly_config.py
@@ -117,6 +118,7 @@ steps:
       models/test_muse_spark_rocm_shared_rope.py
       models/test_muse_spark_rocm_fused_markov_sampling.py
       models/test_muse_spark_rocm_mono.py
+      models/test_muse_spark_fp32_rope.py
       kernels/models/amd/test_muse_spark_fused_markov.py
       models/test_muse_spark_rocm_drafter.py
       models/hy_v4/test_dfly_config.py
@@ -187,6 +189,7 @@ steps:
       - tests/models/test_muse_spark_rocm_shared_rope.py
       - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
       - tests/models/test_muse_spark_rocm_mono.py
+      - tests/models/test_muse_spark_fp32_rope.py
       - tests/kernels/models/amd/test_muse_spark_fused_markov.py
       - tests/models/test_muse_spark_rocm_drafter.py
       - tests/models/test_muse_spark_rocm_draft_fp8.py
@@ -215,6 +218,7 @@ steps:
         models/test_muse_spark_rocm_shared_rope.py
         models/test_muse_spark_rocm_fused_markov_sampling.py
         models/test_muse_spark_rocm_mono.py
+        models/test_muse_spark_fp32_rope.py
         kernels/models/amd/test_muse_spark_fused_markov.py
         models/test_muse_spark_rocm_drafter.py
         models/test_muse_spark_rocm_draft_fp8.py
