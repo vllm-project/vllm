@@ -59,7 +59,7 @@ class PlaceholderMetadataResolver:
         EC store, so encoding it locally has nothing to work with.
         """
         data = feature.data
-        if not data:
+        if feature.is_metadata_only or not data:
             return False
         metadata = self.fields_for(feature.modality)
         return any(

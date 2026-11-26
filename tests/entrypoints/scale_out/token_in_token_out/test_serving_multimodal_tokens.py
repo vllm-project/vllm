@@ -127,6 +127,40 @@ async def client(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
+async def test_metadata_only_remote_prefill_requires_kv_consumer(client, test_image):
+    render_resp = await client.post(
+        RENDER_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "mm_payload": "metadata",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": encode_image_url(test_image, format="PNG")
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    render_resp.raise_for_status()
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            **render_resp.json(),
+            "kv_transfer_params": {"do_remote_prefill": True},
+        },
+    )
+    assert response.status_code == 400
+    assert "KV consumer" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_render_to_generate_roundtrip(client, test_image):
     """End-to-end: render a multimodal chat -> feed into generate -> decode.
 
@@ -446,7 +480,7 @@ def _upload_processed_image(
 async def test_kwargs_refs_generate_like_inline_kwargs_data(
     client, s3_store, test_image
 ):
-    """Tensors loaded from S3 must generate the same tokens as inline ones.
+    """S3 tensors with layout metadata must generate the same tokens as inline ones.
 
     The referenced item gets a new `mm_hash` so the encoder runs on the
     loaded tensors instead of reusing the inline request's output. The
@@ -456,6 +490,7 @@ async def test_kwargs_refs_generate_like_inline_kwargs_data(
         client, encode_image_url(test_image, format="PNG")
     )
     features = render_data["features"]
+    assert features["mm_metadata"]["image"][0] is not None
     reference = _upload_processed_image(s3_store, render_data)
 
     outputs = []
@@ -465,6 +500,7 @@ async def test_kwargs_refs_generate_like_inline_kwargs_data(
             "mm_hashes": {"image": [f"ref-{uuid.uuid4().hex}"]},
             "mm_placeholders": features["mm_placeholders"],
             "kwargs_refs": {"image": [reference]},
+            "mm_metadata": features["mm_metadata"],
         },
     ):
         gen_resp = await client.post(

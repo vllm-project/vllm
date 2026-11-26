@@ -130,14 +130,6 @@ class PlaceholderRangeInfo(BaseModel):
         return self
 
 
-def _has_serialized_mm_items(
-    payload: dict[str, list[str | None]] | None,
-) -> bool:
-    if not payload:
-        return False
-    return any(item is not None for items in payload.values() for item in items)
-
-
 class MultiModalFeatures(BaseModel):
     """Lightweight multimodal metadata produced by the render step.
 
@@ -175,11 +167,27 @@ class MultiModalFeatures(BaseModel):
     Each value is a list parallel to `mm_hashes[modality]`. A `str`
     entry is a base64-encoded `MultiModalKwargsItem` containing only
     placeholder-metadata and `keep_on_cpu` fields. `None` means that
-    the metadata is unavailable for that item. Prefill can use this
-    instead of `kwargs_data` only when `ec_transfer_params` is also
-    set, so embeddings arrive through the EC connector rather than from
-    `pixel_values`.
+    the metadata is unavailable for that item. When neither `kwargs_data`
+    nor `kwargs_refs` supplies tensors, the item needs EC transfer parameters
+    for prefill or remote prefill KV transfer parameters for decode.
     """
+
+    def metadata_only_indices(self) -> dict[str, set[int]]:
+        """Identify layout-only items without inline or referenced tensors."""
+        result: dict[str, set[int]] = {}
+        for modality, items in (self.mm_metadata or {}).items():
+            tensors = (self.kwargs_data or {}).get(modality, [None] * len(items))
+            references = (self.kwargs_refs or {}).get(modality, [None] * len(items))
+            indices = {
+                i
+                for i, (metadata, tensor, reference) in enumerate(
+                    zip(items, tensors, references, strict=True)
+                )
+                if metadata is not None and tensor is None and reference is None
+            }
+            if indices:
+                result[modality] = indices
+        return result
 
     @model_validator(mode="after")
     def _validate_parallel_fields(self) -> "MultiModalFeatures":
@@ -303,32 +311,22 @@ class GenerateRequest(BaseModel):
     placeholders. With `features`, these placeholders must follow the
     last `features` range, which is left as is."""
 
-    _metadata_only_requires_ec: ClassVar[bool] = True
+    _metadata_only_requires_transfer: ClassVar[bool] = True
 
     @model_validator(mode="after")
-    def _require_ec_for_metadata_only(self) -> "GenerateRequest":
+    def _require_transfer_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
-        if features is None or not self._metadata_only_requires_ec:
-            return self
-        if not _has_serialized_mm_items(features.mm_metadata):
-            return self
-        if self.ec_transfer_params:
-            return self
-        kwargs_data = features.kwargs_data or {}
-        kwargs_refs = features.kwargs_refs or {}
-        for modality, metadata_items in (features.mm_metadata or {}).items():
-            n = len(metadata_items)
-            kwargs_items = kwargs_data.get(modality, [None] * n)
-            ref_items = kwargs_refs.get(modality, [None] * n)
-            if any(
-                metadata is not None and kwargs is None and ref is None
-                for metadata, kwargs, ref in zip(
-                    metadata_items, kwargs_items, ref_items, strict=True
-                )
-            ):
-                raise ValueError(
-                    "metadata-only multimodal items require ec_transfer_params"
-                )
+        if (
+            self._metadata_only_requires_transfer
+            and features is not None
+            and not self.ec_transfer_params
+            and (self.kv_transfer_params or {}).get("do_remote_prefill") is not True
+            and features.metadata_only_indices()
+        ):
+            raise ValueError(
+                "metadata-only multimodal items require ec_transfer_params "
+                "or kv_transfer_params with do_remote_prefill=true"
+            )
         return self
 
     sampling_params: SamplingParams
@@ -517,12 +515,13 @@ class GenerateRequest(BaseModel):
 class RenderedGenerateRequest(GenerateRequest):
     """A `GenerateRequest` produced by `/render`.
 
-    `ec_transfer_params` come from the encode response, so a render with
-    `mm_payload="metadata"` cannot have them yet. `/inference/v1/generate`
+    Transfer parameters are supplied after rendering by the encode or prefill
+    response, so a render with `mm_payload="metadata"` cannot have them yet.
+    `/inference/v1/generate`
     still validates the request it receives as a `GenerateRequest`.
     """
 
-    _metadata_only_requires_ec: ClassVar[bool] = False
+    _metadata_only_requires_transfer: ClassVar[bool] = False
 
 
 class GenerateLogProb(BaseModel):

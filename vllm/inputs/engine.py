@@ -161,6 +161,9 @@ class MultiModalInput(_InputOptions):
     If true, skip the multimodal processor cache for this request.
     """
 
+    mm_metadata_only: NotRequired[dict[str, set[int]]]
+    """Per-modality item indices that carry layout metadata but no encoder input."""
+
 
 def mm_input(
     prompt_token_ids: list[int],

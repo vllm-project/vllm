@@ -547,6 +547,24 @@ class ServingTokens(GenerateBaseServing):
         features = request.features
         reservations = mm_reservations if mm_reservations is not None else []
 
+        kv_only_items = (
+            features.metadata_only_indices()
+            if features and not request.ec_transfer_params
+            else {}
+        )
+        if kv_only_items:
+            kv_config = self.engine_client.vllm_config.kv_transfer_config
+            mm_config = self.model_config.multimodal_config
+            if (
+                kv_config is None
+                or not kv_config.is_kv_consumer
+                or mm_config is None
+                or not mm_config.allow_missing_mm_embeddings
+            ):
+                raise VLLMValidationError(
+                    "Metadata-only remote prefill requires a multimodal KV consumer."
+                )
+
         if request.content_parts:
             # Items in features are already expanded; render every token
             # after the last of them, so new placeholders must lie there.
@@ -589,7 +607,6 @@ class ServingTokens(GenerateBaseServing):
             mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
 
             # Deserialize full tensor data and optional metadata-only data.
-            # Metadata-only items are valid when ec_transfer_params is set.
             # `null` entries fall back to `kwargs_data` or the cache.
             references = [
                 ref
@@ -668,6 +685,8 @@ class ServingTokens(GenerateBaseServing):
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
             )
+            if kv_only_items:
+                engine_input["mm_metadata_only"] = kv_only_items
         elif not request.content_parts:
             (engine_input,) = await self.online_renderer.preprocess_completion(
                 request,
