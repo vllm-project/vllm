@@ -1076,18 +1076,24 @@ def test_ignored_unexpected_patterns_match_renamed_keys():
     and only drops weights nothing loads (A.X-K1's `post_mlp_layernorm` is renamed
     into `mlp` and unused only on its dense layers)."""
     stub = nn.Module()
-    stub.layers = nn.ModuleList([nn.Module(), nn.Module()])
-    stub.layers[0].mlp = nn.Module()
-    stub.layers[0].mlp.post_norm = nn.RMSNorm(2)
-    stub.model = SimpleNamespace(_keys_to_ignore_on_load_unexpected=[r"mlp\.post_norm"])
-    stub.hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_renaming=[WeightRenaming("post_norm", "mlp.post_norm")]
-    )
-    weights = [(f"layers.{i}.mlp.post_norm.weight", torch.ones(2)) for i in range(2)]
+    stub.config = PreTrainedConfig()
+    stub.model = nn.Module()
+    stub.model.base_model_prefix = "model"
+    stub.model._keys_to_ignore_on_load_unexpected = [r"mlp\.post_norm"]
+    stub.model.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    stub.model.layers[0].mlp = nn.Module()
+    stub.model.layers[0].mlp.post_norm = nn.RMSNorm(2)
+    renaming = WeightRenaming("post_norm", "mlp.post_norm")
+    stub._weight_conversions = lambda: [renaming]
+    stub._maybe_apply_model_mapping = lambda: None
+    stub._drop_ignored_unexpected = partial(Base._drop_ignored_unexpected, stub)
+    stub.ignore_unexpected_prefixes = stub.ignore_unexpected_suffixes = []
+    Base._create_hf_to_vllm_mapper(stub)
+    weights = [(f"model.layers.{i}.post_norm.weight", torch.ones(2)) for i in range(2)]
 
-    kept = Base._drop_ignored_unexpected(stub, iter(weights))
+    loaded = Base.load_weights(stub, weights)
 
-    assert [name for name, _ in kept] == ["layers.0.mlp.post_norm.weight"]
+    assert loaded == {"model.layers.0.mlp.post_norm.weight"}
 
 
 @pytest.mark.skipif(
