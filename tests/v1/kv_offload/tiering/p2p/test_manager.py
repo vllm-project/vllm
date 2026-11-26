@@ -928,6 +928,20 @@ class TestOnRequestFinished:
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
+        assert session.notify_finishes == ["req-1"]
+
+    def test_decoder_with_submitted_fetch_does_not_send_another_terminal(self):
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        session = _FakeSession(peer_id=peer_id)
+        mgr._sessions[peer_id] = session
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
+        source = ctx.get_state(P2PSourceInfo)
+        assert source is not None
+        source.pd_fetch_submitted = True
+        mgr.on_request_finished(ctx)
+        assert session.finishes == ["req-1"]
+        assert not session.notify_finishes
 
     def test_p2p_consumer_side_calls_session_finish_request(self):
         """Symmetric-P2P consumer finish (`remote_kv_source` set) routes via peer_id
@@ -940,6 +954,7 @@ class TestOnRequestFinished:
         ctx = _req_context(kv_params=_remote_kv_source_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
+        assert not session.notify_finishes
 
     def test_prefiller_bound_id_routes_via_kv_to_session(self):
         """Prefiller-side finish for an id whose session is already bound
@@ -1067,6 +1082,7 @@ class _FakeSession:
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
         self.finishes: list[str] = []
+        self.notify_finishes: list[str] = []
         self.last_activity_at: float = (
             last_activity_at if last_activity_at is not None else time.monotonic()
         )
@@ -1104,8 +1120,10 @@ class _FakeSession:
         self.attached.append(conn)
         self.connected = True
 
-    def finish_request(self, kv_request_id):
+    def finish_request(self, kv_request_id, *, notify_peer=False):
         self.finishes.append(kv_request_id)
+        if notify_peer:
+            self.notify_finishes.append(kv_request_id)
 
     def abort_loads(self):
         pass

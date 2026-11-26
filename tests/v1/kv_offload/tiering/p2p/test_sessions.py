@@ -2634,6 +2634,39 @@ class TestServerFlows:
 
 
 class TestFinishRequestServerSide:
+    @pytest.mark.parametrize("ready_before_finish", [False, True])
+    def test_unused_pd_finish_releases_only_its_supply(self, ready_before_finish):
+        """A no-load PD finish survives the handshake and leaves other stores."""
+        consumer, consumer_conn, _ = _make_session()
+        producer, producer_conn, _ = _make_session()
+        _activate(producer, producer_conn)
+        producer.add_stored_blocks("unused", [OffloadKey(b"a")], [0], job_id=1)
+        producer.add_stored_blocks("other", [OffloadKey(b"b")], [1], job_id=2)
+        if ready_before_finish:
+            _activate(consumer, consumer_conn)
+
+        consumer.finish_request("unused", notify_peer=True)
+        if not ready_before_finish:
+            assert not any(m[TYPE_KEY] == FetchMsg.TYPE for m in consumer_conn._sent)
+            _activate(consumer, consumer_conn)
+
+        fetches = [m for m in consumer_conn._sent if m[TYPE_KEY] == FetchMsg.TYPE]
+        assert len(fetches) == 1
+        producer_conn.enqueue(fetches[0])
+        assert [r.job_id for r in producer.poll().stores] == [1]
+        assert producer.poll().stores == []
+
+        producer_conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "other",
+                FetchMsg.KEYS: [],
+                FetchMsg.BLOCK_INDEXES: [],
+                FetchMsg.ROUND_SEQ: 0,
+            }
+        )
+        assert [r.job_id for r in producer.poll().stores] == [2]
+
     def _last_transfer_done(self, conn: FakeConnection) -> dict | None:
         for msg in reversed(conn._sent):
             if msg[TYPE_KEY] == TransferDoneMsg.TYPE:

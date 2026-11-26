@@ -541,7 +541,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         if source is not None:
             source_session = self._sessions.get(source.peer_id)
             if source_session is not None:
-                source_session.finish_request(source.kv_request_id)
+                source_session.finish_request(
+                    source.kv_request_id,
+                    notify_peer=not source.do_probe and not source.pd_fetch_submitted,
+                )
 
         if dest_id is not None:
             # Prefiller-side finish: identify the session via kv_request_id.
