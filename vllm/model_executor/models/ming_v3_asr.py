@@ -82,6 +82,7 @@ from .interfaces import (
     IsHybrid,
     MultiModalEmbeddings,
     StreamingTranscriptionPostProcessor,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
@@ -318,6 +319,7 @@ class MingV3ASRForConditionalGeneration(
     HasInnerState,
     IsHybrid,
     SupportsPP,
+    SupportsEagle3,
 ):
     supported_languages = _LANGUAGES
     supports_transcription_only = True
@@ -388,7 +390,7 @@ class MingV3ASRForConditionalGeneration(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         return self.language_model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
