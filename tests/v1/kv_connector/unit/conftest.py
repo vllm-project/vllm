@@ -25,3 +25,21 @@ def _mock_cpu_backend_block_sizes(monkeypatch):
         "get_supported_kernel_block_sizes",
         staticmethod(lambda kv_cache_spec=None: [MultipleOf(16)]),
     )
+
+
+@pytest.fixture(autouse=True)
+def _fake_remote_layer_meta_tensors(monkeypatch):
+    """Remote metadata under test advertises no views, so stand in for them
+    (see `fake_remote_layer_meta_tensors`)."""
+    from tests.v1.kv_connector.unit.utils import fake_remote_layer_meta_tensors
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        NixlBaseConnectorWorker,
+    )
+
+    tp_byte_ranges = NixlBaseConnectorWorker._tp_byte_ranges
+
+    def with_remote_views(self, meta, regions, remote_tp_size, *args, **kwargs):
+        fake_remote_layer_meta_tensors(self, meta, regions, remote_tp_size)
+        return tp_byte_ranges(self, meta, regions, remote_tp_size, *args, **kwargs)
+
+    monkeypatch.setattr(NixlBaseConnectorWorker, "_tp_byte_ranges", with_remote_views)

@@ -306,10 +306,6 @@ def kda_conv_ssm(
     spec: MambaSpec,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return zero-copy conv and SSM views over a packed two-state page."""
-    from math import prod
-
-    from vllm.utils.torch_utils import get_dtype_size
-
     if len(spec.shapes) != 2 or len(spec.dtypes) != 2:
         raise ValueError(
             "MoRIIO KDA transfer requires exactly two states (conv and SSM)"
@@ -321,21 +317,8 @@ def kda_conv_ssm(
             "MoRIIO KDA packed cache must have shape [B, 1, 1, C] with "
             "a contiguous byte dimension"
         )
-    # Mirror MambaBase.bind_kv_cache: blocks may be strided within a shared
-    # multi-layer allocation, while every individual byte page is contiguous.
-    pages = kv_cache.squeeze(dim=(1, 2))
-    states: list[torch.Tensor] = []
-    offset = 0
-    for shp, dt in zip(spec.shapes, spec.dtypes, strict=True):
-        nbytes = prod(shp) * get_dtype_size(dt)
-        if offset + nbytes > pages.shape[1]:
-            raise ValueError(
-                "MoRIIO KDA state layout exceeds the packed cache page size"
-            )
-        state = pages[:, offset : offset + nbytes].view(dt)
-        states.append(state.view(-1, *shp))
-        offset += nbytes
-    return states[0], states[1]
+    conv, ssm = spec.split_states(kv_cache)
+    return conv, ssm
 
 
 def iter_layer_registration_regions(

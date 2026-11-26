@@ -30,29 +30,24 @@ from typing import Any, Self
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import numpy as np
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-    NixlBaseConnectorWorker,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
+    ReadSpec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-    ReadSpec,
-    TPMapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
@@ -219,7 +214,9 @@ class TestPushScheduler:
 
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = MagicMock(req_ids=[])
+        scheduler_output.scheduled_cached_reqs = MagicMock(
+            req_ids=[], resumed_req_ids=set()
+        )
 
         # Patch parent build_connector_meta so we don't have to set up
         # all the base scheduler plumbing.
@@ -253,7 +250,9 @@ class TestPushScheduler:
         # Drain via build_connector_meta - lease still pending until WRITE.
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = MagicMock(req_ids=[])
+        scheduler_output.scheduled_cached_reqs = MagicMock(
+            req_ids=[], resumed_req_ids=set()
+        )
         with patch.object(
             sched.__class__.__mro__[1],
             "build_connector_meta",
@@ -315,7 +314,9 @@ class TestPushScheduler:
 
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = MagicMock(req_ids=[])
+        scheduler_output.scheduled_cached_reqs = MagicMock(
+            req_ids=[], resumed_req_ids=set()
+        )
         with patch.object(
             sched.__class__.__mro__[1],
             "build_connector_meta",
@@ -375,15 +376,19 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
-        w.draft_tp_mappings = {}
-        w._head_sharded_draft_kv_heads = None
-        w._head_sharded_draft_regions = set()
+        w._remote_stages = {}
+        w._local_desc_lists = {}
+        w._physical_blocks_per_group = [1]
+        w._remote_physical_blocks_per_group = {}
+        w._remote_block_splits = {}
+        w._push_senders = defaultdict(dict)
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.pcp_rank = 0
         w.pcp_dcp_sharded = False
         w.world_size = 1
         w.pp_size = 1
+        w.dcp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._failed_remote_engines = set()
@@ -392,8 +397,6 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w.region_group_ids = [0]
-        w._packed_member_layouts = {}
-        w._remote_stages = {}
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._is_csa_linear = False
@@ -812,10 +815,9 @@ def _eviction_worker(
     w._handshake_lock = threading.RLock()
     # _cleanup_remote_engine touches these when reaping an engine.
     w.nixl_wrapper = MagicMock()
-    w._remote_stages = {}
     w.kv_caches_base_addr = {}
     w.dst_num_blocks = {}
-    w.tp_mappings = {}
+    w.source_ranks = {}
     w.transfer_topo = None
     monkeypatch.setattr(w, "_logical_to_kernel_block_ids", lambda blocks, ratio: blocks)
     w.writes = []
@@ -957,7 +959,8 @@ class TestPushWriterNotifs:
         # Pretend the writer thread already forwarded a completion notif
         # for a request whose KV is being received.
         request_id = "req-recv-1"
-        w._recving_metadata[request_id] = MagicMock(pp_size=1)
+        w._recving_metadata[request_id] = MagicMock()
+        w._push_senders[w._recving_metadata[request_id].remote.engine_id] = {0: 1}
         # Compose the standard completion notif: req_id:tp_size.
         notif_msg = f"{request_id}:1".encode()
         w._pending_completion_notifs.put(notif_msg)
@@ -1088,15 +1091,12 @@ class TestPushWriterNotifs:
         """A submission error remains a failure even if later polls succeed."""
         w = self._pollable_worker()
         request_id = self._make_sending_req(w)
-        monkeypatch.setattr(
-            w, "_apply_prefix_caching", MagicMock(return_value=([[1]], [[1]]))
-        )
-        monkeypatch.setattr(w, "_compute_desc_ids", MagicMock(return_value=[0]))
-        w.dst_num_blocks = {w.engine_id: 8}
-        w.region_num_blocks = [8]
-        w._remote_stages[w.engine_id] = remote_stage(
-            region_pairs_by_index(1), region_num_blocks=[8]
-        )
+        w.transfer_topo.block_size_ratio.return_value = 1
+        w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
+        w._compute_desc_ids = MagicMock(return_value=([0], [0]))
+        stage = remote_stage(w, w.engine_id)
+        stage.local_descs = MagicMock(handle=1)
+        stage.xfer_side_handles = {0: 2}
         w.nixl_wrapper.make_prepped_xfer.return_value = 101
         w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
         if release_fails:
@@ -1111,8 +1111,7 @@ class TestPushWriterNotifs:
             dst_engine_id=w.engine_id,
             request_id=request_id,
             remote_request_id="decode-request",
-            local_xfer_side_handle=1,
-            remote_xfer_side_handle=2,
+            stage=stage,
         )
         assert handle == (101 if release_fails else None)
         w._sending_transfers[request_id] = [102]
@@ -1525,10 +1524,14 @@ class TestPushPipelineParallel:
 
     def test_completion_waits_for_one_notif_per_pp_stage(self):
         """Each PP stage WRITEs its own layers and sends one notif; D must
-        collect pp_size notifs before reporting the recv done."""
+        collect one notif per stage before reporting the recv done."""
         w = _StubWriterWorker.fresh()
         request_id = "req-pp-2"
-        w._recving_metadata[request_id] = MagicMock(pp_size=2)
+        w._recving_metadata[request_id] = MagicMock()
+        w._push_senders[w._recving_metadata[request_id].remote.engine_id] = {
+            0: 1,
+            1: 1,
+        }
         notif = f"{request_id}:1".encode()
 
         # First stage: counted, not yet done.
@@ -1563,16 +1566,15 @@ class TestPushPipelineParallel:
         metadata.add_new_req_to_recv("req-default", ([0],), params)
         assert metadata.reqs_to_recv["req-default"].pp_size == 1
 
-    def test_add_remote_agent_keeps_the_remote_regions_of_local_layers(self):
+    def test_add_remote_agent_pairs_the_remote_regions_of_local_layers(self):
         """With PP>1 the consumer registered regions for the full model, but
-        this worker holds only a layer slice; add_remote_agent keeps the
+        this worker holds only a layer slice; add_remote_agent pairs the
         consumer's regions holding those layers before building descriptors.
         We stop right after via a sentinel on the next collaborator call."""
         block_len = 4096 * 16
         w = _StubWriterWorker.fresh()  # seeds writer-thread state for teardown
         w.pp_size = 2
         w.block_len_per_layer = [block_len, block_len]  # 2 local layers
-        w._region_is_mla = [False, False]
         w.region_group_ids = [0, 0]
         w.kv_cache_config = MagicMock(
             transfer_group_index_by_layer={f"L{i}": 0 for i in range(4)}
@@ -1597,18 +1599,16 @@ class TestPushPipelineParallel:
             block_strides=[block_len] * 4,
             kv_cache_layout="HND",
             block_size=16,
-            ssm_sizes=(0, 0),
             attn_backend_name="FLASH_ATTN",
-            physical_blocks_per_logical_kv_block=1,
+            physical_blocks_per_group=[1],
             region_members=[["L0"], ["L1"], ["L2"], ["L3"]],
         )
 
         with pytest.raises(_StopAfterSlice):
             w.add_remote_agent(meta, remote_tp_rank=0, remote_tp_size=1)
 
-        # Down to the regions of this worker's layers.
-        assert meta.kv_caches_base_addr == [12, 13]
-        assert meta.block_lens == [block_len, block_len]
+        pairs = remote_stage(w, "p-engine").pairs
+        assert (pairs.remote, pairs.local) == ([2, 3], [0, 1])
 
 
 class TestPushWriterMlaReplication:
@@ -1621,10 +1621,6 @@ class TestPushWriterMlaReplication:
     def _mla_worker_writing_to(d_ranks, monkeypatch: pytest.MonkeyPatch):
         from types import SimpleNamespace
 
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-            TPMapping,
-        )
-
         engine_id = "decode-engine"
         w = _StubWriterWorker.fresh()
         w.use_mla = True
@@ -1635,50 +1631,24 @@ class TestPushWriterMlaReplication:
             remote_block_size=16,
             remote_physical_blocks_per_logical=1,
         )
-        # D_TP > P_TP => negative ratio (one P rank feeds |ratio| D ranks).
-        w.transfer_topo.tp_ratio.return_value = -len(d_ranks)
-        # The tp-mapping collapses MLA to a single source rank (correct for
-        # the pull/read direction); the push path must fan it back out.
-        w.tp_mappings = {
-            engine_id: TPMapping(
-                source_ranks_per_group=((0,),),
-                all_source_ranks=(0,),
-                rank_to_attention_slot={0: 0},
-                rank_offset_factor=0,
-            )
-        }
-        monkeypatch.setattr(
-            w, "_logical_to_kernel_block_ids", lambda block_ids, ratio: block_ids
-        )
-        w._remote_stages[engine_id] = remote_stage(
-            region_pairs_by_index(1),
-            region_num_blocks=[100],
-            xfer_side_handles={r: 1000 + r for r in d_ranks},
-        )
-        w.src_xfer_handles_by_block_size = {16: 2000}
+        # The push direction's ranges write the replicated latent to every
+        # D rank (see test_tp_mapping).
+        w.source_ranks = {engine_id: [tuple(d_ranks)]}
+        w._remote_physical_blocks_per_group = {engine_id: [1]}
+        stage = remote_stage(w, engine_id)
+        stage.pairs = region_pairs_by_index(1)
+        stage.xfer_side_handles = {r: 1000 + r for r in d_ranks}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
 
-    def test_mla_hetero_tp_writes_every_d_rank(self, monkeypatch: pytest.MonkeyPatch):
+    @staticmethod
+    def _req(engine_id):
         from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
             RemoteMeta,
             ReqMeta,
         )
 
-        w, engine_id = self._mla_worker_writing_to(
-            d_ranks=(0, 1), monkeypatch=monkeypatch
-        )
-
-        written: list[int] = []
-
-        def _fake_xfer(**kw):
-            rank = kw["read_spec"].remote_rank
-            written.append(rank)
-            return 1000 + rank  # in-flight handle, as the real method returns
-
-        w._xfer_blocks = _fake_xfer
-
-        meta = ReqMeta(
+        return ReqMeta(
             local_block_ids=([100, 101],),
             local_physical_block_ids=([100, 101],),
             tp_size=1,
@@ -1691,7 +1661,19 @@ class TestPushWriterMlaReplication:
             ),
         )
 
-        w._xfer_blocks_for_req(req_id="p-req", meta=meta)
+    def test_mla_hetero_tp_writes_every_d_rank(self):
+        w, engine_id = self._mla_worker_writing_to(d_ranks=(0, 1))
+
+        written: list[int] = []
+
+        def _fake_xfer(**kw):
+            rank = kw["read_spec"].remote_rank
+            written.append(rank)
+            return 1000 + rank  # in-flight handle, as the real method returns
+
+        w._xfer_blocks = _fake_xfer
+
+        w._xfer_blocks_for_req(req_id="p-req", meta=self._req(engine_id))
 
         # Every handshook D rank must receive a real WRITE of the latent...
         assert sorted(written) == [0, 1]
@@ -1701,84 +1683,16 @@ class TestPushWriterMlaReplication:
         # engine thread never sees a partial set and double-frees the request.
         assert sorted(w._sending_transfers["p-req"]) == [1000, 1001]
 
-    def test_csa_linear_writes_every_group_to_each_target(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        from types import SimpleNamespace
+    def test_replica_rank_with_nothing_to_write_finishes_at_once(self):
+        """With P TP > D TP, another P rank writes the replicated latent; this
+        one writes nothing and reports the request done rather than holding its
+        blocks until the lease expires."""
+        w, engine_id = self._mla_worker_writing_to(d_ranks=())
+        w._xfer_blocks = MagicMock(side_effect=AssertionError("nothing to write"))
 
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-            RemoteMeta,
-            ReqMeta,
-        )
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-            TPMapping,
-        )
+        w._xfer_blocks_for_req(req_id="p-req", meta=self._req(engine_id))
 
-        engine_id = "decode-engine"
-        w = _StubWriterWorker.fresh()
-        w.world_size = 2
-        w.use_mla = False
-        w._has_mamba = True
-        w._is_csa_linear = True
-        w.nixl_wrapper = MagicMock()
-        w.transfer_topo = MagicMock()
-        w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
-            remote_tp_size=4,
-            remote_block_size=16,
-            remote_physical_blocks_per_logical=1,
-        )
-        w.transfer_topo.tp_ratio.return_value = -2
-        w.transfer_topo.handshake_target_ranks.return_value = (0, 1)
-        w.tp_mappings = {
-            engine_id: TPMapping(
-                source_ranks_per_group=((0,), (0,), (0, 1), (0, 1)),
-                all_source_ranks=(0, 1),
-                rank_to_attention_slot={0: 0, 1: 0},
-                rank_offset_factor=0,
-            )
-        }
-        monkeypatch.setattr(
-            w, "_logical_to_kernel_block_ids", lambda block_ids, ratio: block_ids
-        )
-        w.region_group_ids = [0, 1, 2, 3]
-        w._remote_stages[engine_id] = remote_stage(
-            region_pairs_by_index(4, groups=[0, 1, 2, 3]),
-            region_num_blocks=[100] * 4,
-            region_group_ids=[0, 1, 2, 3],
-            xfer_side_handles={0: 1000, 1: 1001},
-        )
-        w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
-
-        writes = []
-
-        def _fake_xfer(**kwargs):
-            writes.append(kwargs)
-            return 3000 + kwargs["read_spec"].remote_rank
-
-        monkeypatch.setattr(w, "_xfer_blocks", _fake_xfer)
-        block_ids = ([10], [20], [30], [40])
-        meta = ReqMeta(
-            local_block_ids=block_ids,
-            local_physical_block_ids=block_ids,
-            tp_size=2,
-            remote=RemoteMeta(
-                block_ids=([50], [60], [70], [80]),
-                host="",
-                port=0,
-                engine_id=engine_id,
-                request_id="d-req",
-            ),
-        )
-
-        w._xfer_blocks_for_req(req_id="p-req", meta=meta)
-
-        assert [write["read_spec"].remote_rank for write in writes] == [0, 1]
-        assert [write["read_spec"].local_block_ids for write in writes] == [
-            list(block_ids),
-            list(block_ids),
-        ]
-        assert [write["local_xfer_side_handle"] for write in writes] == [2000, 2001]
-        assert sorted(w._sending_transfers["p-req"]) == [3000, 3001]
+        assert w._pop_done_transfers(w._sending_transfers) == ({"p-req"}, set())
 
 
 class TestPushPrefixCaching:
@@ -1800,10 +1714,6 @@ class TestPushPrefixCaching:
     ):
         from types import SimpleNamespace
 
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-            TPMapping,
-        )
-
         w = _StubWriterWorker.fresh()
         w._has_mamba = False
         w.use_mla = False
@@ -1818,24 +1728,17 @@ class TestPushPrefixCaching:
             remote_tp_size=1,
         )
         w.transfer_topo.tp_ratio.return_value = 1
-        w.tp_mappings = {
-            engine_id: TPMapping(
-                source_ranks_per_group=((0,),),
-                all_source_ranks=(0,),
-                rank_to_attention_slot={0: 0},
-                rank_offset_factor=0,
-            )
-        }
-        w.dst_num_blocks = {engine_id: 10_000, w.engine_id: 10_000}
-        w.region_num_blocks = [10_000]
-        w._remote_stages = {
-            engine_id: remote_stage(
-                region_pairs_by_index(1),
-                region_num_blocks=[10_000],
-                xfer_side_handles={0: 5000},
-            )
-        }
-        w.src_xfer_handles_by_block_size = {16: 2000}
+        w.transfer_topo.block_size_ratio.return_value = 1
+        w.source_ranks = {engine_id: [(0,)]}
+        w._remote_physical_blocks_per_group = {engine_id: [1]}
+        stage = remote_stage(w, engine_id)
+        stage.region_group_ids = [0]
+        stage.pairs = region_pairs_by_index(1)
+        stage.xfer_side_handles = {0: 5000}
+        # One whole-block desc per block on both sides, so desc ids are the
+        # block ids.
+        stage.desc_starts = {0: np.array([[0, 0, 0, 0]])}
+        stage.local_descs = MagicMock(handle=2000)
 
         # Stub only the NIXL WRITE; kernel expansion, prefix-cache trim, desc
         # computation and count assertions all run for real.
@@ -1883,15 +1786,10 @@ class TestPushPrefixCaching:
         assert remote == [500, 501, 502]
 
     @pytest.mark.parametrize("groups_match", [False, True])
-    def test_push_requires_each_layer_in_the_same_cache_group(
-        self, groups_match, monkeypatch: pytest.MonkeyPatch
-    ):
-        """A layer in a pooled remote region still receives its blocks; a layer
-        in another cache group on D is refused."""
-        w, engine_id = self._worker_driving_xfer(monkeypatch=monkeypatch)
-        stage = w._remote_stages[engine_id][0]
-        stage.region_group_ids = [-1]
-        stage.pairs.groups_match = groups_match
+    def test_push_requires_each_layer_in_the_same_cache_group(self, groups_match):
+        """A layer in another cache group on D is refused."""
+        w, engine_id = self._worker_driving_xfer()
+        remote_stage(w, engine_id).pairs.groups_match = groups_match
         reg = _registration_data("req-groups", local_block_ids=([500, 501],))
 
         if not groups_match:
@@ -1925,9 +1823,8 @@ def _agent_metadata(
         block_strides=list(block_lens if block_strides is None else block_strides),
         kv_cache_layout="LBHNC",
         block_size=16,
-        ssm_sizes=(0, 0),
         attn_backend_name="FLASH_ATTN",
-        physical_blocks_per_logical_kv_block=1,
+        physical_blocks_per_group=[1],
         region_members=region_layers,
     )
 
@@ -1944,149 +1841,91 @@ def _layer_routing_worker(
     worker._has_mamba = False
     worker._is_hma_required = True
     worker.kv_cache_config = MagicMock(transfer_group_index_by_layer=group_by_layer)
+    worker._group_spec_types = (AttentionSpec,) * (max(group_by_layer.values()) + 1)
     worker.transfer_topo = MagicMock()
-    worker.region_group_ids = [
-        groups.pop() if len(groups := {group_by_layer[n] for n in layers}) == 1 else -1
-        for layers in region_layers
-    ]
+    worker.region_group_ids = [group_by_layer[layers[0]] for layers in region_layers]
     worker.block_len_per_layer = [128] * len(region_layers)
-    worker._region_is_mla = [False] * len(region_layers)
     worker._set_region_layers(region_layers)
     return worker
 
 
-def test_shared_region_reads_once_per_group_from_one_descriptor_list():
-    """A region shared by two cache groups keeps one descriptor list and is
-    read at each group's blocks."""
-    worker = _layer_routing_worker(
-        [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
+def _prep_whole_blocks(worker, metadata, pairs, base_addresses) -> list[np.ndarray]:
+    """Prepare desc lists moving every paired block whole with remote rank 0,
+    and return them expanded to one row per block."""
+    engine_id = metadata.engine_id
+    num_remote = len(metadata.kv_caches_base_addr)
+    stage = remote_stage(worker, engine_id)
+    stage.pairs = pairs
+    stage.byte_ranges = [
+        {0: [(0, 0, worker.block_len_per_layer[local])]} for local in pairs.local
+    ]
+    stage.region_num_blocks = metadata.region_num_blocks or (
+        [metadata.num_blocks] * num_remote
     )
-    pairs = worker._pair_regions(
-        _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+    worker.nixl_memory_type = "VRAM"
+    worker.kv_caches_base_addr = {worker.engine_id: {worker.tp_rank: base_addresses}}
+    worker.block_stride_per_layer = getattr(
+        worker, "block_stride_per_layer", list(worker.block_len_per_layer)
     )
-    assert (pairs.local, pairs.group) == ([0, 0, 1], [0, 1, 0])
-    desc_ids = worker._compute_desc_ids(
-        block_ids=[[1, 2], [5]],
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        region_num_blocks=[4, 7],
-        pairs=(pairs.local, pairs.group),
-    )
-    assert desc_ids.tolist() == [1, 2, 5, 6, 5]
+    worker.device_id = 0
+    worker._mixed_mem_types = False
+    worker.region_mem_types = ["VRAM"] * len(base_addresses)
+    lists: list[np.ndarray] = []
+
+    def prep_xfer_dlist(agent, descs, **_) -> int:
+        lists.append(expand_strided_descs(descs))
+        return len(lists) - 1
+
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.prep_xfer_dlist.side_effect = prep_xfer_dlist
+    worker._prep_descs(metadata, 0, "remote-agent", 1, stage)
+    return lists
 
 
 def test_layer_metadata_round_trip():
     metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
     metadata.region_num_blocks = [4]
-    metadata.region_group_ids = [-1]
-    metadata.region_names = ["L0"]
+    metadata.region_group_ids = [0]
     metadata.region_mem_types = ["VRAM"]
-    metadata.layer_group_ids = {"L0": 0, "L1": 1}
+    metadata.layer_group_ids = {"L0": 0, "L1": 0}
 
     encoded = msgspec.msgpack.encode(metadata)
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
 
 
-@pytest.mark.parametrize(
-    ("l0_layout", "error"),
-    [
-        ((-1, 64), "escapes its block"),
-        ((0, 0), "escapes its block"),
-        ((200, 64), "escapes its block"),
-        (None, "without a layout"),
-    ],
-)
-def test_packed_row_expansion_rejects_invalid_page_layout(l0_layout, error):
+def test_push_requires_identical_block_sizes():
     worker = _layer_routing_worker([["L0"]], {"L0": 0})
-    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
-    metadata.packed_member_layouts = {"L1": (128, 64)}
-    if l0_layout is not None:
-        metadata.packed_member_layouts["L0"] = l0_layout
-    with pytest.raises(AssertionError, match=error):
-        worker._pair_regions(metadata)
-
-
-def test_pairing_expands_packed_rows_alongside_nonpacked_regions():
-    worker = _layer_routing_worker([["a"], ["b"]], {"a": 0, "b": 1})
-    worker.block_len_per_layer = [64, 128]
-    metadata = _agent_metadata(
-        [["a", "other"], ["b"]], [0x1000, 0x2000], [192, 128], [256, 128]
-    )
-    metadata.packed_member_layouts = {"a": (64, 64), "other": (128, 64)}
-
-    pairs = worker._pair_regions(metadata)
-    worker._select_remote_regions(metadata, pairs.remote_regions)
-
-    assert (pairs.remote, pairs.local) == ([0, 1], [0, 1])
-    assert metadata.kv_caches_base_addr == [0x1040, 0x2000]
-    assert metadata.block_lens == [64, 128]
-    assert metadata.block_strides == [256, 128]
-
-
-def test_pairing_keeps_pooled_regions_once():
-    worker = _layer_routing_worker(
-        [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
-    )
-    metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
-    metadata.region_num_blocks = [4, 6]
-    metadata.region_group_ids = [-1, 0]
-
-    pairs = worker._pair_regions(metadata)
-
-    assert pairs.remote_regions == [0, 1]
-    assert (pairs.remote, pairs.local, pairs.group) == (
-        [0, 0, 1],
-        [0, 0, 1],
-        [0, 1, 0],
-    )
-    assert pairs.groups_match
-
-
-@pytest.mark.parametrize(
-    ("remote_layer_groups", "groups_match"),
-    [({"a": 0, "a.swa": 1, "b": 0}, True), ({"a": 0, "a.swa": 0, "b": 0}, False)],
-)
-def test_pairing_compares_each_layer_s_group_in_a_shared_region(
-    remote_layer_groups, groups_match
-):
-    """A region shared by two groups advertises group -1, so only the
-    per-layer groups show that the peer puts a layer in another group (here P
-    treats its sliding-window layer as full attention)."""
-    worker = _layer_routing_worker(
-        [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
-    )
-    metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
-    metadata.region_group_ids = [-1, 0]
-    metadata.layer_group_ids = remote_layer_groups
-
-    assert worker._pair_regions(metadata).groups_match is groups_match
+    worker.pcp_size = 1
+    worker._physical_blocks_per_logical_kv_block = 1
+    metadata = _agent_metadata([["L0"]], [0x10000], [128])
+    worker._validate_remote_parallel_config(metadata)
+    metadata.block_size = 32
+    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
+        worker._validate_remote_parallel_config(metadata)
 
 
 def test_pairing_keeps_a_pp_stage_s_regions():
     worker = _layer_routing_worker([["l2"], ["l3"]], {"l2": 0, "l3": 1})
+    worker.block_len_per_layer = [65536, 32768]
+    worker.region_num_blocks = [4, 8]
     metadata = _agent_metadata(
         [["l2"], ["l0"], ["l3"], ["l1"]],
-        [0xC000, 0xA000, 0xD000, 0xB000],
+        [0xC0000, 0xA0000, 0xD0000, 0xB0000],
         [65536, 65536, 32768, 32768],
         [131072, 131072, 65536, 65536],
     )
     metadata.region_num_blocks = [4, 6, 8, 10]
     metadata.region_group_ids = [0, 0, 1, 1]
-    metadata.region_names = ["l2", "l0", "l3", "l1"]
     metadata.region_mem_types = ["VRAM"] * 4
 
     pairs = worker._pair_regions(metadata)
-    worker._select_remote_regions(metadata, pairs.remote_regions)
+    assert (pairs.remote, pairs.local, pairs.group) == ([0, 2], [0, 1], [0, 1])
 
-    assert (pairs.remote, pairs.local, pairs.group) == ([0, 1], [0, 1], [0, 1])
-    assert metadata.kv_caches_base_addr == [0xC000, 0xD000]
-    assert metadata.block_lens == [65536, 32768]
-    assert metadata.block_strides == [131072, 65536]
-    assert metadata.region_num_blocks == [4, 8]
-    assert metadata.region_group_ids == [0, 1]
-    assert metadata.region_names == ["l2", "l3"]
-    assert metadata.region_mem_types == ["VRAM", "VRAM"]
+    # Only the stage's layers are addressed on the peer.
+    _, remote_descs = _prep_whole_blocks(worker, metadata, pairs, [0x1000, 0x80000])
+    assert remote_descs.tolist() == [
+        [0xC0000 + block * 131072, 65536, 7] for block in range(4)
+    ] + [[0xD0000 + block * 65536, 32768, 7] for block in range(8)]
 
 
 @pytest.mark.parametrize(
@@ -2098,60 +1937,41 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
 ):
     """A PP split can leave each stage a different mix of attention types.
 
-    Stage 1 owns L3 (full) pooled with L4 (sliding) in region 0, and L5 (full)
-    alone in region 1. The consumer holds every layer and pools them
-    differently, so region indices cannot be paired positionally.
+    Stage 1 owns L3 and L5 (full) and L4 (sliding). The consumer holds every
+    layer in another order, so region indices cannot be paired positionally.
     """
-    worker = _layer_routing_worker([["L3", "L4"], ["L5"]], {"L3": 0, "L4": 1, "L5": 0})
-    worker.block_stride_per_layer = [256, 512]
+    worker = _layer_routing_worker(
+        [["L3"], ["L4"], ["L5"]], {"L3": 0, "L4": 1, "L5": 0}
+    )
+    worker.block_stride_per_layer = [256, 256, 512]
     worker.num_blocks = 4
-    worker.region_num_blocks = local_num_blocks
+    worker.region_num_blocks = [*local_num_blocks, local_num_blocks[0]]
     worker.device_id = 0
 
     consumer = _agent_metadata(
-        [["L0", "L1"], ["L3", "L2"], ["L5", "L4"]],
-        [0xA000, 0xB000, 0xC000],
-        [128, 128, 128],
-        [256, 512, 1024],
+        [["L0"], ["L5"], ["L4"], ["L3"]],
+        [0xA000, 0xB000, 0xC000, 0xD000],
+        [128, 128, 128, 128],
+        [256, 512, 1024, 256],
     )
     consumer.num_blocks = 4
-    consumer.region_num_blocks = remote_num_blocks
+    consumer.region_num_blocks = [*remote_num_blocks, remote_num_blocks[0]]
     pairs = worker._pair_regions(consumer)
-    worker._select_remote_regions(consumer, pairs.remote_regions)
 
-    # L3 -> remote region 1, L4 and L5 -> 2; region 0 holds no local layer.
-    assert consumer.kv_caches_base_addr == [0xB000, 0xC000]
+    # L5 -> remote region 1, L4 -> 2, L3 -> 3; region 0 holds no local layer.
+    assert (pairs.remote, pairs.local) == ([1, 2, 3], [2, 1, 0])
 
-    plan = TPMapping(((0,), (0,)), (0,), {0: 0}, 0)
-    # Builders emit one strided run per region; expand to per-block descriptors.
-    local_descs = expand_strided_descs(
-        worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
+    # Every region moves whole blocks from remote rank 0.
+    local_descs, remote_descs = _prep_whole_blocks(
+        worker, consumer, pairs, [0x1000, 0x2000, 0x3000]
     )
-    remote_descs = expand_strided_descs(
-        worker._build_fa_remote(
-            plan, consumer, block_size_ratio=1, local_region_ids=pairs.partner
-        )
+    local_ids, remote_ids = worker._compute_desc_ids(
+        remote_stage(worker, consumer.engine_id), 0, [[1, 2], [3]], [[0, 1], [2]]
     )
-    local_ids = worker._compute_desc_ids(
-        [[1, 2], [3]],
-        4,
-        None,
-        1,
-        region_num_blocks=local_num_blocks,
-        pairs=(pairs.local, pairs.group),
-    )
-    remote_ids = worker._compute_desc_ids(
-        [[0, 1], [2]],
-        4,
-        None,
-        1,
-        region_num_blocks=consumer.region_num_blocks,
-        pairs=(pairs.remote, pairs.group),
-    )
-    assert len(local_descs) == sum(local_num_blocks)
-    assert len(remote_descs) == sum(consumer.region_num_blocks)
+    assert len(local_descs) == sum(worker.region_num_blocks)
+    assert len(remote_descs) == sum(consumer.region_num_blocks[1:])
 
-    # Each pair addresses the same layer's blocks despite different pooling
+    # Each pair addresses the same layer's blocks despite different orders
     # and strides. L3 and L5 use group 0; L4 uses group 1.
     assert sorted(
         zip(
@@ -2160,11 +1980,11 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
             strict=True,
         )
     ) == [
-        ([0x1100, 128, 0], [0xB000, 128, 7]),
-        ([0x1200, 128, 0], [0xB200, 128, 7]),
-        ([0x1300, 128, 0], [0xC800, 128, 7]),
-        ([0x2200, 128, 0], [0xC000, 128, 7]),
-        ([0x2400, 128, 0], [0xC400, 128, 7]),
+        ([0x1100, 128, 0], [0xD000, 128, 7]),
+        ([0x1200, 128, 0], [0xD100, 128, 7]),
+        ([0x2300, 128, 0], [0xC800, 128, 7]),
+        ([0x3200, 128, 0], [0xB000, 128, 7]),
+        ([0x3400, 128, 0], [0xB200, 128, 7]),
     ]
 
 
@@ -2177,7 +1997,6 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
         ([["a"], ["b"]], 2, [["a"]], RuntimeError, "does not hold the KV layers"),
         # Only a PP stage may hold a slice of the peer's layers.
         ([["a"]], 1, [["a"], ["b"]], RuntimeError, "has no counterpart here"),
-        ([["a"]], 2, [["a"], ["a"]], NotImplementedError, "spans 2 NIXL regions"),
     ],
 )
 def test_pairing_rejects_unpairable_peers(
@@ -2195,24 +2014,12 @@ def test_pairing_rejects_unpairable_peers(
         worker._pair_regions(metadata)
 
 
-def test_pairing_pairs_split_layers_in_order():
-    """A layer registered as two regions (K and V apart) pairs them in order."""
-    worker = _layer_routing_worker([["a"], ["a"]], {"a": 0})
-    metadata = _agent_metadata([["a"], ["a"]], [0xA000, 0xB000], [128, 128])
-
-    pairs = worker._pair_regions(metadata)
-
-    assert worker._regions_by_layer == {"a": [0, 1]}
-    assert (pairs.remote, pairs.local) == ([0, 1], [0, 1])
-
-
 @pytest.mark.parametrize(
     "field",
     [
         "block_lens",
         "region_num_blocks",
         "region_group_ids",
-        "region_names",
         "region_mem_types",
     ],
 )
@@ -2225,35 +2032,32 @@ def test_pairing_rejects_inconsistent_region_geometry(field):
         worker._pair_regions(metadata)
 
 
-def test_head_sharded_draft_push_rejects_heterogeneous_tp():
-    """Push mode writes a head-sharded draft's KV under an MLA target only at
-    equal TP; heterogeneous TP is the pull path's job."""
-    w = _StubWriterWorker.fresh()
-    w._head_sharded_draft_regions = {1}
-    w.transfer_topo = MagicMock(tp_size=4)
-    meta = MagicMock(spec=NixlAgentMetadata)
-    with patch.object(
-        NixlBaseConnectorWorker, "_validate_remote_agent_handshake", return_value=None
-    ):
-        w._validate_remote_agent_handshake(meta, remote_tp_size=4)
-        with pytest.raises(NotImplementedError, match="push mode"):
-            w._validate_remote_agent_handshake(meta, remote_tp_size=1)
-
-
-def test_layer_handshake_rejects_unsupported_geometry():
+@pytest.mark.parametrize(
+    ("local_block_size", "remote_block_size", "remote_tp_size", "error"),
+    [
+        (32, 16, 1, "identical P/D block sizes"),
+        (16, 32, 1, "identical P/D block sizes"),
+        (16, 16, 2, "decode TP greater"),
+    ],
+)
+def test_layer_handshake_rejects_unsupported_geometry(
+    local_block_size: int, remote_block_size: int, remote_tp_size: int, error: str
+):
     """Reject unsupported peers without registering agents or transfer state."""
     metadata = _agent_metadata([["a"]], [0xA000], [128])
+    metadata.block_size = remote_block_size
     worker = _layer_routing_worker([["a"]], {"a": 0})
+    worker.block_size = local_block_size
     worker.block_len_per_layer = [128]
     worker.use_mla = False
     worker.nixl_wrapper = MagicMock()
     worker.kv_caches_base_addr = defaultdict(dict)
     worker.dst_num_blocks = {}
-    worker.tp_mappings = {}
+    worker.source_ranks = {}
     worker.transfer_topo = TransferTopology(
         tp_rank=0,
         tp_size=1,
-        block_size=16,
+        block_size=local_block_size,
         engine_id=worker.engine_id,
         is_mla=False,
         is_mamba=False,
@@ -2261,28 +2065,12 @@ def test_layer_handshake_rejects_unsupported_geometry():
         attn_backends=[],
     )
 
-    with pytest.raises(NotImplementedError, match="decode TP greater"):
-        worker.add_remote_agent(metadata, remote_tp_size=2)
+    with pytest.raises(NotImplementedError, match=error):
+        worker.add_remote_agent(metadata, remote_tp_size=remote_tp_size)
     worker.nixl_wrapper.add_remote_agent.assert_not_called()
     worker.nixl_wrapper.prep_xfer_dlist.assert_not_called()
-    assert not worker.tp_mappings
+    assert not worker.source_ranks
     assert not worker.dst_num_blocks
     assert not worker.kv_caches_base_addr
     with pytest.raises(KeyError):
         worker.transfer_topo.get_engine_info(metadata.engine_id)
-
-
-@pytest.mark.parametrize(
-    ("remote_block_size", "remote_ppl"), [(8, 1), (32, 1), (16, 2)]
-)
-def test_push_handshake_rejects_different_block_sizes(
-    remote_block_size: int, remote_ppl: int
-):
-    metadata = _agent_metadata([["a"]], [0xA000], [128])
-    metadata.block_size = remote_block_size
-    metadata.physical_blocks_per_logical_kv_block = remote_ppl
-    worker = _layer_routing_worker([["a"]], {"a": 0})
-    worker.pcp_size = 1
-
-    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
-        worker._validate_remote_parallel_config(metadata)

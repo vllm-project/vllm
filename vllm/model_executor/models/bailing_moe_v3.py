@@ -60,6 +60,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    create_conv_temporal_state_spec,
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -96,6 +97,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaSpec
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
 from .utils import (
@@ -646,6 +648,12 @@ class BailingMoeV3MLAAttention(nn.Module):
 @PluggableLayer.register("bailing_moe_v3_kimi_delta_attention")
 class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
     # --8<-- [end:bailing_moe_v3_kimi_delta_attention]
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        # The conv state is `Q | K | V`, each this rank's projection.
+        size = self.num_heads * self.head_dim // self.tp_size
+        return create_conv_temporal_state_spec(spec, {"q": size, "k": size, "v": size})
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:

@@ -30,6 +30,7 @@ from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointEx
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    create_conv_temporal_state_spec,
     is_conv_state_dim_first,
     mamba_state_alignment,
 )
@@ -75,6 +76,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -1248,6 +1250,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_speculative_tokens=self.num_spec,
             )
         return base_shape
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if len(spec.shapes) != 2:
+            return spec
+        # The conv state is `x | B | C`, with `x` as long as the
+        # `[heads, head_dim, state]` temporal state's heads.
+        conv, temporal = spec.shapes
+        x = temporal[0] * temporal[1]
+        groups = (conv[0 if is_conv_state_dim_first() else 1] - x) // 2
+        return create_conv_temporal_state_spec(spec, {"x": x, "B": groups, "C": groups})
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:

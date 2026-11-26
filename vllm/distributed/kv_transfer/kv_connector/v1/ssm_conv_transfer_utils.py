@@ -18,8 +18,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec, MultiComponentSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +102,6 @@ class MambaConvSplitInfo:
 
 def derive_mamba_conv_split(
     mamba_spec: MambaSpec,
-    local_tp: int,
     *,
     require_dim_first: bool = True,
 ) -> MambaConvSplitInfo:
@@ -116,7 +114,6 @@ def derive_mamba_conv_split(
         mamba_spec: MambaSpec whose shapes are:
             shapes[0] = conv state in the configured DS or SD layout.
             shapes[1] = temporal state (model-specific shape).
-        local_tp: this engine's tensor-parallel size.
         require_dim_first: Require the DS layout used by NIXL 3-read transfer.
 
     Returns:
@@ -124,16 +121,6 @@ def derive_mamba_conv_split(
         conv_dtype_size, and ssm_sizes (conv_state_bytes, ssm_state_bytes).
 
     """
-    _supported = (
-        MambaAttentionBackendEnum.MAMBA2,
-        MambaAttentionBackendEnum.GDN_ATTN,
-    )
-    if mamba_spec.mamba_type not in _supported:
-        raise NotImplementedError(
-            f"Conv transfer only supports Mamba2 and GDN models, "
-            f"got mamba_type={mamba_spec.mamba_type!r}."
-        )
-
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
@@ -156,51 +143,12 @@ def derive_mamba_conv_split(
     conv_state_bytes = torch.Size(mamba_spec.shapes[0]).numel() * conv_dtype_size
     ssm_state_bytes = torch.Size(mamba_spec.shapes[1]).numel() * ssm_dtype_size
 
-    local_proj_dims: tuple[int, ...]
-    if mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2:
-        # NOTE (ZhanqiuHu): intermediate_size (= global x dim) is not stored
-        # in MambaSpec, so we reconstruct it from the SSM temporal state shape:
-        #   shapes[1] = (local_num_heads, head_dim), already divided by TP.
-        head_dim = mamba_spec.shapes[1][1]
-        local_num_heads = mamba_spec.shapes[1][0]
-        intermediate_size = local_num_heads * local_tp * head_dim
-
-        # NOTE (ZhanqiuHu): global conv dim = intermediate_size + 2 * groups_ss,
-        # where groups_ss is the B (= C) dimension.  B and C are always the same
-        # size, so we recover groups_ss from the remainder after subtracting x.
-        remainder = local_conv_dim * local_tp - intermediate_size
-        assert remainder > 0 and remainder % 2 == 0, (
-            f"Conv dim ({local_conv_dim}*tp={local_tp}) doesn't decompose "
-            f"into intermediate_size={intermediate_size} + 2*groups_ss. "
-            f"remainder={remainder}"
-        )
-        groups_ss = remainder // 2
-
-        # Divide by TP to get per-rank column counts.
-        x_local = intermediate_size // local_tp
-        b_local = groups_ss // local_tp
-        local_proj_dims = (x_local, b_local, b_local)
-    elif mamba_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
-        # GDN: conv = [Q, K, V] where dim(Q) == dim(K) == key_dim.
-        # conv_dim = key_dim*2 + value_dim (all global, divided by TP).
-        # Temporal state shape is (num_v_heads/TP, head_v_dim, head_k_dim).
-        temporal_shape = mamba_spec.shapes[1]
-        num_v_heads_local = temporal_shape[0]
-        head_v_dim = temporal_shape[1]
-        value_dim_local = num_v_heads_local * head_v_dim
-
-        remainder = local_conv_dim - value_dim_local
-        assert remainder > 0 and remainder % 2 == 0, (
-            f"GDN conv dim ({local_conv_dim}) doesn't decompose into "
-            f"2*key_dim_local + value_dim_local={value_dim_local}. "
-            f"remainder={remainder}"
-        )
-        key_dim_local = remainder // 2
-        local_proj_dims = (key_dim_local, key_dim_local, value_dim_local)
-    else:
+    conv = next(iter(mamba_spec.components.values()))
+    if not isinstance(conv, MultiComponentSpec):
         raise NotImplementedError(
             f"Conv split not supported for mamba_type={mamba_spec.mamba_type!r}"
         )
+    local_proj_dims = tuple(part.num_heads for part in conv.components.values())
 
     return MambaConvSplitInfo(
         conv_rows=conv_rows,

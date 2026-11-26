@@ -124,12 +124,13 @@ def sliding_window_layer(
 
 def mamba_layer(
     *,
+    spec_cls: Callable[..., MambaSpec] = MambaSpec,
     enable_prefix_caching: bool = False,
     num_speculative_blocks: int = 0,
     **spec_kwargs,
 ) -> KVCacheLayerConfig:
     return MambaManager.layer_config(
-        MambaSpec(**spec_kwargs),
+        spec_cls(**spec_kwargs),
         enable_prefix_caching=enable_prefix_caching,
         num_speculative_blocks=num_speculative_blocks,
     )

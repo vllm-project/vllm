@@ -169,6 +169,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
         mixer.replayssm_buffer_len = 16
         mixer.get_state_shape = lambda: spec.shapes
         mixer.get_state_dtype = lambda: spec.dtypes
+        mixer.state_alignment = spec.state_alignment
         mixer.bind_kv_cache(page)
         for tensor in mixer.kv_cache:
             tensor.fill_(3)

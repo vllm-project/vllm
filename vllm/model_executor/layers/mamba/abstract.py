@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Iterable
-from math import lcm, prod
+from math import lcm
 
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
@@ -34,20 +32,15 @@ class MambaBase(AttentionLayerBase):
     _replayssm_prev_num_accepted: torch.Tensor
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        """Unpack a raw `[B, 1, 1, C]` int8 page view into per-state views.
-
-        Each block's `C` bytes hold the layer's states (e.g. conv, ssm)
-        packed by dtype/shape with the layer's state alignment.
-        """
-        pages = kv_cache.squeeze(dim=(1, 2))
-        states: list[torch.Tensor] = []
-        offset = 0
-        for shape, dtype in zip(self.get_state_shape(), self.get_state_dtype()):
-            nbytes = prod(shape) * get_dtype_size(dtype)
-            state = pages[:, offset : offset + nbytes].view(dtype)
-            states.append(state.view(-1, *shape))
-            offset += round_up(nbytes, self.state_alignment)
-        self.kv_cache = tuple(states)
+        """View a raw `[B, 1, 1, C]` int8 page view as the layer's states
+        (e.g. conv, ssm), as its spec's `split` places them."""
+        spec = MambaSpec(
+            block_size=1,
+            shapes=tuple(self.get_state_shape()),
+            dtypes=self.get_state_dtype(),
+            state_alignment=self.state_alignment,
+        )
+        self.kv_cache = spec.split_states(kv_cache)
 
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:
@@ -84,20 +77,27 @@ class MambaBase(AttentionLayerBase):
         """
         return None
 
-    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
+        """The spec of the layer's page: its states back to back. A layer
+        whose states are sharded across TP returns a spec that names them as
+        components and says how each is sharded; otherwise only transfers
+        between ranks holding the same states are supported.
+        """
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
-        page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        spec = MambaSpec(
+        return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
             state_alignment=self.state_alignment,
             block_stride_alignment=self.state_alignment,
             block_size=mamba_block_size,
-            page_size_padded=page_size_padded,
+            page_size_padded=vllm_config.cache_config.mamba_page_size_padded,
             mamba_type=self.mamba_type,
             tp_replicated=self.is_kv_cache_tp_replicated,
         )
+
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
+        spec = self.get_kv_cache_spec(vllm_config)
         checkpoint_alignment = self.get_kv_cache_checkpoint_alignment(vllm_config)
         return MambaManager.layer_config(
             spec,

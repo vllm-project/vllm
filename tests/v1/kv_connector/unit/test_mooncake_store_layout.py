@@ -82,16 +82,17 @@ def _make_state_store_layout(
 def _make_gdn_store_layout(
     *, local_tp_size: int, tp_rank: int
 ) -> tuple[MambaStoreLayout, torch.Tensor]:
+    from tests.v1.kv_connector.unit.utils import gdn_spec
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import MambaSpec
 
     local_factor = 4 // local_tp_size
     conv_shape = (6 * local_factor, 3)
     if os.environ.get("VLLM_SSM_CONV_STATE_LAYOUT") == "SD":
         conv_shape = conv_shape[::-1]
-    spec = MambaSpec(
+    spec = gdn_spec(
         block_size=16,
         shapes=(conv_shape, (local_factor, 2, 2)),
+        conv_dim=int(conv_shape[0] == 3),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
@@ -101,20 +102,21 @@ def _make_gdn_store_layout(
 def _make_mamba2_store_layout(
     *, local_tp_size: int, tp_rank: int
 ) -> tuple[MambaStoreLayout, torch.Tensor]:
+    from tests.v1.kv_connector.unit.utils import mamba2_spec
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import MambaSpec
 
     local_heads = 4 // local_tp_size
     effective_groups = local_tp_size
     conv_shape = ((8 + 2 * effective_groups * 2) // local_tp_size, 3)
     if os.environ.get("VLLM_SSM_CONV_STATE_LAYOUT") == "SD":
         conv_shape = conv_shape[::-1]
-    spec = MambaSpec(
+    spec = mamba2_spec(
         block_size=16,
         shapes=(
             conv_shape,
             (local_heads, 2, 2),
         ),
+        conv_dim=int(conv_shape[0] == 3),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
     )

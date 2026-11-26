@@ -2846,7 +2846,7 @@ class MoRIIOConnectorWorker:
                     "MoRIIO KDA conv transfer requires the DS (dim-first) "
                     "state layout; set VLLM_SSM_CONV_STATE_LAYOUT=DS"
                 )
-            self._conv_decomp = derive_mamba_conv_split(mamba_spec, self.world_size)
+            self._conv_decomp = derive_mamba_conv_split(mamba_spec)
         # KDA layers use packed pages with different geometry; only record
         # attention tensor shapes here.
         self.kv_cache_shapes = {

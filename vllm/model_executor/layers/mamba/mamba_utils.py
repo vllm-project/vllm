@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch
@@ -19,6 +20,12 @@ from vllm.utils.torch_utils import (
     get_kv_cache_torch_dtype,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import (
+    ComponentSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MultiComponentSpec,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -319,6 +326,94 @@ class MambaStateShapeCalculator:
         )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
         return (conv_state_shape, recurrent_state_shape)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ConvComponentSpec(MultiComponentSpec):
+    """A conv state: `state_len` states of the channels of each of `parts`
+    (e.g. Q, K and V), each part sharded across TP by its channels. Stored
+    `(dim, state_len)` if `dim_first`, else `(state_len, dim)`."""
+
+    parts: tuple[tuple[str, int], ...]
+    state_len: int
+    element_bytes: int
+    dim_first: bool
+
+    @property
+    def components(self) -> dict[str, KVCacheSpec]:
+        return {
+            name: ComponentSpec(
+                block_size=self.block_size,
+                num_heads=size,
+                num_kernel_states=self.state_len,
+                state_content_bytes=self.element_bytes,
+            )
+            for name, size in self.parts
+        }
+
+    def get_num_kernel_states(self, kernel_block_size: int) -> int:
+        return 1 if self.dim_first else self.state_len
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        if self.dim_first:
+            return super().state_content_size_bytes
+        return sum(size for _, size in self.parts) * self.element_bytes
+
+    def split(self, cache: torch.Tensor) -> dict[str, torch.Tensor]:
+        if self.dim_first:
+            return super().split(cache)
+        # (state_len, dim): every state holds each part's channels in turn.
+        sizes = [size * self.element_bytes for _, size in self.parts]
+        parts = cache.squeeze(1).split(sizes, dim=-1)
+        return {
+            name: part.unflatten(-1, (size, -1)).transpose(1, 2)
+            for (name, size), part in zip(self.parts, parts)
+        }
+
+
+def create_conv_temporal_state_spec(
+    spec: MambaSpec, conv_parts: dict[str, int], dim_first: bool | None = None
+) -> MambaSpec:
+    """`spec`, the spec of a (conv, temporal) page, with its states named as
+    components that are each sharded across TP: the conv state by the
+    channels of each of `conv_parts` (e.g. Q, K and V), the temporal state by
+    its first dim. A page every TP rank holds whole is left as it is.
+
+    The page, for conv parts Q, K and V and two conv states (n0, n1):
+
+        (dim, state_len): each part's channels, then the next part
+
+        |<---------------- conv ----------------->|
+        | Q n0 | Q n1 | K n0 | K n1 | V n0 | V n1 | temporal |
+
+        (state_len, dim): each state holds every part's channels
+
+        |<---------------- conv ----------------->|
+        | Q n0 | K n0 | V n0 | Q n1 | K n1 | V n1 | temporal |
+    """
+    if spec.tp_replicated:
+        return spec
+    if dim_first is None:
+        dim_first = is_conv_state_dim_first()
+    conv, temporal = spec.shapes
+    dim, state_len = conv if dim_first else conv[::-1]
+    assert sum(conv_parts.values()) == dim, f"{conv_parts} do not fill {conv}"
+    conv_spec = ConvComponentSpec(
+        block_size=spec.block_size,
+        parts=tuple(conv_parts.items()),
+        state_len=state_len,
+        element_bytes=spec.dtypes[0].itemsize,
+        dim_first=dim_first,
+    )
+    temporal_spec = ComponentSpec(
+        block_size=spec.block_size,
+        num_heads=temporal[0],
+        state_content_bytes=math.prod(temporal[1:]) * spec.dtypes[1].itemsize,
+    )
+    return replace(
+        spec, component_specs=(("conv", conv_spec), ("temporal", temporal_spec))
+    )
 
 
 @dataclass(slots=True)

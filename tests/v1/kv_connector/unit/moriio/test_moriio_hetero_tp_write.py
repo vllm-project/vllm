@@ -57,7 +57,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-from ..utils import make_moriio_writer
+from ..utils import gdn_spec, make_moriio_writer
 
 pytestmark = pytest.mark.cpu_test
 
@@ -191,7 +191,7 @@ def _spec(layer: Layer, num_heads: int, tp_size: int):
             )
         )
         return replace(spec, kv_head_major_slots=layer.kind == "nvfp4_by_head")
-    return MambaSpec(
+    return gdn_spec(
         block_size=BLOCK_SIZE,
         shapes=(
             ((2 * KEY_DIM + V_HEADS * V_DIM) // tp_size, CONV_ROWS),
@@ -346,7 +346,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     }
     worker._conv_decomp = next(
         (
-            derive_mamba_conv_split(spec, tp_size)
+            derive_mamba_conv_split(spec)
             for spec in specs.values()
             if isinstance(spec, MambaSpec)
         ),

@@ -28,7 +28,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     mamba_layer,
     sliding_window_layer,
 )
-from tests.v1.kv_connector.unit.utils import create_model_runner_output
+from tests.v1.kv_connector.unit.utils import create_model_runner_output, gdn_spec
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -79,7 +79,6 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
-    MambaSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import Request, RequestStatus
@@ -504,8 +503,10 @@ def _make_hybrid_gdn_kv_cache_config(
     if conv_layout == "SD":
         conv_shape = conv_shape[::-1]
     gdn = mamba_layer(
+        spec_cls=gdn_spec,
         block_size=16,
         shapes=(conv_shape, (local_factor, 2, 2)),
+        conv_dim=int(conv_layout == "SD"),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
         enable_prefix_caching=True,
@@ -5052,7 +5053,7 @@ def test_store_group_plans_cover_kimi_k3_and_deepseek_v4_specs(monkeypatch):
         )
         for name in ("swa0", "swa1")
     }
-    gdn = MambaSpec(
+    gdn = gdn_spec(
         block_size=64,
         shapes=((6, 3), (1, 2, 2)),
         dtypes=(torch.uint8, torch.uint8),

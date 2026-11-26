@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    BlockIds,
+    EngineId,
+    SerializedLayerMetaTensors,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
@@ -58,8 +62,14 @@ HB_NOTIF_PREFIX = "HB:"
 #      region_members and the cache group of each layer
 #  17: Export remote_blocks_expiry_time for P blocks too, plus
 #      remote_lease_extension; the consumer gates every remote read on it
+#  18: Advertise each attention layer's KV heads for spec-driven TP slicing.
+#      Register each KV layer, Mamba state included, as a region of its own
+#      blocks; drop region_names and the packed-member layouts. Replace
+#      physical_blocks_per_logical_kv_block, ssm_sizes and ple_block_len with
+#      physical_blocks_per_group, and layer_num_kv_heads with each layer's
+#      slice_for_tp_transfer views
 #
-NIXL_CONNECTOR_VERSION: int = 17
+NIXL_CONNECTOR_VERSION: int = 18
 
 
 @dataclass(slots=True)
@@ -73,26 +83,25 @@ class NixlAgentMetadata:
     block_strides: list[int]
     kv_cache_layout: str
     block_size: int
-    ssm_sizes: tuple[int, int]
     attn_backend_name: str
-    physical_blocks_per_logical_kv_block: int
+    # Kernel blocks each logical block of each cache group spans.
+    physical_blocks_per_group: list[int]
     region_num_blocks: list[int] | None = None
     region_group_ids: list[int] | None = None
-    region_names: list[str] | None = None
     region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
-    # Page length of the PLE short-conv state (None when the model has none).
-    ple_block_len: int | None = None
-    # Layer names sharing each advertised region, in region order.
+    # The layers viewing each region's blocks, in region order.
     region_members: list[list[str]] = field(default_factory=list)
     # Cache group of each layer in region_members.
     layer_group_ids: dict[str, int] = field(default_factory=dict)
-    # Packed member -> (byte offset in its region's block, bytes per page).
-    packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Layer -> its `slice_for_tp_transfer` views, in bytes from its first block.
+    layer_meta_tensors: dict[str, SerializedLayerMetaTensors] = field(
+        default_factory=dict
+    )
 
 
-@dataclass
+@dataclass(slots=True)
 class NixlHandshakePayload(KVConnectorHandshakeMetadata):
     """Wrapper for NIXL handshake sent over the wire.
 
@@ -135,7 +144,7 @@ def _get_speculative_compatibility_factors(
 
     # Note: the draft attention_backend is intentionally not hashed. Its only
     # transfer-relevant effect is the KV block layout/size, which is validated
-    # per region at runtime in _validate_remote_agent_handshake. The connector
+    # per region at runtime in validate_remote_agent_handshake. The connector
     # only sees the raw override here (usually None = auto-select), never the
     # resolved backend, so hashing it would cause false mismatches without
     # catching anything the runtime layout check misses.
@@ -144,6 +153,7 @@ def _get_speculative_compatibility_factors(
         "model": draft_model_config.model,
         "revision": draft_model_config.revision,
         "code_revision": draft_model_config.code_revision,
+        "parallel_drafting": speculative_config.parallel_drafting,
         "kv_cache_dtype": str(kv_cache_dtype),
         "auxiliary_layer_ids": (
             tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
@@ -174,7 +184,7 @@ def compute_nixl_compatibility_hash(
     pull connector must never complete a handshake with each other.
 
     Note: Factors like tensor_parallel_size, block_size, and kv_cache_layout
-    are validated at runtime in _validate_remote_agent_handshake and are not
+    are validated at runtime in validate_remote_agent_handshake and are not
     included in this hash to support heterogeneous deployments.
 
     Note - the set of factors are likely to evolve significantly over
@@ -272,9 +282,6 @@ class ReqMeta:
     # True only when the scheduler parked the request in WAITING_FOR_REMOTE_KVS
     # and expects it in finished_recving; notify-only recvs must not be reported.
     awaiting_kvs: bool = False
-    # Worker-only, per-region physical pages to zero after a successful pull.
-    # None selects group-based completion; empty lists mean no zeroing.
-    region_blocks_to_zero: BlockIds | None = None
     # Worker-only, per-group range of the remote-sized sub-blocks of each local
     # group a pull covers. None derives it from the block counts.
     covered_sub_blocks: list[range] | None = None
