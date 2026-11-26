@@ -30,6 +30,9 @@ pub struct NixlStats {
     /// Late notification counter increments collected since the previous update.
     #[serde(default)]
     pub num_notifications_after_expiry: Vec<u64>,
+    /// Declined expired-read counter increments collected since the previous update.
+    #[serde(default)]
+    pub num_declined_expired_reads: Vec<u64>,
 }
 
 // Buckets copied verbatim from the Python `NixlPromMetrics` class so
@@ -87,6 +90,7 @@ pub(super) struct NixlMetrics {
     num_failed_notifications: Family<EngineLabels, U64Counter>,
     num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
     num_notifications_after_expiry: Family<EngineLabels, U64Counter>,
+    num_declined_expired_reads: Family<EngineLabels, U64Counter>,
 }
 
 impl NixlMetrics {
@@ -157,6 +161,16 @@ impl NixlMetrics {
             num_notifications_after_expiry.clone(),
         );
 
+        let num_declined_expired_reads = Family::default();
+        registry.register(
+            "vllm:nixl_num_declined_expired_reads",
+            "Number of remote KV reads declined because the remote had released the blocks \
+             (lease expired) before the read. Each one is a request that follows \
+             kv_load_failure_policy. NOTE: This metric is tracked on the reading (consumer) \
+             instance",
+            num_declined_expired_reads.clone(),
+        );
+
         Self {
             xfer_time_seconds,
             post_time_seconds,
@@ -166,6 +180,7 @@ impl NixlMetrics {
             num_failed_notifications,
             num_kv_expired_reqs,
             num_notifications_after_expiry,
+            num_declined_expired_reads,
         }
     }
 
@@ -203,5 +218,8 @@ impl NixlMetrics {
         self.num_notifications_after_expiry
             .get_or_create(labels)
             .inc_by(stats.num_notifications_after_expiry.iter().sum());
+        self.num_declined_expired_reads
+            .get_or_create(labels)
+            .inc_by(stats.num_declined_expired_reads.iter().sum());
     }
 }

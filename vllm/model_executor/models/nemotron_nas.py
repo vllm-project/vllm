@@ -33,8 +33,16 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -42,15 +50,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.llama import LlamaAttention, LlamaMLP
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import HasNoOps, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -70,7 +77,45 @@ def _find_multiple(n: int, k: int) -> int:
     return n + k - (n % k)
 
 
-class DeciLMAttention(LlamaAttention):
+class DeciLMMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        bias: bool = False,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.gate_up_proj(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class DeciLMAttention(nn.Module):
     def __init__(
         self,
         config: LlamaConfig,
@@ -83,41 +128,89 @@ class DeciLMAttention(LlamaAttention):
         bias_o_proj: bool = False,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
     ) -> None:
-        super().__init__(
-            config,
-            hidden_size,
-            num_heads,
-            num_kv_heads,
-            max_position_embeddings,
-            quant_config,
-            bias,
-            bias_o_proj,
-            cache_config,
-            prefix,
-            attn_type,
+        super().__init__()
+        layer_idx = extract_layer_index(prefix)
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+
+        head_dim = getattr(config, "head_dim", None)
+        self.head_dim = head_dim or self.hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.max_position_embeddings = max_position_embeddings
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            input_size=self.total_num_heads * self.head_dim,
+            output_size=hidden_size,
+            bias=bias_o_proj,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
-    def _init_rotary_emb(
-        self,
-        config,
-        quant_config: QuantizationConfig | None,
-    ) -> None:
-        # Enables YARN for Mistral and LLaMA4 derivatives.
         is_neox_style = True
         if hasattr(config, "position_embedding_type"):
             is_neox_style = config.position_embedding_type not in [
                 "mistral_yarn",
                 "rope_llama4",
             ]
-
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
         )
+
+        sliding_window = None
+        if layer_types := getattr(config, "layer_types", None):
+            assert layer_idx < len(layer_types), (
+                f"layer_idx: {layer_idx} is out of bounds for "
+                f"layer_types: {layer_types}"
+            )
+            if layer_types[layer_idx] == "sliding_attention":
+                sliding_window = config.sliding_window
+
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
+            prefix=f"{prefix}.attn",
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class DeciLMDecoderLayer(nn.Module):
@@ -177,7 +270,7 @@ class DeciLMDecoderLayer(nn.Module):
             else:
                 hidden_act = config.hidden_act
 
-            self.mlp = LlamaMLP(
+            self.mlp = DeciLMMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=hidden_act,

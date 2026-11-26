@@ -88,7 +88,7 @@ class SdsaConfig:
     context in [lo, hi). "auto" fuses all."""
 
     # FA4's tile holds 128 query rows; trtllm-gen's token-sparse tile 64 heads.
-    # Packed NVFP4 K/V is gathered to FP8 per selected token, so only the token
+    # Packed NVFP4 K/V is converted to FP8 per selected token, so only the token
     # core reads it.
     def decode(
         self, *, heads: int, drafts: int, kv_cache_dtype: str = "auto"
@@ -301,21 +301,27 @@ def _token_slots_kernel(
     counts,
     top_k: tl.constexpr,
     page: tl.constexpr,
+    keep_positions: tl.constexpr,
 ):
     row = tl.program_id(0)
     query = tl.load(query_rows + row).to(tl.int64)
     if query >= 0:
         columns = tl.arange(0, top_k)
         keys = tl.load(positions + row.to(tl.int64) * top_k + columns)
-        request = tl.load(requests + row).to(tl.int64)
         valid = keys >= 0
-        pages = tl.load(
-            block_table + request * table_stride + keys // page, mask=valid, other=0
-        )
-        tl.store(
-            slots + query * top_k + columns,
-            tl.where(valid, pages * page + keys % page, -1),
-        )
+        if keep_positions:
+            tl.store(slots + query * top_k + columns, tl.where(valid, keys, -1))
+        else:
+            request = tl.load(requests + row).to(tl.int64)
+            pages = tl.load(
+                block_table + request * table_stride + keys // page,
+                mask=valid,
+                other=0,
+            )
+            tl.store(
+                slots + query * top_k + columns,
+                tl.where(valid, pages * page + keys % page, -1),
+            )
         tl.store(counts + query, tl.sum(valid.to(tl.int32), 0))
 
 
@@ -326,11 +332,13 @@ def _token_slots(
     block_table: torch.Tensor,
     slots: torch.Tensor,
     counts: torch.Tensor,
+    keep_positions: bool = False,
 ) -> None:
     """Write each tiled row's Top-K keys (key positions, -1 last) as cache
     slots, -1 last, to its query's row of `slots`, and their count to
     `counts`. Row r holds query query_rows[r] (-1: none) of request
-    requests[r], whose pages are its row of `block_table`."""
+    requests[r], whose pages are its row of `block_table`. With
+    keep_positions, the rows get the key positions themselves."""
     rows, top_k = positions.shape
     if rows:
         _token_slots_kernel[(rows,)](
@@ -343,6 +351,7 @@ def _token_slots(
             counts,
             top_k,
             PAGE,
+            keep_positions,
         )
 
 
@@ -698,6 +707,7 @@ class SdsaPrefillPlan:
         num_requests = len(query_lens)
         self.block_table = block_table
         self.config = config
+        self.query_lens, self.context_lens = query_lens, context_lens
         device = block_table.device
 
         # Every request occupies whole 128-query tiles. Row r of a tile holds
@@ -779,6 +789,12 @@ class SdsaPrefillPlan:
         )
         self.group = union_group(heads) if self.core == "union" else 1
         self.union_requests = tile_requests.repeat_interleave(128 // self.group)
+        # NVFP4 cores convert by key position: each token's row of `unions`
+        # then holds its Top-K key positions, not slots.
+        self.keep_positions = kv_cache_dtype == "nvfp4"
+        # The core's NVFP4 conversion launches for this step, set by its first
+        # layer (SdsaAttentionImpl).
+        self.nvfp4_launches: list | None = None
 
     def run(
         self,
@@ -802,7 +818,7 @@ class SdsaPrefillPlan:
         bitmask over that union is its row of `mask` (group_union_masks).
         Group g is batch group_batches[g], -1 if it holds no queries. The
         per-token cores take no masks: a token's union is its Top-K keys'
-        slots, in Top-K order, -1 last.
+        slots (key positions if keep_positions), in Top-K order, -1 last.
         `topk_workspace` is gvr_2's zeroed scratch, shared with the decode rows.
 
         Initial and cached prefill are one pipeline: cached context is just
@@ -895,6 +911,7 @@ class SdsaPrefillPlan:
                     self.block_table,
                     self.unions,
                     valid_counts,
+                    keep_positions=self.keep_positions,
                 )
                 continue
             # Each group's union of its rows' Top-K keys, and their bitmasks.
