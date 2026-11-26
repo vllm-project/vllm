@@ -92,6 +92,9 @@ class IncrementalDetokenizer:
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         return ""
 
+    def set_skip_special_tokens(self, skip_special_tokens: bool) -> None:
+        pass
+
     @classmethod
     def from_new_request(
         cls,
@@ -231,23 +234,46 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.request_id = request.request_id
         self.skip_special_tokens = sampling_params.skip_special_tokens
+        self._initial_prompt_ids = request.prompt_token_ids
+        self._initial_prompt_len = len(request.prompt_token_ids or ())
+        self._spaces_between_special_tokens = (
+            sampling_params.spaces_between_special_tokens
+        )
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
+        self._reset_stream(request.prompt_token_ids)
+
+    def set_skip_special_tokens(self, skip_special_tokens: bool) -> None:
+        if self.skip_special_tokens == skip_special_tokens:
+            return
+        self.skip_special_tokens = skip_special_tokens
+        context_ids = (self._initial_prompt_ids or [])[: self._initial_prompt_len]
+        context_ids.extend(self.token_ids)
+        # Prime a complete prefix, then restore any buffered UTF-8 tokens.
+        end = len(context_ids)
+        while end and self.tokenizer.decode(
+            context_ids[:end], skip_special_tokens=skip_special_tokens
+        ).endswith("\ufffd"):
+            end -= 1
+        self._reset_stream(context_ids[:end])
+        for token_id in context_ids[end:]:
+            self._protected_step(token_id)
+
+    def _reset_stream(self, context_ids: list[int] | None) -> None:
         # Use native prefill to prime the decode stream with the prompt tail.
         # Look up DecodeStream on the module so backend patches (e.g. the
         # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
         # are honored regardless of import order.
         self.stream = tokenizers.decoders.DecodeStream(
             ids=get_decode_stream_seed(
-                self.tokenizer, request.prompt_token_ids, self.skip_special_tokens
+                self.tokenizer, context_ids, self.skip_special_tokens
             ),
             skip_special_tokens=self.skip_special_tokens,
         )
 
         self.spaces_between_special_tokens = (
-            sampling_params.skip_special_tokens
-            or sampling_params.spaces_between_special_tokens
+            self.skip_special_tokens or self._spaces_between_special_tokens
         )
 
         if not self.spaces_between_special_tokens:
@@ -340,6 +366,25 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.skip_special_tokens = params.skip_special_tokens
         self.spaces_between_special_tokens = params.spaces_between_special_tokens
+
+    def set_skip_special_tokens(self, skip_special_tokens: bool) -> None:
+        if self.skip_special_tokens == skip_special_tokens:
+            return
+        self.skip_special_tokens = skip_special_tokens
+        self.tokens, self.prefix_offset, self.read_offset = (
+            convert_prompt_ids_to_tokens(
+                self.tokenizer, self.token_ids, skip_special_tokens=skip_special_tokens
+            )
+        )
+        # Incomplete UTF-8 tokens must remain unread after the setting changes.
+        while self.read_offset and self.tokenizer.convert_tokens_to_string(
+            self.tokens[: self.read_offset]
+        ).endswith("\ufffd"):
+            self.read_offset -= 1
+        self.prefix_offset = max(
+            self.read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0
+        )
+        gc_untrack(self.tokens)
 
     @property
     def output_token_ids(self) -> list[int]:

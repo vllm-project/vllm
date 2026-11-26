@@ -23,6 +23,19 @@ For further details on generative models, please refer to [this page](../models/
 - `LLM.enqueue_chat` - Enqueues chat conversations for generation without waiting.
 - `LLM.wait_for_completion` - Waits for all enqueued requests to complete and returns results.
 
+## Streaming Inputs with AsyncLLM
+
+[`AsyncLLM.generate`][vllm.v1.engine.async_llm.AsyncLLM.generate] accepts an async
+generator of [`StreamingInput`][vllm.engine.protocol.StreamingInput] objects for
+sessions that receive additional input while generating output. Each input can
+provide its own `SamplingParams`. If an input omits `sampling_params`, it uses
+the parameters passed to `generate`.
+
+`SamplingParams.skip_special_tokens` defaults to `True`. A change to this setting
+takes effect when that input becomes active, including when inputs are queued.
+With `RequestOutputKind.CUMULATIVE`, text already returned for earlier inputs
+keeps its original decoding; the new setting applies to subsequent output.
+
 ## Pooling APIs
 
 For further details on pooling models, please refer to [this page](../models/pooling_models/README.md).

@@ -522,6 +522,63 @@ async def test_streaming_input_per_chunk_sampling_params(engine: AsyncLLM):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize("first_skip", [False, True])
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE]
+)
+async def test_streaming_input_per_chunk_skip_special_tokens(
+    engine: AsyncLLM,
+    first_skip: bool,
+    queued: bool,
+    output_kind: RequestOutputKind,
+):
+    """Decoding changes apply to model output at the corresponding input boundary."""
+    tokenizer = engine.input_processor.get_tokenizer()
+    special_id = tokenizer.eos_token_id
+    assert special_id is not None
+    special_ids = [special_id]
+    special_text = tokenizer.decode([special_id], skip_special_tokens=False)
+    assert special_text
+    assert tokenizer.decode([special_id], skip_special_tokens=True) == ""
+    first_completed = asyncio.Event()
+
+    def params(skip: bool) -> SamplingParams:
+        return SamplingParams(
+            temperature=0,
+            max_tokens=1,
+            ignore_eos=True,
+            allowed_token_ids=special_ids,
+            skip_special_tokens=skip,
+            output_kind=output_kind,
+        )
+
+    async def inputs() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt="Hello", sampling_params=params(first_skip))
+        if not queued:
+            await asyncio.wait_for(first_completed.wait(), timeout=30)
+        yield StreamingInput(prompt=" world", sampling_params=params(not first_skip))
+
+    texts = []
+    token_ids = []
+    request_id = f"skip-special-{first_skip}-{queued}-{output_kind.name}"
+    async for output in engine.generate(inputs(), params(first_skip), request_id):
+        if output.outputs:
+            choice = output.outputs[0]
+            if choice.finish_reason == "length" and choice.token_ids:
+                texts.append(choice.text)
+                token_ids.append(list(choice.token_ids))
+                first_completed.set()
+
+    expected = ["" if first_skip else special_text, special_text if first_skip else ""]
+    cumulative = output_kind == RequestOutputKind.CUMULATIVE
+    if cumulative:
+        expected = [expected[0], "".join(expected)]
+    assert token_ids == [[special_id], [special_id] * (2 if cumulative else 1)]
+    assert texts == expected
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_streaming_input_empty_generator(engine: AsyncLLM):
     """Test behavior when the input generator yields nothing.
 

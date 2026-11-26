@@ -55,6 +55,7 @@ steps:
   source_file_dependencies:
     - vllm/v1/engine/
     - tests/v1/engine/
+    - tests/tokenizers_/test_detokenize.py
     - tests/v1/test_tensor_ipc_queue.py
   commands:
     - pytest -v -s v1/engine/test_preprocess_error_handling.py
@@ -63,6 +64,7 @@ steps:
       v1/engine
       --ignore v1/engine/test_preprocess_error_handling.py
     - pytest -v -s v1/test_tensor_ipc_queue.py
+    - pytest -v -s tokenizers_/test_detokenize.py -k skip_special_tokens_change_preserves_pending_text
   mirror:
     amd:
       automatic_shard: true
@@ -74,12 +76,17 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/platforms/rocm.py
+      - vllm/v1/engine/detokenizer.py
+      - vllm/v1/engine/output_processor.py
+      - tests/v1/engine/test_output_processor.py
+      - tests/tokenizers_/test_detokenize.py
       commands:
       - >-
         pytest -v -s
         v1/engine
         --ignore v1/engine/test_preprocess_error_handling.py
       - pytest -v -s v1/test_tensor_ipc_queue.py
+      - pytest -v -s tokenizers_/test_detokenize.py -k skip_special_tokens_change_preserves_pending_text
       - pytest -v -s config/test_mp_reducer.py
 
 # Split from the engine-1-gpu AMD mirror: this test needs a forked EngineCore,
