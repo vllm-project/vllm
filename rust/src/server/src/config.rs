@@ -116,6 +116,15 @@ pub struct ApiServerOptions {
     pub max_n_sequences: i64,
 }
 
+/// The Decisions API read strategies the Rust frontend implements, named
+/// after Python's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DecisionsReadStrategy {
+    /// Python's `NextTokenStrategy`: each question is one request, read from
+    /// the logprobs of the option labels as the reply's first token.
+    NextToken,
+}
+
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and
 /// `--enable-log-deltas`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
@@ -384,6 +393,9 @@ pub struct ServerConfig {
     /// Server-default chat template override, as a file path or inline
     /// template.
     pub chat_template: Option<String>,
+    /// How `/v1/decisions` reads the model, the strategy Python's
+    /// `select_read_strategy` picks for it. Without one, it answers 501.
+    pub decisions_read_strategy: Option<DecisionsReadStrategy>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
     /// Server-side rewrites of the request's typed reasoning effort.

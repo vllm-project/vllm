@@ -17,6 +17,21 @@ from vllm.renderers import TokenizeParams
 pytestmark = pytest.mark.skip_global_cleanup
 
 
+def test_prompt_formatting_preserves_text_around_reserved_markers():
+    clean_prompt = JinaRankingIOProcessor.format_docs_prompts_func(
+        query="¿Qué cafés hay?",
+        docs=["Café São Paulo", "喫茶店"],
+        instruction="Prioriza locales céntricos.",
+    )
+    prompt = JinaRankingIOProcessor.format_docs_prompts_func(
+        query="¿Qué <|rerank_token|>cafés hay?",
+        docs=["Café <|embed_token|>São Paulo", "喫茶店<|rerank_token|>"],
+        instruction="Prioriza locales <|embed_token|>céntricos.",
+    )
+
+    assert prompt == clean_prompt
+
+
 @pytest.fixture
 def offline_processor_and_context():
     backend = Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))

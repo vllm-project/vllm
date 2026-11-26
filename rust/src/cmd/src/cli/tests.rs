@@ -10,9 +10,9 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
-    AdmissionLimits, EngineCoreConfig, FingerprintMode, GenerationConfigMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
-    RendererSelection,
+    AdmissionLimits, DecisionsReadStrategy, EngineCoreConfig, FingerprintMode,
+    GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
+    ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -331,6 +331,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        decisions_read_strategy: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -456,6 +457,67 @@ fn serve_args_accept_python_underscore_flag_names() {
         ]
     "#]]
     .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+/// Python gives each boolean flag a `--no-<flag>` spelling and pairs
+/// `--enable-<x>` with `--disable-<x>`; the frontend must read those spellings
+/// of the flags it owns instead of forwarding them to the engine.
+#[test]
+fn serve_args_accept_python_bool_flag_inverses() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--disable-log-requests",
+        "--disable-log-deltas",
+        "--no-enable-prompt-tokens-details",
+        "--no-trust-request-chat-template",
+        "--no-log-error-stack",
+        "--enable-uvicorn-access-log",
+        "--disable_scale_out",
+        "--no-language-model-only",
+        "--no-data-parallel-hybrid-lb",
+        "--no-data-parallel-external-lb",
+        "--no-enforce-eager",
+        "--disable-ssl-refresh",
+        "--no-enable-ssl-refresh",
+        "--no-enable-flash-late-interaction",
+        "--no-hf-token",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(!args.runtime.enable_log_requests);
+    assert!(!args.runtime.enable_log_deltas);
+    assert!(!args.runtime.enable_prompt_tokens_details);
+    assert!(!args.runtime.trust_request_chat_template);
+    assert_eq!(args.runtime.log_error_stack, Some(false));
+    assert!(!args.runtime.disable_access_log);
+    assert_eq!(args.runtime.enable_scale_out, Some(false));
+    // Undeclared flags, and the off spellings of flags the frontend does not
+    // implement, go to Python unchanged.
+    expect![[r#"
+        [
+            "--no-enforce-eager",
+            "--disable-ssl-refresh",
+            "--no-enable-ssl-refresh",
+            "--no-enable-flash-late-interaction",
+            "--no-hf-token",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-log-outputs",
+        "--disable-log-outputs",
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
 
 #[test]
@@ -1109,6 +1171,44 @@ fn queue_limits_reach_frontend_config() {
             max_num_queued_tokens: Some(8192),
         }
     );
+}
+
+#[test]
+fn decisions_read_strategy_reaches_frontend_config() {
+    let parse = |args_json: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])?;
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        Ok::<_, clap::Error>(args.into_config().server.decisions_read_strategy)
+    };
+    assert_eq!(
+        parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","decisions_read_strategy":"NextTokenStrategy"}"#)
+            .unwrap(),
+        Some(DecisionsReadStrategy::NextToken)
+    );
+    assert_eq!(parse(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap(), None);
+
+    // A strategy the Rust frontend does not implement fails startup, rather
+    // than leaving the endpoint to answer 501.
+    let error =
+        parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","decisions_read_strategy":"SlotLMStrategy"}"#)
+            .unwrap_err();
+    expect![[r#"
+        error: invalid JSON arguments: decisions_read_strategy: unknown variant `SlotLMStrategy`, expected `NextTokenStrategy` at line 1 column 73
+    "#]]
+    .assert_eq(&error.to_string());
 }
 
 #[test]
@@ -2329,26 +2429,6 @@ fn serve_args_reject_custom_generation_config_source() {
 }
 
 #[test]
-fn serve_args_reject_unsupported_no_flag_alias() {
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--no-enable-ssl-refresh",
-    ])
-    .unwrap_err();
-
-    expect![[r#"
-        error: invalid value 'true' for '--enable-ssl-refresh [<ENABLE_SSL_REFRESH>]': argument is not implemented in Rust frontend yet
-
-        Remove this argument, or unset the environment variable bound to it, to continue.
-
-        For more information, try '--help'.
-    "#]]
-    .assert_eq(&error.to_string());
-}
-
-#[test]
 fn frontend_args_accept_json() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -2446,6 +2526,7 @@ fn frontend_args_accept_json() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        decisions_read_strategy: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3614,6 +3695,7 @@ fn serve_args_accept_handshake_aliases() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        decisions_read_strategy: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3876,6 +3958,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,
@@ -4030,6 +4113,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,
@@ -4290,6 +4374,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,

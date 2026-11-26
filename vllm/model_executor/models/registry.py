@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
+from transformers.models.auto.modeling_auto import MODEL_MAPPING_NAMES
 
 from vllm import envs
 from vllm.config import (
@@ -76,7 +77,6 @@ _TEXT_GENERATION_MODELS = {
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "AliceAIForCausalLM": ("alice_ai", "AliceAIForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
-    "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
@@ -88,7 +88,6 @@ _TEXT_GENERATION_MODELS = {
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2MoeForCausalLM": ("cohere2_moe", "Cohere2MoeForCausalLM"),
-    "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
@@ -208,7 +207,6 @@ _TEXT_GENERATION_MODELS = {
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
-    "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
     "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),
@@ -789,6 +787,7 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
+    "AXK1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "ArceeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "CwmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Ernie4_5ForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -980,6 +979,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "JambaForCausalLM": "0.34.0",
     "JambaForSequenceClassification": "0.34.0",
     "MambaForCausalLM": "0.34.0",
+    "TeleFLMForCausalLM": "0.34.0",
+    "DbrxForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
@@ -1391,6 +1392,15 @@ class _ModelRegistry:
     ) -> str | None:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
+        if supported := _TRANSFORMERS_SUPPORTED_MODELS.get(architecture):
+            return supported[1]
+
+        if not model_config.trust_remote_code:
+            # `architectures` may name a class that Transformers doesn't have, so use
+            # the class `AutoModel` builds for the config instead.
+            model_type = model_config.hf_config.model_type
+            if name := MODEL_MAPPING_NAMES.get(model_type):
+                architecture = name[0] if isinstance(name, tuple) else name
 
         auto_map: dict[str, str] = (
             getattr(model_config.hf_config, "auto_map", None) or dict()

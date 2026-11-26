@@ -5,6 +5,7 @@ mod abort_requests;
 mod cache;
 mod checkpoint;
 mod collective_rpc;
+pub(crate) mod decisions;
 mod fault_tolerance;
 mod generative_scoring;
 mod health;
@@ -143,8 +144,7 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
         .route("/v1/messages/count_tokens", post(not_supported))
         // TODO: implement batched chat completions.
         .route("/v1/chat/completions/batch", post(not_supported))
-        // TODO: implement the decisions APIs.
-        .route("/v1/decisions", post(not_supported))
+        // TODO: implement the structured decisions API.
         .route("/v1/systemone", post(not_supported))
         // TODO: implement elastic EP scaling.
         .route("/scale_elastic_ep", post(not_supported))
@@ -165,6 +165,15 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
+
+    router = router.route(
+        "/v1/decisions",
+        if state.decisions().is_some() {
+            post(decisions::decisions)
+        } else {
+            post(not_supported)
+        },
+    );
 
     let scale_out_routes: [(&str, MethodRouter<Arc<AppState>>); 4] = [
         ("/inference/v1/generate", post(inference::generate)),
