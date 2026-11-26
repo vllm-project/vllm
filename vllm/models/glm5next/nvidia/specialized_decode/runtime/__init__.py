@@ -48,6 +48,9 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     policy = dict(extra.get("policy", {}))
     if boundary_only:
         policy = {stage: "" for stage in DEFAULT if stage != "boundary"} | policy
+    if vllm_config.cache_config.use_replayssm:
+        # KdaSplit keeps no ReplaySSM records; the KDA module runs them.
+        policy["kda"] = ""
     spec = vllm_config.speculative_config
     return DecodeConfig(
         max_context=vllm_config.model_config.max_model_len,
@@ -187,8 +190,7 @@ def unsupported(vllm_config) -> list[str]:
             spec is not None and spec.num_speculative_tokens > 7,
             "more than 7 speculative tokens",
         ),
-        # The KDA decode keeps a BF16 conv state and an FP32 recurrent state in place;
-        # it maintains neither other cache dtypes nor ReplaySSM / RecoverSSM records.
+        # The KDA decode keeps a BF16 conv state and an FP32 recurrent state in place.
         (
             not boundary_only
             and kda_dtypes(vllm_config) != (torch.bfloat16, torch.float32),
@@ -196,10 +198,6 @@ def unsupported(vllm_config) -> list[str]:
                 "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
                 "state (mamba cache dtype)"
             ),
-        ),
-        (
-            not boundary_only and (cache.use_replayssm or cache.use_kda_recoverssm),
-            "ReplaySSM / RecoverSSM (--use-replayssm)",
         ),
         # The KDA decode reads its projection weights directly as BF16.
         (
