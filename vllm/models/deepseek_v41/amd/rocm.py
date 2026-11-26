@@ -7,7 +7,7 @@ from typing import Any, ClassVar, cast
 
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -26,6 +26,7 @@ from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
 )
 from vllm.models.deepseek_v4.amd.model import mxfp8_input
 from vllm.models.deepseek_v4.amd.rocm import (
+    _indexer_shardq_enabled,
     _plain_fp8_sparse_mla,
     _register_plain_fp8_kv_scales,
 )
@@ -92,18 +93,6 @@ def _trust_dsv4_extra_cache_nan_free(
         and kv_cache_dtype == "fp8_ds_mla"
         and not has_foreign_kv_writer
         and has_extra_cache
-    )
-
-
-def _indexer_shardq_enabled(vllm_config: VllmConfig) -> bool:
-    parallel = vllm_config.parallel_config
-    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
-    return (
-        vllm_config.attention_config.sparse_mla_shard_q
-        and parallel.tensor_parallel_size > 1
-        and parallel.decode_context_parallel_size == 1
-        and parallel.prefill_context_parallel_size == 1
-        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
     )
 
 

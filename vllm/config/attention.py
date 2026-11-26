@@ -151,8 +151,8 @@ class AttentionConfig:
     the DCP group equal to the TP group), each rank attends a gathered copy of
     its tokens' context instead of the DCP-local cache. A mixed step's decode
     tokens stay sharded by head (on the DCP path under DCP). On ROCm,
-    DeepSeek-V4.1 shards only its indexer prefill this way and all-gathers the
-    top-k back; its attention stays sharded by head."""
+    DeepSeek-V4 and V4.1 shard only their indexer prefill this way and
+    all-gather the top-k back; their attention stays sharded by head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most

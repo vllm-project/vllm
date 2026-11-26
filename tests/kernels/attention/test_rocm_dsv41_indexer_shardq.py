@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ShardQ split of the ROCm FP8 sparse-indexer prefill (DeepSeek-V4.1).
+"""ShardQ split of the ROCm FP8 sparse-indexer prefill (DeepSeek-V4/V4.1).
 
 One GPU plays every TP rank: each rank scores its zigzag tokens, which must
 select what the replicated run selects for them, including a candidate
@@ -112,8 +112,11 @@ def _chunks(cache, tokens: np.ndarray):
     return chunks
 
 
-def _run(monkeypatch, cache, split=None, tokens=None, cand=None, write=False):
-    """One indexer layer over all the rows, or over a rank's ShardQ `tokens`."""
+def _run(
+    monkeypatch, cache, split=None, tokens=None, cand=None, write=False, compact=False
+):
+    """One indexer layer over all the rows, or over a rank's ShardQ `tokens`
+    (with `compact`, q and weights hold just those rows)."""
     from vllm.config import CUDAGraphMode
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerMetadata,
@@ -123,6 +126,8 @@ def _run(monkeypatch, cache, split=None, tokens=None, cand=None, write=False):
 
     ratio, q, weights, kv, _, _ = cache
     indices = None if tokens is None else torch.from_numpy(tokens).cuda()
+    if compact and indices is not None:
+        q, weights = q[indices], weights[indices]
     chunks = _chunks(cache, np.arange(ROWS) if tokens is None else tokens)
     metadata = DeepseekV32IndexerMetadata(
         seq_lens=torch.empty(0, device="cuda"),
@@ -209,3 +214,34 @@ def test_shardq_split_matches_replicated(monkeypatch, world):
             assert torch.equal(sets(local), sets(want[mine]))
             assert torch.equal(sets(out), sets(want))
         assert torch.equal(sets(cand[: len(mine)]), sets(ref_cand[mine]))
+        # A query built for this rank's rows only selects the same.
+        gathered.clear()
+        compact = _run(monkeypatch, two, split, tokens, compact=True)
+        assert torch.equal(sets(gathered[0]), sets(ref[0][mine]))
+        assert torch.equal(sets(compact), sets(ref[0]))
+
+
+@pytest.mark.parametrize("case", ["on", "off", "cudagraph", "padded", "no_prefill"])
+def test_compact_query_rows(monkeypatch, case):
+    """DeepSeek-V4 builds a compact index query only when the op can use it."""
+    from vllm.config import CUDAGraphMode
+    from vllm.models.deepseek_v4 import attention
+
+    rows = torch.arange(4)
+    prefill = SimpleNamespace(shardq_gather_indices=rows)
+    metadata = SimpleNamespace(
+        prefill=None if case == "no_prefill" else prefill,
+        decode=SimpleNamespace(requires_padding=case == "padded"),
+    )
+    context = SimpleNamespace(
+        attn_metadata={PREFIX: metadata},
+        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+        if case == "cudagraph"
+        else CUDAGraphMode.NONE,
+    )
+    monkeypatch.setattr(attention, "get_forward_context", lambda: context)
+    indexer = SimpleNamespace(
+        shardq_compact_query=case != "off", k_cache=SimpleNamespace(prefix=PREFIX)
+    )
+    got = attention.DeepseekV4Indexer._shardq_query_rows(indexer)
+    assert got is (rows if case == "on" else None)
