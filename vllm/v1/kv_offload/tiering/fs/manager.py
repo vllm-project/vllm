@@ -19,13 +19,6 @@ import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
 
-try:
-    from vllm.fs_io_C import batch_lookup as batch_lookup_C
-
-    _HAS_BATCH_LOOKUP_C = True
-except ImportError:
-    _HAS_BATCH_LOOKUP_C = False
-
 from typing_extensions import override
 
 from vllm.logger import init_logger
@@ -37,13 +30,13 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.fs.lookup import FsAsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
-    RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
     TransferJob,
@@ -59,27 +52,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
-
-
-class FsAsyncLookupManager(AsyncLookupManager):
-    """Async lookup manager for FileSystemTierManager."""
-
-    def __init__(
-        self,
-        tier: "FileSystemTierManager",
-        tier_type: str,
-    ) -> None:
-        super().__init__(tier_type=tier_type)
-        self._tier = tier
-
-    def batch_lookup(
-        self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool]:
-        paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
-        if _HAS_BATCH_LOOKUP_C:
-            # C extension: GIL released for the entire faccessat() batch.
-            return batch_lookup_C(paths)
-        return (os.path.exists(p) for p in paths)
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -116,6 +88,7 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
@@ -131,10 +104,17 @@ class FileSystemTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        access_mode: `read` serves loads but never writes blocks, `write`
+            writes blocks but never serves loads, and `readwrite` (default)
+            does both.
 
         """
         super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector,
+            access_mode=access_mode,
         )
         self.locality = Locality(locality) if locality is not None else None
 
@@ -180,18 +160,24 @@ class FileSystemTierManager(SecondaryTierManager):
             parallel_agnostic=True,
         )
 
-        # Write config file
         config_path = self.file_mapper.get_config_file_path()
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        if not os.path.exists(config_path):
-            with open(config_path, "w") as f:
-                json.dump(
-                    self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
-                )
+
+        # Write config file. A read-only tier must not write anything, and may
+        # be backed by a read-only mount (where even mkdir fails), so only a
+        # writable tier touches the directory or creates the file.
+        if self.access_mode.can_write:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            if not os.path.exists(config_path):
+                with open(config_path, "w") as f:
+                    json.dump(
+                        self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
+                    )
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
         # rather than failing every block.
+        # This can result in a write as part of the probe even if we are in
+        # read only mode.
         self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
         if not self._use_o_direct:
             logger.warning(
@@ -207,11 +193,7 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
-        self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
-
-    @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
+        self._lookup_manager = FsAsyncLookupManager(self.file_mapper, self.tier_type)
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:

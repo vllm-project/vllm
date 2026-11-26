@@ -35,6 +35,7 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
+    requires_draft_context_kv: bool = False
 
 
 class MooncakeXferResponseStatus(IntEnum):

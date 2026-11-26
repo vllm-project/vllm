@@ -30,6 +30,7 @@ EXPECTED_METADATA_SCHEMA = [
     ("registered_row_offsets", "list[int]", "factory=list"),
     ("remote_pp_size", "int", "default=1"),
     ("layout_id", "int", "default=0"),
+    ("requires_draft_context_kv", "bool", "default=False"),
 ]
 
 EXPECTED_RESPONSE_SCHEMA = [

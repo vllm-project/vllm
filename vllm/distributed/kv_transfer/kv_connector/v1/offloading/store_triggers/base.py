@@ -39,6 +39,10 @@ class StoreJobSink(Protocol):
         """Offer keys to the manager, with the trigger of this handler."""
         ...
 
+    def record_allocation_failure(self) -> None:
+        """Count a store attempt whose keys are not offered again."""
+        ...
+
     def add_job(
         self,
         req_id: ReqId,
