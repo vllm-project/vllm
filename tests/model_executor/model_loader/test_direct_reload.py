@@ -43,11 +43,42 @@ from vllm.model_executor.model_loader.reload.direct import (
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter, retire_parameter
+from vllm.platforms.interface import Platform
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
 )
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_platform_checkpoint_view(monkeypatch, invalid):
+    model = torch.nn.Linear(3, 2)
+    record_checkpoint_layout(model)
+    runtime_ptr = model.weight.data_ptr()
+    bias_ptr = model.bias.data_ptr()
+    staging = torch.empty_like(model.weight)
+
+    class StagingPlatform(Platform):
+        @classmethod
+        def get_direct_reload_checkpoint_view(cls, tensor):
+            if tensor is model.weight:
+                return staging
+            if invalid and tensor is model.bias:
+                return staging  # wrong shape for bias
+            return None
+
+    monkeypatch.setattr(direct, "current_platform", StagingPlatform())
+    if invalid:
+        with pytest.raises(RuntimeError, match="bias.*incompatible"):
+            begin_direct_reload(model)
+        assert model.weight.data_ptr() == runtime_ptr
+    else:
+        begin_direct_reload(model)
+        assert model.weight.data_ptr() == staging.data_ptr()
+        assert model.bias.data_ptr() == bias_ptr
+        default_weight_loader(model.weight, torch.ones_like(staging))
+        torch.testing.assert_close(staging, torch.ones_like(staging))
 
 
 def test_output_padding_reload_keeps_unpadded_parameters_and_addresses(dist_init):

@@ -1607,6 +1607,18 @@ class Platform:
         return False
 
     @classmethod
+    def get_direct_reload_checkpoint_view(
+        cls, tensor: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Return a writable checkpoint tensor for a platform-specific layout.
+
+        Called during direct reload planning, before any tensor is rebound.
+        The returned tensor must match the recorded checkpoint layout and
+        device. Return None to use the default storage handling.
+        """
+        return None
+
+    @classmethod
     def use_sync_weight_loader(cls) -> bool:
         """Returns if the current platform needs to sync weight loader."""
         return False
