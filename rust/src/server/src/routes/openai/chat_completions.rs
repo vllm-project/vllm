@@ -11,6 +11,7 @@ use std::sync::Arc;
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{StreamExt as _, future};
@@ -24,6 +25,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
+use vllm_text::DecodedLogprobs;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
@@ -47,7 +49,6 @@ use crate::routes::openai::utils::types::{
     ToolCallDelta, Usage,
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
@@ -70,8 +71,9 @@ pub(crate) fn lower_chat_request(
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    body: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Json(body) = body?;
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
@@ -265,10 +267,19 @@ async fn collect_chat_completion(
         })
         .collect::<Vec<_>>();
     let logprobs = if requested_logprobs && include_output_metadata {
+        let logprobs = match logprobs {
+            Some(logprobs) => logprobs,
+            // A request that generated nothing, such as one aborted during
+            // prefill, has no positions to report.
+            None if token_ids.is_empty() => DecodedLogprobs {
+                positions: Vec::new(),
+            },
+            None => {
+                bail_server_error!("chat response requested logprobs but generation returned none")
+            }
+        };
         Some(decoded_logprobs_to_openai_chat(
-            logprobs.as_ref().ok_or_else(|| {
-                server_error!("chat response requested logprobs but generation returned none")
-            })?,
+            &logprobs,
             output_top_logprobs,
             return_tokens_as_token_ids,
         )?)
@@ -276,10 +287,7 @@ async fn collect_chat_completion(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref(),
-            &prompt_token_ids,
-        )?)
+        Some(prompt_logprobs_to_maps(prompt_logprobs.as_ref()))
     } else {
         None
     };
@@ -288,6 +296,7 @@ async fn collect_chat_completion(
         timestamps,
         usage.output_token_count,
         spec_decode_metrics,
+        None,
     );
     let usage = Usage::from_token_usage(
         usage.engine,
@@ -574,6 +583,7 @@ async fn chat_completion_chunk_stream(
                 message,
                 usage: final_usage,
                 timestamps,
+                first_content_token_ts,
                 spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
@@ -652,6 +662,7 @@ async fn chat_completion_chunk_stream(
                         timestamps,
                         final_usage.output_token_count,
                         spec_decode_metrics.map(|value| *value),
+                        first_content_token_ts,
                     );
                     y.yield_ok(usage_chunk(
                         &envelope,
@@ -1263,6 +1274,7 @@ mod tests {
                     first_token_ts: 10.5,
                     last_token_ts: 11.0,
                 },
+                first_content_token_ts: Some(10.75),
                 spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                     num_spec_tokens: 3,
                     histogram: vec![0, 1, 1, 0],
@@ -1321,6 +1333,7 @@ mod tests {
         );
         assert!(chunks[..3].iter().all(|chunk| chunk.metrics.is_none()));
         let metrics = chunks[3].metrics.as_ref().expect("per-request metrics");
+        assert!((metrics.time_to_first_content_token_ms.unwrap() - 550.0).abs() < 1e-9);
         assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
         assert!((metrics.tokens_per_second.unwrap() - 1.25).abs() < 1e-9);
         assert_eq!(
@@ -1367,6 +1380,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1422,6 +1436,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: None,
@@ -1490,6 +1505,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1577,6 +1593,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1716,6 +1733,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 4, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1801,6 +1819,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1869,6 +1888,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(3, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1955,6 +1975,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2033,6 +2054,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2100,6 +2122,7 @@ mod tests {
                     message: Default::default(),
                     usage: done_usage(1, 1, 0),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: None,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,

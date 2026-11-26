@@ -35,7 +35,6 @@ steps: []
   #     - "!vllm/v1/attention/backends/rocm_aiter_unified_attn.py"
   #     - "!vllm/v1/attention/backends/flex_attention.py"
   #     - "!vllm/v1/attention/backends/hpc_attn.py"
-  #     - "!vllm/v1/attention/backends/mamba1_attn.py"
   #     - "!vllm/v1/attention/backends/mamba2_attn.py"
   #     - "!vllm/v1/attention/backends/mamba_attn.py"
   #     - "!vllm/v1/attention/backends/short_conv_attn.py"

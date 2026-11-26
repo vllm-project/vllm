@@ -624,6 +624,7 @@ async def test_joint_schema_reads_every_question_at_once(joint_schema):
     assert tokenizer.decode(ids) == JOINT_SCHEMA_PROMPT
     assert prompt["cache_salt"] == "salt"
     assert params.task == "token_classify"
+    assert params.use_activation is True
     schema = params.extra_kwargs["joint_schema"]
     assert schema["question_types"] == [1, 0, 2]
     assert schema["option_counts"] == [3, 2, 3]

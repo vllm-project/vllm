@@ -28,11 +28,15 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     retained_objects,
 )
+from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECCPUWorkerMetadata
+from vllm.distributed.ec_transfer.ec_connector.cpu.connector import ECCPUConnector
 from vllm.distributed.ec_transfer.ec_connector.example_connector import (
     ECExampleConnectorMetadata,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
+from vllm.distributed.ec_transfer.ec_events import AllECCleared, ECRemoved, ECStored
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
     ExampleConnectorMetadata,
 )
@@ -7292,6 +7296,7 @@ def test_scheduler_ec_connector_stats():
         )
         scheduler.ec_connector = Mock()
         scheduler.ec_connector.take_unavailable_requests.return_value = set()
+        scheduler.ec_connector.take_events.return_value = ()
         scheduler.ec_connector.get_ec_connector_stats.return_value = (
             scheduler_stats if worker_stats is None else None
         )
@@ -7829,6 +7834,7 @@ def test_unavailable_encoder_input_fails_the_request_as_retryable():
     scheduler.ec_connector.take_unavailable_requests.return_value = {request.request_id}
     # `request_finished` reports (delay_free, params) for the request teardown.
     scheduler.ec_connector.request_finished.return_value = (False, None)
+    scheduler.ec_connector.take_events.return_value = ()
 
     scheduler_output = scheduler.schedule()
     outputs = scheduler.update_from_output(
@@ -9153,6 +9159,181 @@ def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
     return request
 
 
+def _make_eccpu_scheduler(ec_role, cpu_blocks, **scheduler_kwargs):
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_ec_connector=True,
+        ec_role=ec_role,
+        **scheduler_kwargs,
+    )
+    config = scheduler.vllm_config
+    ec_config = config.ec_transfer_config
+    assert ec_config is not None
+    dtype = config.model_config.dtype
+    assert isinstance(dtype, torch.dtype)
+    width = config.model_config.get_inputs_embeds_size()
+    ec_config.ec_connector = "ECCPUConnector"
+    ec_config.mm_encoder_output_widths = {"image": width}
+    ec_config.ec_connector_extra_config = {
+        "ec_cpu_bytes": cpu_blocks * width * dtype.itemsize,
+    }
+    connector = ECCPUConnector(config, ECConnectorRole.SCHEDULER)
+    scheduler.ec_connector = connector
+    connector.bind_encoder_cache_query(
+        scheduler.encoder_cache_manager.get_cached_num_encoder_embeds
+    )
+    return scheduler, connector
+
+
+@pytest.mark.parametrize("ec_role", ["ec_producer", "ec_both"])
+def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
+    """A runner hit reserves a new CPU save without encoding or loading again."""
+    scheduler, connector = _make_eccpu_scheduler(ec_role, cpu_blocks=2)
+    request, replacement, repeat = create_requests(
+        num_requests=3,
+        num_tokens=8,
+        mm_hashes_list=[["cached-image"], ["replacement-image"], ["cached-image"]],
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=1)],
+            [PlaceholderRange(offset=0, length=2)],
+            [PlaceholderRange(offset=0, length=1)],
+        ],
+    )
+
+    def save_completed(req):
+        connector.update_state_after_alloc(req, 0)
+        metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+        mm_hash = req.mm_features[0].identifier
+        assert mm_hash in metadata.saves
+        connector.update_connector_output(
+            ECConnectorOutput(
+                ec_connector_worker_meta=ECCPUWorkerMetadata(completed_saves=[mm_hash])
+            )
+        )
+
+    try:
+        manager = scheduler.encoder_cache_manager
+        manager.allocate(request, 0)
+        manager.free(request)
+        save_completed(request)
+        save_completed(replacement)
+        assert connector.connector_scheduler._cache.get("cached-image") is None
+        assert manager.get_cached_num_encoder_embeds(request, 0) == 1
+
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[request.request_id] == 8
+        assert output.scheduled_encoder_inputs == {}
+        assert "cached-image" in output.ec_connector_metadata.saves
+        assert output.ec_connector_metadata.loads == {}
+        entry = connector.connector_scheduler._cache.get("cached-image")
+        assert entry is not None and not entry.ready
+
+        connector.update_connector_output(
+            ECConnectorOutput(
+                ec_connector_worker_meta=ECCPUWorkerMetadata(
+                    completed_saves=["cached-image"]
+                )
+            )
+        )
+        assert entry.ready
+        scheduler.add_request(repeat)
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[repeat.request_id] == 8
+        metadata = output.ec_connector_metadata
+        assert metadata.saves == {}
+        assert metadata.loads == {}
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("cpu_blocks", [1, 2])
+def test_ec_republish_preserves_selected_cpu_load(cpu_blocks):
+    """A runner hit can only republish using space left after pinning loads."""
+    scheduler, connector = _make_eccpu_scheduler("ec_both", cpu_blocks)
+    cpu_hashes = ["cpu-only", "evictable"][:cpu_blocks]
+    seed, request = create_requests(
+        num_requests=2,
+        num_tokens=8,
+        mm_hashes_list=[cpu_hashes, ["cpu-only", "runner-only"]],
+        mm_positions=[
+            [PlaceholderRange(offset=i, length=1) for i in range(cpu_blocks)],
+            [PlaceholderRange(offset=i, length=1) for i in range(2)],
+        ],
+    )
+
+    try:
+        for i in range(cpu_blocks):
+            connector.update_state_after_alloc(seed, i)
+        metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+        assert metadata.saves.keys() == set(cpu_hashes)
+        connector.update_connector_output(
+            ECConnectorOutput(
+                ec_connector_worker_meta=ECCPUWorkerMetadata(completed_saves=cpu_hashes)
+            )
+        )
+        manager = scheduler.encoder_cache_manager
+        manager.allocate(request, 1)
+        manager.free(request)
+
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+
+        assert output.num_scheduled_tokens == {request.request_id: 8}
+        assert output.scheduled_encoder_inputs == {}
+        metadata = output.ec_connector_metadata
+        assert metadata.loads.keys() == {"cpu-only"}
+        assert metadata.saves.keys() == ({"runner-only"} if cpu_blocks == 2 else set())
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("masked_prefix", [False, True])
+def test_ec_republish_waits_for_chunk_with_embeddings(masked_prefix):
+    """A runner hit is republished only when the chunk uses its embeddings."""
+    scheduler, connector = _make_eccpu_scheduler(
+        "ec_both",
+        cpu_blocks=2,
+        max_num_seqs=1,
+        max_num_batched_tokens=4,
+        max_model_len=64,
+    )
+    position = (
+        PlaceholderRange(
+            offset=2,
+            length=4,
+            is_embed=torch.tensor([False, False, True, True]),
+        )
+        if masked_prefix
+        else PlaceholderRange(offset=4, length=2)
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        mm_hashes_list=[["runner-only"]],
+        mm_positions=[[position]],
+    )
+
+    try:
+        manager = scheduler.encoder_cache_manager
+        manager.allocate(request, 0)
+        manager.free(request)
+        scheduler.add_request(request)
+
+        first = scheduler.schedule()
+        assert first.num_scheduled_tokens == {request.request_id: 4}
+        assert first.scheduled_encoder_inputs == {}
+        assert first.ec_connector_metadata.saves == {}
+
+        second = scheduler.schedule()
+        assert second.num_scheduled_tokens == {request.request_id: 4}
+        assert second.scheduled_encoder_inputs == {}
+        assert second.ec_connector_metadata.loads == {}
+        assert second.ec_connector_metadata.saves.keys() == {"runner-only"}
+    finally:
+        connector.shutdown()
+
+
 def test_encoder_instance_defers_stop_until_prompt_is_consumed():
     """An encoder instance must not finish a request that has not encoded yet.
 
@@ -9671,3 +9852,103 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+def test_reset_encoder_cache_publishes_clear_event_while_idle():
+    """An idle engine must publish `AllECCleared` on reset.
+
+    `update_from_output` is the only place that normally drains EC events, and
+    it never runs while the engine is idle, so the reset has to flush its own.
+    """
+    scheduler = create_scheduler()
+    scheduler.encoder_cache_manager = EncoderCacheManager(
+        cache_size=100, enable_events=True
+    )
+    publisher = Mock()
+    scheduler.ec_event_publisher = publisher
+
+    scheduler.reset_encoder_cache()
+
+    publisher.publish.assert_called_once()
+    batch = publisher.publish.call_args.args[0]
+    assert batch.events == [AllECCleared()]
+
+
+def test_ec_store_events_published_with_the_step_that_creates_them():
+    """A step's `ECStored` must not be advertised with an earlier step's output.
+
+    Async scheduling runs `schedule()` for the next step before the current
+    step's output arrives, so publishing whatever the cache manager queued would
+    advertise embeddings that are not cached yet.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+        encoder_cache_size=2048,
+    )
+    scheduler.encoder_cache_manager.enable_events = True
+    publisher = Mock()
+    scheduler.ec_event_publisher = publisher
+
+    request = create_requests(
+        1,
+        num_tokens=2000,
+        req_ids=["request"],
+        mm_hashes_list=[["img_a", "img_b"]],
+        mm_positions=[[PlaceholderRange(0, 576), PlaceholderRange(1200, 576)]],
+    )[0]
+    scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+    assert first_output.scheduled_encoder_inputs == {"request": [0]}
+    # Schedule the next chunk before the first one has produced its output.
+    second_output = scheduler.schedule()
+    assert second_output.scheduled_encoder_inputs == {"request": [1]}
+
+    _model_output(scheduler, first_output, [[]])
+    published = [call.args[0].events for call in publisher.publish.call_args_list]
+    assert published == [[ECStored(mm_hashes=["img_a"], medium="GPU")]]
+
+    _model_output(scheduler, second_output, [[]])
+    published = [call.args[0].events for call in publisher.publish.call_args_list]
+    assert published == [
+        [ECStored(mm_hashes=["img_a"], medium="GPU")],
+        [ECStored(mm_hashes=["img_b"], medium="GPU")],
+    ]
+
+
+def test_ec_eviction_published_when_no_tokens_are_scheduled():
+    """A rejected request can evict a cached item without running a forward pass."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=1024,
+        encoder_cache_size=576,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    manager = scheduler.encoder_cache_manager
+    cached, missing = create_requests(
+        2,
+        num_tokens=manager.cache_size,
+        mm_hashes_list=[["cached"], ["missing"]],
+        mm_positions=[[PlaceholderRange(0, manager.cache_size)]] * 2,
+    )
+    assert manager.can_allocate(cached, 0, manager.cache_size, 0)
+    manager.allocate(cached, 0)
+    manager.free(cached)
+    manager.enable_events = True
+    publisher = Mock()
+    scheduler.ec_event_publisher = publisher
+
+    missing.mm_features[0].data = None
+    scheduler.add_request(missing)
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens == 0
+    assert output.free_encoder_mm_hashes == ["cached"]
+
+    scheduler.update_from_output(output, make_empty_encoder_model_runner_output(output))
+    assert [call.args[0].events for call in publisher.publish.call_args_list] == [
+        [ECRemoved(mm_hashes=["cached"], medium="GPU")]
+    ]
