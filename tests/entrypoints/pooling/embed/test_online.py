@@ -372,8 +372,8 @@ def test_chat_request_uses_default_chat_template_kwargs(
     )
     overridden = prompt_tokens(chat_template_kwargs={"prefix": ""})
 
-    assert server_default == explicit
-    assert overridden < server_default
+    assert server_default == explicit == 18
+    assert overridden == 9
 
 
 @pytest.mark.asyncio
