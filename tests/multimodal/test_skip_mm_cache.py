@@ -7,13 +7,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+from vllm.multimodal.cache import (
+    LruKeyReplicatedReceiverCache,
+    MultiModalCacheMissError,
+)
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.sampling_params import SamplingParams
+from vllm.utils.mem_constants import GiB_bytes
+
+# =====================================================================
+# P0 Helpers: Render-to-Generate Input
+# =====================================================================
 
 
 @dataclass
@@ -102,11 +117,15 @@ def _make_serving_for_build_input() -> ServingTokens:
     return serving
 
 
+# =====================================================================
+# P0: Render-to-Generate Feature Cache State
+# =====================================================================
+
 SERVING_MOD = "vllm.entrypoints.scale_out.token_in_token_out.serving"
 
 
 class TestBuildEngineInputSkipMmCache:
-    """Unit tests for build_engine_input across rendered, metadata, and mixed inputs."""
+    """P0 contract: only full tensors from rendered features bypass the P1 LRU."""
 
     @pytest.mark.asyncio
     async def test_rendered_full_tensor_sets_skip_mm_cache(self):
@@ -179,7 +198,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
             patch(
                 f"{SERVING_MOD}.mm_kwargs_from_features",
-                return_value={"image": [_FakeElem(data="tensor")]},
+                return_value={"image": [{"pixel_values": _FakeElem(data="tensor")}]},
             ),
             pytest.raises(ValueError, match="bad cache handle"),
         ):
@@ -200,7 +219,7 @@ class TestBuildEngineInputSkipMmCache:
         )
 
         meta_elem = _FakeElem(data=None, skip_mm_cache=False)
-        fake_mm_kwargs = {"image": [None, {"meta": meta_elem}]}
+        fake_mm_kwargs = {"image": [{"meta": meta_elem}]}
 
         with (
             patch(
@@ -222,11 +241,13 @@ class TestBuildEngineInputSkipMmCache:
         ):
             engine_input = await serving.build_engine_input(request)
 
-        assert engine_input["mm_kwargs"]["image"][0] is None
+        assert engine_input["mm_kwargs"]["image"][0]["meta"] is meta_elem
         assert meta_elem.skip_mm_cache is False
 
     @pytest.mark.asyncio
-    async def test_mixed_rendered_features_and_content_parts(self):
+    async def test_mixed_rendered_features_and_content_parts_keep_skip_per_feature(
+        self,
+    ):
         serving = _make_serving_for_build_input()
         # Feature range ends at offset 2 + length 8 = 10 -> start should be 10.
         features = _make_features(
@@ -299,3 +320,97 @@ class TestBuildEngineInputSkipMmCache:
             "hash-rendered-1",
             "hash-content-part-1",
         ]
+
+
+# =====================================================================
+# P1: Receiver Cache Skip Behavior
+# =====================================================================
+
+
+class _ModelConfig:
+    def __init__(self) -> None:
+        self._mm_config = MultiModalConfig(mm_processor_cache_gb=128 / GiB_bytes)
+
+    def get_multimodal_config(self) -> MultiModalConfig:
+        return self._mm_config
+
+
+def _make_receiver_cache() -> LruKeyReplicatedReceiverCache:
+    return LruKeyReplicatedReceiverCache(_ModelConfig())
+
+
+def _make_item() -> MultiModalKwargsItem:
+    return MultiModalKwargsItem.dummy(nbytes=64)
+
+
+def _make_feature(
+    mm_hash: str,
+    data: MultiModalKwargsItem | None,
+    *,
+    skip_mm_cache: bool | None = False,
+) -> MultiModalFeatureSpec:
+    return MultiModalFeatureSpec(
+        data=data,
+        modality="image",
+        identifier=mm_hash,
+        mm_position=PlaceholderRange(offset=0, length=1),
+        mm_hash=mm_hash,
+        skip_mm_cache=skip_mm_cache,
+    )
+
+
+def _call_receiver(
+    cache: LruKeyReplicatedReceiverCache,
+    *features: MultiModalFeatureSpec,
+) -> list[MultiModalFeatureSpec]:
+    return cache.get_and_update_features(list(features))
+
+
+class TestReceiverSkipMmCache:
+    """P1 contract: only an explicit true flag skips cache touch and lookup."""
+
+    @pytest.mark.parametrize("skip_mm_cache", [None, False], ids=["none", "false"])
+    def test_none_or_false_flag_caches_full_tensor(self, skip_mm_cache):
+        cache = _make_receiver_cache()
+        item = _make_item()
+
+        _call_receiver(
+            cache,
+            _make_feature("image-normal", item, skip_mm_cache=skip_mm_cache),
+        )
+
+        (resolved,) = _call_receiver(cache, _make_feature("image-normal", None))
+        assert resolved.data is item
+
+    def test_true_flag_skips_insert_and_data_none_lookup_raises(self):
+        cache = _make_receiver_cache()
+        item = _make_item()
+
+        (skipped,) = _call_receiver(
+            cache, _make_feature("image-skipped", item, skip_mm_cache=True)
+        )
+        assert skipped.data is item
+
+        with pytest.raises(MultiModalCacheMissError) as exc_info:
+            _call_receiver(cache, _make_feature("image-skipped", None))
+        assert exc_info.value.mm_hashes == ["image-skipped"]
+
+    def test_mixed_features_only_cache_unskipped_items(self):
+        cache = _make_receiver_cache()
+        item_a = _make_item()
+        item_b = _make_item()
+        _call_receiver(
+            cache, _make_feature("image-a", item_a), _make_feature("image-b", item_b)
+        )
+
+        _call_receiver(
+            cache,
+            _make_feature("image-skipped", _make_item(), skip_mm_cache=True),
+            _make_feature("image-cached", _make_item(), skip_mm_cache=False),
+        )
+
+        (resolved_b,) = _call_receiver(cache, _make_feature("image-b", None))
+        assert resolved_b.data is item_b
+        with pytest.raises(MultiModalCacheMissError) as exc_info:
+            _call_receiver(cache, _make_feature("image-skipped", None))
+        assert exc_info.value.mm_hashes == ["image-skipped"]
