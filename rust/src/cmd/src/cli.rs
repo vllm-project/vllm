@@ -42,8 +42,8 @@ use vllm_server::{
     AccessLogConfig, AdmissionLimits, ApiServerOptions, ChatTemplateContentFormatOption,
     CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode, LlmSource, LoraModulePath,
-    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
+    DefaultMmLoras, EngineCoreConfig, FingerprintMode, GrpcLlm, HttpListenerMode, LlmSource,
+    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
     RendererSelection, Server, ServerConfig,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
@@ -1120,10 +1120,9 @@ impl SharedRuntimeArgs {
 
     /// Build the OpenAI-server config for the managed `serve` path that still
     /// owns the startup handshake and binds its own HTTP listener.
-    fn into_managed_config(
-        self,
-        listener_mode: HttpListenerMode,
-        grpc_listener_mode: Option<HttpListenerMode>,
+    fn to_managed_config(
+        &self,
+        server: ServerConfig,
         handshake_address: String,
         advertised_host: String,
         topology: &DataParallelTopology,
@@ -1131,66 +1130,8 @@ impl SharedRuntimeArgs {
         local_output_address: Option<String>,
         manages_engine: bool,
     ) -> FrontendConfig {
-        let ready_timeout = self.ready_timeout();
-        let shutdown_timeout = self.shutdown_timeout();
-        let keep_alive_timeout = self.keep_alive_timeout();
-        let log_stats_interval = self.log_stats_interval();
-        let api_server_options = self.api_server_options();
-        let fingerprint_mode = self.fingerprint_mode_config();
-        let admission_limits = self.admission_limits();
-        let cors = self.cors_config();
-        let access_log = self.access_log_config();
-        let tls = self.ssl.tls_config();
-        let profiler = self.profiler();
-        let structured_outputs_backend = self.structured_outputs_backend();
-        let ModelFileSources {
-            model,
-            tokenizer,
-            hf_config,
-            skip_tokenizer_init,
-            hf_token,
-        } = self.model_args().file_sources();
-
         FrontendConfig {
-            server: ServerConfig {
-                model: model.id,
-                revision: model.revision,
-                tokenizer,
-                hf_config,
-                skip_tokenizer_init,
-                hf_token,
-                hf_overrides: self.hf_overrides,
-                generation_config: self.generation_config,
-                override_generation_config: self.override_generation_config,
-                served_model_name: self.served_model_name,
-                listener_mode,
-                grpc_listener_mode,
-                tool_call_parser: self.tool_call_parser,
-                reasoning_parser: self.reasoning_parser,
-                tool_strict_level: self.tool_strict_level,
-                structured_outputs_backend,
-                renderer: self.renderer,
-                language_model_only: self.language_model_only,
-                chat_template: self.chat_template,
-                default_chat_template_kwargs: self.default_chat_template_kwargs,
-                reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
-                trust_request_chat_template: self.trust_request_chat_template,
-                exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
-                limit_mm_per_prompt: self.limit_mm_per_prompt,
-                mm_processor_kwargs: self.mm_processor_kwargs,
-                chat_template_content_format: self.chat_template_content_format,
-                max_logprobs: self.max_logprobs,
-                api_server_options,
-                fingerprint_mode,
-                cors,
-                access_log,
-                tls,
-                root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
-                api_keys: self.api_key,
-                shutdown_timeout,
-                keep_alive_on_engine_death: self.keep_alive_on_engine_death,
-                keep_alive_timeout,
-            },
+            server,
             engine_core: EngineCoreConfig {
                 transport_mode: TransportMode::HandshakeOwner {
                     handshake_address,
@@ -1198,21 +1139,21 @@ impl SharedRuntimeArgs {
                     engine_start_index: topology.frontend_engine_start_index(),
                     engine_count: topology.frontend_engine_count(),
                     data_parallel_size: topology.data_parallel_size,
-                    ready_timeout,
+                    ready_timeout: self.ready_timeout(),
                     local_input_address,
                     local_output_address,
                 },
                 coordinator_mode: CoordinatorMode::MaybeInProc,
-                lora_modules: self.lora_modules,
-                default_mm_loras: self.default_mm_loras,
+                lora_modules: self.lora_modules.clone(),
+                default_mm_loras: self.default_mm_loras.clone(),
                 stream_interval: self.stream_interval,
-                admission_limits,
+                admission_limits: self.admission_limits(),
                 disable_log_stats: self.disable_log_stats,
-                log_stats_interval,
-                custom_histogram_buckets: self.custom_histogram_buckets,
+                log_stats_interval: self.log_stats_interval(),
+                custom_histogram_buckets: self.custom_histogram_buckets.clone(),
                 disable_request_id_randomization: self.disable_request_id_randomization,
                 manages_engine,
-                profiler,
+                profiler: self.profiler(),
             },
         }
     }
@@ -1544,6 +1485,17 @@ impl FrontendArgs {
 #[educe(Debug)]
 #[command(override_usage = "vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]")]
 pub struct ServeArgs {
+    /// Send token generation to a vllm.Inference gRPC endpoint.
+    #[arg(long, requires = "max_model_len", conflicts_with_all = [
+        "headless", "python_args", "python", "handshake_host", "handshake_port",
+        "data_parallel_size", "data_parallel_size_local", "data_parallel_rank",
+        "data_parallel_start_rank", "data_parallel_external_lb", "data_parallel_hybrid_lb",
+        "lora_modules", "default_mm_loras", "stream_interval", "max_num_queued_reqs",
+        "max_num_queued_tokens", "engine_ready_timeout_secs", "disable_log_stats",
+        "custom_histogram_buckets", "log_stats_interval", "disable_request_id_randomization",
+        "profiler_config",
+    ])]
+    pub remote_generation_url: Option<String>,
     /// Only launch the managed Python headless engine and do not start the Rust
     /// frontend.
     #[arg(long)]
@@ -1591,6 +1543,36 @@ impl ServeArgs {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
             topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
+        self.runtime.to_managed_config(
+            self.to_server_config(),
+            handshake_address,
+            self.managed_engine.handshake_host.clone(),
+            topology,
+            local_input_address,
+            local_output_address,
+            // `--data-parallel-size-local 0` runs the frontend without a local engine.
+            self.managed_engine.data_parallel_size_local != Some(0),
+        )
+    }
+
+    pub(super) fn grpc_llm(&self, url: &str) -> anyhow::Result<GrpcLlm> {
+        let Some(limit) = self
+            .managed_engine
+            .max_model_len
+            .as_deref()
+            .and_then(parse_human_readable_int)
+            .and_then(|n| u32::try_from(n).ok())
+            .and_then(NonZeroU32::new)
+        else {
+            anyhow::bail!(
+                "--remote-generation-url requires a positive --max-model-len such as 512 or 1K"
+            );
+        };
+        let model = self.runtime.served_model_name.first().unwrap_or(&self.runtime.model.id);
+        GrpcLlm::new(url, model.clone(), limit)
+    }
+
+    pub(super) fn to_server_config(&self) -> ServerConfig {
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -1609,17 +1591,54 @@ impl ServeArgs {
             port,
         });
 
-        self.runtime.clone().into_managed_config(
+        let runtime = &self.runtime;
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
+        } = runtime.model_args().file_sources();
+
+        ServerConfig {
+            model: model.id,
+            revision: model.revision,
+            tokenizer,
+            hf_config,
+            skip_tokenizer_init,
+            hf_token,
+            hf_overrides: runtime.hf_overrides.clone(),
+            generation_config: runtime.generation_config,
+            override_generation_config: runtime.override_generation_config.clone(),
+            served_model_name: runtime.served_model_name.clone(),
             listener_mode,
             grpc_listener_mode,
-            handshake_address,
-            self.managed_engine.handshake_host.clone(),
-            topology,
-            local_input_address,
-            local_output_address,
-            // `--data-parallel-size-local 0` runs the frontend without a local engine.
-            self.managed_engine.data_parallel_size_local != Some(0),
-        )
+            tool_call_parser: runtime.tool_call_parser.clone(),
+            reasoning_parser: runtime.reasoning_parser.clone(),
+            tool_strict_level: runtime.tool_strict_level,
+            structured_outputs_backend: runtime.structured_outputs_backend(),
+            renderer: runtime.renderer,
+            language_model_only: runtime.language_model_only,
+            chat_template: runtime.chat_template.clone(),
+            default_chat_template_kwargs: runtime.default_chat_template_kwargs.clone(),
+            reasoning_effort_map: runtime.reasoning_effort_map.clone().unwrap_or_default(),
+            trust_request_chat_template: runtime.trust_request_chat_template,
+            exclude_tools_when_tool_choice_none: runtime.exclude_tools_when_tool_choice_none,
+            limit_mm_per_prompt: runtime.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: runtime.mm_processor_kwargs.clone(),
+            chat_template_content_format: runtime.chat_template_content_format,
+            max_logprobs: runtime.max_logprobs,
+            api_server_options: runtime.api_server_options(),
+            fingerprint_mode: runtime.fingerprint_mode_config(),
+            cors: runtime.cors_config(),
+            access_log: runtime.access_log_config(),
+            tls: runtime.ssl.tls_config(),
+            root_path: runtime.root_path.clone().filter(|root_path| !root_path.is_empty()),
+            api_keys: runtime.api_key.clone(),
+            shutdown_timeout: runtime.shutdown_timeout(),
+            keep_alive_on_engine_death: runtime.keep_alive_on_engine_death,
+            keep_alive_timeout: runtime.keep_alive_timeout(),
+        }
     }
 
     /// Build the managed Python-engine spawn configuration with the given

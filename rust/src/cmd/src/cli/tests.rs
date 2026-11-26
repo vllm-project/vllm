@@ -260,6 +260,7 @@ fn serve_args_forward_python_flags_with_separator() {
         Cli {
             command: Serve(
                 ServeArgs {
+                    remote_generation_url: None,
                     headless: false,
                     host: "127.0.0.1",
                     port: 8000,
@@ -1427,6 +1428,42 @@ fn int_flag_parses_like_python_bool_int() {
         "true" -> Err("`true` is not an integer")
         "" -> Err("`` is not an integer")"#]]
     .assert_eq(&parsed);
+}
+
+#[tokio::test]
+async fn remote_generation_accepts_pod_local_sockets_and_rejects_engine_launch_args() {
+    let args = [
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--uds=/run/llm-d/frontend-http.sock",
+        "--remote-generation-url=unix:///run/llm-d/generation.sock",
+        "--max-model-len=1K",
+    ];
+    let Command::Serve(mut serve) = Cli::try_parse_from(args).unwrap().command else {
+        panic!("expected serve args");
+    };
+    let url = serve.remote_generation_url.as_deref().unwrap();
+    assert_eq!(url, "unix:///run/llm-d/generation.sock");
+    let config = serve.to_server_config();
+    serve.grpc_llm(url).unwrap();
+    assert_eq!(
+        config.listener_mode,
+        HttpListenerMode::BindUnix {
+            path: "/run/llm-d/frontend-http.sock".into()
+        }
+    );
+    serve.managed_engine.max_model_len = Some("auto".into());
+    assert!(serve.grpc_llm(url).is_err());
+
+    for argument in [
+        "--headless",
+        "--lora-modules=adapter=/weights/adapter",
+        "--stream-interval=8",
+    ] {
+        let error = Cli::try_parse_from(args.into_iter().chain([argument])).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }
 
 #[test]
@@ -3582,6 +3619,7 @@ fn serve_args_accept_handshake_aliases() {
         Cli {
             command: Serve(
                 ServeArgs {
+                    remote_generation_url: None,
                     headless: false,
                     host: "127.0.0.1",
                     port: 8000,

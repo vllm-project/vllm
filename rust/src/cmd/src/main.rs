@@ -13,6 +13,7 @@ use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
+use vllm_server::{LlmSource, Server};
 use vllm_tracing::LogLevel;
 
 use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
@@ -165,6 +166,12 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
+            if let Some(url) = args.remote_generation_url.as_deref() {
+                let config = args.to_server_config();
+                let llm = args.grpc_llm(url)?;
+                let server = Server::new(config, LlmSource::Provided(Box::new(llm)));
+                return server.serve(shutdown_signal()).await;
+            }
             let topology = args.data_parallel_lb.resolve(&args.managed_engine, args.headless)?;
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 

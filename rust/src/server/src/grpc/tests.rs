@@ -47,6 +47,7 @@ use vllm_engine_core_client::protocol::output::{
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
@@ -54,7 +55,7 @@ use vllm_engine_core_client::test_utils::{
     IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task_with_ready,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{EngineCoreLlm, FinishReason, GenerateRequest, Llm as _};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, SamplingHints, TextBackend, TextRequestProcessor};
@@ -62,6 +63,7 @@ use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
+use super::client::GrpcLlm;
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
 use super::health::{EngineHealth, HealthMonitor};
@@ -855,6 +857,85 @@ async fn unary_generate_with_token_ids_prompt() {
         3
     );
 
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+fn grpc_llm_request() -> GenerateRequest {
+    GenerateRequest {
+        request_id: "proof".into(),
+        prompt_token_ids: vec![21, 43],
+        sampling_params: EngineCoreSamplingParams {
+            temperature: 0.75,
+            max_tokens: 8,
+            stop_token_ids: vec![99],
+            seed: Some(9_007_199_254_740_993),
+            ..EngineCoreSamplingParams::for_test()
+        },
+        arrival_time: None,
+        cache_salt: None,
+        trace_headers: None,
+        priority: 0,
+        data_parallel_rank: None,
+        session_id: None,
+        mm_features: None,
+        kv_hints: None,
+        reasoning_parser_kwargs: None,
+        reasoning_ended: None,
+        lora_request: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_llm_round_trips_through_inference_to_engine_core() {
+    let (submitted, observed) = tokio::sync::oneshot::channel();
+    let (inference, control, health, engine_task) = setup_grpc_service_with_backend(
+        b"engine-grpc-llm-round-trip",
+        vec![
+            (vec![17], None),
+            (vec![31, 42], Some(EngineCoreFinishReason::Length)),
+        ],
+        Arc::new(FakeTextBackend {
+            tokenizer: Arc::new(PanickingTokenizer),
+            ..Default::default()
+        }),
+        move |request| {
+            submitted.send(request.clone()).expect("record engine request");
+        },
+    )
+    .await;
+    let (channel, server_task) =
+        start_grpc_test_server(inference, control, health, Default::default()).await;
+    let llm = GrpcLlm::from_channel(channel, "test-model".into(), 512.try_into().unwrap());
+    let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
+    let request = observed.await.expect("engine submission");
+    assert_eq!(decode_prompt_token_ids(&request).unwrap(), [21, 43]);
+    let sampling = request.sampling_params.as_ref().unwrap();
+    assert_eq!(sampling.seed, Some(9_007_199_254_740_993));
+    assert_eq!(sampling.temperature, 0.75);
+    assert_eq!(sampling.max_tokens, 8);
+    assert_eq!(sampling.stop_token_ids, [99]);
+    let mut tokens = Vec::new();
+    let mut first = true;
+    loop {
+        let output = stream.next().await.expect("missing terminal output").unwrap();
+        assert_eq!(output.request_id, "proof");
+        if first {
+            assert_eq!(
+                output.prompt_info.unwrap().prompt_token_ids.as_ref(),
+                &[21, 43]
+            );
+            first = false;
+        }
+        tokens.extend(output.token_ids);
+        if let Some(reason) = output.finish_reason {
+            assert_eq!(reason, FinishReason::Length);
+            break;
+        }
+    }
+    assert_eq!(tokens, [17, 31, 42]);
+    assert!(stream.next().await.is_none());
     engine_task.await.expect("mock engine task");
     server_task.abort();
 }
@@ -2109,9 +2190,12 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
     server_task.abort();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn dropping_generate_stream_aborts_before_engine_output() {
+async fn pending_generation_server() -> (
+    Channel,
+    tokio::task::JoinHandle<()>,
+    MockEngineTask,
+    tokio::sync::oneshot::Receiver<()>,
+) {
     let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
     let (inference_service, control_service, engine_health, engine_task) =
         setup_grpc_service_with_engine_script(
@@ -2143,6 +2227,13 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
+    (channel, server_task, engine_task, submitted_rx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn dropping_generate_stream_aborts_before_engine_output() {
+    let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
     let mut client = InferenceClient::new(channel);
     let stream = client
         .generate_stream(pb::GenerateRequest {
@@ -2170,6 +2261,43 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
     result
         .expect("disconnect must abort without waiting for engine output")
         .expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_llm_abort_reaches_engine_while_output_is_idle() {
+    let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
+    let llm = GrpcLlm::from_channel(channel, "test-model".into(), 512.try_into().unwrap());
+    let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    llm.abort(&["proof".into()]).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), engine_task)
+        .await
+        .expect("engine should receive abort before caller polls the stream")
+        .expect("mock engine task");
+    assert!(stream.next().await.unwrap().is_err());
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn dropping_unpolled_grpc_llm_stream_aborts_engine_request() {
+    let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
+    let llm = GrpcLlm::from_channel(channel, "test-model".into(), 512.try_into().unwrap());
+    let stream = llm.generate(grpc_llm_request()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+        .await
+        .expect("timed out waiting for engine submission")
+        .expect("engine submission signal");
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), engine_task)
+        .await
+        .expect("dropping the unpolled stream should abort the engine request")
+        .expect("mock engine task");
+    server_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
