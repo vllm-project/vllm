@@ -1363,7 +1363,9 @@ void cpu_topk_topp_exact(torch::Tensor& logits,
                   logits.scalar_type() == torch::kFloat32 &&
                   logits.stride(1) == 1,
               "logits must be a 2D CPU FP32 tensor with unit column stride");
-  TORCH_CHECK(logits.size(1) > kSmall && logits.size(1) < (1 << 20),
+  // Positions are int and keys hold an int32 index.
+  TORCH_CHECK(logits.size(1) >= 1 &&
+                  logits.size(1) <= std::numeric_limits<int32_t>::max(),
               "vocab size out of range");
   const int rows = static_cast<int>(logits.size(0));
   if (rows == 0 || (!k.has_value() && !p.has_value())) return;

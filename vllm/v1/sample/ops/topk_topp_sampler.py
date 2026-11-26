@@ -347,19 +347,14 @@ def apply_top_k_top_p_x86_cpu(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
 ) -> torch.Tensor:
-    """Exact top-k/top-p masking with the x86 C++ kernel, in place.
+    """Exact top-k/top-p masking with the x86 C++ kernel.
 
-    Logits the kernel does not take (not FP32, vocab of at most 256) use the
-    PyTorch path, so x86 CPUs never compile the Triton kernel.
+    FP32 logits are masked in place; other dtypes are masked in an FP32 copy,
+    which is returned.
     """
     from vllm._cpu_ops import cpu_topk_topp_exact
 
-    if (
-        logits.dtype != torch.float32
-        or logits.stride(-1) != 1
-        or not 256 < logits.shape[-1] < (1 << 20)
-    ):
-        return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
+    logits = logits.float()
     if k is not None:
         k = k.to(torch.int32).contiguous()
     if p is not None:

@@ -1911,15 +1911,23 @@ class TestCpuExactTopkTopp:
         out = self._run(logits, [4097, 5000, 4097, 20], [1.0, 1.0, 2.0, 1.0])
         assert torch.equal(_bits(out[:3]), _bits(logits[:3]))
 
-    @pytest.mark.parametrize("vocab", [257, 4097, 65537, 262143])
+    @pytest.mark.parametrize("vocab", [1, 17, 256, 257, 4097, 65537, 262143])
     @pytest.mark.parametrize("batch", [1, 3, 33, 64])
     def test_shapes(self, vocab, batch):
-        """Vocab sizes off the kernel's 16/256 blocking, batches around the
-        thread count (a split row pass below it)."""
+        """Vocab sizes off the kernel's 16/256 blocking and below its exact
+        finish size, batches around the thread count (a split row pass below
+        it)."""
         logits = self._logits("zipf", batch, vocab)
-        k = self._per_row([1, 20, 255, 257, vocab - 1, vocab], batch)
+        k = self._per_row([1, 20, 255, 257, max(vocab - 1, 1), vocab], batch)
         self._run(logits, k, self._per_row(self.MIXED_P, batch))
         self._run(logits, None, [0.8] * batch)
+
+    @pytest.mark.parametrize("kind", ["zipf", "flat"])
+    def test_vocab_above_2_pow_20(self, kind):
+        vocab = (1 << 20) + 1
+        logits = self._logits(kind, 2, vocab)
+        self._run(logits, [40000, vocab], [0.9, 0.5])
+        self._run(logits, None, [0.99, 0.3])
 
     def test_strided_rows(self):
         """A column slice of every other row of a wider tensor: the view gets
@@ -1951,23 +1959,26 @@ class TestCpuExactTopkTopp:
                 logits, torch.tensor([1, 0], dtype=torch.int32), None
             )
 
+    def test_rejects_strided_columns(self):
+        logits = torch.randn(2, 2000, generator=self.generator)[:, ::2]
+        with pytest.raises(RuntimeError, match="unit column stride"):
+            torch.ops._C.cpu_topk_topp_exact(
+                logits, torch.tensor([5, 5], dtype=torch.int32), None
+            )
+
     @pytest.mark.parametrize(
-        "vocab,dtype,uses_kernel",
-        [(151936, torch.float32, True), (200, torch.float32, False)]
-        + [(151936, torch.bfloat16, False)],
+        "vocab,dtype",
+        [(151936, torch.float32), (200, torch.float32), (151936, torch.bfloat16)],
     )
-    def test_sampler_dispatch(self, vocab, dtype, uses_kernel):
-        """`apply_top_k_top_p` masks x86 FP32 logits with this kernel, and the
-        logits it does not take with the PyTorch path."""
+    def test_sampler_dispatch(self, vocab, dtype):
+        """`apply_top_k_top_p` masks x86 logits with this kernel: FP32 logits in
+        place, other dtypes in a returned FP32 copy (greedy-only batches keep
+        the model dtype)."""
         logits = self._logits("normal", 4, vocab).to(dtype)
         k = torch.tensor([1, 20, vocab, 50], dtype=torch.int32)
         p = torch.tensor([0.9, 0.5, 0.8, 1.0])
-        if uses_kernel:
-            expected = logits.clone()
-            torch.ops._C.cpu_topk_topp_exact(expected, k, p)
-        else:
-            expected = apply_top_k_top_p_pytorch(
-                logits.clone(), k, p, allow_cpu_sync=True
-            )
+        expected = logits.to(torch.float32, copy=True)
+        torch.ops._C.cpu_topk_topp_exact(expected, k, p)
         actual = apply_top_k_top_p(logits.clone(), k, p)
-        assert torch.equal(actual.isfinite(), expected.isfinite())
+        assert actual.dtype == torch.float32
+        assert torch.equal(_bits(actual), _bits(expected))
