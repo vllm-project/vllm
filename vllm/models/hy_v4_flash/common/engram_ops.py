@@ -7,13 +7,16 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit(do_not_specialize=["hashes_stride", "vocab_start", "vocab_end"])
+@triton.jit(
+    do_not_specialize=["hashes_stride", "vocab_start", "vocab_end", "num_tokens"]
+)
 def _lookup_norm_kernel(
     table_ptr,
     scales_ptr,
     hashes_ptr,
     gamma_ptr,
     out_ptr,
+    num_tokens,
     hashes_stride,
     vocab_start,
     vocab_end,
@@ -22,30 +25,35 @@ def _lookup_norm_kernel(
     DIM: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    TOKENS_PER_PROGRAM: tl.constexpr,
     HAS_SCALES: tl.constexpr,
 ):
-    token = tl.program_id(0).to(tl.int64)
     heads = tl.arange(0, BLOCK_H)[:, None]
     lanes = tl.arange(0, BLOCK_D)[None, :]
     head_mask = heads < HEADS
     mask = head_mask & (lanes < DIM)
 
-    bucket = tl.load(
-        hashes_ptr + token * hashes_stride + heads, mask=head_mask, other=-1
-    ).to(tl.int64)
-    found = head_mask & (bucket >= vocab_start) & (bucket < vocab_end)
-    row = tl.where(found, bucket - vocab_start, 0)
-    x = tl.load(table_ptr + row * DIM + lanes, mask=mask & found, other=0.0)
-    x = x.to(tl.float32)
-    if HAS_SCALES:
-        x *= tl.load(scales_ptr + row, mask=found, other=0.0).to(tl.float32)
-    rstd = tl.rsqrt(tl.sum(x * x, axis=1) / DIM + eps)[:, None]
-    gamma = tl.load(gamma_ptr + heads * DIM + lanes, mask=mask, other=0.0)
-    tl.store(
-        out_ptr + (token * HEADS + heads) * DIM + lanes,
-        (x * rstd * gamma.to(tl.float32)).to(out_ptr.dtype.element_ty),
-        mask=mask,
-    )
+    for token_index in tl.static_range(0, TOKENS_PER_PROGRAM):
+        token = tl.program_id(0).to(tl.int64) * TOKENS_PER_PROGRAM + token_index
+        token_mask = token < num_tokens
+        bucket = tl.load(
+            hashes_ptr + token * hashes_stride + heads,
+            mask=head_mask & token_mask,
+            other=-1,
+        ).to(tl.int64)
+        found = head_mask & token_mask & (bucket >= vocab_start) & (bucket < vocab_end)
+        row = tl.where(found, bucket - vocab_start, 0)
+        x = tl.load(table_ptr + row * DIM + lanes, mask=mask & found, other=0.0)
+        x = x.to(tl.float32)
+        if HAS_SCALES:
+            x *= tl.load(scales_ptr + row, mask=found, other=0.0).to(tl.float32)
+        rstd = tl.rsqrt(tl.sum(x * x, axis=1) / DIM + eps)[:, None]
+        gamma = tl.load(gamma_ptr + heads * DIM + lanes, mask=mask, other=0.0)
+        tl.store(
+            out_ptr + (token * HEADS + heads) * DIM + lanes,
+            (x * rstd * gamma.to(tl.float32)).to(out_ptr.dtype.element_ty),
+            mask=mask & token_mask,
+        )
 
 
 def lookup_norm(
@@ -57,6 +65,7 @@ def lookup_norm(
     gamma: torch.Tensor,
     dtype: torch.dtype,
     out: torch.Tensor | None = None,
+    background: bool = False,
 ) -> torch.Tensor:
     """Gather, dequantize and RMS-normalize Engram table rows per head.
 
@@ -73,6 +82,8 @@ def lookup_norm(
         gamma: `[heads, dim]` per-head norm weights.
         dtype: output dtype.
         out: Optional preallocated `[T, heads * dim]` output buffer.
+        background: Process two tokens per program to reduce side-stream
+            launch parallelism.
 
     Returns:
         `[T, heads * dim]` normalized rows.
@@ -90,12 +101,15 @@ def lookup_norm(
         assert out.is_contiguous()
     if num_tokens == 0 or heads == 0:
         return out.zero_()
-    _lookup_norm_kernel[(num_tokens,)](
+    tokens_per_program = 2 if background else 1
+    num_programs = triton.cdiv(num_tokens, tokens_per_program)
+    _lookup_norm_kernel[(num_programs,)](
         table,
         table if scales is None else scales,
         hashes,
         gamma,
         out,
+        num_tokens,
         hashes.stride(0),
         vocab_start,
         vocab_end,
@@ -104,6 +118,7 @@ def lookup_norm(
         DIM=dim,
         BLOCK_H=triton.next_power_of_2(heads),
         BLOCK_D=triton.next_power_of_2(dim),
+        TOKENS_PER_PROGRAM=tokens_per_program,
         HAS_SCALES=scales is not None,
         num_warps=4,
     )

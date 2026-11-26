@@ -471,6 +471,7 @@ class FlashEngram(nn.Module):
                 self.lookup_norm_weight,
                 dtype,
                 out=self._prefetched_lookup[:num_tokens],
+                background=True,
             )
         self._prefetch_done.record(stream)
         self._prefetched_tokens = num_tokens
