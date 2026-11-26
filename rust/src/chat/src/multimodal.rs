@@ -2035,7 +2035,7 @@ mod tests {
             (feature.mm_position.length, pixel_values.shape[0])
         }
 
-        let info = nemotron_omni_info();
+        let info = nemotron_omni_info().with_mm_processor_cache(Some(cache::test_shm_cache()));
         // Without a budget, or with one the image fits beside the 100 text
         // tokens, it keeps its 30x40 patch grid: 300 tokens inside `<img>`.
         assert_eq!(prepare(&info, None).await, (302, 1200));

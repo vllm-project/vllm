@@ -24,10 +24,9 @@ impl MultimodalModelInfo {
     fn mm_cache_for(&self, modality: Modality) -> Option<&MmProcessorCache> {
         let cache = self.mm_processor_cache.as_deref()?;
         if modality == Modality::Image
-            && self
-                .image
-                .as_ref()
-                .is_some_and(|image| image.processor.model_name() == "nemotron_omni")
+            && self.image.as_ref().is_some_and(|image| {
+                matches!(image.spec.raw.name(), "nemotron_omni" | "nemotron_vl")
+            })
         {
             return None;
         }
