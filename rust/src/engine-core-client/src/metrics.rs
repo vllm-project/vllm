@@ -115,6 +115,7 @@ impl SchedulerStatsRecorder {
             stats.num_skipped_waiting_reqs,
             &stats.num_kv_fetch_reqs_by_stage,
             stats.kv_cache_usage,
+            stats.num_preempted_reqs,
         );
         handles.prefix_cache.record(
             &stats.prefix_cache_stats,

@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-21
+  date_updated: 2026-11-24
   tasks:
     - multimodal
     - text
@@ -29,10 +29,11 @@ model:
   min_vllm_version: "0.35.0"
   nightly_required: true
   # NVIDIA's is the day-0 CUDA 13 (cu130) build only. AMD's is the ROCm 10.0
-  # 712d9eb build, the one the MI355X AgentX preset was measured on.
+  # 020490a build (the amd_kernels bridge, vllm-project/vllm#69172), the one the
+  # MI355X AgentX preset was measured on.
   docker_image:
     nvidia: "vllm/vllm-openai:kimi-k31"
-    amd: "vllm/vllm-openai-rocm:kimi-k31-712d9eb"
+    amd: "vllm/vllm-openai-rocm:kimi-k31-020490a"
   # Docker-only: K3.1 support isn't in a wheel yet (vllm-project/vllm#65685).
   install:
     pip: false
@@ -42,6 +43,11 @@ model:
   context_length: 1048576
   base_args:
     - "--trust-remote-code"
+    # The checkpoint's generation_config.json sets no sampling defaults, so a
+    # request that omits them would sample at top_p 1.0. These are the model
+    # card's values; see the guide's Client usage.
+    - "--override-generation-config"
+    - '{"temperature":1.0,"top_p":0.95}'
 
 features:
   tool_calling:
@@ -116,12 +122,29 @@ features:
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
+  strict_tool_calls:
+    label: "Strict tool calls"
+    description: "Constrain tool calls to each tool's declared arguments; use with Tool calling."
+    # Not offered under pd_cluster: its Dynamo router passes feature args to a
+    # worker that rejects this flag.
+    strategies:
+      - single_node_tp
+      - single_node_tep
+      - multi_node_tp
+      - multi_node_tep
+    # The tool-call parser has not been exercised on TPU.
+    hardware:
+      ironwood: unsupported
+    args:
+      - "--tool-strict-level"
+      - "parameter"
 
 opt_in_features:
   - spec_decoding
   - text_only
   - low_latency_decode
   - nvfp4_kv_cache
+  - strict_tool_calls
 
 variants:
   default:
@@ -253,7 +276,7 @@ hardware_overrides:
 
 presets:
   # MI355X: the single-node vLLM AgentX lane kimik3.1-fp4-mi355x-vllm-agentic-dspark
-  # of SemiAnalysisAI/InferenceX#5119, one point per benchmark concurrency. Every
+  # of SemiAnalysisAI/InferenceX#5196, one point per benchmark concurrency. Every
   # point serves TP8 with the K3.1 DSpark draft (revision e4e6e626) with block
   # rejection, FP8 KV with an MXFP4 indexer cache, and BF16 linear layers, MoE
   # combine and all-reduce.
@@ -263,8 +286,8 @@ presets:
     strategy: single_node_tp
     workload: "Agentic (InferenceX AgentX)"
     description: "One MI355X node at TP8: plain TP8 with the low-latency decode backend and 7 draft tokens at concurrency 1, DCP8 with the low-latency decode backend and 5 draft tokens at 4, DCP8 with host KV offload and prefill every 32 engine steps at 16 to 32, and DCP8 with host KV offload at 48, all four with 4 draft tokens, with linear layers, MoE combine and all-reduce in BF16."
-    source: { label: "InferenceX #5119", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5119", key: "kimik3.1-fp4-mi355x-vllm-agentic-dspark", revision: "2bf834d5d36d0f80aaca0aa7fa0dbfd6d4be7ba2" }
-    image: "vllm/vllm-openai-rocm:kimi-k31-712d9eb@sha256:7c167350f127a3019ac2c2fc99f6d3229356e8e8e033a7634c3201f072f0ecf4"
+    source: { label: "InferenceX #5196", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5196", key: "kimik3.1-fp4-mi355x-vllm-agentic-dspark", revision: "7f9d894472312711c97ec2ee3200332830766fb0" }
+    image: "vllm/vllm-openai-rocm:kimi-k31-020490a@sha256:f2cef9ee13f652b8281bcb0687759c6e8f5035d24ee46f2a2dffb3cf3c0b9b14"
     select:
       frontend: python
       # Named in full: the builder keeps any feature a preset doesn't name. The
@@ -353,17 +376,17 @@ presets:
       # As in the benchmark lane.
       PYTHONHASHSEED: "42"
     # --speculative-config: the draft revision InferenceX's golden acceptance
-    # lengths were measured with, and an fp8 draft KV cache (the target's dtype)
-    # next to the feature's TRITON_ATTN from concurrency 16; concurrency 1 and 4
-    # drop both so the image picks its FlyDSL draft attention with a BF16 draft
-    # cache.
+    # lengths were measured with, and the image's FlyDSL draft attention with an
+    # fp8 draft KV cache (the target's dtype) from concurrency 16; concurrency 1
+    # and 4 drop both so the image picks the same FlyDSL draft attention with a
+    # BF16 draft cache.
     # --kv-transfer-config: the Simple option's connector (SimpleCPUOffloadConnector,
     # kv_both, lazy_offload false) with the lane's 1799 GB of host DRAM split per
     # rank; edited only on the points with offload on. kda_prefill_backend is
     # merged rather than left in args alone, because a feature's
     # --additional-config would replace the preset's.
     json_args:
-      "--speculative-config": { revision: "e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f", kv_cache_dtype: fp8, rejection_sample_method: block }
+      "--speculative-config": { revision: "e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f", attention_backend: KIMI_K3_FLYDSL_SWA_GQA, kv_cache_dtype: fp8, rejection_sample_method: block }
       "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       "--additional-config": { kda_prefill_backend: fused }
       "--compilation-config": { mode: 3, cudagraph_mode: FULL_AND_PIECEWISE, custom_ops: ["+fused_rms_norm_gated"] }
@@ -385,6 +408,9 @@ presets:
           VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
           # Run each DSA layer's decode prologue as one launch; needs DCP1.
           VLLM_KIMI_SD_DSA_PROLOGUE: "1"
+          # The amd_kernels DSA and draft-MLA routes need DCP = TP, so every
+          # amd_kernels route stays off without DCP and the stock kernels run.
+          VLLM_KIMI_AKR: "0"
         json_args:
           "--speculative-config": { num_speculative_tokens: 7, attention_backend: null, kv_cache_dtype: null }
           "--compilation-config":
@@ -399,6 +425,10 @@ presets:
         args: ["--max-num-seqs", "2"]
         env:
           VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+          # amd_kernels' KDA decode (K1) and layer tail (K2) ports for the
+          # low-latency decode backend; both default off.
+          VLLM_KIMI_AKR_K1: "1"
+          VLLM_KIMI_AKR_K2: "1"
         json_args:
           "--speculative-config": { num_speculative_tokens: 5, attention_backend: null, kv_cache_dtype: null }
           "--compilation-config":
@@ -450,11 +480,11 @@ presets:
             max_cudagraph_capture_size: 10240
             cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180, 185, 190, 195, 200, 205, 210, 215, 220, 225, 230, 235, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 4608, 5120, 6144, 6400, 7168, 8192, 8704, 10240]
     runbook: |
-      The MI355X AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-mi355x-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#5119](https://github.com/SemiAnalysisAI/InferenceX/pull/5119)), one TP8 engine on the node's eight GPUs. It keeps linear layers, MoE combine and all-reduce in BF16 and has been measured only on the image digest the preset pins.
+      The MI355X AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-mi355x-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#5196](https://github.com/SemiAnalysisAI/InferenceX/pull/5196)), one TP8 engine on the node's eight GPUs. It keeps linear layers, MoE combine and all-reduce in BF16 and has been measured only on the image digest the preset pins.
 
       **Points.**
-      - **Concurrency 1: plain TP8, no DCP, KV cache on the GPU.** At one request DCP's extra KV capacity isn't needed: the server log reports 3.2M KV tokens, 3x a 1M-token request. The DSpark draft runs 7 tokens, `--max-num-seqs` is 1, and the capture sizes 2 to 16 cover the 8-row decode step (1 + 7). `VLLM_KIMI_SD_DSA_PROLOGUE=1` runs each DSA layer's decode prologue as one launch; it needs DCP off.
-      - **Concurrency 4: DCP8, KV cache on the GPU.** 5 draft tokens at `--max-num-seqs 2`, so a decode step is at most 12 rows (2 × (1 + 5)) and the capture sizes are 6 and 12. DCP8 holds 18.1M KV tokens on the GPUs.
+      - **Concurrency 1: plain TP8, no DCP, KV cache on the GPU.** At one request DCP's extra KV capacity isn't needed: the server log reports 3.1M KV tokens, 3x a 1M-token request. The DSpark draft runs 7 tokens, `--max-num-seqs` is 1, and the capture sizes 2 to 16 cover the 8-row decode step (1 + 7). `VLLM_KIMI_SD_DSA_PROLOGUE=1` runs each DSA layer's decode prologue as one launch; it needs DCP off. `VLLM_KIMI_AKR=0` turns the amd_kernels routes off (see below).
+      - **Concurrency 4: DCP8, KV cache on the GPU.** 5 draft tokens at `--max-num-seqs 2`, so a decode step is at most 12 rows (2 × (1 + 5)) and the capture sizes are 6 and 12. DCP8 holds 17.2M KV tokens on the GPUs. `VLLM_KIMI_AKR_K1=1` and `VLLM_KIMI_AKR_K2=1` run the low-latency decode backend's KDA decode and layer-tail launches on amd_kernels (see below).
       - **Concurrency 16, 24 and 32: DCP8 with host KV offload, prefill every 32 engine steps.** `--max-num-seqs` is 8, 13 and 20, below the concurrency, with 4 draft tokens. `--prefill-schedule-interval 32` admits prefill only once every 32 engine steps, so decode runs in long uninterrupted stretches. With fewer slots than clients, requests always wait, and vLLM would otherwise drop the hold on any step that leaves requests waiting; `VLLM_PREFILL_CADENCE_NO_ESCAPE=1` keeps it. Concurrency 32 also runs `--max-num-batched-tokens 10240` at 0.91 memory utilization.
       - **Concurrency 48: DCP8 with host KV offload, prefill on every step.** 4 draft tokens at `--max-num-seqs 48`. Decode batches are at most 48 × 5 rows, so the sizes 5 to 240 in steps of 5 cover every decode step, and the list continues to 10240, the value of `--max-num-batched-tokens`.
 
@@ -467,32 +497,33 @@ presets:
       - **`VLLM_K3_SP_PREFILL=1`** (set on every point). In batches of at least 4096 tokens (prefill and large mixed steps), the residual stream stays token-sharded across the TP ranks, so each MoE layer's three all-reduces (attention output, routed latent and MoE output) become reduce-scatters and all-gathers over symmetric memory. These sum the TP partials in FP32 in a fixed order. Decode steps and smaller batches are unchanged. The server log reports `sequence-parallel prefill enabled (batches of >= 4096 tokens)` at every point; the pinned image also runs it without DCP (concurrency 1), where the routed experts' MXFP4 input is quantized before the gather.
       - **DCP8** shards the MLA latent and indexer-key caches across the TP group, with the A2A DCP backend and `--cp-kv-cache-interleave-size 1`. `VLLM_ROCM_DCP_VUP_RS=1` applies `v_up` first and then sums the ranks with AITER's LSE all-gather and reduce-scatter, for the target's MLA layers; it needs `VLLM_ROCM_DCP_AITER_ALLGATHER=1`. `VLLM_ROCM_DSA_MULTISTREAM=1` runs the DSA indexer, the DCP score all-gather and merge, and the gate on a second stream in decode. Concurrency 1 keeps these variables as InferenceX ran it; with DCP off they are expected to have no effect.
       - **The indexer key cache is MXFP4** (`indexer_kv_dtype`). AITER needs padded FP4 indexer pages for it. Stock AITER asserts on the page stride at startup. `kda_prefill_backend: fused` prefills the KDA layers with the fused gfx950 kernel.
-      - **Spec decoding** (the Spec decoding feature, on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark/tree/e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f) (5 GQA layers, 2,048-token sliding window, BF16) at revision `e4e6e626`, the one InferenceX's golden acceptance lengths were measured with, with probabilistic drafting and block rejection; each point sets its draft token count. From concurrency 16 the draft runs `TRITON_ATTN` with an fp8 KV cache, the target's dtype. At concurrency 1 and 4 the preset sets neither, and the pinned image picks `KIMI_K3_FLYDSL_SWA_GQA` (`TRITON_ATTN` with a FlyDSL kernel for the draft's decode and verify calls, `VLLM_K31_DRAFT_FLYDSL_ATTN`, default 1) with a BF16 draft KV cache; the server log reports `Using KIMI_K3_FLYDSL_SWA_GQA backend`.
+      - **Spec decoding** (the Spec decoding feature, on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark/tree/e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f) (5 GQA layers, 2,048-token sliding window, BF16) at revision `e4e6e626`, the one InferenceX's golden acceptance lengths were measured with, with probabilistic drafting and block rejection; each point sets its draft token count. Every point runs the draft on `KIMI_K3_FLYDSL_SWA_GQA` (`TRITON_ATTN` with a FlyDSL kernel for the draft's decode and verify calls, `VLLM_K31_DRAFT_FLYDSL_ATTN`, default 1); the server log reports `Using KIMI_K3_FLYDSL_SWA_GQA backend`. From concurrency 16 the preset sets it explicitly with an fp8 draft KV cache, the target's dtype; the kernel reads a BF16 query and dequantizes the fp8 cache itself. At concurrency 1 and 4 the preset sets neither, and the pinned image picks the same backend with a BF16 draft KV cache.
+      - **amd_kernels.** The pinned image routes parts of the model to the [amd-kernels](https://github.com/Inferact/amd-kernels) package (vllm-project/vllm#69172, Inferact/amd-kernels#10) wherever it is installed on gfx950 and the shapes fit, and keeps the stock kernels otherwise. All routes default to on; the server log lists them (`amd_kernels routes: gemm, moe, kda, attention, indexer, norm, collectives, draft, sampling, overlap` from concurrency 4) and warns once for each route a point cannot use. `VLLM_KIMI_AKR=0` turns every route off, and a comma list keeps only those routes. Concurrency 1 sets 0 (`amd_kernels routes: none`), because the DSA and draft-MLA routes need DCP = TP. `VLLM_KIMI_AKR_K1` and `VLLM_KIMI_AKR_K2` (default 0) move the low-latency decode backend's KDA decode and layer-tail launches onto amd_kernels; concurrency 4 sets both (`specialized decode: K1 on, K2 on`), and the decode backend used from concurrency 16 ignores them.
       - The **Simple** KV-offload option (concurrency 16 to 48) gets 224,875,000,000 bytes of host DRAM per rank, InferenceX's 1799 GB split over 8 ranks. Size `cpu_bytes_to_use_per_rank` to your host.
 
       **Precision.** As the K3.1 precision policy requires: BF16 all-reduce (`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=NONE`), BF16 MoE combine (`AITER_FLYDSL_STAGE2_FP8=0`), BF16 KDA input projections (no `--quantization-config`) and an FP32 KDA recurrent state (`--mamba-ssm-cache-dtype float32`).
 
-      **Image.** The pinned image carries kernels and switches that are not in vLLM main yet. On main, the DCP and DSA variables (`VLLM_ROCM_AITER_MLA_DCP_VERIFY`, `VLLM_ROCM_DCP_*`, `VLLM_ROCM_DSA_*`), `VLLM_ROCM_MEM_HEADROOM_GIB`, `VLLM_K3_SP_PREFILL`, `VLLM_KIMI_SD_DSA_PROLOGUE`, `VLLM_PREFILL_CADENCE_NO_ESCAPE`, `VLLM_SWA_FINE_GRAINED_PREFIX_HITS`, `VLLM_K31_DRAFT_FLYDSL_ATTN` and the low-latency speedup variables above are not read, the `KIMI_K3_FLYDSL_SWA_GQA` draft backend does not exist (main defaults a GQA draft to `FLASH_ATTN`, which fails on ROCm), and the low-latency decode backend does not serve K3.1 without DCP: there it also requires `VLLM_ROCM_USE_AITER_FP4BMM=1` and still refuses K3.1's sparse (indexer) MLA layers, so the concurrency-1 point fails at startup on main or nightly images.
+      **Image.** The pinned image is the `nightly-rocm100-647a76866b4559a74e27d1c6b55fbffe85c07ce4` toolchain (torch 2.13.0+rocm10.0.0, FlyDSL 0.5.0) with vLLM built from [vllm-project/vllm#69172](https://github.com/vllm-project/vllm/pull/69172) at `020490af6` (the amd_kernels bridge on top of `k31-amd-tracking` at `712d9eb37`), amd-kernels installed, AITER 0.1.29.post1 patched with [ROCm/aiter#8177](https://github.com/ROCm/aiter/pull/8177) (the padded FP4 indexer page strides), and the `libhsa-runtime64` of rocm-systems `6a31027`, which removes a ~2 MiB device-memory cost per HIP graph. It carries kernels and switches that are not in vLLM main yet. On main, the DCP and DSA variables (`VLLM_ROCM_AITER_MLA_DCP_VERIFY`, `VLLM_ROCM_DCP_*`, `VLLM_ROCM_DSA_*`), `VLLM_ROCM_MEM_HEADROOM_GIB`, `VLLM_K3_SP_PREFILL`, `VLLM_KIMI_SD_DSA_PROLOGUE`, `VLLM_PREFILL_CADENCE_NO_ESCAPE`, `VLLM_SWA_FINE_GRAINED_PREFIX_HITS`, `VLLM_K31_DRAFT_FLYDSL_ATTN`, the `VLLM_KIMI_AKR*` switches and the low-latency speedup variables above are not read, amd_kernels is not used, the `KIMI_K3_FLYDSL_SWA_GQA` draft backend does not exist (main defaults a GQA draft to `FLASH_ATTN`, which fails on ROCm), and the low-latency decode backend does not serve K3.1 without DCP: there it also requires `VLLM_ROCM_USE_AITER_FP4BMM=1` and still refuses K3.1's sparse (indexer) MLA layers, so the concurrency-1 point fails at startup on main or nightly images.
 
-      [InferenceX run 44640765021](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/44640765021) passed all six performance points and GSM8K at concurrency 1, 4, 32 and 48 at `2bf834d5` (single run per point, synthetic acceptance as below):
+      [InferenceX run 45218651930](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/45218651930) passed all six performance points and GSM8K at concurrency 1, 4, 32 and 48 at `c36a9d7f`, whose serving arguments are those of the preset's source revision (single run per point, synthetic acceptance as below):
 
       | Concurrency | Interactivity p50 / p90 (tokens/s/user) | Total tokens/s per GPU |
       | --- | ---: | ---: |
-      | 1 | 337.5 / 328.9 | 2,539 |
-      | 4 | 244.0 / 211.5 | 3,493 |
-      | 16 | 114.0 / 91.5 | 9,811 |
-      | 24 | 93.5 / 77.9 | 14,658 |
-      | 32 | 81.0 / 70.0 | 17,348 |
-      | 48 | 47.6 / 30.3 | 22,240 |
+      | 1 | 337.7 / 330.7 | 2,488 |
+      | 4 | 260.1 / 235.3 | 3,818 |
+      | 16 | 137.5 / 106.0 | 10,909 |
+      | 24 | 108.7 / 86.1 | 16,136 |
+      | 32 | 94.8 / 78.2 | 19,097 |
+      | 48 | 54.2 / 31.4 | 23,392 |
 
-      GSM8K exact match (strict) over 1319 questions, with block verification, was 0.979 at concurrency 1, 0.980 at 4, 0.980 at 32 and 0.980 at 48.
+      GSM8K exact match (strict) over 1319 questions, with block verification, was 0.981 at concurrency 1, 0.978 at 4, 0.983 at 32 and 0.979 at 48.
 
       ### Throughput measurement only (synthetic acceptance)
 
       To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for the point's draft token count: 4.16 for 7 tokens, 3.81 for 5 and 3.46 for 4. For example, at concurrency 48:
 
       ```bash
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":4,"method":"dspark","attention_backend":"TRITON_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":4,"method":"dspark","attention_backend":"KIMI_K3_FLYDSL_SWA_GQA","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
       ```
 
       InferenceX also turns the tool-call and reasoning parsers off for these runs, because the Kimi parsers stop streaming on the unverified draft tokens. Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
@@ -2317,8 +2348,8 @@ guide: |
   with routed experts EP8 on MegaMoE, [AgentX TP8 + DCP8 + EP8](#preset-b300_agentx_ep) at concurrency 48 and 64.
 
   On MI355X, one node takes the same TP8 layout with the AMD profile's AITER environment, in the
-  `vllm/vllm-openai-rocm:kimi-k31-712d9eb` image. The [AgentX TP8](#preset-mi355x_agentx) preset
-  follows InferenceX's MI355X vLLM AgentX lane (SemiAnalysisAI/InferenceX#5119) with one point per
+  `vllm/vllm-openai-rocm:kimi-k31-020490a` image. The [AgentX TP8](#preset-mi355x_agentx) preset
+  follows InferenceX's MI355X vLLM AgentX lane (SemiAnalysisAI/InferenceX#5196) with one point per
   concurrency, all with the K3.1 DSpark draft: plain TP8 with GPU KV and the low-latency decode
   backend at concurrency 1, DCP8 with GPU KV and the low-latency decode backend at 4, and DCP8
   with host KV offload from 16 to 48. It needs the image the preset pins.
@@ -2419,6 +2450,22 @@ guide: |
   is free after the engines are up. The tested GB300 prefill workers used 128 GiB per GPU
   (512 GiB per tray).
 
+  ## Strict tool calls
+
+  Without a grammar, K3.1 sometimes calls a tool with empty or placeholder arguments. The opt-in
+  **Strict tool calls** feature adds `--tool-strict-level parameter`, which constrains every
+  tool call to a declared tool and to that tool's declared argument names and types, as if each
+  tool had set `strict: true`. On the
+  [Kimi Vendor Verifier](https://github.com/MoonshotAI/Kimi-Vendor-Verifier) Tool Call benchmark
+  (70 samples x 5 epochs, 8x MI355X, single-node TP8, Python frontend) K3.1 Pro scored 0.786
+  without the flag and 0.980 with it. The Rust frontend builds its own grammar and was not
+  measured. The limits are those in the
+  [Kimi-K3 recipe](https://recipes.vllm.ai/moonshotai/Kimi-K3)'s Tool calling note: a tool
+  schema the grammar cannot compile fails the whole request, and arguments still need
+  validating on the client. The feature is not offered for prefill/decode disaggregation:
+  Dynamo workers do not accept the flag and constrain tool calls through their own
+  `--dyn-enable-structural-tag`, which the AgentX PD presets set.
+
   ## Client usage
 
   ```bash
@@ -2426,11 +2473,17 @@ guide: |
     -H "Content-Type: application/json" \
     -d '{
       "model": "moonshotai/Kimi-K3.1-Pro",
-      "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}],
-      "temperature": 0.7,
-      "top_p": 0.95
+      "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}]
     }'
   ```
+
+  The model card reports its results at `temperature = 1.0` and `top-p = 0.95`, but the
+  checkpoint's `generation_config.json` sets no sampling defaults, so the command passes them
+  as server defaults with `--override-generation-config`. They apply only to the parameters a
+  request omits; a value sent by the client still wins. Without the flag vLLM serves such a
+  request at `top_p = 1.0`: on DeepSWE (113 tasks, 8x MI355X, one run each) a coding agent that
+  sends neither parameter resolved 75 tasks at that fallback and 88 with `temperature = 1.0`
+  and `top_p = 0.95` set in the agent.
 
   ## References
 

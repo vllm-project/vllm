@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_messages};
 use crate::reasoning::ReasoningControl;
 use crate::renderer::tool_call_arguments_or_empty;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool};
@@ -206,9 +206,7 @@ fn render_developer_message(
     add_generation_prompt: bool,
 ) -> Result<()> {
     if content.is_empty() {
-        return Err(Error::ChatTemplate(
-            "invalid DeepSeek V3.2 developer message: empty content".to_string(),
-        ));
+        bail_invalid_messages!("invalid DeepSeek V3.2 developer message: empty content");
     }
 
     out.push_str("<｜User｜>");
@@ -265,35 +263,33 @@ fn render_tool_message(
     }
 
     let Some(prev_assistant_idx) = previous_assistant_actual_index(messages, block_start) else {
-        return Err(Error::ChatTemplate(
-            "invalid DeepSeek V3.2 tool message: missing previous assistant message".to_string(),
-        ));
+        bail_invalid_messages!(
+            "invalid DeepSeek V3.2 tool message: missing previous assistant message"
+        );
     };
 
     let ChatMessage::Assistant {
         content: assistant_content,
     } = &messages[prev_assistant_idx]
     else {
-        return Err(Error::ChatTemplate(
+        bail_invalid_messages!(
             "invalid DeepSeek V3.2 tool message: previous non-tool message is not assistant"
-                .to_string(),
-        ));
+        );
     };
 
     let assistant_tool_calls = assistant_content.tool_calls().collect::<Vec<_>>();
     if assistant_tool_calls.is_empty() {
-        return Err(Error::ChatTemplate(
+        bail_invalid_messages!(
             "invalid DeepSeek V3.2 tool message: previous assistant message has no tool calls"
-                .to_string(),
-        ));
+        );
     }
 
     let mut expected_tool_call_ids = HashSet::with_capacity(assistant_tool_calls.len());
     for tool_call in &assistant_tool_calls {
         if !expected_tool_call_ids.insert(tool_call.id.as_str()) {
-            return Err(Error::ChatTemplate(
-                "invalid DeepSeek V3.2 assistant tool calls: duplicate tool_call_id".to_string(),
-            ));
+            bail_invalid_messages!(
+                "invalid DeepSeek V3.2 assistant tool calls: duplicate tool_call_id"
+            );
         }
     }
 
@@ -308,23 +304,22 @@ fn render_tool_message(
         };
 
         if !expected_tool_call_ids.contains(tool_call_id.as_str()) {
-            return Err(Error::ChatTemplate(format!(
+            bail_invalid_messages!(
                 "invalid DeepSeek V3.2 tool message: unknown tool_call_id `{tool_call_id}`"
-            )));
+            );
         }
 
         if tool_results_by_id.insert(tool_call_id.as_str(), content).is_some() {
-            return Err(Error::ChatTemplate(format!(
+            bail_invalid_messages!(
                 "invalid DeepSeek V3.2 tool message: duplicate tool_call_id `{tool_call_id}`"
-            )));
+            );
         }
     }
 
     if tool_results_by_id.len() != assistant_tool_calls.len() {
-        return Err(Error::ChatTemplate(
+        bail_invalid_messages!(
             "invalid DeepSeek V3.2 tool messages: missing tool result for assistant tool call"
-                .to_string(),
-        ));
+        );
     }
 
     out.push_str("\n\n<function_results>");
@@ -391,10 +386,9 @@ fn render_assistant_message(
 
     if after_last_user_turn {
         if !has_reasoning && !has_tool_calls {
-            return Err(Error::ChatTemplate(
+            bail_invalid_messages!(
                 "invalid DeepSeek V3.2 assistant message after last user message: expected reasoning or tool calls"
-                    .to_string(),
-            ));
+            );
         }
 
         if has_reasoning {
