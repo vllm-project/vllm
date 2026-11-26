@@ -91,6 +91,7 @@ from vllm.model_executor.models.utils import (
     ShardId,
     WeightsMapper,
     WeightsTransformFn,
+    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
     spec_decode_needs_target_embed,
@@ -127,6 +128,7 @@ class ConvertWeights:
             p: c for c in converters for p in c.source_patterns
         }
         self.mapper = mapper
+        self.model = model
         self.config = model.config
         tensors = chain(model.named_parameters(), model.named_buffers())
         self.shapes = {name: t.shape for name, t in tensors}
@@ -148,6 +150,12 @@ class ConvertWeights:
             converter = self.pattern_to_converter[source]
             sources, targets = converter.source_patterns, converter.target_patterns
             full_layer_name = self.mapper.map_name(first)
+            # The loader drops the weights of modules not on this rank or stage
+            if full_layer_name is None or is_pp_missing_parameter(
+                full_layer_name, self.model
+            ):
+                yield rename_source_key(name, self.renamings, [])[0], tensor
+                continue
             if full_layer_name not in self.shapes:
                 raise ValueError(
                     f"Cannot convert {name!r} into {targets}: {full_layer_name!r} is "
