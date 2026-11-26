@@ -27,18 +27,17 @@ def _check_ihc_rows(worker, sequence_parallel):
     world = get_tensor_model_parallel_world_size()
     worker.ihc_token_rows = []
     current_rows = 0
-    shardq_active = False
 
-    def begin_layer(module, args):
-        nonlocal current_rows, shardq_active
-        current_rows = args[0].shape[0]
+    def begin_step(module, args, kwargs):
+        nonlocal current_rows
+        positions = kwargs["positions"] if "positions" in kwargs else args[1]
+        current_rows = positions.shape[-1]
+
+    def check_rows(layer, module, args):
         metadata = get_forward_context().attn_metadata
         assert isinstance(metadata, dict)
-        layer_metadata = metadata[module.self_attn.mla_attn.layer_name]
+        layer_metadata = metadata[layer.self_attn.mla_attn.layer_name]
         assert isinstance(layer_metadata, SparseMLACommonMetadata)
-        shardq_active = layer_metadata.shardq is not None
-
-    def check_rows(module, args):
         expected = (
             (current_rows + world - 1) // world
             if sequence_parallel and current_rows >= 1024
@@ -50,12 +49,20 @@ def _check_ihc_rows(worker, sequence_parallel):
             expected,
             args[0].shape[0],
         )
-        worker.ihc_token_rows.append((current_rows, expected, shardq_active))
+        worker.ihc_token_rows.append(
+            (current_rows, expected, layer_metadata.shardq is not None)
+        )
 
+    model.register_forward_pre_hook(begin_step, with_kwargs=True)
     for layer in model.layers:
-        layer.register_forward_pre_hook(begin_layer)
-        layer.hc_attn_layer.hc_pre.register_forward_pre_hook(check_rows)
-        layer.hc_mlp_layer.hc_pre.register_forward_pre_hook(check_rows)
+        # The fused boundaries replace the pre layers when the op is built.
+        for boundary, hc_layer in (
+            (layer.ihc_attn_boundary, layer.hc_attn_layer),
+            (layer.ihc_mlp_boundary, layer.hc_mlp_layer),
+        ):
+            (boundary or hc_layer.hc_pre).register_forward_pre_hook(
+                partial(check_rows, layer)
+            )
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False])
