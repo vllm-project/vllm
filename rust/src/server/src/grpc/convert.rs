@@ -353,7 +353,6 @@ pub(super) fn to_grpc_request(
     rpc_request_id: Uuid,
     request: GenerateRequest,
 ) -> Result<pb::GenerateRequest, LlmError> {
-    reject_unsupported_fields(&request)?;
     let sampling_params = request.sampling_params;
     let kwargs = request
         .reasoning_parser_kwargs
@@ -437,66 +436,6 @@ pub(super) fn to_grpc_request(
         ),
         ..Default::default()
     })
-}
-
-fn reject_unsupported_fields(request: &GenerateRequest) -> Result<(), LlmError> {
-    if request.mm_features.is_some() {
-        return Err(LlmError::Unsupported {
-            field: "multimodal inputs",
-        });
-    }
-    if request.lora_request.is_some() {
-        return Err(LlmError::Unsupported {
-            field: "lora_request",
-        });
-    }
-    if request.kv_hints.is_some() {
-        return Err(LlmError::Unsupported { field: "kv_hints" });
-    }
-    if request.data_parallel_rank.is_some() {
-        return Err(LlmError::Unsupported {
-            field: "data_parallel_rank",
-        });
-    }
-
-    let sampling_params = &request.sampling_params;
-    if sampling_params.extra_args.is_some() {
-        return Err(LlmError::Unsupported {
-            field: "extra_args",
-        });
-    }
-    if sampling_params.structured_outputs.is_some() {
-        return Err(LlmError::Unsupported {
-            field: "structured_outputs",
-        });
-    }
-    if sampling_params.logprobs.is_some() || sampling_params.logprob_token_ids.is_some() {
-        return Err(LlmError::Unsupported { field: "logprobs" });
-    }
-    if sampling_params.prompt_logprobs.is_some()
-        || sampling_params.prompt_logprob_token_ids.is_some()
-    {
-        return Err(LlmError::Unsupported {
-            field: "prompt_logprobs",
-        });
-    }
-    if sampling_params.repetition_detection.is_some() {
-        return Err(LlmError::Unsupported {
-            field: "repetition_detection",
-        });
-    }
-    if sampling_params.stream_interval.is_some() {
-        return Err(LlmError::Unsupported {
-            field: "stream_interval",
-        });
-    }
-    if sampling_params.routed_experts_prompt_start != 0 {
-        return Err(LlmError::Unsupported {
-            field: "routed_experts_prompt_start",
-        });
-    }
-
-    Ok(())
 }
 
 fn numbers_fit_protobuf_struct(value: &Value) -> bool {
