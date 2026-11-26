@@ -29,7 +29,7 @@ BASE_TRUST_REMOTE_CODE_MODELS = {
 }
 
 BASE_MODELS_TO_TEST = [
-    "state-spaces/mamba-130m-hf",
+    "vllm-project/mamba2-130m-hf",
     "mistralai/Mamba-Codestral-7B-v0.1",
     # Excluded: terratorch/torchgeo version mismatch in CPU CI environment
     # (NonGeoDataset import error). Tested in model initialization tests.
