@@ -14,7 +14,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
 
 if HAS_TRITON:
-    from vllm.v1.sample.ops import topk_topp_triton
+    from vllm.v1.sample.ops import topk_topp_triton, topk_topp_triton_cpu
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -26,6 +26,7 @@ def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
     if HAS_TRITON:
         topk_topp_triton.register_warmups()
+        topk_topp_triton_cpu.register_warmups()
 
 
 def maybe_reserve_topk_topp_workspace(
@@ -219,6 +220,8 @@ def apply_top_k_top_p(
 
     if HAS_TRITON and topk_topp_triton.is_supported(logits.shape[-1]):
         return topk_topp_triton.apply_top_k_top_p_triton(logits, k, p)
+    if HAS_TRITON and topk_topp_triton_cpu.is_supported(logits):
+        return topk_topp_triton_cpu.apply_top_k_top_p_triton_cpu(logits, k, p)
 
     if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
         CpuArchEnum.ARM,

@@ -1498,6 +1498,149 @@ class TestFlashInferDistributionMatch:
         )
 
 
+@pytest.mark.skipif(
+    not HAS_TRITON
+    or not current_platform.is_cpu()
+    or current_platform.get_cpu_architecture() != CpuArchEnum.X86,
+    reason="the CPU Triton kernel runs on x86 CPUs",
+)
+class TestTritonCpuTopkTopp:
+    """Tests for the CPU Triton top-k/top-p kernel."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        torch.set_default_device("cpu")
+        self.generator = Generator(device="cpu").manual_seed(42)
+
+    @pytest.fixture(params=[1, 256], ids=["fused", "split"])
+    def threads(self, request, monkeypatch: pytest.MonkeyPatch):
+        """Rows get one split (the fused launch) or several (three launches) by the
+        thread count, so pin it to cover both on any CI machine."""
+        monkeypatch.setattr(torch, "get_num_threads", lambda: request.param)
+        return request.param
+
+    @staticmethod
+    def _apply(logits, k, p):
+        from vllm.v1.sample.ops.topk_topp_triton_cpu import (
+            apply_top_k_top_p_triton_cpu,
+        )
+
+        return apply_top_k_top_p_triton_cpu(logits, k, p)
+
+    # Every path: top-k through the 256-logit or the 16-logit maxima, top-p alone in
+    # the 64, 512 or 4096 tier, a bin below the max, or past it (all logits: ties that
+    # no bin splits, or a nucleus 16.7 nats below the max, whose FP32 mass is lost).
+    @pytest.mark.parametrize(
+        "kind,batch,vocab,k,p",
+        [
+            ("normal", 16, 248320, 20, 0.95),
+            ("normal", 64, 248320, 200, None),
+            ("normal", 8, 131072, 1000, 0.9),
+            ("normal", 8, 131072, 5000, None),
+            ("normal", 8, 131072, None, 0.95),
+            ("zipf", 8, 131072, None, 0.9),
+            ("zipf", 1, 248320, None, 0.95),
+            ("huge", 4, 131072, None, 0.5),
+            ("bf16", 64, 65536, "mixed", "mixed"),
+            ("zeros", 8, 65536, 20, 0.5),
+            ("zeros", 2, 65536, None, 0.5),
+            ("neginf", 8, 131072, 200, 0.9),
+            ("neginf", 8, 131072, None, 0.9),
+            ("normal", 3, 65537, "mixed", "mixed"),
+            ("normal", 5, 1000, 50, 0.9),
+            ("tail", 4, 131072, None, 0.9995),
+        ],
+    )
+    def test_exact_selection(self, kind, batch, vocab, k, p, threads):
+        source = _make_logits(kind, batch, vocab, self.generator)
+        k = _make_param(k, batch, vocab, self.generator, torch.int32)
+        p = _make_param(p, batch, vocab, self.generator, torch.float32)
+        _assert_exact_filter(source, self._apply(source.clone(), k, p), k, p)
+
+    @pytest.mark.parametrize("max_k", [1, 64])
+    @pytest.mark.parametrize("use_p", [True, False])
+    def test_exact_hazards_at_the_cut(self, max_k, use_p, threads):
+        """Exact cut with ties, signed zeros, -inf or NaN at the cut."""
+        vocab = 151936
+        source = torch.randn(10, vocab, generator=self.generator) * 4
+        source = source.bfloat16().float()
+        k = torch.tensor([1, 64, 20, 20, 20, 20, 20, 20, 0, 0], dtype=torch.int32)
+        k = k.clamp(max=max_k)
+        k[8:] = vocab
+        source[2, ::997] = source[2].topk(int(k[2])).values[-1]
+        source[3] = -30.0
+        source[3, 5:65:3] = 0.5
+        source[4] = float("-inf")
+        source[4, [0, 7, 300]] = torch.tensor([1.0, 3.0, 2.0])
+        source[5] = float("nan")
+        source[6] = -30.0
+        source[6, 0:200:5] = torch.tensor([0.0, -0.0] * 20)
+        source[7, [3, 50, 500]] = float("nan")
+        p = torch.tensor([0.9, 1 - 1e-6, 0.95, 0.5, 0.95, 0.95, 0.9, 0.9, 0.9, 1])
+        p = p if use_p else None
+        actual = self._apply(source.clone(), k, p)
+        # NaN is never kept, so the reference orders it as -inf.
+        source, actual = (
+            t.masked_fill(t.isnan(), float("-inf")) for t in (source, actual)
+        )
+        _assert_exact_filter(source, actual, k, p)
+
+    def test_warmup_covers_runtime_launch(self):
+        """The startup warmup compiles the variant that every call launches."""
+        import vllm.v1.sample.ops.topk_topp_triton_cpu as tc
+
+        for kernel in tc._KERNELS:
+            kernel.device_caches.clear()
+        tc.reset_buffer_cache()
+        vocab = 65536
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(get_vocab_size=lambda: vocab)
+        )
+        for owner in (
+            tc._levels_warmup,
+            tc._select_warmup,
+            tc._fill_warmup,
+            tc._fused_warmup,
+        ):
+            owner.compile_many(owner.get_warmup_keys(vllm_config=config))
+        warmed = [_num_compiled(kernel) for kernel in tc._KERNELS]
+        assert warmed == [1, 1, 1, 1]
+        for batch, k, p in ((1, 20, 0.9), (8, None, 0.95), (64, 3000, None)):
+            logits = torch.randn(batch, vocab, generator=self.generator)
+            k_rows = None if k is None else torch.full((batch,), k, dtype=torch.int64)
+            p_rows = None if p is None else torch.full((batch,), p)
+            self._apply(logits, k_rows, p_rows)
+        assert [_num_compiled(kernel) for kernel in tc._KERNELS] == warmed
+
+    def test_sampler_dispatch(self, monkeypatch: pytest.MonkeyPatch):
+        """x86 CPU logits take the CPU Triton kernel, not the PyTorch sort."""
+        import vllm.v1.sample.ops.topk_topp_triton_cpu as tc
+
+        calls = []
+        real = tc.apply_top_k_top_p_triton_cpu
+
+        def spy(logits, k, p):
+            calls.append(logits.shape)
+            return real(logits, k, p)
+
+        monkeypatch.setattr(tc, "apply_top_k_top_p_triton_cpu", spy)
+        source = torch.randn(8, 32000, generator=self.generator)
+        k = torch.full((8,), 50, dtype=torch.int32)
+        p = torch.full((8,), 0.9)
+        actual = apply_top_k_top_p(source.clone(), k, p)
+        assert calls == [source.shape]
+        _assert_exact_filter(source, actual, k, p)
+
+    def test_empty_batch(self):
+        from vllm.v1.sample.ops.topk_topp_triton_cpu import (
+            apply_top_k_top_p_triton_cpu,
+        )
+
+        logits = torch.empty(0, 32000)
+        k = torch.empty(0, dtype=torch.int32)
+        assert apply_top_k_top_p_triton_cpu(logits, k, torch.empty(0)) is logits
+
+
 # =============================================================================
 # CPU kernel tests
 # =============================================================================
