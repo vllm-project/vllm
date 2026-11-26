@@ -907,6 +907,89 @@ def test_causal_backend_correctness(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
+    reason="FA2 requires CUDA SM80 or newer",
+)
+def test_flash_attn_fa2_fp16_decode(default_vllm_config):
+    """A paged FP16 decode on Ampere must dispatch to FA2 and match dense attention."""
+    from unittest.mock import patch
+
+    from vllm.vllm_flash_attn import is_fa_version_supported
+
+    assert is_fa_version_supported(2)
+
+    device = torch.device("cuda")
+    block_size, seq_len = 16, 35
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B", dtype=torch.float16, block_size=block_size
+    )
+    # Ampere selects FA2 by default. Exercise the same path on newer CI GPUs.
+    if current_platform.has_device_capability(90):
+        config.attention_config.flash_attn_version = 2
+    spec = create_standard_kv_cache_spec(config)
+    num_heads = config.model_config.get_num_attention_heads(config.parallel_config)
+    generator = torch.Generator(device=device).manual_seed(42)
+
+    def sample(tokens, heads):
+        return torch.randn(
+            tokens,
+            heads,
+            spec.head_size,
+            dtype=torch.float16,
+            device=device,
+            generator=generator,
+        )
+
+    query = sample(1, num_heads)
+    keys = sample(seq_len, spec.num_kv_heads)
+    values = sample(seq_len, spec.num_kv_heads)
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[seq_len], query_lens=[1]), block_size, device
+    )
+    cache = create_and_prepopulate_kv_cache(
+        [keys[:-1]],
+        [values[:-1]],
+        block_size,
+        spec.num_kv_heads,
+        spec.head_size,
+        query.dtype,
+        device,
+        1 + cdiv(seq_len, block_size),
+        metadata,
+        KVCacheLayout.LBNHC,
+    )
+
+    fa2 = torch.ops._vllm_fa2_C
+    with (
+        set_current_vllm_config(config),
+        patch.object(fa2, "varlen_fwd", wraps=fa2.varlen_fwd) as kernel,
+    ):
+        output = run_attention_backend(
+            AttentionBackendEnum.FLASH_ATTN,
+            spec,
+            ["placeholder"],
+            config,
+            device,
+            metadata,
+            query,
+            keys[-1:],
+            values[-1:],
+            cache,
+        )
+    kernel.assert_called_once()
+
+    # The last token attends to the whole sequence, including the new KV.
+    repeats = num_heads // spec.num_kv_heads
+    q = query.float().transpose(0, 1)
+    k = keys.float().repeat_interleave(repeats, dim=1).transpose(0, 1)
+    v = values.float().repeat_interleave(repeats, dim=1).transpose(0, 1)
+    scores = (q @ k.transpose(1, 2)) * spec.head_size**-0.5
+    expected = (scores.softmax(dim=-1) @ v).transpose(0, 1)
+    assert output.dtype == torch.float16
+    torch.testing.assert_close(output.float(), expected, atol=5e-4, rtol=1e-3)
+
+
+@pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="FA4 takes FP8 Q/K/V with descales on Blackwell.",
 )
