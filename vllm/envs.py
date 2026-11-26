@@ -141,6 +141,7 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
+    VLLM_RESIDUAL_SP_MIN_TOKENS: int = 1024
     VLLM_ROCM_USE_AITER: bool = True
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
@@ -1316,6 +1317,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD", "True").lower()
         in ("true", "1")
     ),
+    # Minimum tokens per forward for residual sequence parallelism in supported
+    # models Default: 1024;
+    "VLLM_RESIDUAL_SP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_RESIDUAL_SP_MIN_TOKENS", "1024")
+    ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (
@@ -1339,7 +1345,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # many tokens keep the residual stream sharded by token across the TP ranks.
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
-        os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+        os.getenv(
+            "VLLM_ROCM_MUSE_SP_MIN_TOKENS",
+            os.getenv("VLLM_RESIDUAL_SP_MIN_TOKENS", "1024"),
+        )
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
