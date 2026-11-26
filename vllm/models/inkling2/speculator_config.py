@@ -26,7 +26,9 @@ class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
             # A callable can distinguish the target from the converted draft.
             source = spec.draft_model_config
             if target.model == source.model:
-                shared = spec.revision is None or target.revision == source.revision
+                target_ref = getattr(target.revision, "resolved", target.revision)
+                draft_ref = getattr(source.revision, "resolved", source.revision)
+                shared = spec.revision is None or target_ref == draft_ref
             else:
                 # In offline mode EngineArgs replaces the target repo with its
                 # cached snapshot path. An explicit draft still uses its repo ID.
