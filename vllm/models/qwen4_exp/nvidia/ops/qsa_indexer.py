@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
+from vllm.models.qwen4_exp.nvidia.ops.qsa import _is_h20
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer_topk_varlen_gvr2
@@ -133,6 +134,7 @@ def _qsa_mqa_paged_prefill_kernel(
     BLOCK_N: tl.constexpr,
     K_TILES: tl.constexpr,
     STAGES: tl.constexpr,
+    ALIGNED_STORE: tl.constexpr = False,
 ) -> None:
     num_columns = page_table_width * PAGE_SIZE
     NUM_HEADS_PADDED: tl.constexpr = triton.next_power_of_2(NUM_HEADS)
@@ -213,11 +215,29 @@ def _qsa_mqa_paged_prefill_kernel(
             & (columns[:, None] < visible[None, :])
             & (columns[:, None] < num_columns)
         )
-        tl.store(
-            logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
-            score,
-            mask=store_mask,
-        )
+        if ALIGNED_STORE:
+            aligned_visible = tl.multiple_of(visible & (-8), 8)
+            aligned_mask = (
+                valid_rows[None, :]
+                & (columns[:, None] < aligned_visible[None, :])
+                & (columns[:, None] < num_columns)
+            )
+            tl.store(
+                logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
+                score,
+                mask=aligned_mask,
+            )
+            tl.store(
+                logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
+                score,
+                mask=store_mask & (columns[:, None] >= aligned_visible[None, :]),
+            )
+        else:
+            tl.store(
+                logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
+                score,
+                mask=store_mask,
+            )
 
 
 @triton.jit
@@ -410,6 +430,17 @@ def _prefill_logits(
         TILE_R, STAGES, num_warps = 64, 2, 4
     BLOCK_N = 64
     K_TILES = 16
+    h20_fp8 = (
+        q.dtype == k_cache.dtype == torch.float8_e4m3fn
+        and q.shape[1:] == (4, 128)
+        and k_cache.shape[1:3] == (400, 1)
+        and 1 <= num_queries <= 4096
+        and query_offset == 0
+        and 1 <= page_table.shape[0] <= 2
+        and _is_h20()
+    )
+    if h20_fp8:
+        TILE_R, K_TILES = 16, 8
     grid = (
         page_table.shape[0],
         triton.cdiv(min(num_queries, max_query_len), TILE_R),
@@ -436,6 +467,7 @@ def _prefill_logits(
         BLOCK_N=BLOCK_N,
         K_TILES=K_TILES,
         STAGES=STAGES,
+        ALIGNED_STORE=h20_fp8,
         num_warps=num_warps,
     )
     return logits

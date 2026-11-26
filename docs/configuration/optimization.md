@@ -558,3 +558,30 @@ If you observe that GPU utilization is lower than expected, CPU contention may b
 vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
 
 For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.
+
+## H20 Qwen4Exp FP8 QSA kernels
+
+On NVIDIA H20 (SM90, 78 SMs), native E4M3 QSA KV caches use an eight-warp
+split-K launch for 1–7 query rows when a rank has six query heads, head dimension
+256 and 1600-token cache pages with packed logical selections. Externally
+resolved physical selections, eight or more rows, other head/page shapes,
+BF16 caches and other devices retain their existing launch tables. Warmup
+includes the same specialization as runtime.
+
+The FP8 indexer scorer uses query tile 16, eight KV tiles per CTA and aligned
+visible-prefix stores for four 128-dimensional query heads, 400-token cache
+pages, 1–4096 scored rows, query offset zero and one or two requests. Other
+shapes and offset windows retain the original scorer. Invisible logits remain
+undefined. The packed attention selection count remains authoritative during
+CUDA Graph replay, including partial final tiles.
+
+These choices were selected through 80 candidate evaluations per phase bucket
+on one H20. Against the frozen operator baseline from `7a2fbe18e2` with the
+live-selection-count correction, independent holdout matrices measured 1.155× for
+small prefill attention, 1.092× for decode, 1.074× for mixed attention and
+1.361× for indexer prefill. Each matrix was evaluated separately with CUPTI,
+CUDA Graph and L2 refreshed before every replay. They are operator results;
+H100, complete-model quality and P/D serving performance have not been validated
+for this change. These measurements are not a comparison against the current
+repository parent; `benchmarks/kernels/benchmark_qsa_h20_fp8.py` provides that
+comparison. No new flag or environment variable is required.

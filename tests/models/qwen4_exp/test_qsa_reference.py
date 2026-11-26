@@ -1970,3 +1970,119 @@ def test_qsa_streaming_compression_and_compressor_state_store_match_reference() 
                 rope_cache[block, position % 4, 0],
                 position_row(request, position).to("cuda"),
             )
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("fp8", [False, True])
+def test_qsa_short_query_graph_ignores_stale_selection_tail(fp8: bool) -> None:
+    """Warmup covers the H20 launch; shrinking graph counts ignores old indices."""
+    from vllm.triton_utils import triton
+
+    torch.manual_seed(617)
+    q = torch.randn(3, 6, 256, device="cuda", dtype=torch.bfloat16)
+    gate = torch.randn_like(q)
+    packed = torch.randn(2, 1600, 1, 512, device="cuda", dtype=q.dtype)
+    if fp8:
+        packed = packed.to(torch.float8_e4m3fn)
+    keys, values = packed.split(256, dim=-1)
+    table = torch.zeros((1, 1), device="cuda", dtype=torch.int32)
+    requests = torch.zeros(3, device="cuda", dtype=torch.int32)
+    indices = torch.empty((3, 66), device="cuda", dtype=torch.int32)
+    indices[:, :-1] = torch.arange(65, device="cuda")
+    indices[:, -1] = 65
+    out = torch.empty_like(q)
+    k_scale, v_scale = (0.5, 2.0) if fp8 else (1.0, 1.0)
+    warm_cache = packed.view(torch.uint8) if fp8 else packed
+    qsa_ops.warmup_qsa_sparse_paged_attention(
+        warm_cache.transpose(1, 2), table, num_query_heads=6, selection_width=65
+    )
+
+    def invoke():
+        return qsa_ops.qsa_sparse_paged_attention(
+            q,
+            keys,
+            values,
+            indices,
+            table,
+            requests,
+            use_prefill_config=False,
+            out=out,
+            output_gate=gate,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+
+    def fail_compile(**kwargs):
+        pytest.fail(f"QSA compiled after warmup: {kwargs.get('fn')}")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(triton.knobs.runtime, "jit_post_compile_hook", fail_compile)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            invoke()
+        for count in (65, 17, 0, 65):
+            indices[:, -1] = count
+            wanted_indices = indices[:, :-1].clone()
+            wanted_indices[:, count:] = -1
+            expected = _qsa_sparse_paged_attention_reference(
+                q,
+                keys,
+                values,
+                wanted_indices,
+                table,
+                requests,
+                256**-0.5,
+                k_scale,
+                v_scale,
+            ) * torch.sigmoid(gate.float())
+            graph.replay()
+            torch.testing.assert_close(out.float(), expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("num_requests", [1, 2])
+@pytest.mark.parametrize("query_offset", [0, 1])
+def test_qsa_fp8_indexer_keeps_visible_tails_and_offset_fallback(
+    num_requests: int, query_offset: int
+) -> None:
+    """The H20 scorer handles alignment tails; offset windows keep the old path."""
+    torch.manual_seed(617)
+    rows, width = 17, 800
+    q = torch.randn(rows, 4, 128, device="cuda").to(torch.float8_e4m3fn)
+    cache = torch.randn(num_requests * 2, 400, 1, 128, device="cuda").to(
+        torch.float8_e4m3fn
+    )
+    table = torch.arange(num_requests * 2, device="cuda", dtype=torch.int32).view(
+        num_requests, 2
+    )
+    starts = [0, rows] if num_requests == 1 else [0, 5, rows]
+    query_start_loc = torch.tensor(starts, device="cuda", dtype=torch.int32)
+    visible = torch.tensor(
+        [0, 7, 8, 9, 17, 31, 32, 33, 399, 400, 401, 511, 512, 513, 798, 799, 800],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    count = rows - query_offset
+    workspace = torch.full((count * width,), torch.nan, device="cuda")
+    actual = qsa_indexer_ops._prefill_logits(
+        q,
+        cache,
+        table,
+        query_start_loc,
+        visible,
+        workspace,
+        max_query_len=max(b - a for a, b in zip(starts, starts[1:])),
+        logits_width=width,
+        query_offset=query_offset,
+        num_queries=count,
+    )
+    expected = torch.full_like(actual, torch.nan)
+    for row in range(query_offset, rows):
+        request = int(num_requests == 2 and row >= 5)
+        keys = cache[table[request].long(), :, 0].reshape(width, 128).float()
+        scores = (q[row].float() @ keys.T).clamp_min(0).sum(0)
+        live = int(visible[row])
+        expected[row - query_offset, :live] = scores[:live]
+    assert torch.equal(torch.isnan(actual), torch.isnan(expected))
+    valid = torch.isfinite(expected)
+    torch.testing.assert_close(actual[valid], expected[valid], atol=2e-2, rtol=2e-2)
