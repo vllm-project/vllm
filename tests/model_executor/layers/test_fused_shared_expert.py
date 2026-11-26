@@ -16,11 +16,15 @@ from torch import nn
 from transformers import MiniMaxM3VLTextConfig, Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
+from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
+    AiterSharedRoutedFusedMoERouter,
+)
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
@@ -290,33 +294,6 @@ def get_fse_test_model_config(
         from vllm.models.qwen4_exp.amd.model import Qwen4ExpModel
 
         return config, Qwen4ExpModel
-    if model_type == "AXK1":
-        from transformers import AXK1Config
-
-        from vllm.model_executor.models.AXK1 import AXK1Model
-
-        config = AXK1Config(
-            vocab_size=256,
-            hidden_size=128,
-            intermediate_size=32,
-            moe_intermediate_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=1,
-            num_key_value_heads=1,
-            n_shared_experts=1,
-            n_routed_experts=2,
-            num_experts_per_tok=1,
-            n_group=1,
-            topk_group=1,
-            first_k_dense_replace=0,
-            q_lora_rank=0,
-            kv_lora_rank=0,
-            qk_nope_head_dim=0,
-            qk_rope_head_dim=0,
-            v_head_dim=0,
-            quantization_config=quantization_config,
-        )
-        return config, AXK1Model
     if model_type == "glm4_moe_lite":
         from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
@@ -1327,65 +1304,6 @@ def _build_mtp_for_model(
     return _build_mtp_model(getattr(module, class_name), vllm_config, config, **kwargs)
 
 
-# TODO: move to conftest.py.
-class _SingleRankGroup:
-    """No-op single-rank stand-in for a compiled `GroupCoordinator`."""
-
-    world_size = 1
-    rank_in_group = 0
-    local_rank = 0
-    is_first_rank = True
-    is_last_rank = True
-
-    @property
-    def device_group(self):
-        return self
-
-    @property
-    def cpu_group(self):
-        return self
-
-    @property
-    def device_communicator(self):
-        return self
-
-    def rank(self) -> int:
-        return 0
-
-    def size(self) -> int:
-        return 1
-
-    def all_reduce(self, input_: torch.Tensor, *args: Any, **kwargs: Any):
-        return input_
-
-    def all_gather(self, input_: torch.Tensor, dim: int = 0):
-        return input_
-
-    def all_gatherv(self, inputs: Any, dim: int = 0, sizes: Any = None):
-        return inputs
-
-    def reduce_scatter(self, input_: torch.Tensor, dim: int = 0):
-        return input_
-
-    def reduce_scatterv(self, input_: Any, dim: int = 0, sizes: Any = None):
-        return input_
-
-    def broadcast(self, input_: torch.Tensor, src: int = 0):
-        return input_
-
-    def send(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    def recv(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    def barrier(self) -> None:
-        return None
-
-    def destroy(self) -> None:
-        return None
-
-
 def _load_minimax_m3_weights(
     model: nn.Module, weights: list[tuple[str, torch.Tensor]]
 ) -> set[str]:
@@ -1394,24 +1312,6 @@ def _load_minimax_m3_weights(
     mapper = minimax_m3_model.MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
     mapper = mapper | WeightsMapper(weights_transforms=[redirect])
     return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
-
-
-@pytest.fixture
-def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
-    """Single rank parallel groups without initializing a process group.
-
-    This is faster than the `dist_init` fixture.
-    """
-    for name in ("_WORLD", "_TP", "_ETP", "_DCP", "_PP", "_DP", "_EP", "_PCP"):
-        monkeypatch.setattr(
-            f"vllm.distributed.parallel_state.{name}", _SingleRankGroup()
-        )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
 
 
 @pytest.mark.parametrize(
@@ -1425,7 +1325,6 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         "alice_ai",
         "glm4_moe",
         "deepseek_v2",
-        "AXK1",
         "glm4_moe_lite",
         "deepseek_v32",
         "glm5_next",
@@ -1441,12 +1340,13 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         (True, [r"re:.*\.shared_experts?\..*"]),
     ],
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_models_fse_init(
     model_type: str,
     shared_expert_precision: str,
     use_fse: bool,
     exclude: list[str],
-    single_rank_parallel_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Construction and loading preserve each shared expert's precision."""
@@ -1464,7 +1364,6 @@ def test_models_fse_init(
             "deepseek_v4",
             "glm4_moe",
             "deepseek_v2",
-            "AXK1",
             "glm4_moe_lite",
             "deepseek_v32",
             "glm5_next",
@@ -1668,6 +1567,11 @@ def test_models_fse_init(
                     moe.experts.moe_config.is_fused_shared_expert_requested
                     is aiter_fse_enabled
                 )
+                router = moe.experts.router
+                if isinstance(router, AiterSharedRoutedFusedMoERouter):
+                    assert router.has_shared_expert_gate is (
+                        shared_name == "shared_expert"
+                    )
                 if not fused and not exclude and model_type != "deepseek_v4":
                     scheme = getattr(moe, shared_name).gate_up_proj.scheme
                     expected_dtype = (

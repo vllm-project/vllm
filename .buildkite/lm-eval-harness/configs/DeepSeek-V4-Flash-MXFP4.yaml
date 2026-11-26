@@ -16,7 +16,6 @@ max_model_len: 8192
 kv_cache_dtype: fp8
 moe_backend: aiter
 enforce_eager: false
-trust_remote_code: true
 tokenizer_mode: deepseek_v4
 required_gpu_arch:
 - gfx950

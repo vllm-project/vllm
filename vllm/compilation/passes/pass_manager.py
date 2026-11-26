@@ -96,8 +96,7 @@ def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
 class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
     """The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
-    It supports uuid for the Inductor code cache. That includes torch<2.6
-    support using pickling (in .inductor_pass.CustomGraphPass).
+    It supports uuid for the Inductor code cache.
 
     The order of the post-grad post-passes is:
     1. passes (constructor parameter)
@@ -131,6 +130,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # DCE handles mutating ops correctly as well.
         self.ir_lowering(graph)
         VllmInductorPass.dump_prefix += 1
+        if self.post_lowering_noop_elimination is not None:
+            # Lowered impls add reshapes that can cancel out the caller's
+            # (e.g. RoPE's per-head view after QK-norm); left in place, they
+            # block Inductor fusions.
+            self.post_lowering_noop_elimination(graph)
+            VllmInductorPass.dump_prefix += 1
         self.clone_elimination(graph)
         VllmInductorPass.dump_prefix += 1
 
@@ -254,6 +259,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [QKNormRoPEFusionPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
+            self.post_lowering_noop_elimination: NoOpEliminationPass | None = None
+            if self.pass_config.eliminate_noops:
+                self.post_lowering_noop_elimination = NoOpEliminationPass(
+                    config, graph_may_mutate=True
+                )
             self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
@@ -275,6 +285,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
+        if self.post_lowering_noop_elimination is not None:
+            passes.append(self.post_lowering_noop_elimination.uuid())
         passes.append(self.clone_elimination.uuid())
         passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())

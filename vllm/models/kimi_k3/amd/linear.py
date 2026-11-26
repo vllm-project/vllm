@@ -320,7 +320,8 @@ class KimiMoE(nn.Module):
         min_moe_intermediate_per_partition = getattr(
             config, "min_moe_intermediate_per_partition", 256
         )
-        if self.tp_size > 1:
+        enable_ep = get_current_vllm_config().parallel_config.enable_expert_parallel
+        if self.tp_size > 1 and not enable_ep:
             moe_intermediate_per_partition = moe_intermediate_size // self.tp_size
             if moe_intermediate_per_partition < min_moe_intermediate_per_partition:
                 self.padded_moe_intermediate_size = (
@@ -432,6 +433,7 @@ class KimiMoE(nn.Module):
             top_k=num_experts_per_token,
             hidden_size=self.moe_hidden_size,
             intermediate_size=self.padded_moe_intermediate_size,
+            intermediate_size_unpadded=moe_intermediate_size,
             activation=config.hidden_act,
             activation_situ_beta=activation_situ_beta,
             activation_situ_linear_beta=activation_situ_linear_beta,
@@ -460,17 +462,11 @@ class KimiMoE(nn.Module):
             # The sharded path adds an all_gather, so all ranks must take it or none.
             self.routed_expert_down_proj.enable_token_sharding()
         if self.padded_moe_intermediate_size != moe_intermediate_size:
-            w13_weight = getattr(self.experts, "w13_weight", None)
-            if w13_weight is None:
-                w13_weight = self.experts.w13_weight_packed
-            w2_weight = getattr(self.experts, "w2_weight", None)
-            if w2_weight is None:
-                w2_weight = self.experts.w2_weight_packed
-            w13_weight.data.zero_()
-            w2_weight.data.zero_()
-            self.experts.moe_config.intermediate_size_per_partition_unpadded = (
-                moe_intermediate_size // self.tp_size
-            )
+            # Zero what a direct reload zero-fills at begin (weights and scales,
+            # whatever their names), so a cold start matches a reload.
+            for param in self.experts.routed_experts.parameters(recurse=False):
+                if getattr(param, "fill_on_reload", False):
+                    param.data.zero_()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape

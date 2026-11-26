@@ -22,7 +22,7 @@ def test_model_inspection_requires_explicit_call(vllm_runner):
         assert repr(llm) == f"LLM(model={model_name!r})"
 
         inspection = llm.get_model_inspection()
-        assert "LlamaForCausalLM" in inspection
+        assert "TransformersForCausalLM" in inspection
         assert "(embed_tokens):" in inspection
 
 
