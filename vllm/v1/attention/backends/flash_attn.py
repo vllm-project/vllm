@@ -1591,7 +1591,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         if self.kv_cache_dtype == "int4_per_token_head" and fa_int4_enabled():
             from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-                _triton_reshape_and_cache_flash_per_token_head_quant,
+                triton_reshape_and_cache_flash_per_token_head_quant,
             )
             from vllm.v1.kv_cache_interface import KVQuantMode
 
@@ -1601,7 +1601,7 @@ class FlashAttentionImpl(AttentionImpl):
             # Write path expects [blocks, block_size, Hkv, packed_hs]
             key_cache = key_u8.transpose(1, 2)
             value_cache = value_u8.transpose(1, 2)
-            _triton_reshape_and_cache_flash_per_token_head_quant(
+            triton_reshape_and_cache_flash_per_token_head_quant(
                 key,
                 value,
                 key_cache,
