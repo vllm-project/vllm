@@ -16,7 +16,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import is_mamba_group, is_mamba_prefix_caching_group
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
@@ -716,15 +715,15 @@ def _get_mamba_gpu_state_copy_funcs(
 ) -> MambaStateCopyFuncs:
     state_copy_funcs = copy_funcs[spec.mamba_type]
     if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
-        if (
-            spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
-            or len(spec.shapes) != 5
-            or len(spec.dtypes) != 5
-            or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
+        # The rings follow the canonical states, in the page or in a block of
+        # their own.
+        if len(layer.kv_cache) != 5 or state_copy_funcs != (
+            get_conv_copy_spec,
+            get_temporal_copy_spec,
         ):
             raise ValueError(
-                "ReplaySSM trackers require two canonical Mamba2 "
-                "states and three ring states"
+                "ReplaySSM trackers require conv and temporal canonical "
+                "states and three bound ring states"
             )
         state_copy_funcs += (get_temporal_copy_spec,) * 3
     return state_copy_funcs

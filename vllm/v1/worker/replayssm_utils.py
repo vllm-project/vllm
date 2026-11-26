@@ -401,7 +401,8 @@ class ReplaySSMModelContext:
     src_slots_ptrs: torch.Tensor
     dst_slots_ptrs: torch.Tensor
     num_layers: torch.Tensor
-    materialize_tables: _ReplaySSMMaterializeTables
+    # Prefix-cache snapshots only; they read Mamba2's states and A.
+    materialize_tables: _ReplaySSMMaterializeTables | None
     src_slots: torch.Tensor
     dst_slots: torch.Tensor
     plan_ring_start: torch.Tensor
@@ -431,7 +432,7 @@ class ReplaySSMModelContext:
         geometry = [(state.shape[1:], state.dtype) for state in first.kv_cache[1:]]
         assert all(
             [(state.shape[1:], state.dtype) for state in mixer.kv_cache[1:]] == geometry
-            and mixer.A.dtype == first.A.dtype
+            and (not materialize_prefixes or mixer.A.dtype == first.A.dtype)
             and mixer.replayssm_buffer_len == first.replayssm_buffer_len
             for mixer in mixers
         ), "ReplaySSM trackers require equal materialization geometry"
@@ -473,7 +474,9 @@ class ReplaySSMModelContext:
                 dtype=torch.int32,
                 device=device,
             ),
-            materialize_tables=_ReplaySSMMaterializeTables(
+            materialize_tables=None
+            if not materialize_prefixes
+            else _ReplaySSMMaterializeTables(
                 state_ptrs=_cuda_i64_ptrs([m.kv_cache[1] for m in mixers]),
                 state_slot_strides=_cuda_i64_slot_strides(
                     [m.kv_cache[1] for m in mixers]
@@ -514,6 +517,7 @@ class ReplaySSMModelContext:
         """Publish all canonical prefix snapshots in one kernel launch."""
         first = self.mixers[0]
         mamba_config = first.mamba_config
+        assert self.materialize_tables is not None
         if not first.use_flashinfer_replayssm:
             replayssm_materialize(
                 *self.materialize_tables[:9],
