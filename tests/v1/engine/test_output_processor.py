@@ -11,7 +11,7 @@ import prometheus_client
 import pytest
 import torch
 from tokenizers import Tokenizer, decoders, models
-from transformers import TokenizersBackend
+from transformers import AutoTokenizer, TokenizersBackend
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -42,6 +42,10 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
+)
+from vllm.v1.engine.detokenizer import (
+    FastIncrementalDetokenizer,
+    SlowIncrementalDetokenizer,
 )
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
@@ -1840,8 +1844,7 @@ def test_streaming_input_skip_special_tokens(
         for request in requests[1:]:
             processor.add_request(request, None)
 
-    observed = []
-    expected = []
+    cumulative = output_kind == RequestOutputKind.CUMULATIVE
     cumulative_text = ""
     for index, skip in enumerate(skip_per_chunk):
         if index and not queued:
@@ -1860,11 +1863,40 @@ def test_streaming_input_skip_special_tokens(
         output = request_output.outputs[0]
         text = "" if skip else "<marker>"
         cumulative_text += text
-        cumulative = output_kind == RequestOutputKind.CUMULATIVE
         assert output.token_ids == [1] * (index + 1 if cumulative else 1)
-        observed.append(output.text)
-        expected.append(cumulative_text if cumulative else text)
-    assert observed == expected
+        assert output.text == (cumulative_text if cumulative else text)
+
+
+@pytest.mark.parametrize(
+    "tokenizer_name", ["gpt2", "vllm-project/tiny-random-LlamaForCausalLM"]
+)
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize("initial_skip", [False, True])
+def test_skip_special_tokens_change_preserves_pending_text(
+    tokenizer_name: str, fast: bool, initial_skip: bool
+):
+    """Changing special-token handling must preserve incomplete UTF-8 output."""
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    output_ids = tokenizer.encode("你好😀", add_special_tokens=False)
+    request = _make_streaming_input_request(
+        "decode-setting",
+        tokenizer.encode("Hello", add_special_tokens=False),
+        SamplingParams(skip_special_tokens=initial_skip),
+    )
+    decoder_class = FastIncrementalDetokenizer if fast else SlowIncrementalDetokenizer
+    for split in range(1, len(output_ids)):
+        decoder = decoder_class(tokenizer, request)
+        reference = decoder_class(tokenizer, request)
+        observed = ""
+        expected = ""
+        for chunk_index, chunk in enumerate([output_ids[:split], output_ids[split:]]):
+            if chunk_index:
+                decoder.set_skip_special_tokens(not initial_skip)
+            decoder.update(chunk, stop_terminated=False)
+            reference.update(chunk, stop_terminated=False)
+            observed += decoder.get_next_output_text(finished=True, delta=True)
+            expected += reference.get_next_output_text(finished=True, delta=True)
+        assert observed == expected
 
 
 def _add_streaming_request_with_queued_chunk(
