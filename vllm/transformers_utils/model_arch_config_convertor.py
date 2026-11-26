@@ -666,6 +666,11 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 )
             elif getattr(hf_config, "modeling_overrides", None) is not None:
                 hf_config.architectures = ["Qwen3_5ForSlotDecision"]
+        elif getattr(hf_config, "architectures", None) == ["Qwen3_5ForCausalLM"]:
+            # A Drex checkpoint is the text backbone plus ``head.pt``.
+            model_path = hf_config.name_or_path
+            if model_path and file_or_path_exists(model_path, "head.pt", revision):
+                hf_config.architectures = ["Qwen3_5ForDrex"]
         elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
             # Decision 3.0 checkpoints are a bare backbone plus a code readout
             # described by decision_config.json.
