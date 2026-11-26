@@ -267,6 +267,22 @@ nvcc --version # verify that nvcc is in your PATH
 ${CUDA_HOME}/bin/nvcc --version # verify that nvcc is in your CUDA_HOME
 ```
 
+If you can't install the CUDA Toolkit system-wide, you can build with the CUDA wheels from PyPI instead. The CUDA wheels of PyTorch 2.14 depend on the `cuda-toolkit` package; add the compiler and the CCCL headers at the same version and point `CUDA_HOME` at the wheels' install directory. The wheels install libraries into `lib/` with only versioned names, while `nvcc` links from `lib64/` and CMake looks for `libcudart.so` and `libnvrtc.so`, so add those links too. For example, with PyTorch for CUDA 13.0 already installed:
+
+```bash
+CUDA_TOOLKIT_VERSION=$(python -c "import importlib.metadata as m; print(m.version('cuda-toolkit'))")
+pip install "cuda-toolkit[nvcc,cccl]==${CUDA_TOOLKIT_VERSION}"
+export CUDA_HOME=$(python -c "import nvidia, os; print(os.path.join(list(nvidia.__path__)[0], 'cu13'))")
+export PATH="${CUDA_HOME}/bin:$PATH"
+ln -s lib "${CUDA_HOME}/lib64"
+ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
+ln -s libnvrtc.so.13 "${CUDA_HOME}/lib/libnvrtc.so"
+pip install -r requirements/build/cuda.txt
+pip install --no-build-isolation -e .
+```
+
+The build links against `libcuda.so` from the NVIDIA driver, so run it on a machine or container where the driver is available. DeepGEMM, which is built for Hopper and newer GPUs, also needs the elfutils headers (`libdw-dev` on Debian and Ubuntu).
+
 #### Unsupported OS build
 
 vLLM can fully run only on Linux but for development purposes, you can still build it on other systems (for example, macOS), allowing for imports and a more convenient development environment. The binaries will not be compiled and won't work on non-Linux systems.
