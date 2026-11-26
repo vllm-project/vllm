@@ -165,6 +165,8 @@ class ServingTokenization(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        self.renderer.validate_token_ids(request.tokens, parameter="tokens")
+
         try:
             tok_params = apply_max_tokenize_tokens(
                 request.build_tok_params(self.model_config),
