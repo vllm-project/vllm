@@ -102,7 +102,6 @@ def test_object_put_timeout_follows_execute_model_timeout(monkeypatch):
             {"adaptive_verification": True},
             "adaptive speculative verification",
         ),
-        ({"pp": 2}, "pipeline parallelism"),
         ({"dcp": 2}, "context parallelism"),
         ({"pcp": 2}, "context parallelism"),
     ],
@@ -114,9 +113,10 @@ def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"sliding_window": 4096}, {"attention_chunk_size": 4096}],
+    [{"sliding_window": 4096}, {"attention_chunk_size": 4096}, {"pp": 2}],
+    ids=["sliding-window", "chunked-attention", "pipeline-parallel"],
 )
-def test_aux_output_config_defers_attention_layout_to_kv_config(kwargs):
+def test_aux_output_config_accepts(kwargs):
     VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
 
 

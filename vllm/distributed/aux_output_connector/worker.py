@@ -35,11 +35,13 @@ from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    _get_routed_experts_shape,
     bind_routed_experts_capturer,
 )
+from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv, round_up
 
 if TYPE_CHECKING:
@@ -119,6 +121,23 @@ class _ObjectRun:
         return np.concatenate(blocks)[: end - start]
 
 
+PP_ROUTED_EXPERTS_KEY = "routed_experts"
+
+
+def add_pp_routes_buffer(
+    intermediate_tensors: IntermediateTensors,
+    vllm_config: VllmConfig,
+    max_num_tokens: int,
+    device: torch.device,
+) -> None:
+    num_layers, _, num_experts_per_tok = _get_routed_experts_shape(vllm_config)
+    intermediate_tensors[PP_ROUTED_EXPERTS_KEY] = torch.zeros(
+        (max_num_tokens, num_layers, num_experts_per_tok),
+        dtype=torch.int32,
+        device=device,
+    )
+
+
 @dataclass(slots=True)
 class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
@@ -176,7 +195,29 @@ class AuxOutputWorkerConnector:
         capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
         )
-        bind_routed_experts_capturer(model, capturer)
+        pp_group = get_pp_group()
+        if pp_group.world_size == 1:
+            bind_routed_experts_capturer(model, capturer)
+        else:
+            error: ValueError | None = None
+            try:
+                num_bound = bind_routed_experts_capturer(
+                    model, capturer, allow_no_router=True
+                )
+            except ValueError as e:
+                error, num_bound = e, 0
+            totals = torch.tensor([num_bound, error is not None])
+            torch.distributed.all_reduce(totals, group=pp_group.cpu_group)
+            if error is not None:
+                raise error
+            if totals[1]:
+                raise ValueError(
+                    "Routed-experts capture failed on another pipeline stage."
+                )
+            if not totals[0]:
+                raise ValueError(
+                    "No supported MoE router found for routed-experts capture."
+                )
         self._capturer = capturer
         self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
@@ -196,7 +237,7 @@ class AuxOutputWorkerConnector:
         """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
-        if not get_tp_group().is_first_rank:
+        if not get_tp_group().is_first_rank or not get_pp_group().is_last_rank:
             return
 
         vllm_config = self._vllm_config
@@ -225,6 +266,21 @@ class AuxOutputWorkerConnector:
                 ),
                 timeout_s=object_put_timeout_s(),
             )
+
+    def receive_pp_routes(
+        self, intermediate_tensors: IntermediateTensors, num_tokens: int
+    ) -> None:
+        """Take the earlier stages' rows; this stage's forward writes its own."""
+        received = intermediate_tensors[PP_ROUTED_EXPERTS_KEY]
+        self._capturer.device_buffer[:num_tokens] = received[:num_tokens]
+
+    def send_pp_routes(
+        self, output_intermediate_tensors: IntermediateTensors
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            output_intermediate_tensors.tensors
+            | {PP_ROUTED_EXPERTS_KEY: self._capturer.device_buffer}
+        )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""

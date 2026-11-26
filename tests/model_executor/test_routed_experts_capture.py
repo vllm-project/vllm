@@ -264,6 +264,19 @@ def test_custom_restorer_writes_returned_rows(tmp_path, monkeypatch):
     assert source.restore_calls == 1
 
 
+@pytest.mark.parametrize(
+    "allow_no_router", [False, True], ids=["whole-model", "dense-pp-stage"]
+)
+def test_bind_without_moe_router(tmp_path, monkeypatch, allow_no_router):
+    capturer = _cpu_capturer(tmp_path, monkeypatch)
+    model = torch.nn.ModuleList([torch.nn.Linear(2, 2)])
+    if allow_no_router:
+        bind_routed_experts_capturer(model, capturer, allow_no_router=True)
+        return
+    with pytest.raises(ValueError, match="No supported MoE router"):
+        bind_routed_experts_capturer(model, capturer)
+
+
 def test_shared_restorer_uses_current_context_for_each_layer(tmp_path, monkeypatch):
     """The same callback handles distinct layers and reads each forward's context."""
     capturer = _cpu_capturer(tmp_path, monkeypatch)
@@ -765,18 +778,33 @@ def test_get_aux_output_connector_passes_config(monkeypatch):
     assert result is connector
 
 
-def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
+@pytest.mark.parametrize(
+    "tp_first,pp_last",
+    [(False, True), (True, False)],
+    ids=["other-tp-rank", "earlier-pp-stage"],
+)
+def test_aux_output_worker_connector_binds_capture_on_non_output_rank(
+    monkeypatch, tp_first, pp_last
+):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     capturer = Mock()
     constructor = Mock(return_value=capturer)
-    bind = Mock()
+    bind = Mock(return_value=1)
     monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", constructor)
     monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda tensor, group: None)
     monkeypatch.setattr(
         aux_output_worker,
         "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=False, world_size=1),
+        lambda: SimpleNamespace(is_first_rank=tp_first, world_size=1),
+    )
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_pp_group",
+        lambda: SimpleNamespace(
+            is_last_rank=pp_last, world_size=2 - pp_last, cpu_group=None
+        ),
     )
 
     config = SimpleNamespace(
@@ -798,10 +826,53 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
         max_num_batched_tokens=32,
         vllm_config=config,
     )
-    bind.assert_called_once_with(model, capturer)
+    if pp_last:
+        bind.assert_called_once_with(model, capturer)
+    else:
+        bind.assert_called_once_with(model, capturer, allow_no_router=True)
     connector.begin_step(Mock())
     assert connector.prepare_output(Mock()) is None
     capturer.snapshot_routing_data.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "bind,others,error",
+    [
+        (Mock(return_value=0), (0, 0), "No supported MoE router"),
+        (Mock(return_value=0), (3, 0), None),
+        (Mock(return_value=2), (0, 1), "failed on another pipeline stage"),
+        (Mock(side_effect=ValueError("unsupported router")), (2, 0), "unsupported"),
+    ],
+    ids=["no-stage-binds", "another-stage-binds", "another-stage-fails", "fails"],
+)
+def test_pp_stages_bind_a_router_together(monkeypatch, bind, others, error):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", Mock())
+    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_pp_group",
+        lambda: SimpleNamespace(world_size=2, cpu_group=None),
+    )
+    reduced = []
+
+    def all_reduce(tensor, group):
+        reduced.append(True)
+        tensor += torch.tensor(others)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+        max_concurrent_batches=2,
+    )
+    if error is None:
+        aux_output_worker.AuxOutputWorkerConnector(vllm_config=config, model=Mock())
+    else:
+        with pytest.raises(ValueError, match=error):
+            aux_output_worker.AuxOutputWorkerConnector(vllm_config=config, model=Mock())
+    # Every stage joins the collective, also the one whose binding failed.
+    assert reduced == [True]
 
 
 def test_aux_output_worker_connector_default_capacity(monkeypatch):
@@ -813,6 +884,11 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     background_store_constructor = Mock(side_effect=lambda store, **_: store)
     capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
     monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=True, world_size=1),
+    )
     monkeypatch.setattr(
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )

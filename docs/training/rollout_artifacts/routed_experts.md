@@ -16,7 +16,7 @@ Startup fails with a `ValueError` unless:
 - the runner is `generate` and the model is **MoE**;
 - **prefix caching is enabled** (the default). `--no-enable-prefix-caching` fails; the old v0.21 advice to disable it is wrong.
 
-Rejected at startup: adaptive speculative verification, PP > 1 and DCP/PCP > 1. Regular speculative decoding works.
+Rejected at startup: adaptive speculative verification and DCP/PCP > 1. Regular speculative decoding works. With pipeline parallelism, each stage passes the rows of the earlier stages' layers and its own to the next stage with its intermediate tensors, and the last stage returns the rows of every layer.
 
 KV connectors are not rejected, including the prefill/decode ones (`NixlConnector`, `MoRIIOConnector`, `MooncakeConnector`, ...). In a prefill/decode deployment, however, the decode engine holds no rows for the KV the prefill engine computed. It accepts that KV only up to `routed_experts_prompt_start` and computes the rest of the prompt again, so the output is correct but the prefill work past that position is lost.
 

@@ -613,6 +613,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         iteration_timer=None,
         _pp_send_work=[previous_tensor_send],
         _pp_transport=None,
+        _pp_all_gather_tensors=None,
     )
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
@@ -622,6 +623,108 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+@pytest.mark.parametrize("num_tokens", [1, 4], ids=["one-token", "four-tokens"])
+def test_pp_relays_the_routed_experts_of_the_same_tp_rank(
+    monkeypatch: pytest.MonkeyPatch, num_tokens: int
+):
+    from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.sequence import IntermediateTensors
+
+    tp_size = 2
+    hidden = torch.arange(num_tokens * 4, dtype=torch.float32).reshape(-1, 4)
+    routes = torch.arange(num_tokens * 6, dtype=torch.int32).reshape(-1, 3, 2) + 1
+    stage_outputs = [
+        {"hidden_states": hidden, "routed_experts": routes},
+        {"hidden_states": hidden, "routed_experts": torch.zeros_like(routes)},
+    ]
+    gathered = object.__new__(GroupCoordinator)._should_use_all_gather
+
+    def run_stage(tp_rank, pp_group, run_model):
+        tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=tp_rank)
+        monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp_group)
+        monkeypatch.setattr(gpu_worker, "get_tp_group", lambda: tp_group)
+        worker = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                parallel_config=SimpleNamespace(
+                    pipeline_parallel_size=2, distributed_executor_backend="mp"
+                ),
+            ),
+            model_runner=SimpleNamespace(
+                execute_model=run_model, is_pooling_model=False
+            ),
+            annotate_profile=lambda scheduler_output: nullcontext(),
+            iteration_timer=None,
+            _pp_send_work=[],
+            _pp_transport=None,
+            _pp_recv_specs=gpu_worker.row_specs(stage_outputs[0]),
+            _pp_all_gather_tensors={"routed_experts": False},
+        )
+        scheduler_output = SimpleNamespace(
+            total_num_scheduled_tokens=num_tokens,
+            num_scheduled_tokens={"r0": num_tokens},
+        )
+        gpu_worker.Worker.execute_model(worker, scheduler_output)
+
+    sent = []
+    for tp_rank in range(tp_size):
+
+        def isend_tensor_dict(
+            tensors, all_gather_group=None, all_gather_tensors=None, rank=tp_rank
+        ):
+            sent.append(
+                {
+                    key: tensor.reshape(tp_size, -1)[rank]
+                    if gathered(
+                        key, tensor.numel(), all_gather_group, all_gather_tensors
+                    )
+                    else tensor
+                    for key, tensor in tensors.items()
+                }
+            )
+            return [None]
+
+        run_stage(
+            tp_rank,
+            SimpleNamespace(
+                is_first_rank=True,
+                is_last_rank=False,
+                isend_tensor_dict=isend_tensor_dict,
+            ),
+            lambda scheduler_output, intermediate_tensors, rank=tp_rank: (
+                IntermediateTensors(dict(stage_outputs[rank]))
+            ),
+        )
+
+    def irecv_tensor_dict(all_gather_group=None, all_gather_tensors=None):
+        received = {}
+        for key, tensor in stage_outputs[0].items():
+            if gathered(key, tensor.numel(), all_gather_group, all_gather_tensors):
+                received[key] = torch.cat([part[key] for part in sent]).reshape(
+                    tensor.shape
+                )
+            else:
+                received[key] = sent[0][key]
+        return received, [], []
+
+    received = {}
+
+    def run_last_stage(scheduler_output, intermediate_tensors):
+        received.update(intermediate_tensors.tensors)
+
+    run_stage(
+        0,
+        SimpleNamespace(
+            is_first_rank=False,
+            is_last_rank=True,
+            irecv_tensor_dict=irecv_tensor_dict,
+        ),
+        run_last_stage,
+    )
+
+    assert torch.equal(received["routed_experts"], routes)
+    assert torch.equal(received["hidden_states"], hidden)
 
 
 @pytest.mark.parametrize("is_last_rank", [False, True])
