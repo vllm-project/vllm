@@ -15,6 +15,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `DeepseekOCR2ForCausalLM` | `DeepSeek-OCR-2` | ✅︎ | ❌︎ | ✅︎ |
 | `DeepseekVLV2ForCausalLM` | `DeepSeek-VL2` | ✅︎ | ❌︎ | ❌︎ |
 | `DeepseekV41ForCausalLM` | `DeepSeek-V4.1-Flash` | ✅︎ | ❌︎ | ❌︎ |
+| `DotsOCRForCausalLM` | `dots.ocr` | ✅︎ | ❌︎ | ❌︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Gemma3ForConditionalGeneration` | `Gemma3` | ✅︎ | ❌︎ | ❌︎ |
 | `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ | ❌︎ |

@@ -2207,6 +2207,7 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "deepseek_ocr",
     "deepseek_ocr2",
     "deepseek_vl_v2",
+    "dots_ocr",
     "ernie45_vl",
     "minicpmv2_5_vl",
     "minicpmv2_6_vl",

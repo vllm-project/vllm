@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from itertools import accumulate
 from typing import Annotated, Literal, TypeAlias
 
@@ -60,7 +60,12 @@ from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionCon
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+)
 
+from .encoder_cudagraph_utils import Qwen2VLEncoderCudaGraphMixin
 from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
 
 IMAGE_TOKEN = "<|imgpad|>"
@@ -553,14 +558,21 @@ class DotsVisionTransformer(nn.Module):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
-    def forward(
-        self, hidden_states: torch.Tensor, grid_thw: list[list[int]]
-    ) -> torch.Tensor:
+    def prepare_encoder_metadata(
+        self,
+        grid_thw: list[list[int]],
+        *,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Compute the grid_thw-dependent metadata outside of forward(),
+        so that it is not baked into the encoder CUDA graph."""
+        if device is None:
+            device = self.device
+
+        # Position embeddings.
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-        hidden_states = hidden_states.to(self.dtype)
-        hidden_states = self.patch_embed(hidden_states)
-
         cu_seqlens = torch.tensor(
             list(
                 accumulate((h * w for t, h, w in grid_thw for _ in range(t)), initial=0)
@@ -569,9 +581,59 @@ class DotsVisionTransformer(nn.Module):
             device="cpu",
         )
 
-        # Attention wrappers read max_seqlen with .item() on every layer.
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
-        cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
+        # Keep cu_seqlens shape stable across capture/replay.
+        # Pad with the last offset so that padded sequences are empty and the
+        # offsets stay valid.
+        pad_to = max_batch_size
+        if pad_to is not None:
+            num_seqs = len(cu_seqlens) - 1
+            if num_seqs < pad_to:
+                cu_seqlens = torch.cat(
+                    (
+                        cu_seqlens,
+                        torch.full(
+                            (pad_to - num_seqs,),
+                            cu_seqlens[-1],
+                            dtype=cu_seqlens.dtype,
+                            device=cu_seqlens.device,
+                        ),
+                    )
+                )
+
+        # Keep max_seqlen on CPU: on GPU, the extra D2H copy would be captured
+        # into the CUDA graph. For capture, the override is the max number of
+        # patches of the token budget.
+        if max_seqlen_override is None:
+            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        else:
+            max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
+
+        return {
+            "rotary_pos_emb": rotary_pos_emb,
+            "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
+            "max_seqlen": max_seqlen,
+        }
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]] | None,
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        if encoder_metadata is None:
+            assert grid_thw is not None
+            grid_thw_list = (
+                grid_thw if isinstance(grid_thw, list) else grid_thw.tolist()
+            )
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
+
+        rotary_pos_emb = encoder_metadata["rotary_pos_emb"]
+        cu_seqlens = encoder_metadata["cu_seqlens"]
+        max_seqlen = encoder_metadata["max_seqlen"]
+        hidden_states = hidden_states.to(self.dtype)
+        hidden_states = self.patch_embed(hidden_states)
+
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
@@ -592,7 +654,13 @@ class DotsVisionTransformer(nn.Module):
     info=DotsOCRProcessingInfo,
     dummy_inputs=DotsOCRDummyInputsBuilder,
 )
-class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+class DotsOCRForCausalLM(
+    nn.Module,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsLoRA,
+    Qwen2VLEncoderCudaGraphMixin,
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".attn.qkv_proj.": ".attn.qkv.",
@@ -739,6 +807,59 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    @property
+    def visual(self) -> DotsVisionTransformer:
+        """Vision tower under the name `Qwen2VLEncoderCudaGraphMixin` reads."""
+        return self.vision_tower
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values", "rotary_pos_emb", "cu_seqlens", "max_seqlen"],
+            out_hidden_size=self.vision_tower.out_hidden_size,
+        )
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        # Overridden because dots.ocr is image-only and its patch embedding is
+        # wrapped in `patchifier` without a fused input norm.
+        m = self.vision_tower.spatial_merge_size
+        # Ceil so one item using the full budget fits the captured buffers.
+        per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+        grid_config = [[1, m, per_item_output * m] for _ in range(max_batch_size)]
+
+        patchifier = self.vision_tower.patch_embed.patchifier
+        dummy_pixel_values = torch.zeros(
+            sum(t * h * w for t, h, w in grid_config),
+            patchifier.num_channels
+            * patchifier.temporal_patch_size
+            * patchifier.patch_size
+            * patchifier.patch_size,
+            device=device,
+            dtype=dtype,
+        )
+        # max_seqlen is baked into the graph at capture, so it must cover one
+        # item consuming the full budget.
+        metadata = self.vision_tower.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget * m**2,
+            device=device,
+        )
+        return EncoderCudaGraphCaptureInputs(
+            values=metadata | {"pixel_values": dummy_pixel_values}
+        )
 
     def forward(
         self,
