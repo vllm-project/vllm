@@ -11,12 +11,14 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.aux_output_connector import connector as connector_module
 from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
     PackedBlockHashes,
+    retained_objects,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -85,10 +87,10 @@ def _kv_cache_manager(
 
 
 def _make_connector():
-    return AuxOutputSchedulerConnector(_kv_cache_manager({}))
+    return AuxOutputSchedulerConnector(_kv_cache_manager({}), 0)
 
 
-@dataclass
+@dataclass(slots=True)
 class _Execution:
     request_id: str
     token_start: int
@@ -97,13 +99,13 @@ class _Execution:
     block_hashes: list[bytes] | PackedBlockHashes
 
 
-@dataclass
+@dataclass(slots=True)
 class _WorkerStep:
     metadata: AuxOutputConnectorMetadata
     executions: list[_Execution]
 
 
-@dataclass
+@dataclass(slots=True)
 class _SchedulerRequest:
     request_id: str
     block_hashes: list[bytes]
@@ -1929,6 +1931,22 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
         worker.close()
 
 
+def test_worker_skips_initial_partial_block():
+    worker = _make_worker(1)
+    rows = np.arange(9 * 6, dtype=_DTYPE).reshape(9, *_SHAPE)
+    try:
+        for start in range(5, 9):
+            emit = max(6, start)
+            step = _metadata(0, [_request_metadata("decode", start, 1, emit, [])], {})
+            output = _process_output(
+                worker, step, rows[start : start + 1], ["decode"], np.array([0])
+            )["decode"]
+            assert output.token_start == emit
+            np.testing.assert_array_equal(output.rows, rows[emit : start + 1])
+    finally:
+        worker.close()
+
+
 def test_scheduler_connector_sends_each_block_hash_once():
     connector = _make_connector()
     request = _scheduler_request("request", [b"a" * 32, b"b" * 32], num_tokens=12)
@@ -2010,8 +2028,12 @@ def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
 
 def _finished_request_with_cached_blocks(num_blocks: int = 1):
     cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
-    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
-    request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager(cached, 2, num_blocks), 2 * num_blocks
+    )
+    request = _SchedulerRequest(
+        "request", list(_HASHES), 17, num_output_tokens=0, num_computed_tokens=16
+    )
     connector.request_finished(request)
     assert _kv_cache_metadata(connector) == (_HASHES, [])
     return cached, connector, request
@@ -2020,6 +2042,91 @@ def _finished_request_with_cached_blocks(num_blocks: int = 1):
 def _finish_empty_request(connector: AuxOutputSchedulerConnector):
     connector.request_finished(_SchedulerRequest("empty", [], 1))
     return _kv_cache_metadata(connector)
+
+
+@pytest.mark.parametrize(
+    "max_bytes,kv_transfer_config,expected",
+    [(None, None, 6), (None, object(), 12), (400, object(), 5), (1, None, 1)],
+    ids=["kv-cache", "kv-connector", "max-bytes", "max-bytes-floor"],
+)
+def test_retained_objects_follow_max_bytes(
+    monkeypatch, max_bytes, kv_transfer_config, expected
+):
+    monkeypatch.setattr(
+        connector_module, "resolve_kv_cache_block_sizes", lambda *_: (16, 8)
+    )
+    monkeypatch.setattr(
+        connector_module, "get_routed_experts_bytes_per_token", lambda _: 10
+    )
+    vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(max_bytes=max_bytes),
+        kv_transfer_config=kv_transfer_config,
+    )
+    kv_cache_config = SimpleNamespace(num_blocks=3)
+    assert retained_objects(vllm_config, kv_cache_config) == (expected, 8)
+
+
+@pytest.mark.parametrize(
+    "num_output_tokens,prompt_start",
+    [(0, 17), (1, 0)],
+    ids=["prompt-start", "resumed"],
+)
+def test_connector_hit_needs_rows_from_emit_start(num_output_tokens, prompt_start):
+    connector = _make_connector()
+    request = _SchedulerRequest("request", [], 17, num_output_tokens=num_output_tokens)
+    request.sampling_params.routed_experts_prompt_start = prompt_start
+
+    assert connector.max_cache_hit(request) == 16
+
+
+def test_connector_forgets_loaded_blocks_once_evicted():
+    cached: dict = {}
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, 1), 2)
+    decode = _SchedulerRequest("decode", list(_HASHES), 17, num_output_tokens=0)
+    decode.sampling_params.routed_experts_prompt_start = 16
+    request = _SchedulerRequest("request", list(_HASHES), 17, num_output_tokens=0)
+    blocks = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
+
+    assert connector.cap_external_hit(decode, 0, 16) == 16
+    connector.request_loading(decode, 16)
+    _finish_empty_request(connector)
+    cached.update(blocks)
+    assert connector.max_cache_hit(request) == 0
+
+    cached.clear()
+    connector.request_finished(decode)
+    cached.update(blocks)
+    assert connector.max_cache_hit(request) == 16
+
+
+def test_connector_keeps_mark_of_partly_loaded_block():
+    cached = {_HASHES[0]: [Mock()], _HASHES[1]: [Mock()]}
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached), 0)
+    decode = _SchedulerRequest("decode", list(_HASHES[:3]), 13, num_output_tokens=0)
+    decode.sampling_params.routed_experts_prompt_start = 9
+    request = _SchedulerRequest("request", list(_HASHES[:3]), 13, num_output_tokens=0)
+
+    assert connector.cap_external_hit(decode, 8, 1) == 1
+    connector.request_loading(decode, 9)
+    _finish_empty_request(connector)
+    cached[_HASHES[2]] = [Mock()]
+    assert connector.max_cache_hit(request) == 8
+
+
+def test_connector_marks_partly_computed_block_once_its_hash_exists():
+    cached = {_HASHES[0]: [Mock()], _HASHES[1]: [Mock()]}
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached), 0)
+    decode = _SchedulerRequest("decode", [_HASHES[0]], 7, num_computed_tokens=5)
+    request = _SchedulerRequest("request", list(_HASHES[:2]), 9, num_output_tokens=0)
+    connector.build_connector_meta(
+        _step_output(["decode"], [5], [1]), {"decode": decode}
+    )
+    decode.block_hashes.append(_HASHES[1])
+    decode.num_tokens = 8
+    rows = np.zeros((2, *_SHAPE), dtype=_DTYPE)
+    connector.take_output(decode, {"decode": AuxRequestOutput(5, rows)})
+
+    assert connector.max_cache_hit(request) == 4
 
 
 def test_connector_releases_oldest_uncached_blocks_past_capacity():

@@ -29,6 +29,7 @@ if not is_aiter_found_and_supported():
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 
 
 class _FakeAiter(ModuleType):
@@ -144,6 +145,10 @@ def _make_builder(max_num_batched_tokens: int = 8):
     topk_tokens = 4
 
     builder.device = torch.device("cpu")
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
     builder.kv_cache_spec = SimpleNamespace(block_size=1)
     builder.model_dtype = torch.bfloat16
     builder.kv_cache_dtype = "fp8"
@@ -153,6 +158,7 @@ def _make_builder(max_num_batched_tokens: int = 8):
     builder.cp_kv_cache_interleave_size = 1
     builder.use_pcp = False
     builder.use_shardq = False
+    builder.dcp_shardq = None
     builder._prefill_backend = None
 
     builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]
@@ -312,7 +318,11 @@ def _construct_builder(monkeypatch, impl: SimpleNamespace, cache_dtype: str):
         speculative_config=None,
         compilation_config=SimpleNamespace(
             static_forward_context={
-                "layers.0": SimpleNamespace(impl=impl, prefill_backend=None)
+                "layers.0": SimpleNamespace(
+                    impl=impl,
+                    prefill_backend=None,
+                    get_attn_backend=lambda: sparse_mod.ROCMAiterMLASparseBackend,
+                )
             }
         ),
     )
@@ -513,7 +523,8 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
     """
     builder = _make_builder()
     builder.vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(sparse_mla_force_mqa=False)
+        attention_config=SimpleNamespace(sparse_mla_force_mqa=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
     query_start_loc = torch.tensor([0, 1, 5], dtype=torch.int32)
@@ -541,7 +552,7 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
         num_decode_tokens=1,
         seq_lens=seq_lens,
         prefill_max_seq_len=4,
-        prefill=SimpleNamespace(use_dense_mha=True),
+        prefill=SimpleNamespace(route=SparseMLAPrefillRoute.DENSE_MHA),
     )
 
     monkeypatch.setattr(
@@ -597,7 +608,8 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
     """
     builder = _make_builder()
     builder.vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(sparse_mla_force_mqa=False)
+        attention_config=SimpleNamespace(sparse_mla_force_mqa=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
     # One decode token followed by a five-token prefill.  topk_tokens is four,
@@ -627,7 +639,7 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
         num_decode_tokens=1,
         seq_lens=seq_lens,
         prefill_max_seq_len=5,
-        prefill=SimpleNamespace(use_dense_mha=False),
+        prefill=SimpleNamespace(route=SparseMLAPrefillRoute.SPARSE_MQA),
     )
 
     monkeypatch.setattr(
@@ -686,7 +698,7 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
     guards the slicing that prevents the index conversion from writing beyond
     the decode-sized output.
     """
-    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl = sparse_mod.ROCMAiterMLASparseImpl.__new__(sparse_mod.ROCMAiterMLASparseImpl)
     impl.kv_cache_dtype = "auto"
     impl.num_heads = 4
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
@@ -735,7 +747,7 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache_dtype):
     """Both cache dtypes must slice mixed-batch metadata to decode queries."""
-    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl = sparse_mod.ROCMAiterMLASparseImpl.__new__(sparse_mod.ROCMAiterMLASparseImpl)
     impl.kv_cache_dtype = kv_cache_dtype
     impl.num_heads = 4
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
@@ -807,7 +819,8 @@ def test_sparse_metadata_workload_length_dtype_matrix(
     builder = _make_builder()
     builder._num_attention_heads = num_heads
     builder.vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(sparse_mla_force_mqa=False)
+        attention_config=SimpleNamespace(sparse_mla_force_mqa=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
     if kv_cache_dtype == "fp8":
         builder._mla_q_dtype = current_platform.fp8_dtype()
@@ -862,7 +875,15 @@ def test_sparse_metadata_workload_length_dtype_matrix(
         num_decode_tokens=num_decodes,
         seq_lens=seq_lens,
         prefill_max_seq_len=prefill_len if num_prefills else 0,
-        prefill=SimpleNamespace(use_dense_mha=not is_long) if num_prefills else None,
+        prefill=(
+            SimpleNamespace(
+                route=SparseMLAPrefillRoute.SPARSE_MQA
+                if is_long
+                else SparseMLAPrefillRoute.DENSE_MHA
+            )
+            if num_prefills
+            else None
+        ),
     )
     monkeypatch.setattr(
         sparse_mod.SparseMLACommonMetadataBuilder,

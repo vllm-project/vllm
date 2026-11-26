@@ -19,6 +19,10 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t CuCount);
 
+torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
+                         const std::optional<at::Tensor>& in_bias,
+                         const int64_t logical_M, const int64_t CuCount);
+
 void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
                const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
                const at::Tensor& scale_a, const at::Tensor& scale_b,
@@ -43,6 +47,13 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
+
+void moe_w4a8_decode_rdna3(
+    at::Tensor& out, const at::Tensor& x, const at::Tensor& topk_ids,
+    const at::Tensor& topk_weights, const std::optional<at::Tensor>& expert_map,
+    at::Tensor& workspace, const at::Tensor& w13, const at::Tensor& w13_scale,
+    const std::optional<at::Tensor>& w13_zp, const at::Tensor& w2,
+    const at::Tensor& w2_scale, const std::optional<at::Tensor>& w2_zp);
 
 // RDNA3.5 decode and prefill attention: the fields of every build (none off
 // gfx1151), and a launch of one build by its index.

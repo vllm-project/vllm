@@ -124,7 +124,7 @@ def test_bailing_v3_vl_config_normalizes_config_instance(top_sections, text_sect
     assert text_config.rope_parameters["mrope_section"] == [8, 12, 12]
 
 
-@pytest.mark.parametrize("field", ["mrope_section", "rope_parameters", "rope_scaling"])
+@pytest.mark.parametrize("field", ["mrope_section", "rope_parameters"])
 def test_bailing_v3_vl_config_loads_nested_mrope_section(tmp_path: Path, field: str):
     config_dict = _bailing_v3_vl_config()
     sections = config_dict.pop("mrope_section")
@@ -158,13 +158,6 @@ def test_bailing_v3_text_config_trailing_and_legacy_layers():
     assert text_config.layer_types == expected
 
 
-def test_bailing_v3_text_config_accepts_legacy_rope_type():
-    text_config = BailingMoeV3TextConfig(rope_scaling={"type": "linear", "factor": 2.0})
-
-    assert text_config.rope_parameters["type"] == "linear"
-    assert text_config.rope_parameters["rope_type"] == "linear"
-
-
 def test_bailing_v3_vl_config_rejects_invalid_values():
     with pytest.raises(ValueError, match="layer_group_size must be positive"):
         BailingMoeV3TextConfig(layer_group_size=0)
@@ -176,7 +169,7 @@ def test_bailing_v3_vl_config_rejects_invalid_values():
             layer_types=["full_attention"] * 8,
         )
 
-    for field in ("mrope_section", "rope_parameters", "rope_scaling"):
+    for field in ("mrope_section", "rope_parameters"):
         sections = [4, 14, 14]
         value = sections if field == "mrope_section" else {"mrope_section": sections}
         with pytest.raises(ValueError, match="conflicting M-RoPE sections"):

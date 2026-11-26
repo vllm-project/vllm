@@ -1951,10 +1951,6 @@ class CohereASRDummyInputsBuilder(BaseDummyInputsBuilder[CohereASRProcessingInfo
 class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessingInfo]):
     skip_decoder_start_token: bool = True
 
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return True
-
     def create_encoder_prompt(
         self,
         prompt: list[int],

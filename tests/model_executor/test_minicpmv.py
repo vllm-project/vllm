@@ -27,13 +27,12 @@ def new_model_4_6() -> MiniCPMV4_6ForConditionalGeneration:
 def make_model_4_6(
     monkeypatch: pytest.MonkeyPatch,
 ) -> MiniCPMV4_6ForConditionalGeneration:
-    model = new_model_4_6()
     monkeypatch.setattr(
-        model,
+        MiniCPMV4_6ForConditionalGeneration,
         "_process_vision_input",
-        lambda vision_input, use_vit_merger=None: [vision_input["image_embeds"]],
+        lambda self, vision_input, use_vit_merger=None: [vision_input["image_embeds"]],
     )
-    return model
+    return new_model_4_6()
 
 
 def test_video_embeds_reach_the_vision_parser():
@@ -132,15 +131,17 @@ class TestPerItemMergerFlags:
     def test_process_vision_input_applies_flags_per_item(self, monkeypatch):
         calls: list[str | None] = []
 
-        def fake_get_vision_hidden_states(data, downsample_mode=None):
+        def fake_get_vision_hidden_states(self, data, downsample_mode=None):
             calls.append(downsample_mode)
             tag = 1.0 if downsample_mode == "16x" else 0.0
             return [torch.full((1,), tag) for _ in data["pixel_values"]]
 
-        model = new_model_4_6()
         monkeypatch.setattr(
-            model, "get_vision_hidden_states", fake_get_vision_hidden_states
+            MiniCPMV4_6ForConditionalGeneration,
+            "get_vision_hidden_states",
+            fake_get_vision_hidden_states,
         )
+        model = new_model_4_6()
 
         image_input = {
             "type": "pixel_values",
@@ -166,14 +167,16 @@ class TestPerItemMergerFlags:
     def test_process_vision_input_uses_one_group_for_uniform_flags(self, monkeypatch):
         calls: list[str | None] = []
 
-        def fake_get_vision_hidden_states(data, downsample_mode=None):
+        def fake_get_vision_hidden_states(self, data, downsample_mode=None):
             calls.append(downsample_mode)
             return [torch.zeros(1) for _ in data["pixel_values"]]
 
-        model = new_model_4_6()
         monkeypatch.setattr(
-            model, "get_vision_hidden_states", fake_get_vision_hidden_states
+            MiniCPMV4_6ForConditionalGeneration,
+            "get_vision_hidden_states",
+            fake_get_vision_hidden_states,
         )
+        model = new_model_4_6()
 
         image_input = {
             "type": "pixel_values",

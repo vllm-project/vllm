@@ -4,8 +4,8 @@
 configs, one test per config.
 
 Sized for a 2-GPU pod so it can run on every PR; the full 4-GPU sweeps
-(TP2/TP2, FlashInfer, the wider DP-EP and SW sets, cross-layer, Mamba1) run
-nightly only (see .buildkite/test_areas/disaggregated.yaml).
+(TP2/TP2, FlashInfer, the wider DP-EP and SW sets, cross-layer) run nightly
+only (see .buildkite/test_areas/disaggregated.yaml).
 
 Each test runs run_accuracy_test.sh with its config's environment, which
 starts the prefill and decode servers and the proxy, runs test_accuracy.py
@@ -37,8 +37,8 @@ DENSE_CONFIGS = [
     # TP shapes and modes on the dense default model (Qwen3-0.6B). TP1/TP1
     # gets one dedicated GPU per side. The hetero-TP configs (P TP1/D TP2 and
     # P TP2/D TP1) share one GPU between the prefiller and one decoder rank
-    # (0.35 each), as does push-mode PP prefill (P TP1xPP2, D TP2, sharing
-    # both GPUs). DP-attention decode runs the nightly sweep's MoE model
+    # (0.35 each), as does PP prefill in pull and push modes (P TP1xPP2,
+    # D TP2, sharing both GPUs). DP-attention decode runs the nightly sweep's MoE model
     # (deepseek-vl2-tiny, ~6.5 GB bf16): P TP1 and one D DP2 rank share GPU0,
     # so it needs 0.4 per engine to keep room for KV and CUDA contexts.
     pytest.param(
@@ -74,6 +74,16 @@ DENSE_CONFIGS = [
             "MODEL_NAMES": "deepseek-ai/deepseek-vl2-tiny",
         },
         id="dp-ep-p-tp1-d-dp2",
+    ),
+    pytest.param(
+        {
+            "KV_CONNECTOR": "NixlConnector",
+            "GPU_MEMORY_UTILIZATION": "0.35",
+            "PREFILLER_PP_SIZE": "2",
+            "PREFILLER_TP_SIZE": "1",
+            "DECODER_TP_SIZE": "2",
+        },
+        id="pull-p-pp2-d-tp2",
     ),
     pytest.param(
         {
@@ -120,7 +130,7 @@ ARCH_CONFIGS = [
             "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
             "GPU_MEMORY_UTILIZATION": "0.8",
             "MODEL_NAMES": "ibm-granite/granite-4.0-h-tiny",
-            "VLLM_SERVE_EXTRA_ARGS": "--max-model-len,8192,--trust-remote-code",
+            "VLLM_SERVE_EXTRA_ARGS": "--max-model-len,8192",
         },
         id="mamba2-granite-4.0-h-tiny",
     ),

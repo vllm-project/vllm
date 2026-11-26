@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class PEFTHelper:
     """A helper class for PEFT configurations, specifically designed for LoRA.
     This class handles configuration validation, compatibility checks for

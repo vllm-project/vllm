@@ -125,13 +125,7 @@ def test_gpqa_correctness(config_filename):
     server_args = shlex.split(server_args_str) if server_args_str else []
 
     # Add standard server arguments
-    server_args.extend(
-        [
-            "--trust-remote-code",
-            "--enforce-eager",
-            "--disable-uvicorn-access-log",
-        ]
-    )
+    server_args.extend(["--enforce-eager", "--disable-uvicorn-access-log"])
 
     # Build server environment with tiktoken path and any config-specified vars
     server_env = {"TIKTOKEN_ENCODINGS_BASE": str(TIKTOKEN_DATA_DIR)}

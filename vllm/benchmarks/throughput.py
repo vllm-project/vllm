@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     BenchmarkDataset,
+    PrefixRepetitionRandomDataset,
     RandomDataset,
     SampleRequest,
     add_random_dataset_base_args,
@@ -524,11 +525,16 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
-# --random-* length -> (legacy option it overrides, value when neither is set).
-_RANDOM_LEN_FALLBACKS = {
+# Dataset length -> (general option it overrides, value when neither is set).
+_DATASET_LEN_FALLBACKS = {
     "random_input_len": ("input_len", RandomDataset.DEFAULT_INPUT_LEN),
     "random_output_len": ("output_len", RandomDataset.DEFAULT_OUTPUT_LEN),
     "random_prefix_len": ("prefix_len", RandomDataset.DEFAULT_PREFIX_LEN),
+    "custom_output_len": ("output_len", None),
+    "prefix_repetition_output_len": (
+        "output_len",
+        PrefixRepetitionRandomDataset.DEFAULT_OUTPUT_LEN,
+    ),
 }
 
 
@@ -548,11 +554,11 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     """
     d = vars(args).copy()
-    # random_*: prefer --random-* over legacy --input/output/prefix-len, then
-    # the RandomDataset defaults. Callers without the legacy flags (e.g. bench
+    # Prefer the dataset-specific flag over legacy --input/output/prefix-len,
+    # then the dataset default. Callers without the legacy flags (e.g. bench
     # mm-processor) omit them, so read them optionally. Identity checks, not
     # truthiness: an explicit 0 must not fall through to them.
-    for name, (legacy, default) in _RANDOM_LEN_FALLBACKS.items():
+    for name, (legacy, default) in _DATASET_LEN_FALLBACKS.items():
         value = getattr(args, name, None)
         if value is None:
             value = getattr(args, legacy, None)
@@ -958,21 +964,21 @@ def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--prefix-repetition-prefix-len",
         type=int,
-        default=None,
+        default=PrefixRepetitionRandomDataset.DEFAULT_PREFIX_LEN,
         help="Number of prefix tokens per request, used only for prefix "
         "repetition dataset.",
     )
     parser.add_argument(
         "--prefix-repetition-suffix-len",
         type=int,
-        default=None,
+        default=PrefixRepetitionRandomDataset.DEFAULT_SUFFIX_LEN,
         help="Number of suffix tokens per request, used only for prefix "
         "repetition dataset. Total input length is prefix_len + suffix_len.",
     )
     parser.add_argument(
         "--prefix-repetition-num-prefixes",
         type=int,
-        default=None,
+        default=PrefixRepetitionRandomDataset.DEFAULT_NUM_PREFIXES,
         help="Number of prefixes to generate, used only for prefix repetition "
         "dataset. Prompts per prefix is num_requests // num_prefixes.",
     )
@@ -987,14 +993,15 @@ def add_cli_args(parser: FlexibleArgumentParser):
     # (random, random-mm, random-rerank)
     add_random_dataset_base_args(parser)
     # Unset unless passed, so the legacy --input-len/--output-len/--prefix-len
-    # apply when given; _to_serve_args falls back to the RandomDataset defaults.
+    # apply when given; _to_serve_args falls back to the dataset defaults.
     for action in parser._actions:
-        if action.dest in _RANDOM_LEN_FALLBACKS:
-            legacy, default = _RANDOM_LEN_FALLBACKS[action.dest]
+        if action.dest in _DATASET_LEN_FALLBACKS:
+            legacy, default = _DATASET_LEN_FALLBACKS[action.dest]
             action.default = None
+            fallback = "" if default is None else f"; if neither is set, {default}"
             action.help = (
                 f"{action.help} Takes precedence over "
-                f"--{legacy.replace('_', '-')}; if neither is set, {default}."
+                f"--{legacy.replace('_', '-')}{fallback}."
             )
     add_random_multimodal_dataset_args(parser)
 

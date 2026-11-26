@@ -14,6 +14,7 @@ from vllm.multimodal.video_decoders import (
     VideoDecoderBackend,
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_frame_copies,
     decode_video,
     resolve_video_backend_kwargs,
 )
@@ -31,6 +32,13 @@ logger = init_logger(__name__)
 DecodedFrames: TypeAlias = npt.NDArray | torch.Tensor
 """Decoded video frames: a host `np.ndarray`, or a device `torch.Tensor`
 when a GPU decoding codec is used (e.g. torchcodec with `device="cuda"`)."""
+
+
+def _frame_nbytes(frames: DecodedFrames) -> int:
+    """Size in bytes of one frame of `frames`."""
+    if isinstance(frames, torch.Tensor):
+        return frames[0].numel() * frames.element_size()
+    return frames[0].nbytes
 
 
 class VideoLoaderRegistry(ExtensionManager):
@@ -365,7 +373,11 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
 
 @VIDEO_LOADER_REGISTRY.register(
     "qwen3_vl",
-    video_processor=("Qwen3VLVideoProcessor", "Cosmos3EdgeVideoProcessor"),
+    video_processor=(
+        "Qwen3VLVideoProcessor",
+        "Cosmos3EdgeVideoProcessor",
+        "Lfm3VlVideoProcessor",
+    ),
 )
 class Qwen3VLVideoBackend(VideoBackend):
     default_num_frames: ClassVar[int] = -1
@@ -584,6 +596,8 @@ class EmbeddingGemma2VideoBackend(VideoBackend):
             idx_to_pos = {idx: pos for pos, idx in enumerate(valid_frame_indices)}
             if all(idx in idx_to_pos for idx in requested_indices):
                 positions = [idx_to_pos[idx] for idx in requested_indices]
+                # Charge the repeated frames before they are allocated.
+                charge_frame_copies(len(positions) - len(frames), _frame_nbytes(frames))
                 if isinstance(frames, np.ndarray):
                     frames = frames[positions]
                 else:
@@ -1180,6 +1194,7 @@ class GLMGAVideoBackend(VideoBackend):
         # Ensure even frame count — matches HF's sample_frames even-padding
         # and _preprocess temporal_patch_size divisibility check.
         if frames.shape[0] & 1:
+            charge_frame_copies(1, _frame_nbytes(frames))
             frames = np.concatenate([frames, frames[-1:]], axis=0)
         return frames, metadata
 
@@ -1499,100 +1514,6 @@ class NemotronVLVideoBackend(VideoBackend):
         return frames, metadata
 
 
-@VIDEO_LOADER_REGISTRY.register("openpangu")
-class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
-    @classmethod
-    def compute_frames_index_to_sample(
-        cls,
-        source: VideoSourceMetadata,
-        target: VideoTargetMetadata,
-        **kwargs,
-    ) -> list[int]:
-        total_frames_num = source.total_frames_num
-        original_fps = source.original_fps
-        num_frames = target.num_frames
-        fps = target.fps
-
-        # The timestamp of the rightmost frame, cannot be used to calculate frame 0.
-        if total_frames_num >= 1 and original_fps > 0:
-            total_duration = (total_frames_num - 1) / original_fps
-        else:
-            total_duration = 0
-
-        # `fps` is the FPS parameter passed in for sampling,
-        # -1 indicates that sampling can be performed directly without FPS limitation.
-        if fps > 0:
-            # Num_frames is the maximum number of frames to sample.
-            # If fewer frames are sampled at this sample_fps, the update duration will be longer. # noqa: E501
-            if num_frames >= int(total_duration * fps) + 1:
-                num_frames = int(total_duration * fps) + 1
-                # Under the new maximum frame rate, the video duration of the rightmost frame, # noqa: E501
-                # cannot be calculated for frame 0.
-                total_duration = min(total_duration, (num_frames - 1) / fps)
-        elif fps != -1:
-            raise ValueError(
-                f"requires dataset fps is -1 or greater than 0 but got {fps}"
-            )
-
-        sample_frame_timestamps = np.linspace(
-            0, total_duration, num_frames, dtype=float
-        )
-        frames_indices = [
-            min(total_frames_num - 1, round(t * original_fps))
-            for t in sample_frame_timestamps
-        ]
-        return frames_indices
-
-    @classmethod
-    def load_bytes(
-        cls,
-        data: bytes,
-        num_frames: int = -1,
-        fps: int = 2,
-        max_duration: int = 300,
-        frame_recovery: bool = False,
-        **kwargs,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """Load video frames with dynamic sampling based on duration.
-
-        Args:
-            data: Raw video bytes
-            num_frames: Not used in dynamic backend
-            fps: Target FPS for sampling (default: 2)
-            max_duration: Maximum video duration to process (default: 300s)
-            frame_recovery: Enable forward-scan recovery for failed frames
-
-        Returns:
-            Tuple of (frames_array, metadata_dict)
-
-        """
-        # recompute source metadata with adjusted duration to ensure correct
-        # sampling indices computation
-        target = VideoTargetMetadata(
-            num_frames=num_frames,
-            fps=fps,
-            max_duration=max_duration,
-        )
-
-        frames, source, _, valid_frame_indices = decode_video(
-            "opencv",
-            cls,
-            data,
-            target,
-            {},
-            {},
-            frame_recovery=frame_recovery,
-        )
-
-        # Use transformers.video_utils.VideoMetadata format
-        metadata = cls.create_hf_metadata(
-            source=source,
-            video_backend="opencv_dynamic",
-            valid_frame_indices=valid_frame_indices,
-        )
-        return frames, metadata
-
-
 @VIDEO_LOADER_REGISTRY.register("clef_omni")
 class ClefOmniVideoBackend(VideoBackend):
     """Clef-Omni's reference sampling: the first frame at or after each
@@ -1648,6 +1569,7 @@ class ClefOmniVideoBackend(VideoBackend):
             **kwargs,
         )
         if len(frames) % 2:
+            charge_frame_copies(1, _frame_nbytes(frames))
             last = frames[-1:]
             if isinstance(frames, torch.Tensor):
                 frames = torch.cat([frames, last])

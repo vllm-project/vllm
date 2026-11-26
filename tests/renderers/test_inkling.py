@@ -10,13 +10,17 @@ in token-level parity. Image blocks emit the bare `<|content_image|>` marker;
 
 import pytest
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers.inkling import (
     InklingRenderer,
     _HfBackedTmlTokenizer,
+    _resolve_inkling2_reasoning_effort,
     _resolve_reasoning_effort,
 )
 from vllm.renderers.inkling_encoding import (
+    OPTIONAL_SPECIAL_TOKENS,
     SPECIAL_TOKEN_SPELLINGS,
+    render_inkling2_messages,
     render_inkling_messages,
 )
 from vllm.renderers.params import ChatParams
@@ -261,6 +265,108 @@ class TestRenderingSemantics:
             == "<|message_tool|>my_tool<|content_text|>ok<|end_message|>"
         )
 
+    def test_tool_response_image_part(self, inkling_tokenizer):
+        """Tool results may carry images (e.g. screenshots); every part must
+        render and the image must emit a marker for the MM processor."""
+        messages = [
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "name": "screenshot",
+                "content": [
+                    {"type": "text", "text": "captured"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == (
+            "<|message_tool|>screenshot<|content_text|>captured<|end_message|>"
+            "<|message_tool|>screenshot<|content_image|><|end_message|>"
+        )
+
+    def test_tool_response_image_marker_per_part(self, inkling_tokenizer):
+        image = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"},
+        }
+        text = render_text(
+            inkling_tokenizer,
+            [{"role": "tool", "name": "shot", "content": [image, image, image]}],
+            add_generation_prompt=False,
+        )
+        assert text.count("<|content_image|>") == 3
+
+    def test_tool_response_multiple_text_parts(self, inkling_tokenizer):
+        messages = [
+            {
+                "role": "tool",
+                "name": "bash",
+                "content": [
+                    {"type": "text", "text": "stdout"},
+                    {"type": "text", "text": "stderr"},
+                ],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == ("<|message_tool|>bash<|content_text|>stdoutstderr<|end_message|>")
+
+    def test_tool_response_coalesces_text_around_media(self, inkling_tokenizer):
+        image = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"},
+        }
+        messages = [
+            {
+                "role": "tool",
+                "name": "shot",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "text", "text": " and "},
+                    image,
+                    {"type": "text", "text": "after"},
+                    {"type": "text", "text": " image"},
+                ],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == (
+            "<|message_tool|>shot<|content_text|>before and <|end_message|>"
+            "<|message_tool|>shot<|content_image|><|end_message|>"
+            "<|message_tool|>shot<|content_text|>after image<|end_message|>"
+        )
+
+    @pytest.mark.parametrize("content", ["", None, []])
+    def test_tool_response_empty_still_emits_block(self, inkling_tokenizer, content):
+        assert (
+            render_text(
+                inkling_tokenizer,
+                [{"role": "tool", "name": "noop", "content": content}],
+                add_generation_prompt=False,
+            )
+            == "<|message_tool|>noop<|content_text|><|end_message|>"
+        )
+
+    def test_tool_response_audio_part(self, inkling_tokenizer):
+        messages = [
+            {
+                "role": "tool",
+                "name": "record",
+                "content": [{"type": "input_audio", "input_audio": {}}],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == (
+            "<|message_tool|>record<|content_audio_input|><|audio_end|><|end_message|>"
+        )
+
     def test_tool_call_args_object_form(self, inkling_tokenizer):
         messages = [
             {
@@ -325,6 +431,7 @@ class TestReasoningEffort:
     def test_frontend_defaults_to_high(self, inkling_tokenizer):
         renderer = InklingRenderer.__new__(InklingRenderer)
         renderer._inkling_tokenizer = inkling_tokenizer
+        renderer._is_inkling2 = False
 
         text = decode(
             renderer._render(
@@ -346,6 +453,7 @@ class TestReasoningEffort:
     def test_zero_effort_has_one_canonical_spelling(self, inkling_tokenizer, value):
         renderer = InklingRenderer.__new__(InklingRenderer)
         renderer._inkling_tokenizer = inkling_tokenizer
+        renderer._is_inkling2 = False
 
         text = decode(
             renderer._render(
@@ -457,7 +565,8 @@ class TestSpecialTokenResolution:
     def test_all_spellings_covered(self):
         # Every semantic token must resolve from the reference vocab.
         for token, spellings in SPECIAL_TOKEN_SPELLINGS.items():
-            assert any(s in _SPECIAL_VOCAB for s in spellings), token
+            if token not in OPTIONAL_SPECIAL_TOKENS:
+                assert any(s in _SPECIAL_VOCAB for s in spellings), token
 
 
 def test_render_inkling_messages_direct_protocol():
@@ -482,3 +591,434 @@ def test_render_inkling_messages_direct_protocol():
         add_generation_prompt=True,
     )
     assert ids == [200000, 200004, ord("h"), ord("i"), 200010, 200001]
+
+
+# ── Inkling2 ──────────────────────────────────────────────────────────────
+# Expected strings are the reference renderer's output for the same requests.
+
+_INKLING2_VOCAB = {
+    "<|endoftext|>": 199999,
+    "<|message_user|>": 200000,
+    "<|message_model|>": 200001,
+    "<|message_system|>": 200002,
+    "<|message_tool|>": 200003,
+    "<|content_text|>": 200004,
+    "<|content_image|>": 200005,
+    "<|content_model_end_sampling|>": 200006,
+    "<|content_thinking|>": 200008,
+    "<|end_message|>": 200010,
+    "<|content_tool_error|>": 200022,
+    "<|content_xml|>": 200024,
+    "<|content_invoke_tool_json|>": 200049,
+    "<|content_invoke_tool_text|>": 200057,
+}
+_INKLING2_ID_TO_SPECIAL = {v: k for k, v in _INKLING2_VOCAB.items()}
+
+_WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get weather information",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}
+
+
+_SEARCH_TOOL = {
+    "type": "function",
+    "function": {"name": "search", "parameters": {"type": "object"}},
+}
+
+_DECLARE_WEATHER_AND_SEARCH = (
+    "<|message_system|>tool_declare<|content_xml|>"
+    '[{"description":"Get weather information","name":"get_weather",'
+    '"parameters":{"properties":{"city":{"type":"string"}},'
+    '"required":["city"],"type":"object"},"type":"function"},'
+    '{"description":"","name":"search","parameters":{"type":"object"},'
+    '"type":"function"}]<|end_message|>'
+)
+_EFFORT_09 = "<|message_system|><|content_text|>Thinking effort level: 0.9"
+
+
+class FakeInkling2HfTokenizer:
+    def get_vocab(self):
+        return dict(_INKLING2_VOCAB)
+
+    def encode(self, text, add_special_tokens=False, split_special_tokens=False):
+        assert not add_special_tokens and split_special_tokens
+        return [ord(ch) for ch in text]
+
+
+def render_inkling2_text(messages, **kwargs):
+    tokenizer = _HfBackedTmlTokenizer(
+        FakeInkling2HfTokenizer(), split_special_tokens=True
+    )
+    return "".join(
+        _INKLING2_ID_TO_SPECIAL.get(tid, chr(tid))
+        for tid in render_inkling2_messages(messages, tokenizer, **kwargs)
+    )
+
+
+class TestInkling2Rendering:
+    def test_system_and_user_without_generation_prefix(self):
+        assert render_inkling2_text(
+            [
+                {"role": "system", "content": "You are a concise assistant."},
+                {"role": "user", "content": "What is 2 + 2?"},
+            ]
+        ) == (
+            "<|message_system|><|content_text|>You are a concise assistant."
+            "<|end_message|>"
+            "<|message_system|><|content_text|>Thinking effort level: 0.9"
+            "<|end_message|>"
+            "<|message_user|><|content_text|>What is 2 + 2?<|end_message|>"
+        )
+
+    def test_reasoning_history(self):
+        assert render_inkling2_text(
+            [
+                {"role": "user", "content": "What is 2 + 2?"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "Add the two numbers.",
+                    "content": "4",
+                },
+                {"role": "user", "content": "Thanks!"},
+            ],
+            reasoning_effort=0.8,
+        ) == (
+            "<|message_system|><|content_text|>Thinking effort level: 0.8"
+            "<|end_message|>"
+            "<|message_user|><|content_text|>What is 2 + 2?<|end_message|>"
+            "<|message_model|><|content_thinking|>Add the two numbers."
+            "<|end_message|>"
+            "<|message_model|><|content_text|>4<|end_message|>"
+            "<|content_model_end_sampling|>"
+            "<|message_user|><|content_text|>Thanks!<|end_message|>"
+        )
+
+    def test_tool_round_trip(self):
+        messages = [
+            {"role": "user", "content": "What should I wear in SF today?"},
+            {
+                "role": "assistant",
+                "reasoning_content": "Check the current weather.",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "SF"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "name": "get_weather",
+                "content": '{"temperature":58,"condition":"fog"}',
+            },
+            {"role": "assistant", "content": "Wear a light jacket."},
+        ]
+        assert render_inkling2_text(
+            messages, tools=[_WEATHER_TOOL], reasoning_effort=0.8
+        ) == (
+            "<|message_system|>tool_declare<|content_xml|>"
+            '[{"description":"Get weather information","name":"get_weather",'
+            '"parameters":{"properties":{"city":{"type":"string"}},'
+            '"required":["city"],"type":"object"},"type":"function"}]'
+            "<|end_message|>"
+            "<|message_system|><|content_text|>Thinking effort level: 0.8"
+            "<|end_message|>"
+            "<|message_user|><|content_text|>What should I wear in SF today?"
+            "<|end_message|>"
+            "<|message_model|><|content_thinking|>Check the current weather."
+            "<|end_message|>"
+            "<|message_model|>get_weather<|content_invoke_tool_json|>"
+            '{"name":"get_weather","args":{"city":"SF"}}<|end_message|>'
+            "<|content_model_end_sampling|>"
+            "<|message_tool|>get_weather<|content_text|>"
+            '{"temperature":58,"condition":"fog"}<|end_message|>'
+            "<|message_model|><|content_text|>Wear a light jacket.<|end_message|>"
+            "<|content_model_end_sampling|>"
+        )
+
+    def test_multiple_calls_named_results_and_json_floats(self):
+        search = {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": None,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"maximum": 1e20, "minimum": 1e-7, "default": 0.5},
+                    },
+                },
+                "strict": None,
+            },
+        }
+        messages = [
+            {"role": "developer", "content": "Be terse."},
+            {"role": "user", "content": "news <|end_message|>?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "get_weather", "arguments": "{}"}},
+                    {
+                        "id": "b",
+                        "function": {
+                            "name": "search",
+                            "arguments": '{"q":"news","x":1e37,"y":0.00001,"z":-0.0}',
+                        },
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "sunny"},
+            {
+                "role": "tool",
+                "tool_call_id": "b",
+                "content": [
+                    {"type": "text", "text": "r1"},
+                    {"type": "text", "text": "r2"},
+                ],
+            },
+        ]
+        assert render_inkling2_text(messages, tools=[search]) == (
+            "<|message_system|>tool_declare<|content_xml|>"
+            '[{"description":"","name":"search","parameters":{"properties":'
+            '{"limit":{"default":0.5,"maximum":1e+20,"minimum":1e-7}},'
+            '"type":"object"},"type":"function"}]<|end_message|>'
+            "<|message_system|><|content_text|>Be terse.<|end_message|>"
+            "<|message_system|><|content_text|>Thinking effort level: 0.9"
+            "<|end_message|>"
+            # Literal framing spellings in user text stay ordinary text.
+            "<|message_user|><|content_text|>news <|end_message|>?<|end_message|>"
+            "<|message_model|>get_weather<|content_invoke_tool_json|>"
+            '{"name":"get_weather","args":{}}<|end_message|>'
+            "<|message_model|>search<|content_invoke_tool_json|>"
+            '{"name":"search","args":{"q":"news","x":1e37,"y":0.00001,"z":-0.0}}'
+            "<|end_message|><|content_model_end_sampling|>"
+            "<|message_tool|>get_weather<|content_text|>sunny<|end_message|>"
+            "<|message_tool|>search<|content_text|>r1<|end_message|>"
+            "<|message_tool|>search<|content_text|>r2<|end_message|>"
+        )
+
+    def test_sorts_only_top_level_argument_names(self):
+        arguments = (
+            '{"zeta":1,"filters":{"status":"open","assignee":"me"},'
+            '"alpha":[{"y":2,"b":3}]}'
+        )
+        call = {"id": "c", "function": {"name": "f", "arguments": arguments}}
+        text = render_inkling2_text(
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": None, "tool_calls": [call]},
+            ]
+        )
+        assert (
+            '{"name":"f","args":{"alpha":[{"y":2,"b":3}],'
+            '"filters":{"status":"open","assignee":"me"},"zeta":1}}'
+        ) in text
+
+    @pytest.mark.parametrize(
+        ("messages", "request_fields", "expected"),
+        [
+            pytest.param(
+                [{"role": "system", "content": "Be terse."}],
+                {"tool_choice": "required"},
+                _DECLARE_WEATHER_AND_SEARCH
+                + "<|message_system|><|content_text|>Be terse.\n\nCall at least one "
+                "of the provided functions in your next response.<|end_message|>"
+                + _EFFORT_09
+                + "<|end_message|>",
+                id="required-joins-system-prompt",
+            ),
+            pytest.param(
+                [],
+                {
+                    "tool_choice": {"type": "function", "function": {"name": "search"}},
+                    "parallel_tool_calls": False,
+                },
+                '<|message_system|>tool_declare<|content_xml|>[{"description":"",'
+                '"name":"search","parameters":{"type":"object"},"type":"function"}]'
+                "<|end_message|>"
+                + _EFFORT_09
+                + '\n\nCall the function named "search" exactly once in your next '
+                "response.<|end_message|>",
+                id="named-joins-effort-directive",
+            ),
+            pytest.param(
+                [],
+                {"parallel_tool_calls": False},
+                _DECLARE_WEATHER_AND_SEARCH
+                + _EFFORT_09
+                + "\n\nIf you call a function, call at most one function in your "
+                "next response.<|end_message|>",
+                id="auto-single-call",
+            ),
+            pytest.param(
+                [],
+                {"tool_choice": "none"},
+                _EFFORT_09 + "<|end_message|>",
+                id="none-declares-no-tools",
+            ),
+        ],
+    )
+    def test_tool_choice_renders_as_an_instruction(
+        self, messages, request_fields, expected
+    ):
+        messages = [*messages, {"role": "user", "content": "q"}]
+        tools = [_WEATHER_TOOL, _SEARCH_TOOL]
+        request = ChatCompletionRequest(
+            model=INKLING2_TOKENIZER, messages=messages, tools=tools, **request_fields
+        )
+        params = request.build_chat_params(None, "auto").with_defaults({"tools": tools})
+        renderer = InklingRenderer.__new__(InklingRenderer)
+        renderer._inkling_tokenizer = _HfBackedTmlTokenizer(
+            FakeInkling2HfTokenizer(), split_special_tokens=True
+        )
+        renderer._is_inkling2 = True
+
+        assert "".join(
+            _INKLING2_ID_TO_SPECIAL.get(tid, chr(tid))
+            for tid in renderer._render(messages, params)
+        ) == (expected + "<|message_user|><|content_text|>q<|end_message|>")
+
+    def test_responses_named_tool_choice_matches_chat_completions(self):
+        def render(tool_choice):
+            return render_inkling2_text(
+                [{"role": "user", "content": "q"}],
+                tools=[_WEATHER_TOOL, _SEARCH_TOOL],
+                tool_choice=tool_choice,
+            )
+
+        assert render({"type": "function", "name": "search"}) == render(
+            {"type": "function", "function": {"name": "search"}}
+        )
+
+    def test_empty_contents_are_kept(self):
+        assert render_inkling2_text(
+            [
+                {"role": "user", "content": ""},
+                {"role": "assistant", "content": ""},
+                {"role": "assistant", "content": None},
+                {"role": "user", "content": [{"type": "text", "text": ""}]},
+            ]
+        ) == (
+            "<|message_system|><|content_text|>Thinking effort level: 0.9"
+            "<|end_message|>"
+            "<|message_user|><|content_text|><|end_message|>"
+            "<|message_model|><|content_text|><|end_message|>"
+            "<|content_model_end_sampling|>"
+            "<|message_user|><|content_text|><|end_message|>"
+        )
+
+    def test_image_marker_and_typed_parts(self):
+        assert render_inkling2_text(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image_url", "image_url": {"url": "x"}},
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "hm"},
+                        {"type": "tool_error", "text": "no tool"},
+                    ],
+                },
+            ],
+            reasoning_effort=0.2,
+        ) == (
+            "<|message_system|><|content_text|>Thinking effort level: 0.2"
+            "<|end_message|>"
+            "<|message_user|><|content_text|>look<|end_message|>"
+            "<|message_user|><|content_image|><|end_message|>"
+            "<|message_model|><|content_thinking|>hm<|end_message|>"
+            "<|message_model|><|content_tool_error|>no tool<|end_message|>"
+            "<|content_model_end_sampling|>"
+        )
+
+    def test_continue_final_message(self):
+        messages = [
+            {"role": "user", "content": "Finish: The answer is"},
+            {"role": "assistant", "content": "The answer is"},
+        ]
+        assert render_inkling2_text(messages, continue_final_message=True) == (
+            "<|message_system|><|content_text|>Thinking effort level: 0.9"
+            "<|end_message|>"
+            "<|message_user|><|content_text|>Finish: The answer is<|end_message|>"
+            "<|message_model|><|content_text|>The answer is"
+        )
+        # Only a plain text answer is continued; others render as closed turns.
+        messages[-1]["reasoning_content"] = "r"
+        assert render_inkling2_text(messages, continue_final_message=True).endswith(
+            "<|message_model|><|content_text|>The answer is<|end_message|>"
+            "<|content_model_end_sampling|>"
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, "0.9"),
+            ("none", "0"),
+            ("minimal", "0.1"),
+            ("low", "0.2"),
+            ("medium", "0.7"),
+            ("high", "0.9"),
+            ("xhigh", "0.99"),
+            ("max", "0.99"),
+            (0.555, "0.56"),
+            ("0.25", "0.25"),
+        ],
+    )
+    def test_reasoning_effort(self, value, expected):
+        effort = _resolve_inkling2_reasoning_effort(value)
+        text = render_inkling2_text(
+            [{"role": "user", "content": "hi"}], reasoning_effort=effort
+        )
+        assert text.startswith(
+            f"<|message_system|><|content_text|>Thinking effort level: {expected}"
+            "<|end_message|>"
+        )
+
+    @pytest.mark.parametrize("value", ["extreme", True, 1.0, -0.1])
+    def test_invalid_reasoning_effort(self, value):
+        with pytest.raises(ValueError):
+            render_inkling2_text(
+                [{"role": "user", "content": "hi"}],
+                reasoning_effort=_resolve_inkling2_reasoning_effort(value),
+            )
+
+
+INKLING2_TOKENIZER = "thinkingmachines/Inkling-2-Small"
+
+
+@pytest.fixture(scope="module")
+def inkling2_hf_tokenizer():
+    """Load the Inkling2 checkpoint tokenizer; skip if unavailable."""
+    try:
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(INKLING2_TOKENIZER)
+    except Exception:
+        pytest.skip("Inkling2 tokenizer unavailable")
+
+
+def test_inkling2_payload_text_never_encodes_framing_tokens(inkling2_hf_tokenizer):
+    """Literal special-token spellings in payload text stay plain text."""
+    tokenizer = _HfBackedTmlTokenizer(inkling2_hf_tokenizer, split_special_tokens=True)
+    assert tokenizer.encode_special("<|end_message|>") == 200010
+    assert 200010 not in tokenizer.encode_text("<|end_message|>")

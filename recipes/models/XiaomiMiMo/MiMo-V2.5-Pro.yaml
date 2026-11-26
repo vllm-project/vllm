@@ -56,8 +56,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "8"
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--max-model-len"
       - "auto"
 
@@ -101,7 +99,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.5-Pro \
     --tensor-parallel-size 8 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --generation-config vllm
   ```
@@ -112,7 +109,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.5-Pro \
     --tensor-parallel-size 8 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --reasoning-parser mimo \
     --tool-call-parser mimo \

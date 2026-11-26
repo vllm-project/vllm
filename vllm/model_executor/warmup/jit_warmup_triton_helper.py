@@ -33,7 +33,7 @@ DispatchSpec = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _LaunchBindingPlan:
     input_targets: tuple[tuple[int, str], ...]
     stride_targets: tuple[tuple[str, str, int], ...]
@@ -179,7 +179,7 @@ def triton_ptr_range(tensor: Any) -> int:
     return tensor.untyped_storage().size()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TritonWarmupTensor:
     """Compile-only tensor metadata used by Triton warmup.
 
@@ -371,7 +371,7 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         return outputs
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TritonJitKey:
     """Process-local identity of one Triton JIT specialization."""
 
@@ -381,7 +381,7 @@ class TritonJitKey:
     cache_key: Hashable
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TritonCompileKey:
     """Triton-derived compile key with one non-comparing replay input."""
 
@@ -744,7 +744,7 @@ def triton_kernel_dispatcher_with_warmup(
     return decorate
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TritonPointerInputVariant:
     # Named pointer-alignment variant for compile-only Triton warmup.
     alignments: tuple[tuple[str, bool], ...]

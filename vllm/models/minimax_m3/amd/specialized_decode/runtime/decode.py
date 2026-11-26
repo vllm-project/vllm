@@ -35,7 +35,7 @@ def tp_agree(ok: bool) -> bool:
     return tp_agree(ok, get_tp_group().cpu_group)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Step:
     first_layer: int
     kernels: tuple[LayerKernel | None, ...]

@@ -35,7 +35,9 @@ use crate::routes::openai::chat_completions::types::{
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
     ChatMessageDelta,
 };
-use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
+use crate::routes::openai::utils::choices::{
+    ChoiceChunk, ChoiceResponse, merge_choice_chunk_streams, merge_choice_responses,
+};
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
@@ -69,27 +71,21 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let stream = body.stream;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
-    let lora_resolution = state.resolve_model_with_loras(requested_model).await;
+    let lora_resolution = state
+        .resolve_model_with_default_mm_loras(requested_model, body.media_modalities())
+        .await;
 
-    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
-        Ok(prepared) => prepared,
-        Err(error) => return error.into_response(),
-    };
-    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
-    {
-        return error.into_response();
-    }
-    if let Err(error) = validate_max_output_tokens(
+    let prepared = prepare_chat_request(body, &lora_resolution, request_context)?;
+    validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)?;
+    validate_max_output_tokens(
         "max_completion_tokens",
         prepared.chat_request.sampling_params.max_tokens,
         state.llm().info().max_model_len,
-    ) {
-        return error.into_response();
-    }
+    )?;
     let request_span = tracing::info_span!(
         "chat_completions",
         request_id = %prepared.request_id,
@@ -103,17 +99,12 @@ pub async fn chat_completions(
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
 
     let n = prepared.n;
-    let chat_streams = match state
+    let chat_streams = state
         .chat
         .chat_n(prepared.chat_request, n)
         .instrument(request_span.clone())
         .await
-    {
-        Ok(streams) => streams,
-        Err(error) => {
-            return chat_submit_error("failed to submit chat request", error).into_response();
-        }
-    };
+        .map_err(|error| chat_submit_error("failed to submit chat request", error))?;
 
     if stream {
         let chunk_streams = chat_streams
@@ -136,7 +127,10 @@ pub async fn chat_completions(
         let sse_stream =
             openai_sse_stream(merge_choice_chunk_streams(chunk_streams)).instrument(request_span);
 
-        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
+        Ok(sse_response(
+            sse_stream,
+            api_server_options.sse_keep_alive_interval,
+        ))
     } else {
         let responses = future::try_join_all(chat_streams.into_iter().map(|chat_stream| {
             collect_chat_completion(
@@ -151,32 +145,29 @@ pub async fn chat_completions(
             )
         }))
         .instrument(request_span.clone())
-        .await;
-        match responses {
-            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
-            Err(error) => error.into_response(),
-        }
+        .await?;
+        Ok(Json(merge_choice_responses(responses)).into_response())
     }
 }
 
-/// Merge the responses of a request's choices, in index order, like Python's
-/// non-streaming response for `n > 1`: the prompt-level fields come from the
-/// first choice, usage adds up per [`Usage::add_choice`], and per-request
-/// metrics, which describe a single sample, are reported only for `n = 1`.
-fn merge_choice_responses(responses: Vec<ChatCompletionResponse>) -> ChatCompletionResponse {
-    let mut responses = responses.into_iter();
-    let mut merged = responses.next().expect("a request has at least one choice");
-    for (index, response) in (1..).zip(responses) {
-        merged.metrics = None;
-        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
-            usage.add_choice(other);
-        }
-        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+impl ChoiceResponse for ChatCompletionResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
             choice.index = index;
-            choice
-        }));
+        }
     }
-    merged
+
+    fn usage_mut(&mut self) -> Option<&mut Usage> {
+        self.usage.as_mut()
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
+
+    fn append_choices(&mut self, other: Self) {
+        self.choices.extend(other.choices);
+    }
 }
 
 impl ChoiceChunk for ChatCompletionStreamResponse {
@@ -285,10 +276,7 @@ async fn collect_chat_completion(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref(),
-            &prompt_token_ids,
-        )?)
+        Some(prompt_logprobs_to_maps(prompt_logprobs.as_ref()))
     } else {
         None
     };
@@ -297,6 +285,7 @@ async fn collect_chat_completion(
         timestamps,
         usage.output_token_count,
         spec_decode_metrics,
+        None,
     );
     let usage = Usage::from_token_usage(
         usage.engine,
@@ -583,6 +572,7 @@ async fn chat_completion_chunk_stream(
                 message,
                 usage: final_usage,
                 timestamps,
+                first_content_token_ts,
                 spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
@@ -660,7 +650,8 @@ async fn chat_completion_chunk_stream(
                         enable_per_request_metrics,
                         timestamps,
                         final_usage.output_token_count,
-                        spec_decode_metrics,
+                        spec_decode_metrics.map(|value| *value),
+                        first_content_token_ts,
                     );
                     y.yield_ok(usage_chunk(
                         &envelope,
@@ -1272,12 +1263,13 @@ mod tests {
                     first_token_ts: 10.5,
                     last_token_ts: 11.0,
                 },
-                spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                first_content_token_ts: Some(10.75),
+                spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                     num_spec_tokens: 3,
                     histogram: vec![0, 1, 1, 0],
                     num_draft_tokens: 6,
                     ..Default::default()
-                }),
+                })),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1330,6 +1322,7 @@ mod tests {
         );
         assert!(chunks[..3].iter().all(|chunk| chunk.metrics.is_none()));
         let metrics = chunks[3].metrics.as_ref().expect("per-request metrics");
+        assert!((metrics.time_to_first_content_token_ms.unwrap() - 550.0).abs() < 1e-9);
         assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
         assert!((metrics.tokens_per_second.unwrap() - 1.25).abs() < 1e-9);
         assert_eq!(
@@ -1376,6 +1369,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1431,6 +1425,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: None,
@@ -1499,6 +1494,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1586,6 +1582,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1725,6 +1722,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 4, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1810,6 +1808,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1878,6 +1877,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(3, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1964,6 +1964,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2042,6 +2043,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2109,6 +2111,7 @@ mod tests {
                     message: Default::default(),
                     usage: done_usage(1, 1, 0),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: None,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,

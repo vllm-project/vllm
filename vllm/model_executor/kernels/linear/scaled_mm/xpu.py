@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
@@ -123,6 +124,12 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
 
 class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
@@ -177,7 +184,10 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         weight = layer.weight
         weight_scale = layer.weight_scale
-        return torch.ops._xpu_C.fp8_gemm_w8a16(x, weight, weight_scale, bias)
+        orig_shape = x.shape
+        x = x.reshape(-1, orig_shape[-1])  # flatten to [tokens, hidden]
+        out = torch.ops._xpu_C.fp8_gemm_w8a16(x, weight, weight_scale, bias)
+        return out.reshape(*orig_shape[:-1], out.shape[-1])
 
     def apply_scaled_mm(
         self,

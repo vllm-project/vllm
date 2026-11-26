@@ -4,6 +4,7 @@
 import pytest
 
 from tests.models.utils import GenerateModelInfo
+from tests.utils import large_gpu_mark
 
 from .ppl_utils import vqa_ppl_test
 
@@ -29,6 +30,17 @@ MODELS = [
         GenerateModelInfo("Qwen/Qwen3-VL-4B-Instruct", hf_ppl=11.916606903076172),
         32,
         {},
+    ),
+    pytest.param(
+        GenerateModelInfo(
+            "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            image_token_id=151655,
+            hf_ppl=7.431634902954102,
+        ),
+        32,
+        {},
+        # ~66 GB of bf16 weights must fit in the harness's 0.7 memory budget
+        marks=[large_gpu_mark(min_gb=120)],
     ),
     (
         GenerateModelInfo("Qwen/Qwen3.5-4B", hf_ppl=6.478141784667969),

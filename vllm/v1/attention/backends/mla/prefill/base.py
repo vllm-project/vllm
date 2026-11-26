@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class MLADimensions:
     qk_nope_head_dim: int
     qk_rope_head_dim: int

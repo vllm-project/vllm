@@ -170,7 +170,7 @@ def build_response_output_items(
     custom_names = custom_tool_names(tools)
     last_item_status = response_item_status(finish_reason)
 
-    if reasoning:
+    if reasoning is not None:
         outputs.append(
             ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",

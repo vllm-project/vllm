@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import in_single_pp_stage
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -66,7 +66,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
 
         self.vocab_size = config.vocab_size
 
-        assert get_pp_group().world_size == 1
+        assert not in_single_pp_stage()
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,

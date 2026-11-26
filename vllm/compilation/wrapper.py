@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dis
+import inspect
 import itertools
 import os
 import sys
 from abc import abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
-from types import CodeType
+from types import CodeType, FrameType
 from typing import Any, ParamSpec, TypeVar
 
 import torch
@@ -29,6 +30,18 @@ logger = init_logger(__name__)
 
 R = TypeVar("R")
 P = ParamSpec("P")
+
+
+def _bound_instance(frame: FrameType) -> Any:
+    """The instance a method frame is bound to. Also handles frames of wrappers
+    that take `(*args, **kwargs)`, such as Transformers' `deprecate_kwarg`."""
+    code = frame.f_code
+    if code.co_argcount:
+        return frame.f_locals[code.co_varnames[0]]
+    if code.co_flags & inspect.CO_VARARGS:
+        args = frame.f_locals[code.co_varnames[code.co_kwonlyargcount]]
+        return args[0] if args else None
+    return None
 
 
 @contextmanager
@@ -55,9 +68,6 @@ def _compilation_context() -> Generator[None, None, None]:
 def compile_model_with_stock_torch(
     model: torch.nn.Module, vllm_config: VllmConfig
 ) -> None:
-    from vllm.env_override import _apply_constrain_to_fx_strides_patch
-
-    _apply_constrain_to_fx_strides_patch()
     backend = vllm_config.compilation_config.init_backend(vllm_config)
     compilation_counter.stock_torch_compile_count += 1
     model.compile(fullgraph=True, backend=backend)
@@ -140,32 +150,14 @@ class TorchCompileWithNoGuardsWrapper:
                     entry.guard_type == "SHAPE_ENV" for entry in x
                 ]
             else:
-                if hasattr(torch.compiler, "skip_all_guards_unsafe"):
-                    # Torch 2.10+ provides skip_all_guards_unsafe
-                    options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
-                else:
-                    # Equivalent fallback for older PyTorch: skip all guards
-                    options["guard_filter_fn"] = lambda x: [False for _ in x]
+                options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
 
         compiled_ptr: Any = self.forward
         # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
 
-        # Apply the constrain_to_fx_strides patch before first compilation.
-        # This covers STOCK_TORCH_COMPILE and DYNAMO_ONCE paths. The VLLM
-        # compile paths call this from their own compile() methods too.
-        from vllm.env_override import _apply_constrain_to_fx_strides_patch
-
-        _apply_constrain_to_fx_strides_patch()
-
         aot_context = nullcontext()
         if self._allow_aot_compile and envs.VLLM_USE_AOT_COMPILE:
-            if hasattr(torch._dynamo.config, "enable_aot_compile"):
-                aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
-            else:
-                msg = "torch._dynamo.config.enable_aot_compile is not "
-                msg += "available. AOT compile is disabled and please "
-                msg += "upgrade PyTorch version to use AOT compile."
-                logger.warning(msg)
+            aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
 
         with aot_context:
             self._compiled_callable = torch.compile(
@@ -177,9 +169,14 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            self._bytecode_hook_handle = (
-                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
-            )
+            # A model whose base class is also @support_torch_compile runs this
+            # twice; a second hook would outlive cleanup() and pin the model.
+            if getattr(self, "_bytecode_hook_handle", None) is None:
+                self._bytecode_hook_handle = (
+                    torch._dynamo.convert_frame.register_bytecode_hook(
+                        self.bytecode_hook
+                    )
+                )
             self._compiled_bytecode: CodeType | None = None
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
@@ -245,7 +242,7 @@ class TorchCompileWithNoGuardsWrapper:
         frame = frame.f_locals["frame"]
         assert frame.f_code == old_code
 
-        if frame.f_locals["self"] is not self:
+        if _bound_instance(frame) is not self:
             return
 
         self._compiled_bytecode = new_code
@@ -293,11 +290,12 @@ class TorchCompileWithNoGuardsWrapper:
         handle = getattr(self, "_bytecode_hook_handle", None)
         if handle is not None:
             handle.remove()
+            self._bytecode_hook_handle = None
 
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
         # noqa: E501
-        """Context manager to dispatch to internally compiled code for torch<2.8.
+        """Context manager to dispatch to internally compiled code.
         Why does this work? Because Dynamo guarantees that the compiled
         bytecode has exactly the same arguments, cell variables, and free
         variables as the original code. Therefore we can directly switch
@@ -366,3 +364,11 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
         compile_prefix=model._compile_prefix,
         is_encoder=model._is_encoder,
     )
+
+
+def remove_bytecode_hooks(model: torch.nn.Module) -> None:
+    """Remove the global bytecode hooks of model's compiled modules, which
+    otherwise keep them, and the weights they hold, alive."""
+    for module in model.modules():
+        if isinstance(module, TorchCompileWithNoGuardsWrapper):
+            module.cleanup()

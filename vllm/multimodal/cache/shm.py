@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, TypeAlias
 
 from typing_extensions import override
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_object_storage import (
     MsgpackSerde,
@@ -80,7 +79,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
         ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
-            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            name=mm_config.mm_shm_cache_buffer_name,
             create=True,  # sender is the writer
         )
         self._shm_cache = SingleWriterShmObjectStorage(
@@ -266,7 +265,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
         ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
-            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            name=mm_config.mm_shm_cache_buffer_name,
             create=False,  # Server is a reader
         )
         self._shm_cache = SingleWriterShmObjectStorage(

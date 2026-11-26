@@ -33,6 +33,7 @@ struct EngineMetrics {
     spec_decode_num_drafts: U64Counter,
     spec_decode_num_draft_tokens: U64Counter,
     spec_decode_num_accepted_tokens: U64Counter,
+    spec_decode_num_verified_tokens: U64Counter,
     estimated_flops_per_gpu: U64Counter,
     estimated_read_bytes_per_gpu: U64Counter,
     estimated_write_bytes_per_gpu: U64Counter,
@@ -62,6 +63,7 @@ struct CounterSnapshot {
     spec_decode_num_drafts: u64,
     spec_decode_num_draft_tokens: u64,
     spec_decode_num_accepted_tokens: u64,
+    spec_decode_num_verified_tokens: u64,
     estimated_flops_per_gpu: u64,
     estimated_read_bytes_per_gpu: u64,
     estimated_write_bytes_per_gpu: u64,
@@ -74,6 +76,7 @@ struct SpecDecodingLogStats {
     draft_throughput: f64,
     accepted_tokens: u64,
     draft_tokens: u64,
+    verified_tokens: u64,
     per_position_acceptance_rates: Vec<f64>,
     draft_acceptance_rate: f64,
 }
@@ -131,56 +134,67 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
                 // `iteration_stats.prompt_token_stats.computed`.
                 prompt_tokens_computed: m.request.prompt_tokens_by_source.get_or_create_owned(&pt),
                 generation_tokens: m.request.generation_tokens.get_or_create_owned(&el),
-                prefix_cache_queries: m.scheduler.prefix_cache_queries.get_or_create_owned(&el),
-                prefix_cache_hits: m.scheduler.prefix_cache_hits.get_or_create_owned(&el),
+                prefix_cache_queries: m.scheduler.prefix_cache.queries.get_or_create_owned(&el),
+                prefix_cache_hits: m.scheduler.prefix_cache.hits.get_or_create_owned(&el),
                 external_prefix_cache_queries: m
                     .scheduler
-                    .external_prefix_cache_queries
+                    .prefix_cache
+                    .external_queries
                     .get_or_create_owned(&el),
                 external_prefix_cache_hits: m
                     .scheduler
-                    .external_prefix_cache_hits
+                    .prefix_cache
+                    .external_hits
                     .get_or_create_owned(&el),
-                num_preemptions: m.request.num_preemptions.get_or_create_owned(&el),
+                num_preemptions: m.scheduler.state.num_preemptions.get_or_create_owned(&el),
                 request_success: RequestSuccessCounters::resolve(model_name, engine),
-                spec_decode_num_drafts: m.scheduler.spec_decode_num_drafts.get_or_create_owned(&el),
+                spec_decode_num_drafts: m.scheduler.spec_decode.num_drafts.get_or_create_owned(&el),
                 spec_decode_num_draft_tokens: m
                     .scheduler
-                    .spec_decode_num_draft_tokens
+                    .spec_decode
+                    .num_draft_tokens
                     .get_or_create_owned(&el),
                 spec_decode_num_accepted_tokens: m
                     .scheduler
-                    .spec_decode_num_accepted_tokens
+                    .spec_decode
+                    .num_accepted_tokens
+                    .get_or_create_owned(&el),
+                spec_decode_num_verified_tokens: m
+                    .scheduler
+                    .spec_decode
+                    .num_verified_tokens
                     .get_or_create_owned(&el),
                 estimated_flops_per_gpu: m
                     .scheduler
+                    .perf
                     .estimated_flops_per_gpu
                     .get_or_create_owned(&el),
                 estimated_read_bytes_per_gpu: m
                     .scheduler
+                    .perf
                     .estimated_read_bytes_per_gpu
                     .get_or_create_owned(&el),
                 estimated_write_bytes_per_gpu: m
                     .scheduler
+                    .perf
                     .estimated_write_bytes_per_gpu
                     .get_or_create_owned(&el),
                 log_stats: m.scheduler.log_stats.get_or_create_owned(&el),
-                scheduler_running: m.scheduler.scheduler_running.get_or_create_owned(&el),
-                scheduler_waiting: m.scheduler.scheduler_waiting.get_or_create_owned(&el),
+                scheduler_running: m.scheduler.state.running.get_or_create_owned(&el),
+                scheduler_waiting: m.scheduler.state.waiting.get_or_create_owned(&el),
                 scheduler_deferred: m
                     .scheduler
-                    .scheduler_waiting_by_reason
+                    .state
+                    .waiting_by_reason
                     .get_or_create_owned(&deferred),
                 scheduler_kv_fetch_by_stage: KvFetchReqsByStage::STAGES.map(|stage| {
-                    m.scheduler.scheduler_kv_fetch_by_stage.get_or_create_owned(
-                        &KvFetchStageLabels {
-                            model_name: model_name.to_string(),
-                            engine,
-                            stage,
-                        },
-                    )
+                    m.scheduler.state.kv_fetch_by_stage.get_or_create_owned(&KvFetchStageLabels {
+                        model_name: model_name.to_string(),
+                        engine,
+                        stage,
+                    })
                 }),
-                kv_cache_usage: m.scheduler.kv_cache_usage.get_or_create_owned(&el),
+                kv_cache_usage: m.scheduler.state.kv_cache_usage.get_or_create_owned(&el),
             }
         })
         .collect()
@@ -315,12 +329,14 @@ async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>, interval
                  Accepted throughput: {:.2} tokens/s, \
                  Drafted throughput: {:.2} tokens/s, \
                  Accepted: {} tokens, \
-                 Drafted: {} tokens",
+                 Drafted: {} tokens, \
+                 Verified: {} tokens",
                 spec_stats.mean_acceptance_length,
                 spec_stats.accepted_throughput,
                 spec_stats.draft_throughput,
                 spec_stats.accepted_tokens,
                 spec_stats.draft_tokens,
+                spec_stats.verified_tokens,
             )
             .unwrap();
             if !spec_stats.per_position_acceptance_rates.is_empty() {
@@ -368,6 +384,7 @@ fn read_counters(engines: &[EngineMetrics]) -> CounterSnapshot {
         snap.spec_decode_num_drafts += e.spec_decode_num_drafts.get();
         snap.spec_decode_num_draft_tokens += e.spec_decode_num_draft_tokens.get();
         snap.spec_decode_num_accepted_tokens += e.spec_decode_num_accepted_tokens.get();
+        snap.spec_decode_num_verified_tokens += e.spec_decode_num_verified_tokens.get();
         snap.estimated_flops_per_gpu += e.estimated_flops_per_gpu.get();
         snap.estimated_read_bytes_per_gpu += e.estimated_read_bytes_per_gpu.get();
         snap.estimated_write_bytes_per_gpu += e.estimated_write_bytes_per_gpu.get();
@@ -440,6 +457,9 @@ fn spec_decoding_log_stats(
     let accepted_tokens = curr
         .spec_decode_num_accepted_tokens
         .wrapping_sub(prev.spec_decode_num_accepted_tokens);
+    let verified_tokens = curr
+        .spec_decode_num_verified_tokens
+        .wrapping_sub(prev.spec_decode_num_verified_tokens);
 
     let (accepted_throughput, draft_throughput) = if elapsed > 0.0 {
         (
@@ -470,6 +490,7 @@ fn spec_decoding_log_stats(
         draft_throughput,
         accepted_tokens,
         draft_tokens,
+        verified_tokens,
         per_position_acceptance_rates,
         draft_acceptance_rate,
     })
@@ -584,12 +605,14 @@ mod tests {
             spec_decode_num_drafts: 10,
             spec_decode_num_draft_tokens: 100,
             spec_decode_num_accepted_tokens: 40,
+            spec_decode_num_verified_tokens: 90,
             ..Default::default()
         };
         let curr = CounterSnapshot {
             spec_decode_num_drafts: 14,
             spec_decode_num_draft_tokens: 120,
             spec_decode_num_accepted_tokens: 52,
+            spec_decode_num_verified_tokens: 105,
             ..Default::default()
         };
 
@@ -600,6 +623,7 @@ mod tests {
         assert_eq!(stats.draft_throughput, 10.0);
         assert_eq!(stats.accepted_tokens, 12);
         assert_eq!(stats.draft_tokens, 20);
+        assert_eq!(stats.verified_tokens, 15);
         assert_eq!(stats.per_position_acceptance_rates, vec![1.0, 0.5, 0.25]);
         assert_eq!(stats.draft_acceptance_rate, 60.0);
     }

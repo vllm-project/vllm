@@ -8,17 +8,14 @@ steps:
   device: intel_gpu_k8s
   num_devices: 1
   resource_claim_template: b70-1
-  working_dir: "/workspace/vllm/"
+  working_dir: "/vllm-workspace/"
   env:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/v1/core/
   - vllm/v1/worker/
-  - vllm/v1/attention/backends/mamba1_attn.py
   - vllm/v1/attention/backends/mamba_attn.py
   - vllm/model_executor/layers/mamba/
-  - vllm/model_executor/models/jamba.py
-  - vllm/model_executor/models/mamba.py
   - vllm/config/cache.py
   - vllm/platforms/xpu.py
   - tests/models/language/generation/test_hybrid.py

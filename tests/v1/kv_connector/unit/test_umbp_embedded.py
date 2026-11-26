@@ -58,12 +58,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheTensor,
-    SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import RequestStatus
@@ -159,20 +162,23 @@ def test_every_kv_cache_layout_restores_blocks_exactly(
 ):
     """Restoring a stored block equals copying each layer's block, whatever the
     layout interleaves with it (LHBNC and BHLNC split pages per head)."""
-    shape = dict(block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16)
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16
+    )
+    full = FullAttentionManager.layer_config(spec)
+    window = SlidingWindowManager.layer_config(spec, sliding_window=32)
     groups = [
-        KVCacheGroupSpec(["a0", "a1"], FullAttentionSpec(**shape)),
-        KVCacheGroupSpec(["s0", "s1"], SlidingWindowSpec(**shape, sliding_window=32)),
+        KVCacheGroup.from_layers({"a0": full, "a1": full}),
+        KVCacheGroup.from_layers({"s0": window, "s1": window}),
     ]
     planner_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: layout,
-            num_gpu_blocks_override=4,
             prefix_cache_retention_interval=None,
         ),
         attention_config=SimpleNamespace(hisparse_config=None),
     )
-    config = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
+    config = get_kv_cache_config_from_groups(planner_config, groups, num_blocks=4)
     config.kv_cache_layout = layout.name
     kv_caches = allocate_kv_cache(config, torch.device("cpu"), layout)
 
@@ -262,10 +268,14 @@ def test_bulk_load_preserves_group_order_failures_and_new_buffers(
         )
         supplied = plans
         if batched:
+            group_ids: list[int] = []
+            for plan in plans:
+                assert plan.group_id is not None
+                group_ids.append(plan.group_id)
             supplied = BlockLoadBatch(
                 [p.key for p in plans],
                 [p.block_id for p in plans],
-                [p.group_id for p in plans],
+                group_ids,
                 "r",
             )
             monkeypatch.setattr(
@@ -323,10 +333,14 @@ def test_bulk_load_falls_back_for_entire_mixed_batch(bulk_worker, special):
         buffers["c"] = torch.empty((16, 32), dtype=torch.uint8)
         worker.register_kv_caches(buffers)
         if special == "batch-subblocks":
+            group_ids: list[int] = []
+            for plan in plans:
+                assert plan.group_id is not None
+                group_ids.append(plan.group_id)
             plans = BlockLoadBatch(
                 [p.key for p in plans],
                 [p.block_id for p in plans],
-                [p.group_id for p in plans],
+                group_ids,
                 "r",
             )
     else:
@@ -402,6 +416,7 @@ def test_runtime_config_resolves_total_embedded_capacity_per_rank():
     ).resolve_for_rank_count(4)
 
     runtime = EmbeddedRuntime.from_config(config)
+    assert isinstance(runtime, EmbeddedRuntime)
     assert runtime.options["capacity_bytes"] == 1024
     assert config.options["total_capacity_bytes"] == 4096
     assert "capacity_bytes" not in config.options
@@ -425,6 +440,7 @@ def test_lookup_sockets_separate_engines_and_data_parallel_ranks(socket_dir):
         handle = EmbeddedRuntime.from_config(
             replace(config, dp_index=dp_index)
         ).create_scheduler_handle("same-model", RankTopology(), None)
+        assert isinstance(handle, _MoriSchedulerHandle)
         return handle._paths[RankTopology().local_namespace]
 
     assert path({}) == path({})
@@ -764,12 +780,16 @@ def _run_to_completion(scheduler, worker) -> dict[str, int]:
 
 
 def _attention_and_sliding_window_config() -> KVCacheConfig:
-    shape = dict(block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16)
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
     groups = [
-        KVCacheGroupSpec(["full"], FullAttentionSpec(**shape)),
-        KVCacheGroupSpec(["window"], SlidingWindowSpec(**shape, sliding_window=64)),
+        KVCacheGroup.from_layers({"full": FullAttentionManager.layer_config(spec)}),
+        KVCacheGroup.from_layers(
+            {"window": SlidingWindowManager.layer_config(spec, sliding_window=64)}
+        ),
     ]
-    page_bytes = groups[0].kv_cache_spec.page_size_bytes
+    page_bytes = groups[0].page_size_bytes
     return KVCacheConfig(
         num_blocks=16,
         kv_cache_groups=groups,
