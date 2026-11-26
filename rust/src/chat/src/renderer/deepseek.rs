@@ -18,7 +18,7 @@ use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
 
 use super::MediaPartSource;
 use crate::EffortValue;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_messages};
 use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
@@ -642,9 +642,7 @@ fn render_developer_message(
     media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     if content.is_empty() {
-        return Err(Error::ChatTemplate(
-            "invalid DeepSeek developer message: empty content".to_string(),
-        ));
+        bail_invalid_messages!("invalid DeepSeek developer message: empty content");
     }
 
     out.push_str(USER_SP_TOKEN);

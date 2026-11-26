@@ -1974,7 +1974,7 @@ class ModelConfig:
             block_configs = self.hf_config.block_configs
             return sum(not bc.attention.no_op for bc in block_configs[start:end])
         else:
-            # Hybrid model Jamba
+            # Hybrid models with `layers_block_type`, e.g. Zamba2
             layers_block_type_value = getattr(
                 self.hf_text_config, "layers_block_type", None
             )
@@ -2028,8 +2028,7 @@ class ModelConfig:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
-        # Since Mamba1 does not have a chunk notion
-        # we use a default chunk size of 2048.
+        # Models without a chunk notion use a default chunk size of 2048.
         if chunk_size is None:
             chunk_size = 2048
 

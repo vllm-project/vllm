@@ -704,6 +704,7 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Input shape:
         (batch_size x seq_len x hidden_size) or
@@ -727,6 +728,7 @@ class MMEncoderAttention(CustomOp):
             scale=self.scale,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
@@ -899,15 +901,16 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
-        sequence_lengths: torch.Tensor
-        | None = None,  # Only used for FlashInfer CuDNN backend
+        sequence_lengths: torch.Tensor | None = None,  # FlashInfer and Triton
     ) -> torch.Tensor:
         if self.fp8_enabled and self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
             return self._forward_aiter_fp8(query, key, value, cu_seqlens, max_seqlen)
         elif self.is_flash_attn_backend:
             return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
         elif self.attn_backend == AttentionBackendEnum.TRITON_ATTN:
-            return self._forward_triton(query, key, value, cu_seqlens, max_seqlen)
+            return self._forward_triton(
+                query, key, value, cu_seqlens, max_seqlen, sequence_lengths
+            )
         elif self.attn_backend == AttentionBackendEnum.FLASHINFER:
             return self._forward_flashinfer(
                 query, key, value, cu_seqlens, max_seqlen, sequence_lengths
