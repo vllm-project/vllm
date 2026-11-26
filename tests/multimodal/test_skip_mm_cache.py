@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,6 +14,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     PlaceholderRangeInfo,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+from vllm.inputs.engine import MultiModalInput
 from vllm.multimodal.cache import (
     LruKeyReplicatedReceiverCache,
     MultiModalCacheMissError,
@@ -89,10 +90,13 @@ def _make_request(
     )
 
 
-def _make_serving_for_build_input() -> ServingTokens:
+def _make_serving_for_build_input() -> tuple[
+    ServingTokens, MagicMock, MagicMock, MagicMock
+]:
     serving = ServingTokens.__new__(ServingTokens)
     serving.model_config = MagicMock()
-    serving._validate_mm_cache_handles = MagicMock(return_value=None)
+    validate_cache_handles = MagicMock(return_value=None)
+    serving._validate_mm_cache_handles = validate_cache_handles
 
     tracker = MagicMock()
     parser = MagicMock()
@@ -114,7 +118,7 @@ def _make_serving_for_build_input() -> ServingTokens:
     online_renderer = MagicMock()
     online_renderer.renderer = renderer
     serving.online_renderer = online_renderer
-    return serving
+    return serving, validate_cache_handles, tracker, online_renderer
 
 
 # =====================================================================
@@ -129,7 +133,7 @@ class TestBuildEngineInputSkipMmCache:
 
     @pytest.mark.asyncio
     async def test_rendered_full_tensor_sets_skip_mm_cache(self):
-        serving = _make_serving_for_build_input()
+        serving, validate_cache_handles, _, _ = _make_serving_for_build_input()
         features = _make_features(
             mm_hashes={"image": ["hash-rendered-1"]},
             placeholders={"image": [(2, 8)]},
@@ -158,31 +162,32 @@ class TestBuildEngineInputSkipMmCache:
                 side_effect=lambda **kwargs: kwargs,
             ),
         ):
-            engine_input = await serving.build_engine_input(request)
+            engine_input = cast(
+                MultiModalInput, await serving.build_engine_input(request)
+            )
 
-        serving._validate_mm_cache_handles.assert_called_once()
+        validate_cache_handles.assert_called_once()
         assert rendered_elem.skip_mm_cache is True
-        assert (
-            engine_input["mm_kwargs"]["image"][0]["pixel_values"].skip_mm_cache is True
-        )
+        rendered_item = engine_input["mm_kwargs"]["image"][0]
+        assert rendered_item is not None
+        assert rendered_item["pixel_values"].skip_mm_cache is True
 
     @pytest.mark.asyncio
     async def test_completion_returns_single_engine_input(self):
-        serving = _make_serving_for_build_input()
+        serving, _, _, online_renderer = _make_serving_for_build_input()
         expected = {"type": "token", "prompt_token_ids": [1, 2, 3]}
-        serving.online_renderer.preprocess_completion = AsyncMock(
-            return_value=[expected]
-        )
+        preprocess_completion = AsyncMock(return_value=[expected])
+        online_renderer.preprocess_completion = preprocess_completion
 
         engine_input = await serving.build_engine_input(_make_request())
 
         assert engine_input is expected
-        serving.online_renderer.preprocess_completion.assert_awaited_once()
+        preprocess_completion.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_feature_validation_error_is_raised(self):
-        serving = _make_serving_for_build_input()
-        serving._validate_mm_cache_handles.side_effect = ValueError("bad cache handle")
+        serving, validate_cache_handles, _, _ = _make_serving_for_build_input()
+        validate_cache_handles.side_effect = ValueError("bad cache handle")
         request = _make_request(
             features=_make_features(
                 mm_hashes={"image": ["hash-1"]},
@@ -206,7 +211,7 @@ class TestBuildEngineInputSkipMmCache:
 
     @pytest.mark.asyncio
     async def test_metadata_only_does_not_set_skip_mm_cache(self):
-        serving = _make_serving_for_build_input()
+        serving, _, _, _ = _make_serving_for_build_input()
         features = _make_features(
             mm_hashes={"image": ["hash-meta-1"]},
             placeholders={"image": [(2, 8)]},
@@ -239,16 +244,20 @@ class TestBuildEngineInputSkipMmCache:
                 side_effect=lambda **kwargs: kwargs,
             ),
         ):
-            engine_input = await serving.build_engine_input(request)
+            engine_input = cast(
+                MultiModalInput, await serving.build_engine_input(request)
+            )
 
-        assert engine_input["mm_kwargs"]["image"][0]["meta"] is meta_elem
+        meta_item = engine_input["mm_kwargs"]["image"][0]
+        assert meta_item is not None
+        assert meta_item["meta"] is meta_elem
         assert meta_elem.skip_mm_cache is False
 
     @pytest.mark.asyncio
     async def test_mixed_rendered_features_and_content_parts_keep_skip_per_feature(
         self,
     ):
-        serving = _make_serving_for_build_input()
+        serving, _, tracker, _ = _make_serving_for_build_input()
         # Feature range ends at offset 2 + length 8 = 10 -> start should be 10.
         features = _make_features(
             mm_hashes={"image": ["hash-rendered-1"]},
@@ -274,7 +283,7 @@ class TestBuildEngineInputSkipMmCache:
         with (
             patch(
                 f"{SERVING_MOD}.AsyncMultiModalItemTracker",
-                return_value=serving._tracker,
+                return_value=tracker,
             ),
             patch(
                 f"{SERVING_MOD}.rebuild_mm_placeholders",
@@ -293,7 +302,9 @@ class TestBuildEngineInputSkipMmCache:
                 side_effect=lambda **kwargs: kwargs,
             ),
         ):
-            engine_input = await serving.build_engine_input(request)
+            engine_input = cast(
+                MultiModalInput, await serving.build_engine_input(request)
+            )
 
         # Tokens before start=10 preserved, followed by rendered content_parts tokens.
         assert engine_input["prompt_token_ids"] == list(range(10)) + [
@@ -307,8 +318,11 @@ class TestBuildEngineInputSkipMmCache:
         # second item comes from content_parts (skip_mm_cache remains False).
         img_items = engine_input["mm_kwargs"]["image"]
         assert len(img_items) == 2
-        assert img_items[0]["pixel_values"].skip_mm_cache is True
-        assert img_items[1]["pixel_values"].skip_mm_cache is False
+        first_item, second_item = img_items
+        assert first_item is not None
+        assert second_item is not None
+        assert first_item["pixel_values"].skip_mm_cache is True
+        assert second_item["pixel_values"].skip_mm_cache is False
 
         # Content part placeholder offset is shifted by start=10.
         placeholders = engine_input["mm_placeholders"]["image"]
