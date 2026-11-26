@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
 import itertools
 import math
-import os
-import subprocess
-import sys
-import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +23,7 @@ from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8 as qsa_fp8_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import clear_layer_kv_caches
 
@@ -1293,218 +1289,140 @@ def test_qsa_sparse_paged_attention_correctness(
 )
 # Per-rank heads at TP1 and TP4.
 @pytest.mark.parametrize("heads, kv_heads", [(24, 2), (6, 1)], ids=["tp1", "tp4"])
-def test_qsa_flashinfer_matches_sparse_attention(heads: int, kv_heads: int) -> None:
-    """Prefill steps through FlashInfer write what the Triton kernel
-    writes without blocking the host. Steps of different row buckets share the
-    builder's buffers, and the plans do not outlive them."""
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
-        FlashInferBuffers,
-        build_flashinfer_routes,
-        flashinfer_attention,
-    )
-    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAImpl
-
-    torch.manual_seed(0)
-    head_dim, page_size, budget, ratio, pages = 256, 1600, 2048, 4, 6
-    kv_rows = torch.randn(
-        4 * pages, page_size, kv_heads, 2 * head_dim, device="cuda"
-    ).to(torch.bfloat16)
-    kv_cache = kv_rows.transpose(1, 2)  # QSAImpl's view
-    block_table = torch.randperm(4 * pages, device="cuda").view(4, pages).int()
-    impl = Qwen4ExpQSAImpl(
-        num_heads=heads,
-        head_size=head_dim,
-        scale=head_dim**-0.5,
-        num_kv_heads=kv_heads,
-        kv_cache_dtype="auto",
-    )
-    buffers = FlashInferBuffers(max_num_reqs=64, block_size=ratio)
-    # (cached prefix, new rows) per request. A lone 32-row prompt fills the
-    # smallest bucket; the mixed step has a decode with three draft rows, a short
-    # and a long fresh prefill (past the selection budget) and a chunked prefill.
-    # Alternating them grows the shared workspace, then reuses each plan after
-    # the other bucket has overwritten it.
-    short = [(0, 32)]
-    mixed = [(5000, 4), (0, 300), (0, 3000), (2500, 1500)]
-    for requests in (short, mixed, short, mixed):
-        query_lens = torch.tensor([n for _, n in requests])
-        seq_lens = torch.tensor([p + n for p, n in requests], dtype=torch.int32).cuda()
-        query_start_loc = torch.zeros(len(requests) + 1, dtype=torch.int32)
-        query_start_loc[1:] = query_lens.cumsum(0)
-        query_start_loc = query_start_loc.cuda()
-        num_rows = int(query_lens.sum())
-        token_to_req = torch.repeat_interleave(
-            torch.arange(len(requests), dtype=torch.int32), query_lens
-        ).cuda()
-        positions = torch.cat([torch.arange(p, p + n) for p, n in requests]).cuda()
-        q = torch.randn(num_rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
-        output_gate = torch.randn_like(q)
-        # Top-k of random block scores: every visible block while they fit.
-        visible_blocks = ((positions + 1) // ratio).int()
-        scores = torch.rand(num_rows, pages * page_size // ratio, device="cuda")
-        blocks = torch.arange(scores.shape[1], device="cuda")
-        scores[blocks >= visible_blocks.unsqueeze(1)] = -1
-        top_scores, block_indices = scores.topk(budget // ratio, dim=1)
-        block_indices = torch.where(top_scores >= 0, block_indices, -1).int()
-        selected = torch.empty(
-            num_rows, budget + ratio, device="cuda", dtype=torch.int32
-        )
-        qsa_indexer_ops.expand_qsa_block_indices(
-            block_indices, positions, visible_blocks, ratio, budget, selected
-        )
-        tables = block_table[: len(requests)]
-        expected = torch.empty_like(q)
-        impl.attend(
-            None,
-            q,
-            kv_cache,
-            selected,
-            tables,
-            token_to_req,
-            True,
-            expected,
-            output_gate,
-        )
-        actual = torch.full_like(q, torch.nan)
-        # The first call may plan; the second must not block the host.
-        for sync_mode in ("default", "error"):
-            torch.cuda.set_sync_debug_mode(sync_mode)
-            try:
-                routes = build_flashinfer_routes(
-                    query_start_loc, seq_lens, token_to_req, tables, num_rows, buffers
-                )
-                flashinfer_attention(
-                    "layer",
-                    q,
-                    kv_cache,
-                    selected,
-                    routes,
-                    impl.scale,
-                    output_gate,
-                    actual,
-                )
-            finally:
-                torch.cuda.set_sync_debug_mode("default")
-        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
-
-    # Prepared plans reference the KV cache, so they must go with the buffers.
-    cache = weakref.ref(kv_rows)
-    del kv_rows, kv_cache, buffers, routes
-    gc.collect()
-    assert cache() is None
-
-
-@requires_qsa_kernels
-@pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="FlashInfer QSA prefill runs on sm_100/sm_103",
-)
-@pytest.mark.parametrize(
-    "block_size, block_topk, head_dim, heads, kv_heads",
-    [
-        (4, 512, 256, 24, 2),  # Qwen3.8-Flash-Next at TP1
-        (4, 512, 256, 6, 1),  # and at TP4
-        (2, 512, 256, 24, 2),  # unsupported block size
-        (4, 512, 32, 24, 2),  # unsupported head size
-        (4, 512, 256, 32, 1),  # 8 rows x 32 heads exceed a 128-row tile
-    ],
-)
-def test_qsa_flashinfer_selected_only_when_plannable(
-    block_size: int, block_topk: int, head_dim: int, heads: int, kv_heads: int
-) -> None:
-    """FlashInfer is selected exactly for the geometries its planner accepts, so
-    other QSA configs keep the Triton kernel instead of failing at runtime."""
-    from flashinfer.attention.prims_ts import (
-        QTokenKvBlockSparsePagedTSWrapper,
-        get_q_token_kv_block_sparse_workspace_size,
-    )
+def test_qsa_flashinfer_prefill_correctness(heads: int, kv_heads: int) -> None:
+    """FlashInfer prefill matches the dense reference. Slots past each sequence
+    hold NaN, like stale bytes of another cache group."""
+    from flashinfer.attention.prims_ts import make_q_token_kv_block_sparse_qo_indptr
 
     from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
         GROUP_SIZE,
-        flashinfer_supported,
+        get_workspace_size,
+        qsa_sparse_paged_prefill,
     )
 
-    rows, page_size = 64, 1600
-    q = torch.empty(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
-    k_cache = torch.empty(
-        1, kv_heads, page_size, head_dim, device="cuda", dtype=torch.bfloat16
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    head_dim, page_size, budget, ratio, pages = 256, 1600, 2048, 4, 4
+    max_seq_len_kv = pages * page_size
+    scale = head_dim**-0.5
+    # Prefill requests as (cached prefix, new rows): shorter than a group, a
+    # fresh prefill and a chunked prefill past the selection budget, none
+    # ending on a block boundary. A leading decode request owns block table row
+    # 0 but no rows here, so prefill requests index the table from row 1.
+    num_decodes = 1
+    requests = [(0, 37), (0, 301), (2500, 503)]
+    kv_rows = torch.full(
+        ((num_decodes + len(requests)) * pages, page_size, kv_heads, 2 * head_dim),
+        torch.nan,
+        device="cuda",
+        dtype=torch.bfloat16,
     )
-    block_table = torch.zeros(1, 1, device="cuda", dtype=torch.int32)
-    qo_indptr = torch.arange(0, rows + 1, GROUP_SIZE, device="cuda", dtype=torch.int32)
-    try:
-        workspace = torch.empty(
-            get_q_token_kv_block_sparse_workspace_size(
-                q,
-                k_cache,
-                block_table,
-                block_topk=block_topk,
-                max_seq_len_kv=page_size,
-                qo_indptr=qo_indptr,
-                group_size=GROUP_SIZE,
-                kv_block_size=block_size,
-                split_kv=False,
-            ),
-            dtype=torch.uint8,
-            device="cuda",
+    block_table = (
+        torch.randperm(kv_rows.shape[0], device="cuda", generator=generator)
+        .view(-1, pages)
+        .int()
+    )
+    for req, (prefix, n) in enumerate(requests, num_decodes):
+        slots = torch.arange(prefix + n, device="cuda")
+        kv_rows[block_table[req, slots // page_size].long(), slots % page_size] = (
+            torch.randn(
+                slots.numel(),
+                kv_heads,
+                2 * head_dim,
+                device="cuda",
+                dtype=torch.bfloat16,
+                generator=generator,
+            )
         )
-        QTokenKvBlockSparsePagedTSWrapper().plan(
-            qo_indptr.numel() - 1,
+
+    query_lens = [n for _, n in requests]
+    num_rows = sum(query_lens)
+    seq_lens = torch.tensor(
+        [p + n for p, n in requests], dtype=torch.int32, device="cuda"
+    )
+    token_to_req = torch.repeat_interleave(
+        torch.arange(
+            num_decodes, num_decodes + len(requests), dtype=torch.int32, device="cuda"
+        ),
+        torch.tensor(query_lens, device="cuda"),
+        output_size=num_rows,
+    )
+    positions = torch.cat([torch.arange(p, p + n, device="cuda") for p, n in requests])
+    q, output_gate = torch.randn(
+        2,
+        num_rows,
+        heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    # Top-k of random block scores, -1 padded like the indexer's top-k.
+    visible_blocks = ((positions + 1) // ratio).int()
+    scores = torch.rand(
+        num_rows, max_seq_len_kv // ratio, device="cuda", generator=generator
+    )
+    blocks = torch.arange(scores.shape[1], device="cuda")
+    scores[blocks >= visible_blocks.unsqueeze(1)] = -1
+    top_scores, block_indices = scores.topk(budget // ratio, dim=1)
+    block_indices = torch.where(top_scores >= 0, block_indices, -1).int()
+    selected = torch.empty(num_rows, budget + ratio, device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.expand_qsa_block_indices(
+        block_indices, positions, visible_blocks, ratio, budget, selected
+    )
+    k_cache, v_cache = kv_rows.split(head_dim, dim=-1)
+    expected = _qsa_sparse_paged_attention_reference(
+        q,
+        k_cache,
+        v_cache,
+        selected[:, : budget + ratio - 1],
+        block_table,
+        token_to_req,
+        scale,
+    ) * torch.sigmoid(output_gate)
+
+    qo_indptr = make_q_token_kv_block_sparse_qo_indptr(
+        torch.tensor([0, *itertools.accumulate(query_lens)]),
+        num_rows,
+        group_size=GROUP_SIZE,
+        device="cuda",
+    )
+    actual = torch.full_like(q, torch.nan)
+    qsa_sparse_paged_prefill(
+        q,
+        kv_rows.transpose(1, 2),
+        block_table,
+        num_decodes,
+        seq_lens,
+        block_indices,
+        token_to_req,
+        positions,
+        qo_indptr,
+        ratio,
+        max_seq_len_kv,
+        get_workspace_size(
+            num_rows,
+            len(requests),
             heads,
             kv_heads,
             head_dim,
-            block_size,
             page_size,
-            block_topk,
-            page_size,
-            device=q.device,
-            workspace_buffer=workspace,
-            group_size=GROUP_SIZE,
-            packed_query=True,
-            split_kv=False,
-            q_dtype=q.dtype,
-        )
-        planned = True
-    except (ValueError, NotImplementedError):
-        planned = False
-    assert (
-        flashinfer_supported(block_size, block_topk, head_dim, heads, kv_heads)
-        == planned
+            max_seq_len_kv,
+            ratio,
+            budget // ratio,
+            torch.device("cuda"),
+        ),
+        scale,
+        output_gate,
+        actual,
     )
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
-
-@requires_qsa_kernels
-@pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="FlashInfer QSA prefill runs on sm_100/sm_103",
-)
-# A local JIT build of the metadata module is refused too: FlashInfer only
-# loads it through a ninja check, which FLASHINFER_DISABLE_JIT forbids.
-@pytest.mark.parametrize("local_build", [False, True], ids=["empty", "local_build"])
-def test_qsa_flashinfer_needs_its_jit_module(tmp_path, local_build: bool) -> None:
-    """With FlashInfer's JIT disabled, QSA prefill stays on Triton unless the
-    kernel's metadata module ships precompiled, instead of raising
-    MissingJITCacheError on the first prefill."""
-    code = (
-        "from flashinfer.jit import "
-        "gen_prims_ts_q_token_kv_block_sparse_metadata_module\n"
-        "from vllm.utils.flashinfer import has_flashinfer_qsa_prefill\n"
-        "spec = gen_prims_ts_q_token_kv_block_sparse_metadata_module()\n"
-        f"if {local_build}:\n"
-        "    spec.get_library_path().parent.mkdir(parents=True, exist_ok=True)\n"
-        "    spec.get_library_path().touch()\n"
-        "print(has_flashinfer_qsa_prefill(), spec.is_aot)"
-    )
-    env = {
-        **os.environ,
-        "FLASHINFER_DISABLE_JIT": "1",
-        "FLASHINFER_WORKSPACE_BASE": str(tmp_path),
-    }
-    result = subprocess.run(
-        [sys.executable, "-c", code], env=env, capture_output=True, text=True
-    )
-    assert result.returncode == 0, result.stderr
-    selected, precompiled = result.stdout.split()[-2:]
-    assert selected == precompiled
+    # Each open-block tail is zeroed, and nothing past it is written.
+    for req, (prefix, n) in enumerate(requests, num_decodes):
+        end = prefix + n
+        tail = torch.arange(end, cdiv(end, ratio) * ratio + 1, device="cuda")
+        rows = kv_rows[block_table[req, tail // page_size].long(), tail % page_size]
+        assert (rows[:-1] == 0).all() and rows[-1].isnan().all()
 
 
 @requires_qsa_kernels

@@ -529,30 +529,6 @@ def has_flashinfer_prims_ts_sparse_mla() -> bool:
 
 
 @functools.cache
-def has_flashinfer_qsa_prefill() -> bool:
-    """Return `True` if FlashInfer's QToken-KvBlock-Sparse attention (QSA
-    prefill) can run. Its CUDA metadata module loads without a build step only
-    when precompiled (flashinfer-jit-cache does not ship it); a local JIT build is
-    rebuilt or checked by ninja on load, which FLASHINFER_DISABLE_JIT forbids."""
-    if not has_flashinfer():
-        return False
-    try:
-        from flashinfer.attention.prims_ts import (  # noqa: F401
-            QTokenKvBlockSparsePagedTSWrapper,
-        )
-        from flashinfer.jit import gen_prims_ts_q_token_kv_block_sparse_metadata_module
-    except ImportError:
-        return False
-    spec = gen_prims_ts_q_token_kv_block_sparse_metadata_module()
-    can_build = (
-        not os.environ.get("FLASHINFER_DISABLE_JIT")
-        and _flashinfer_nvcc_path() is not None
-        and shutil.which("ninja") is not None
-    )
-    return spec.is_aot or can_build
-
-
-@functools.cache
 def prims_ts_sparse_mla_format_error(kv_cache_format: str) -> str | None:
     """Why the installed FlashInfer cannot plan prims_ts sparse MLA (D576, 128
     E4M3 query heads, LSE) over `kv_cache_format` on this GPU, else None.
