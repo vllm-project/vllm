@@ -45,6 +45,8 @@ class SpeculatorConfig:
 
     # Uses the target model's hidden states (EAGLE or EAGLE3-style).
     uses_target_hidden_states: ClassVar[bool] = False
+    # Some targets expose an uncollapsed hyper-connection residual for MTP.
+    uses_target_hc_residual: ClassVar[bool] = True
     # The drafter's own KV at a position depends on the tokens it reads ahead.
     draft_kv_depends_on_lookahead: ClassVar[bool] = False
     # Drafts in its own workspace lane.
@@ -376,6 +378,9 @@ _CONFIG_BY_METHOD: dict[str, str] = {
 # architecture can be inspected. Keys use the target's text model type.
 _CONFIG_BY_TARGET_MODEL_TYPE: dict[str, dict[str, str]] = {
     "dfly": {
+        "deepseek_v41": (
+            "vllm.models.deepseek_v41.dfly_config.DeepseekV41DFlySpeculatorConfig"
+        ),
         "hy_v4": "vllm.models.hy_v4.dfly_config.HYV4DFlySpeculatorConfig",
         "hy_v4_flash": (
             "vllm.models.hy_v4_flash.dfly_config.HYV4FlashDFlySpeculatorConfig"

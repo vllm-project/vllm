@@ -85,7 +85,6 @@ from vllm.models.deepseek_v4.nvidia.model import (
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
-from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
     DeepseekV4MegaAttnAttention,
@@ -223,7 +222,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         return MoEOutput(routed=routed, shared_output=shared_output)
 
 
-def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
+def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[nn.Module]:
     """Pick the CUDA sparse-MLA attention class for the configured backend.
 
     The generic CUDA backend selector does not instantiate DSv4 layers directly,
@@ -233,6 +232,13 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     with CuTe DSL decode attention, and everything else keeps the FlashMLA
     path.
     """
+    if vllm_config.model_config.hf_config.architectures == [
+        "DFlyDeepseekV41DraftModel"
+    ]:
+        from .dfly import DFlyAttention
+
+        return DFlyAttention
+
     backend = vllm_config.attention_config.backend
     if is_ampere():
         # No FlashMLA or DeepGEMM build runs on SM80; its own kernels do.

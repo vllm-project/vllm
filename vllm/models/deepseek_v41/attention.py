@@ -520,6 +520,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.indexer_rotary_emb = self.rotary_emb
         self.topk_indices_buffer = topk_indices_buffer
+        self.topk_snapshot: torch.Tensor | None = None
         self.candidate_block_buffer = candidate_block_buffer
 
         # Register with compilation context for metadata lookup. Done before
@@ -1125,6 +1126,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 index_weights,
             )
 
+        if self.topk_snapshot is not None:
+            assert self.topk_indices_buffer is not None
+            count = hidden_states.shape[0]
+            self.topk_snapshot[:count].copy_(self.topk_indices_buffer[:count])
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
         self.forward_mqa(q, kv, positions, out)

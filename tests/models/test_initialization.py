@@ -227,6 +227,12 @@ def can_initialize(
 
     # Flash runs on CUDA and on ROCm gfx950; other platforms must reject it.
     initialization_result = nullcontext()
+    if model_arch == "DFlyDeepseekV41DraftModel" and not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(90)
+    ):
+        initialization_result = pytest.raises(
+            NotImplementedError, match="DeepSeek-V4.1 DFly2 requires NVIDIA SM90"
+        )
     if model_arch in (
         "HYV4FlashForCausalLM",
         "HYV4FlashVLForConditionalGeneration",
