@@ -465,6 +465,13 @@ if (
 if torch.version.hip:
     os.environ.setdefault("NCCL_RAS_ENABLE", "0")
 
+# On RDNA4, a stream waiting on another stream from its own hardware queue adds
+# a fixed delay to every kernel on the busy queue; the async-output and
+# pipeline-parallel side streams do this every step. Up to two queues avoid it.
+# https://github.com/ROCm/TheRock/issues/9297
+if _ON_RDNA4:
+    os.environ.setdefault("GPU_MAX_HW_QUEUES", "2")
+
 
 @cache
 def use_rocm_custom_paged_attention(

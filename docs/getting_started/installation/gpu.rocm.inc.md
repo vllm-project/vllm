@@ -19,6 +19,7 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
 - ROCm 6.3 or above
     - MI350 requires ROCm 7.0 or above
     - Ryzen AI MAX / AI 300 Series requires ROCm 7.0.2 or above
+- On Radeon RX 9000 series and Radeon AI PRO R9700 (gfx1200/1201), vLLM sets `GPU_MAX_HW_QUEUES=2` unless it is already set. With more hardware queues, ROCm slows every kernel while another stream waits on it ([ROCm/TheRock#9297](https://github.com/ROCm/TheRock/issues/9297)), which can slow decode by 10% or more. Set `GPU_MAX_HW_QUEUES` yourself to override it.
 
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
