@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{self};
 use thiserror::Error as ThisError;
 use vllm_text::backend::hf::HfSpecialTokens;
+use vllm_tokenizer::parse_checkpoint_json;
 
 use super::developer::DeveloperRole;
 use super::error::TemplateError;
@@ -152,7 +153,7 @@ pub fn load_chat_template(template_path: &Path) -> Result<Option<String>> {
         }
 
         let json_value =
-            serde_json::from_str(&content).map_err(TemplateError::ParseTemplateJson)?;
+            parse_checkpoint_json(&content).map_err(TemplateError::ParseTemplateJson)?;
         let json_template =
             serde_json::from_value(json_value).map_err(|_| TemplateError::InvalidTemplateJson)?;
 

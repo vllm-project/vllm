@@ -5,25 +5,27 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent HY4 Flash multimodal MoE for everyday productivity and agent workflows — 220B total / 12B active, 1M context, DFly speculative decoding"
   date_added: 2026-11-17
-  date_updated: 2026-11-18
+  date_updated: 2026-11-23
   tasks:
     - text
     - multimodal
   related_recipes:
     - "tencent/Hy4-preview"
-  # No ROCm image ships HY4 Flash and pip is unsupported, so AMD has no install path yet.
+  # The ROCm sparse MLA path requires gfx950, so MI300X and MI325X (gfx942) cannot run it.
   hardware:
     mi300x: unsupported
     mi325x: unsupported
-    mi350x: unsupported
-    mi355x: unsupported
+    mi350x: supported
+    mi355x: verified
 
 model:
   model_id: "tencent/Hy4-flash"
-  docker_image: "vllm/vllm-openai:hy4-flash"
+  docker_image:
+    nvidia: "vllm/vllm-openai:hy4-flash"
+    amd: "vllm/vllm-openai-rocm:nightly"
   install:
     docker:
-      note: "Dedicated HY4 Flash image — no released vLLM wheel supports this model yet"
+      note: "Dedicated HY4 Flash image on NVIDIA, nightly ROCm image on AMD — no released vLLM wheel supports this model yet"
     pip: false
   architecture: moe
   parameter_count: "220B"
@@ -70,16 +72,36 @@ variants:
   default:
     precision: bf16
     vram_minimum_gb: 529
+    tp:
+      amd: 8
     description: "BF16 checkpoint (tencent/Hy4-flash) — 441 GB of weights; Engram tables live in host memory"
   fp8:
     model_id: "tencent/Hy4-flash-FP8"
     precision: fp8
     vram_minimum_gb: 345
+    tp:
+      amd: 8
     description: "FP8 checkpoint (tencent/Hy4-flash-FP8), BF16 compute — 287 GB of weights; Engram tables live in host memory"
 
 compatible_strategies:
   - single_node_tp
   - single_node_tep
+
+hardware_overrides:
+  amd:
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      # Temporary: AITER's default sparse MLA decode kernel reads the wrong KV
+      # past 4 GiB of cache. Remove once vLLM's AITER includes ROCm/aiter#6277.
+      VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
+
+notes:
+  - title: "TEP is not validated on AMD"
+    when: { hardware: [amd], strategies: [single_node_tep] }
+    body: |
+      Only TP8 has been run on MI355X. Expert parallelism
+      (`--enable-expert-parallel`) has not been validated on ROCm yet.
 
 guide: |
   ## Overview
@@ -101,11 +123,11 @@ guide: |
   ## Prerequisites
 
   - **Hardware**: Hopper or Blackwell data-center GPUs (H100 / H200 / B200 /
-    GB200 / B300 / GB300). AMD Instinct is not supported yet: no ROCm image
-    ships HY4 Flash.
-  - **vLLM**: the dedicated `vllm/vllm-openai:hy4-flash` Docker image. No
-    released vLLM wheel registers `HYV4FlashVLForConditionalGeneration` or the
-    DFly drafter yet, so pip installs are not supported.
+    GB200 / B300 / GB300), or AMD Instinct MI355X / MI350X (see the AMD section below).
+  - **vLLM**: the dedicated `vllm/vllm-openai:hy4-flash` Docker image on
+    NVIDIA, or `vllm/vllm-openai-rocm:nightly` on AMD. No released vLLM wheel
+    registers `HYV4FlashVLForConditionalGeneration` or the DFly drafter yet, so
+    pip installs are not supported.
   - **Host memory**: Engram tables are offloaded to host RAM by default, so
     provision host memory in addition to GPU memory.
   - **Access**: the checkpoints may require Hugging Face authentication with
@@ -119,6 +141,37 @@ guide: |
   - HY4 uses a paired tool-call / reasoning parser (`hy_v4`): turning on either
     Tool calling or Reasoning configures both parsers; Tool calling additionally
     adds `--enable-auto-tool-choice`.
+
+  ## AMD (8x MI355X)
+
+  Both checkpoints are verified on 8x MI355X with TP8 and DFly; TEP has not
+  been run on AMD. MI350X is the same gfx950 architecture and is supported,
+  but has not been run. The ROCm path needs gfx950, so MI300X and MI325X are
+  not supported.
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+    --ipc=host --shm-size 16g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 \
+    -p 8000:8000 \
+    vllm/vllm-openai-rocm:nightly \
+    tencent/Hy4-flash-FP8 \
+    --tensor-parallel-size 8 \
+    --dtype bfloat16 \
+    --reasoning-parser hy_v4 \
+    --tool-call-parser hy_v4 \
+    --speculative-config '{"num_speculative_tokens":5,"method":"dfly"}'
+  ```
+
+  Use `tencent/Hy4-flash` for the BF16 checkpoint.
+  `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1` is required for now: AITER's
+  default sparse MLA decode kernel reads the wrong KV rows once a layer's KV
+  cache passes 4 GiB, which HY4 Flash reaches after a few hundred thousand
+  tokens. It can be dropped once vLLM's AITER includes
+  [ROCm/aiter#6277](https://github.com/ROCm/aiter/pull/6277). On ROCm the KV
+  cache must stay BF16 (the default); `fp8_ds_mla` is not supported.
 
   ## Context and memory
 

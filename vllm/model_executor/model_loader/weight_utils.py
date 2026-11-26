@@ -27,7 +27,7 @@ import regex as re
 import torch
 from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -37,6 +37,7 @@ from vllm.config.load import (
     LoadConfig,
 )
 from vllm.distributed import (
+    get_node_count,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_world_group,
@@ -594,6 +595,14 @@ def filter_duplicate_safetensors_files(
         raise FileNotFoundError(
             f"Weight files referenced in index but missing: {missing_files}"
         )
+    dropped = set(hf_weights_files) - set(weight_files_in_index)
+    if any(os.path.basename(f) == SAFE_WEIGHTS_NAME for f in dropped):
+        logger.warning_once(
+            "Ignoring %s because it is not listed in %s. Other tools may load "
+            "it instead of the indexed shards.",
+            SAFE_WEIGHTS_NAME,
+            index_file,
+        )
     # Take the files from the index, which may list some in a subdirectory.
     return weight_files_in_index
 
@@ -983,12 +992,14 @@ def _prefetch_all_checkpoints(
         raise ValueError("safetensors prefetch block size must be >= 1")
 
     if torch.distributed.is_initialized():
-        rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
+        # The page cache is per node and every rank reads every file, so split
+        # the files among the ranks of each node rather than across all ranks.
+        world = get_world_group()
+        local_world_size = max(world.world_size // get_node_count(), 1)
+        local_rank = world.local_rank % local_world_size
     else:
-        rank = 0
-        world_size = 1
-    paths_to_prefetch = sorted_files[rank::world_size]
+        local_rank, local_world_size = 0, 1
+    paths_to_prefetch = sorted_files[local_rank::local_world_size]
     total_for_rank = len(paths_to_prefetch)
 
     async def _prefetch_all() -> None:
@@ -1334,8 +1345,10 @@ def fastsafetensors_weights_iterator(
 
 
 _ENGRAM_WEIGHT_RE = re.compile(
-    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"
-    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"
+    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"  # DeepSeek-V4.1
+    r"engram(?:_layer)?\.multi_head_embedding\."  # HY4 Flash
+    r"embedding\.weight(?:_scale_inv)?|"  # HY4 Flash
+    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"  # Qwen4 Exp
 )
 
 

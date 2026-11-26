@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Function tools of a Responses request, including `namespace` tools.
+//! Function tools of a Responses request, including `namespace` tools and the
+//! tools declared by `additional_tools` input items.
 //!
 //! Mirrors the Python frontend (`get_function_tools` and
 //! `build_responses_tool_call_name_map` in `vllm/tool_parsers/utils.py`,
@@ -16,10 +17,98 @@ use std::collections::HashMap;
 use itertools::Itertools as _;
 use vllm_chat::ChatTool;
 
-use super::types::{NamespacedTool, ResponsesTool};
+use super::types::{
+    NamespaceTool, NamespacedTool, ResponseInputItem, ResponsesInput, ResponsesTool,
+};
 use crate::error::{ApiError, bail_invalid_request};
 
 const NAMESPACE_TOOL_SEPARATOR: &str = "__";
+
+/// Move the tools of `additional_tools` input items into the request tools.
+///
+/// Mirrors the Python `hoist_additional_tools_items` validator and
+/// `_merge_additional_tools` in `responses/protocol.py`. Clients such as Codex
+/// declare tools through these items rather than the top-level `tools`, and
+/// everything after this reads the request tools, so it runs first. The items
+/// leave the input, and their tools follow the top-level ones in input order,
+/// one definition per function: a repeated function replaces the earlier
+/// definition in place, so the latest one wins (a client resending its
+/// history carries every redefinition). A namespace that is already present
+/// takes the new description and gains only its new functions. Duplicates
+/// within the top-level `tools` alone are kept.
+pub(super) fn hoist_additional_tools(input: &mut ResponsesInput, tools: &mut Vec<ResponsesTool>) {
+    let ResponsesInput::Items(items) = input else {
+        return;
+    };
+    let mut declared = Vec::new();
+    items.retain_mut(|item| match item {
+        ResponseInputItem::AdditionalTools(item) => {
+            declared.append(&mut item.tools);
+            false
+        }
+        _ => true,
+    });
+    for tool in declared {
+        merge_declared_tool(tools, tool);
+    }
+}
+
+/// Add one tool of an `additional_tools` item to the request tools.
+fn merge_declared_tool(tools: &mut Vec<ResponsesTool>, declared: ResponsesTool) {
+    match declared {
+        ResponsesTool::Function(function) => {
+            let existing = tools.iter_mut().find(|tool| {
+                matches!(tool, ResponsesTool::Function(existing) if existing.name == function.name)
+            });
+            let function = ResponsesTool::Function(function);
+            match existing {
+                Some(existing) => *existing = function,
+                None => tools.push(function),
+            }
+        }
+        ResponsesTool::Namespace(NamespaceTool {
+            name,
+            description,
+            tools: functions,
+        }) => {
+            let mut new_functions = Vec::new();
+            for function in functions {
+                let NamespacedTool::Function(declared) = &function;
+                let existing = namespaces_named(tools, &name)
+                    .flat_map(|namespace| namespace.tools.iter_mut())
+                    .chain(&mut new_functions)
+                    .find(|NamespacedTool::Function(existing)| existing.name == declared.name);
+                match existing {
+                    Some(existing) => *existing = function,
+                    None => new_functions.push(function),
+                }
+            }
+            let first = namespaces_named(tools, &name).next();
+            match first {
+                Some(namespace) => {
+                    namespace.description = description;
+                    namespace.tools.extend(new_functions);
+                }
+                None => tools.push(ResponsesTool::Namespace(NamespaceTool {
+                    name,
+                    description,
+                    tools: new_functions,
+                })),
+            }
+        }
+    }
+}
+
+/// The namespace tools named `name`, in request order.
+fn namespaces_named<'a>(
+    tools: &'a mut [ResponsesTool],
+    name: &str,
+) -> impl Iterator<Item = &'a mut NamespaceTool> {
+    tools.iter_mut().filter_map(move |tool| match tool {
+        ResponsesTool::Namespace(namespace) if namespace.name == name => Some(namespace),
+        _ => None,
+    })
+}
 
 /// A function tool as the client names it: a namespace tool's function
 /// carries its namespace.
@@ -152,10 +241,12 @@ impl ResponsesToolNames {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::json;
     use thiserror_ext::AsReport as _;
 
     use super::*;
+    use crate::routes::openai::utils::types::Function;
 
     fn request_tools(tools: serde_json::Value) -> Vec<ResponsesTool> {
         serde_json::from_value(tools).expect("deserialize tools")
@@ -268,5 +359,135 @@ mod tests {
             invalid_tool_choice("missing"),
             "Tool choice 'function' not found in 'tools' parameter."
         );
+    }
+
+    fn additional_tools(tools: serde_json::Value) -> serde_json::Value {
+        json!({"type": "additional_tools", "id": "at_1", "role": "developer", "tools": tools})
+    }
+
+    fn function(name: &str, description: &str) -> serde_json::Value {
+        json!({"type": "function", "name": name, "description": description})
+    }
+
+    fn clock(description: &str, functions: serde_json::Value) -> serde_json::Value {
+        json!({"type": "namespace", "name": "clock", "description": description, "tools": functions})
+    }
+
+    /// Hoist the `additional_tools` items of `input` into `tools`.
+    fn hoist(
+        input: serde_json::Value,
+        tools: serde_json::Value,
+    ) -> (ResponsesInput, Vec<ResponsesTool>) {
+        let mut input = serde_json::from_value(input).expect("deserialize input");
+        let mut tools = request_tools(tools);
+        hoist_additional_tools(&mut input, &mut tools);
+        (input, tools)
+    }
+
+    /// Each tool as `name: description`, with a namespace's functions nested.
+    fn summary(tools: &[ResponsesTool]) -> Vec<String> {
+        let function = |function: &Function| {
+            format!(
+                "{}: {}",
+                function.name,
+                function.description.as_deref().unwrap_or_default()
+            )
+        };
+        tools
+            .iter()
+            .map(|tool| match tool {
+                ResponsesTool::Function(f) => function(f),
+                ResponsesTool::Namespace(namespace) => format!(
+                    "{}: {} [{}]",
+                    namespace.name,
+                    namespace.description,
+                    namespace
+                        .tools
+                        .iter()
+                        .map(|NamespacedTool::Function(f)| function(f))
+                        .join(", ")
+                ),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn additional_tools_items_leave_the_input_after_top_level_tools() {
+        let (input, tools) = hoist(
+            json!([
+                additional_tools(json!([clock("", json!([function("sleep", "")]))])),
+                {"role": "user", "content": "hi"},
+                additional_tools(json!([function("get_time", "")])),
+            ]),
+            json!([function("get_weather", "")]),
+        );
+
+        let ResponsesInput::Items(items) = input else {
+            panic!("item list");
+        };
+        assert!(
+            matches!(&items[..], [ResponseInputItem::Message(_)]),
+            "{items:?}"
+        );
+        expect![[r#"
+            [
+                "get_weather: ",
+                "clock:  [sleep: ]",
+                "get_time: ",
+            ]
+        "#]]
+        .assert_debug_eq(&summary(&tools));
+    }
+
+    #[test]
+    fn repeated_additional_tools_are_offered_once() {
+        // A namespace split across items is merged, so a named choice of a
+        // repeated namespaced function stays unambiguous.
+        let (_, tools) = hoist(
+            json!([
+                additional_tools(json!([clock("", json!([function("sleep", "")]))])),
+                additional_tools(json!([function("get_weather", "")])),
+                {"role": "user", "content": "hi"},
+                additional_tools(json!([clock("", json!([function("sleep", "")]))])),
+                additional_tools(json!([clock("", json!([function("timer", "")]))])),
+            ]),
+            json!([function("get_weather", "")]),
+        );
+
+        expect![[r#"
+            [
+                "get_weather: ",
+                "clock:  [sleep: , timer: ]",
+            ]
+        "#]]
+        .assert_debug_eq(&summary(&tools));
+    }
+
+    #[test]
+    fn additional_tools_redefinitions_replace_in_place() {
+        let (_, tools) = hoist(
+            json!([
+                additional_tools(json!([clock(
+                    "v1",
+                    json!([function("sleep", "v1"), function("timer", "v1")])
+                )])),
+                additional_tools(json!([function("get_weather", "v2")])),
+                {"role": "user", "content": "hi"},
+                additional_tools(json!([clock(
+                    "v2",
+                    json!([function("sleep", "v2"), function("sleep", "v3")])
+                )])),
+            ]),
+            json!([function("get_weather", "v1"), function("get_time", "v1")]),
+        );
+
+        expect![[r#"
+            [
+                "get_weather: v2",
+                "get_time: v1",
+                "clock: v2 [sleep: v3, timer: v1]",
+            ]
+        "#]]
+        .assert_debug_eq(&summary(&tools));
     }
 }
