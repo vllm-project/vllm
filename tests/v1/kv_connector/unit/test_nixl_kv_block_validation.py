@@ -9,7 +9,6 @@ reads the entries after the data, so a stale, reused or wrong block is caught.
 """
 
 import ctypes
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -24,14 +23,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.kv_validation import (
     ENTRY_SIZE,
     KVBlockMetaPool,
-    KVBlockMetaTracker,
     KVBlockValidator,
     make_entries,
 )
 from vllm.forward_context import ForwardContext
 
 from .test_nixl_connector import FakeNixlConnectorWorker, FakeNixlWrapper
-from .utils import create_vllm_config, make_kv_cache_config
+from .utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+    make_kv_cache_config,
+)
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 32
@@ -87,51 +91,53 @@ class CopyingFakeNixlWrapper(FakeNixlWrapper):
         self.notifs.append(notif_msg)
 
 
-def _request(req_id: str, num_full_blocks: int):
-    return SimpleNamespace(request_id=req_id, block_hashes=_HASHES[:num_full_blocks])
+def _producer_meta(scheduler):
+    output = scheduler.schedule()
+    meta = output.kv_connector_metadata
+    assert isinstance(meta, NixlConnectorMetadata)
+    return output, meta
 
 
-def _scheduler_output(new=(), cached=(), num_scheduled=None):
-    return SimpleNamespace(
-        scheduled_new_reqs=[
-            SimpleNamespace(req_id=r, block_ids=(ids,), num_computed_tokens=nc)
-            for r, ids, nc in new
-        ],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[r for r, _, _ in cached],
-            new_block_ids=[None if ids is None else (ids,) for _, ids, _ in cached],
-            num_computed_tokens=[nc for _, _, nc in cached],
-        ),
-        num_scheduled_tokens=dict(num_scheduled or {}),
+def test_producer_invalidates_new_blocks_and_publishes_filled_ones():
+    """Fresh blocks are invalidated before the forward pass that writes them and
+    published once full, chunk by chunk; prefix hits keep their entries."""
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE,
+        max_num_batched_tokens=64,
+        kv_connector_extra_config={"kv_block_validation": "enforce"},
+        kv_role="kv_producer",
     )
+    scheduler = create_scheduler(vllm_config)
+    first = create_request(num_tokens=100, common_prefix_len=64, max_tokens=4)
+    scheduler.add_request(first)
 
+    # Chunk 1 computes tokens [0, 64): allocates and fills blocks 0-3.
+    output, meta = _producer_meta(scheduler)
+    blocks = scheduler.kv_cache_manager.get_block_ids(first.request_id)[0]
+    assert meta.kv_meta_invalidate == blocks[:4]
+    assert meta.kv_meta_publish_ids == blocks[:4]
+    assert meta.kv_meta_publish_hashes == first.block_hashes[:4]
+    scheduler.update_from_output(output, create_model_runner_output([first]))
 
-def test_tracker_invalidates_new_blocks_and_publishes_filled_ones():
-    """Prefix hits keep their entries; fresh blocks are invalidated before the
-    forward pass and published once full, chunk by chunk."""
-    tracker = KVBlockMetaTracker(BLOCK_SIZE)
-    tracker.add_request(_request("r", num_full_blocks=3))
+    # Chunk 2 computes [64, 100): allocates blocks 4-6 and fills 4-5. The
+    # partial block 6 has no hash yet.
+    output, meta = _producer_meta(scheduler)
+    blocks = scheduler.kv_cache_manager.get_block_ids(first.request_id)[0]
+    assert meta.kv_meta_invalidate == blocks[4:7]
+    assert meta.kv_meta_publish_ids == blocks[4:6]
+    assert meta.kv_meta_publish_hashes == first.block_hashes[4:6]
+    scheduler.update_from_output(output, create_model_runner_output([first]))
 
-    # Block 7 is a prefix hit; 8 and 9 are new. The step computes 24 tokens,
-    # filling block 8 and half of 9.
-    invalidate, ids, hashes = tracker.collect(
-        _scheduler_output(new=[("r", [7, 8, 9], 16)], num_scheduled={"r": 24})
-    )
-    assert invalidate == [8, 9]
-    assert (ids, hashes) == ([8], [_HASHES[1]])
-
-    # The next chunk fills block 9 and allocates block 10.
-    invalidate, ids, hashes = tracker.collect(
-        _scheduler_output(cached=[("r", [10], 40)], num_scheduled={"r": 12})
-    )
-    assert invalidate == [10]
-    assert (ids, hashes) == ([9], [_HASHES[2]])
-
-    # Block 10 never fills with real tokens: no hash, so nothing is published.
-    tracker.remove_request("r")
-    assert tracker.collect(
-        _scheduler_output(cached=[("r", None, 52)], num_scheduled={"r": 1})
-    ) == ([], [], [])
+    # A request sharing the first 64 tokens hits blocks 0-3 in the prefix
+    # cache: their entries are kept, only its own blocks are invalidated.
+    second = create_request(num_tokens=80, common_prefix_len=64, max_tokens=4)
+    scheduler.add_request(second)
+    _, meta = _producer_meta(scheduler)
+    shared = scheduler.kv_cache_manager.get_block_ids(second.request_id)[0]
+    assert shared[:4] == blocks[:4]
+    assert set(shared[4:]) <= set(meta.kv_meta_invalidate)
+    assert not set(shared[:4]) & set(meta.kv_meta_invalidate)
+    assert shared[4] in meta.kv_meta_publish_ids
 
 
 @pytest.fixture
@@ -244,7 +250,6 @@ def _make_connector(mode: str):
     # The fake handshake carries no metadata pool: attach the producer's.
     producer = KVBlockMetaPool(NUM_BLOCKS, torch.device("cpu"))
     assert worker._kv_validator is not None
-    worker._kv_validator.remote_mem_type = "DRAM"
     worker._kv_validator.add_remote(
         _REMOTE,
         0,
