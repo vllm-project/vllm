@@ -101,11 +101,13 @@ on models that support it. In metadata-only mode, the proxy sends those
 overrides only to E.
 
 The proxy asks E for `return_prompt_features`. It forwards the expanded
-tokens, layout-only `features`, and EC parameters to P or PD. In E/P/D,
-it sends the same token layout to D with P's remote-prefill KV parameters
-and no EC parameters. E and P use their usual EC connector roles; D needs
-only a KV consumer. Use dynamic registration to advertise P's control
-address when using Mooncake EC with separate P and D.
+tokens, layout-only `features`, and EC parameters to P or PD. For E/P/D,
+the proxy forwards the layout and P's KV parameters to D without EC
+parameters. This requires a decode worker whose Generate endpoint accepts
+metadata-only requests backed by remote prefill KV. If D does not support
+that input, use E+PD or the existing Chat Completions path. Use dynamic
+registration to advertise P's control address when using Mooncake EC with
+separate P and D.
 
 To distribute media in one request across multiple E instances, set the
 corresponding `--image-fanout-token-id`, `--audio-fanout-token-id`, or

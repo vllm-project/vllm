@@ -158,7 +158,7 @@ class MultiModalFeatures(BaseModel):
     entry is a base64-encoded `MultiModalKwargsItem` containing only
     placeholder-metadata and `keep_on_cpu` fields. `None` means that
     the metadata is unavailable for that item. Without `kwargs_data`,
-    the item needs external EC on prefill or external KV on decode.
+    the item needs embeddings from the EC connector.
     """
 
     def metadata_only_indices(self) -> dict[str, set[int]]:
@@ -287,21 +287,19 @@ class GenerateRequest(BaseModel):
     )
     """Per-modality media loading overrides for raw content_parts."""
 
-    _metadata_only_requires_transfer: ClassVar[bool] = True
+    _metadata_only_requires_ec: ClassVar[bool] = True
 
     @model_validator(mode="after")
-    def _require_transfer_for_metadata_only(self) -> "GenerateRequest":
+    def _require_ec_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
         if (
-            self._metadata_only_requires_transfer
+            self._metadata_only_requires_ec
             and features is not None
             and not self.ec_transfer_params
-            and (self.kv_transfer_params or {}).get("do_remote_prefill") is not True
             and features.metadata_only_indices()
         ):
             raise ValueError(
-                "metadata-only multimodal items require ec_transfer_params "
-                "or a remote-prefill KV transfer"
+                "metadata-only multimodal items require ec_transfer_params"
             )
         return self
 
@@ -510,7 +508,7 @@ class RenderedGenerateRequest(GenerateRequest):
     still validates the request it receives as a `GenerateRequest`.
     """
 
-    _metadata_only_requires_transfer: ClassVar[bool] = False
+    _metadata_only_requires_ec: ClassVar[bool] = False
 
 
 class GenerateLogProb(BaseModel):

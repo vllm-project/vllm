@@ -410,29 +410,18 @@ class ServingTokens(GenerateBaseServing):
         features = request.features
         metadata_only = features.metadata_only_indices() if features else {}
         if metadata_only:
-            config = self.engine_client.vllm_config
-            ec_config = config.ec_transfer_config
-            kv_config = config.kv_transfer_config
+            ec_config = self.engine_client.vllm_config.ec_transfer_config
             mm_config = self.model_config.multimodal_config
-            from_ec = (
-                ec_config is not None
-                and ec_config.is_ec_consumer
-                and bool(request.ec_transfer_params)
-            )
-            from_kv = (
-                kv_config is not None
-                and kv_config.is_kv_consumer
-                and (request.kv_transfer_params or {}).get("do_remote_prefill") is True
-            )
             if not (
                 mm_config
                 and mm_config.allow_missing_mm_embeddings
-                and (from_ec or from_kv)
+                and ec_config is not None
+                and ec_config.is_ec_consumer
+                and request.ec_transfer_params
             ):
                 return self.create_error_response(
                     "Metadata-only features require an EC consumer with "
-                    "ec_transfer_params or a KV consumer with remote-prefill "
-                    "transfer parameters."
+                    "ec_transfer_params."
                 )
         if request.content_parts:
             # Items in features are already expanded; render every token
