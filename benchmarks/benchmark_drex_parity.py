@@ -25,6 +25,8 @@ Usage on a GPU box::
 """
 
 import argparse
+import importlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -120,6 +122,36 @@ def _flipped_answer(question_type: str, criteria, answer: dict) -> str:
     return moved
 
 
+def _load_reference(reference_dir: str):
+    """Import the reference ``code/kev`` package from a checkpoint snapshot.
+
+    The directory is called ``code``, which the standard library also exports,
+    so it is loaded under a private name rather than added to ``sys.path``.
+
+    Args:
+        reference_dir: Snapshot holding ``code/kev``, ``head.pt`` and shards.
+
+    Returns:
+        The reference ``api`` module and the checkpoint ``load`` callable.
+
+    Raises:
+        SystemExit: The snapshot has no importable ``code/kev`` package.
+
+    """
+    package_dir = Path(reference_dir) / "code"
+    spec = importlib.util.spec_from_file_location(
+        "drex_reference", package_dir, submodule_search_locations=[str(package_dir)]
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"no reference package at {package_dir}")
+    package = importlib.util.module_from_spec(spec)
+    sys.modules["drex_reference"] = package
+    spec.loader.exec_module(package)
+    api = importlib.import_module("drex_reference.kev.api")
+    checkpoint = importlib.import_module("drex_reference.kev.checkpoint")
+    return api, checkpoint.load
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", required=True)
@@ -132,9 +164,7 @@ def main() -> int:
     parser.add_argument("--max-diff", type=float, default=1e-3)
     args = parser.parse_args()
 
-    sys.path.insert(0, args.reference_dir)
-    from code.kev import api as ref_api
-    from code.kev.checkpoint import load as ref_load
+    ref_api, ref_load = _load_reference(args.reference_dir)
 
     dtype = getattr(torch, args.dtype) if args.dtype else None
     tokenizer, model = ref_load(args.reference_dir, device=args.device, dtype=dtype)
