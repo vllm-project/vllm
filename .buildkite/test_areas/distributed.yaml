@@ -13,6 +13,7 @@ steps:
   - vllm/distributed
   - vllm/v1/attention/ops/cp_common.py
   - "!vllm/distributed/kv_transfer/"
+  - vllm/triton_utils/tp_synced_autotune.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
@@ -24,6 +25,7 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
   - pytest -v -s distributed/test_pipeline_partition.py
+  - pytest -v -s distributed/test_tp_synced_autotune.py
   mirror:
     amd:
       automatic_shard: true
@@ -38,6 +40,7 @@ steps:
       - vllm/distributed
       - tests/distributed
       - vllm/platforms/rocm.py
+      - vllm/triton_utils/tp_synced_autotune.py
       commands:
       - pytest -v -s distributed/test_comm_ops.py
       - pytest -v -s distributed/test_cpu_all_reduce.py
@@ -45,6 +48,7 @@ steps:
       - pytest -v -s distributed/test_shm_broadcast.py
       - pytest -v -s distributed/test_shm_buffer.py
       - pytest -v -s distributed/test_shm_storage.py
+      - pytest -v -s distributed/test_tp_synced_autotune.py
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer

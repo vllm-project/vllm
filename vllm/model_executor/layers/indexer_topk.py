@@ -10,6 +10,10 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.logger import init_logger
+from vllm.model_executor.layers.canonical_topk import (
+    canonicalize_topk_,
+    deterministic_sparse_topk,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_topk_varlen_gvr2
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -141,6 +145,9 @@ def deep_select_topk(
 # ---------------------------------------------------------------------------
 
 
+logger = init_logger(__name__)
+
+
 @functools.cache
 def get_indexer_topk(backend: str) -> "SparseIndexerTopk":
     return SparseIndexerTopk(backend)
@@ -161,6 +168,7 @@ class SparseIndexerTopk(torch.nn.Module):
                 vllm_config = get_current_vllm_config()
             backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         self._backend = backend
+        self._apply_determinism()
         # Decode rows per step (requests x tokens per request), used to warm
         # up gvr_2 for every row count before the first CUDA-graph capture.
         self._gvr2_max_rows = 256
@@ -193,6 +201,19 @@ class SparseIndexerTopk(torch.nn.Module):
 
             self._aiter_enabled = bool(rocm_aiter_ops.is_enabled())
             self._aiter_capable = bool(rocm_aiter_ops.is_indexer_top_k_enabled())
+
+    def _apply_determinism(self) -> bool:
+        """Read the flag now (a replication switch may set it after this module
+        was built); DeepSelect ranks BF16 approximations of the scores, so its
+        set is not the exact top-k a canonical result is built from."""
+        deterministic = deterministic_sparse_topk()
+        if deterministic and self._backend == "deep_select":
+            logger.warning_once(
+                "Deterministic sparse top-k: using the exact top-k kernels "
+                "instead of sparse_indexer_topk_backend='deep_select'."
+            )
+            self._backend = "auto"
+        return deterministic
 
     def resolve_backend(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
@@ -269,6 +290,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> bool:
         """Whether this decode call can consume BF16 without a full FP32 copy."""
+        self._apply_determinism()
         if logits.dtype != torch.bfloat16 or logits.stride(1) != 1:
             return False
         if self._backend == "deep_select":
@@ -508,8 +530,29 @@ class SparseIndexerTopk(torch.nn.Module):
         """Run the resolved decode top-k implementation, writing into
         topk_indices (int32, -1 fill for rows shorter than topk_tokens).
         """
+        deterministic = self._apply_determinism()
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
         logger.info_once("Sparse indexer decode top-k backend: %s", backend)
+        self._dispatch(
+            backend, logits, seq_lens, next_n, topk_indices, topk_tokens, max_seq_len
+        )
+        if deterministic:
+            canonicalize_topk_(
+                logits,
+                topk_indices[:, :topk_tokens],
+                self._row_ends(seq_lens, next_n, logits.shape[0]),
+            )
+
+    def _dispatch(
+        self,
+        backend: str,
+        logits: torch.Tensor,
+        seq_lens: torch.Tensor,
+        next_n: int,
+        topk_indices: torch.Tensor,
+        topk_tokens: int,
+        max_seq_len: int,
+    ) -> None:
         if backend == "deep_select":
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
             deep_select_topk(logits, topk_tokens, end=row_ends, output_idx=topk_indices)

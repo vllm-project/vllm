@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.2"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_DETERMINISTIC_SPARSE_TOPK: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -129,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
+    VLLM_TRITON_SYNC_AUTOTUNE_TP: bool = False
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = True
@@ -230,6 +232,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
+    VLLM_QWEN4EXP_REPLICATE_MIXER: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_USE_LOCALITY_DOMAINS: bool = False
@@ -649,6 +652,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # If set, the sparse-attention indexer top-k (DeepSeek-V3.2/V4.1, GLM-5.x,
+    # Qwen4Exp QSA) returns a deterministic set in ascending index order: ties
+    # with the k-th score keep the lowest indices. On by default with
+    # VLLM_BATCH_INVARIANT.
+    "VLLM_DETERMINISTIC_SPARSE_TOPK": lambda: bool(
+        int(os.getenv("VLLM_DETERMINISTIC_SPARSE_TOPK", "0"))
+    ),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),
@@ -1240,6 +1250,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
         in ("1", "true")
     ),
+    # If set, every tensor-parallel rank adopts rank 0's Triton autotune choice
+    # (inside model forward passes), so all TP ranks run the same config. Needed
+    # when ranks compute the same tensors without an all-reduce after them; plain
+    # TP does not need it. Covers kernels decorated with triton.autotune only.
+    "VLLM_TRITON_SYNC_AUTOTUNE_TP": lambda: (
+        os.environ.get("VLLM_TRITON_SYNC_AUTOTUNE_TP", "0").strip().lower()
+        in ("1", "true")
+    ),
     # Maximum compiler threads per worker for registered CUDA Triton JIT warmup.
     # Set to 1 for serial warmup. Does not affect runtime JIT or autotuning.
     "VLLM_TRITON_JIT_WARMUP_NUM_THREADS": lambda: int(
@@ -1780,6 +1798,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP
     # ranks must belong to one NVLink domain.
     "VLLM_ENABLE_GEMM_RS": lambda: bool(int(os.getenv("VLLM_ENABLE_GEMM_RS", "0"))),
+    # Experimental: Qwen4Exp keeps every mixer (GDN and QSA) whole on each TP rank
+    # (no mixer all-reduce); MoE/MLP stay tensor-parallel. For TP over slow links.
+    "VLLM_QWEN4EXP_REPLICATE_MIXER": lambda: bool(
+        int(os.getenv("VLLM_QWEN4EXP_REPLICATE_MIXER", "0"))
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(

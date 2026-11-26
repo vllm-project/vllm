@@ -77,6 +77,7 @@ from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.utils import cuda_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
@@ -746,8 +747,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ) = None,
         norm_eps: float | None = None,
         a_log_dtype: torch.dtype = torch.float32,
+        replicate: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
+        # replicate: every rank holds all heads and the full recurrent state.
+        self.replicate = replicate
+        if replicate:
+            self.tp_size, self.tp_rank = 1, 0
 
         self.beta_scale = (
             2.0 if getattr(config, "linear_allow_neg_eigval", False) else 1.0
@@ -841,8 +847,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         )
 
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        # sharded_weight_loader narrows by the global TP rank.
+        head_loader = default_weight_loader if replicate else sharded_weight_loader(0)
+        set_weight_attrs(self.A_log, {"weight_loader": head_loader})
+        set_weight_attrs(self.dt_bias, {"weight_loader": head_loader})
 
         output_gate_type = getattr(config, "output_gate_type", "silu")
         if output_gate_type == "swish":
@@ -868,6 +876,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             reduce_results=reduce_results,
             quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
+            disable_tp=replicate,
         )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
@@ -1089,6 +1098,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             output_size=self.conv_dim,
             bias=False,
             prefix=f"{prefix}.conv1d",
+            disable_tp=self.replicate,
         )
         conv.weight.data = conv.weight.data.unsqueeze(1)
         query_key_settings = (self.key_dim, 0, False)
@@ -1130,6 +1140,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
+            disable_tp=self.replicate,
         )
 
     def create_ba_proj(
@@ -1153,7 +1164,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
-            disable_tp=self.maybe_disable_tp(quant_config),
+            disable_tp=self.replicate or self.maybe_disable_tp(quant_config),
         )
 
     def maybe_disable_tp(self, quant_config: QuantizationConfig | None) -> bool:

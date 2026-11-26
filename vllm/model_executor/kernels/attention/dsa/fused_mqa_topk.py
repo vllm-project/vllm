@@ -8,6 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.canonical_topk import deterministic_sparse_topk
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -72,12 +73,15 @@ def use_fused_mqa_topk(
     full_context: every rank ranks its rows over the whole context (no DCP, or
     PCP after the KV all-gather); pure DCP needs the per-shard top-k merge;
     candidate_selection: v4.1 two-level selection needs the logits.
-    VLLM_BATCH_INVARIANT keeps the dense path: the fused gate depends on the
-    chunk's total keys, and ties at the k-th score are taken in atomic order.
+    VLLM_BATCH_INVARIANT and the canonical top-k (deterministic_sparse_topk)
+    keep the dense path: the fused gate depends on the chunk's total keys, ties
+    at the k-th score are taken in atomic order, and the kernel never
+    materializes the scores the canonical top-k is rebuilt from.
     """
     return (
         envs.VLLM_USE_FUSED_MQA_TOPK
         and not envs.VLLM_BATCH_INVARIANT
+        and not deterministic_sparse_topk()
         and not fp4_cache
         and full_context
         and not candidate_selection
