@@ -1554,6 +1554,11 @@ class DrexStrategy(ReadStrategy):
             )
             rows.append((texts, order, ids, (opt_positions, decide_position)))
 
+        try:
+            drex_prompt.check_budget([ids for _, _, ids, _ in rows], self.max_model_len)
+        except ValueError as e:
+            raise StructuredDecisionError(str(e)) from e
+
         async def read_one(n: int) -> list[float]:
             _, _, ids, (opt_positions, decide_position) = rows[n]
             result = None

@@ -28,6 +28,11 @@ MAX_STATE = 384
 MAX_BRANCH = 1024
 MAX_PACKED = 2048
 
+#: One request may read this many windows' worth of tokens in total. Each
+#: question prefills the state again, so this bounds the work one caller can
+#: ask for; real traffic stays well inside it.
+REQUEST_BUDGET_FACTOR = 2
+
 #: Caller text may contain `<|name|>`, which the tokenizer would turn into a
 #: real control token. Rewrite it to the `¦` form so option boundaries cannot
 #: be forged, exactly as `code/kev` does.
@@ -121,6 +126,30 @@ def apply_order(probs: Sequence[float], order: Sequence[int]) -> list[float]:
             f"got {len(probs)} options but {len(order)} positions to place them"
         )
     return [probs[i] for i in order]
+
+
+def check_budget(rows: Sequence[Sequence[int]], max_model_len: int) -> None:
+    """Reject a request whose rows add up to more than the serving budget.
+
+    Every question prefills the state again, so one caller can ask for far
+    more work than a single window holds. Bounding the sum of the rows keeps
+    that amplification finite without narrowing what a real request may ask.
+
+    Args:
+        rows: Token ids of each question's packed row.
+        max_model_len: The model window the budget scales with.
+
+    Raises:
+        ValueError: The rows exceed `REQUEST_BUDGET_FACTOR * max_model_len`.
+
+    """
+    limit = REQUEST_BUDGET_FACTOR * max_model_len
+    total = sum(len(row) for row in rows)
+    if total > limit:
+        raise ValueError(
+            f"this request reads {total} tokens, over the {limit}-token budget "
+            f"for a {max_model_len}-token window"
+        )
 
 
 def pack(

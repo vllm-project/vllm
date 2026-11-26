@@ -179,3 +179,19 @@ def test_render_indents_nested_structures():
 
 def test_render_empty_values_are_empty():
     assert drex_prompt.render(None) == ""
+
+
+def test_check_budget_allows_a_request_within_the_window():
+    drex_prompt.check_budget([[1, 2], [3]], max_model_len=2)
+
+
+def test_check_budget_allows_a_request_exactly_at_the_limit():
+    # Two rows of two tokens reach 2 * max_model_len without exceeding it.
+    drex_prompt.check_budget([[1, 2], [3, 4]], max_model_len=2)
+
+
+def test_check_budget_rejects_a_request_that_amplifies_one_call():
+    # Every question prefills the state again, so the rows, not the question
+    # count, are what bounds the work a single caller can ask for.
+    with pytest.raises(ValueError, match="over the 4-token budget"):
+        drex_prompt.check_budget([[1, 2], [3, 4], [5]], max_model_len=2)
