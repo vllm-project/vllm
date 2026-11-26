@@ -45,7 +45,7 @@ easy-ext = "1.0.3"
 educe = "0.6.0"
 enum-as-inner = "0.7.0"
 expect-test = "1.5.1"
-fastokens = { version = "0.3.5", default-features = false }
+fastokens = { version = "0.3.6", default-features = false }
 futures = "0.3.31"
 half = { version = "2.7.1", features = ["bytemuck"] }
 hex = "0.4.3"
@@ -62,8 +62,9 @@ image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
 indexmap = { version = "2.13.0", features = ["serde"] }
 indicatif = "0.18.4"
 itertools = "0.14.0"
+json5 = "1.3.8"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/smg-project/smg", rev = "2787f7cde21e0a2511f481994d731c98109020af", default-features = false }
+llm-multimodal = { git = "https://github.com/smg-project/smg", rev = "f23bf087be275375580718c57067d5ad5e66fc49", default-features = false }
 memmap2 = "0.9"
 mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
