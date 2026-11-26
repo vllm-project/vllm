@@ -8,20 +8,80 @@ import "google/protobuf/empty.proto";
 import "google/protobuf/struct.proto";
 import "inference.proto";
 
-// Engine-free chat rendering, the gRPC counterpart of the HTTP render API.
+// Engine-free prompt rendering, the gRPC counterpart of the HTTP render API.
 //
-// A client renders a chat request with RenderChat, builds its own
-// GenerateRequest from the RenderChatResponse fields, and runs it with
+// A client renders a request with Render or RenderChat, builds its own
+// GenerateRequest from the response fields, and runs it with
 // Inference.Generate.
 service Render {
   // Renders a chat request into prompt token IDs plus the generation settings
   // that rendering decides.
   rpc RenderChat (RenderChatRequest) returns (RenderChatResponse) {}
+
+  // Renders a raw JSON request body for the specified API into prompt token IDs
+  // plus the generation settings that rendering decides.
+  rpc Render (RenderRequest) returns (RenderResponse) {}
 }
 
 // ======================================================================================
 // Render
 // ======================================================================================
+
+// API family of the raw JSON request body.
+enum Api {
+  API_UNSPECIFIED = 0;
+  // OpenAI-compatible Chat Completions (/v1/chat/completions).
+  API_CHAT = 1;
+  // Plain prompt Completions (/v1/completions).
+  API_COMPLETIONS = 2;
+  // Anthropic Messages (/v1/messages).
+  API_ANTHROPIC_MESSAGES = 3;
+  // Stateless Responses (/v1/responses).
+  API_RESPONSES = 4;
+}
+
+// Multimodal payload returned by raw-JSON rendering.
+enum MmPayload {
+  // Same as MM_PAYLOAD_TENSORS.
+  MM_PAYLOAD_UNSPECIFIED = 0;
+  MM_PAYLOAD_TENSORS = 1;
+  // Keep hashes and placeholder ranges, without inline kwargs tensors.
+  MM_PAYLOAD_NONE = 2;
+  // TODO: MM_PAYLOAD_METADATA, matching Python's mm_payload: "metadata" (#65018).
+}
+
+message RenderRequest {
+  Api api = 1;
+  // Raw client JSON request body.
+  bytes body = 2;
+  // Controls the returned media independently of `mm_payload` and
+  // `return_mm_kwargs` in the client JSON body, which do not select this mode.
+  MmPayload mm_payload = 3;
+}
+
+// Output of engine-free rendering.
+//
+// Copy these fields into the GenerateRequest sent to Inference.Generate.
+// Sampling and stopping values (including temperature, max_tokens, stop,
+// bad_words, and n) are not returned yet. The caller must supply the equivalent
+// generation parameters separately; copying only these fields is insufficient.
+// Tracked in https://github.com/vllm-project/vllm/issues/65503.
+message RenderResponse {
+  // The rendered prompt, already truncated. Send as `token_ids`.
+  repeated uint32 prompt_token_ids = 1;
+  // The effective structured-output constraint: the request's
+  // `structured_output`, or the output grammar the tool-call parser built
+  // around it. Unset means unconstrained. Send as `decoding.structured_output`.
+  StructuredOutput structured_output = 2;
+  // Send as `engine_reasoning_gate`.
+  EngineReasoningGate engine_reasoning_gate = 3;
+  // Preprocessed media items, ordered by their placeholder ranges in
+  // `prompt_token_ids`. Send as `media`. Their inline kwargs total at most
+  // 16 MiB, the most Inference.Generate accepts; larger media fail with
+  // RESOURCE_EXHAUSTED. Such responses exceed the 4 MiB default receive limit
+  // of many gRPC clients.
+  repeated MediaItem media = 4;
+}
 
 message RenderChatRequest {
   ChatRequest chat = 1;

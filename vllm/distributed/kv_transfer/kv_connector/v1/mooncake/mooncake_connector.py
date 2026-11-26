@@ -678,6 +678,7 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
+    requires_draft_context_kv: bool = False
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1390,6 +1391,10 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        spec = vllm_config.speculative_config
+        self.projects_draft_context_kv = (
+            spec is not None and spec.speculator_config.projects_context_kv
+        )
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
@@ -3158,6 +3163,9 @@ class MooncakeConnectorWorker:
         `send_kv_to_decode` runs on every scheduler batch. The registered
         layout does not change until the next `register_kv_caches`.
         """
+        if meta.requires_draft_context_kv and not self.projects_draft_context_kv:
+            msg = "Missing draft context KV. Configure the same drafter on prefill."
+            return [], [], msg
         cache_key = (
             meta.remote_hostname,
             meta.remote_port,
@@ -3349,6 +3357,7 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
+            requires_draft_context_kv=self.projects_draft_context_kv,
         )
 
     def _validate_head_resharding_layout(
