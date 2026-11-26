@@ -25,6 +25,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
+use vllm_text::DecodedLogprobs;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
@@ -266,10 +267,19 @@ async fn collect_chat_completion(
         })
         .collect::<Vec<_>>();
     let logprobs = if requested_logprobs && include_output_metadata {
+        let logprobs = match logprobs {
+            Some(logprobs) => logprobs,
+            // A request that generated nothing, such as one aborted during
+            // prefill, has no positions to report.
+            None if token_ids.is_empty() => DecodedLogprobs {
+                positions: Vec::new(),
+            },
+            None => {
+                bail_server_error!("chat response requested logprobs but generation returned none")
+            }
+        };
         Some(decoded_logprobs_to_openai_chat(
-            logprobs.as_ref().ok_or_else(|| {
-                server_error!("chat response requested logprobs but generation returned none")
-            })?,
+            &logprobs,
             output_top_logprobs,
             return_tokens_as_token_ids,
         )?)
