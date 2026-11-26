@@ -461,6 +461,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     supports_dense_mha_prefill: ClassVar[bool] = True
     # PCP+DCP is validated per model; subclasses opt in.
     supports_pcp_dcp: ClassVar[bool] = False
+    # Models using a compatible paged sparse backend may opt in.
+    supports_fp8_ds_mla_sliding_window: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -527,13 +529,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
-        if sliding_window is not None and kv_cache_dtype in (
-            "fp8_ds_mla",
-            "nvfp4_ds_mla",
-        ):
-            raise ValueError(
-                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
-            )
+        requested_kv_cache_dtype = kv_cache_dtype
+        self._check_sliding_window_kv_cache_dtype(kv_cache_dtype, kv_cache_dtype)
         dtype = torch.get_default_dtype()
         self.act_dtype = dtype
         if attn_backend is not None:
@@ -555,6 +552,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
             self.attn_backend, kv_cache_dtype
+        )
+        # Sparse backends may serve fp8 / fp8_e4m3 / auto as fp8_ds_mla.
+        self._check_sliding_window_kv_cache_dtype(
+            requested_kv_cache_dtype, normalized_kv_cache_dtype
         )
         if normalized_kv_cache_dtype != kv_cache_dtype:
             if cache_config is not None:
@@ -873,6 +874,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL.register_warmup(
                 self._vllm_config,
                 block_stride_rows=self.kv_cache.stride(0) // row_width,
+            )
+
+    def _check_sliding_window_kv_cache_dtype(
+        self, requested: CacheDType | str, served: CacheDType | str
+    ) -> None:
+        if self.sliding_window is None:
+            return
+        if served == "nvfp4_ds_mla" or (
+            served == "fp8_ds_mla" and not self.supports_fp8_ds_mla_sliding_window
+        ):
+            alias = "" if served == requested else f" (served as {served})"
+            raise ValueError(
+                "Sliding-window MLA does not support "
+                f"kv_cache_dtype={requested}{alias}."
             )
 
     def _uses_flat_kv_cache(self) -> bool:

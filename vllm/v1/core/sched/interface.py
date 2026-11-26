@@ -207,6 +207,11 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
+    def should_schedule(self) -> bool:
+        """Whether the engine should schedule another step now, rather than wait
+        for an in-flight one."""
+        return self.has_requests()
+
     @property
     @abstractmethod
     def pause_state(self) -> PauseState:

@@ -131,10 +131,37 @@ def test_token_ids_view_searches_in_place():
     # Now tokens[:3]: the search stops before the popped 4 and the suffix.
     assert len(view) == 3 and rfind_tokens(view, (4, 6)) == -1
     assert rfind_tokens(view, (2,)) == 1
+    assert view[:] == [1, 2, 3]
+    with pytest.raises(IndexError):
+        view[3]
+    with pytest.raises(IndexError):
+        view[-4]
     assert view._list is None  # searching didn't copy the tokens
     assert list(view) == [1, 2, 3] and view[-1] == 3
     view.pop()
     assert list(view) == [1, 2] and rfind_tokens(view, (3,)) == -1
+
+
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("split", [0, 3, 6])
+def test_token_ids_view_slices_match_list(materialized, split):
+    expected = list(range(6))
+    view = TokenIdsView(TokenBuffer(expected[:split]), expected[split:])
+    if materialized:
+        assert list(view) == expected
+    for _ in range(7):
+        for start in (None, -9, -3, 0, 2, 9):
+            for stop in (None, -9, -1, 0, 4, 9):
+                for step in (None, -3, -1, 1, 2):
+                    index = slice(start, stop, step)
+                    assert view[index] == expected[index]
+        with pytest.raises(ValueError):
+            view[::0]
+        if not materialized:
+            assert view._list is None
+        if expected:
+            view.pop()
+            expected.pop()
 
 
 def test_token_buffer_pickles_out_of_band_snapshot():

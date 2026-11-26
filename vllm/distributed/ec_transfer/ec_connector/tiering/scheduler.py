@@ -185,11 +185,7 @@ class ECTieringScheduler(ECCPUScheduler):
         num_computed_tokens: int,
         local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
-        if not super().ensure_cache_available(
-            request,
-            num_computed_tokens,
-            local_cache_hashes,
-        ):
+        if not super().ensure_cache_available(request, num_computed_tokens):
             return False
         if self._tiering_manager is None or not self._is_consumer:
             return True
