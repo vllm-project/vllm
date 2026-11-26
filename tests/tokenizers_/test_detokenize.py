@@ -107,6 +107,44 @@ def tokenizer(tokenizer_name):
 
 
 @pytest.mark.parametrize(
+    "tokenizer_name", ["gpt2", "vllm-project/tiny-random-LlamaForCausalLM"]
+)
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize("initial_skip", [False, True])
+def test_skip_special_tokens_change_preserves_pending_text(
+    tokenizer: TokenizersBackend, fast: bool, initial_skip: bool
+):
+    """Changing special-token handling must preserve incomplete UTF-8 output."""
+    prompt_ids = tokenizer.encode("Hello", add_special_tokens=False)
+    output_ids = tokenizer.encode("你好😀", add_special_tokens=False)
+    request = EngineCoreRequest(
+        request_id="decode-setting",
+        prompt_token_ids=prompt_ids,
+        mm_features=None,
+        sampling_params=SamplingParams(skip_special_tokens=initial_skip),
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    decoder_class = FastIncrementalDetokenizer if fast else SlowIncrementalDetokenizer
+    for split in range(1, len(output_ids)):
+        decoder = decoder_class(tokenizer, request)
+        reference = decoder_class(tokenizer, request)
+        observed = ""
+        expected = ""
+        for chunk_index, chunk in enumerate([output_ids[:split], output_ids[split:]]):
+            if chunk_index:
+                decoder.set_skip_special_tokens(not initial_skip)
+            decoder.update(chunk, stop_terminated=False)
+            reference.update(chunk, stop_terminated=False)
+            observed += decoder.get_next_output_text(finished=True, delta=True)
+            expected += reference.get_next_output_text(finished=True, delta=True)
+        assert observed == expected
+
+
+@pytest.mark.parametrize(
     "tokenizer_name", ["openai-community/gpt2", "mistralai/Pixtral-12B-2409"]
 )
 def test_slow_decode_long_history_preserves_text_and_token_ids(tokenizer):

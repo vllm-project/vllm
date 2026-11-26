@@ -10,6 +10,8 @@ import numpy as np
 import prometheus_client
 import pytest
 import torch
+from tokenizers import Tokenizer, decoders, models
+from transformers import TokenizersBackend
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -1784,16 +1786,17 @@ async def test_streaming_input_collector_preserves_chunk_boundary():
 
 
 def _make_streaming_input_request(
-    request_id: str, prompt_token_ids: list[int]
+    request_id: str,
+    prompt_token_ids: list[int],
+    sampling_params: SamplingParams | None = None,
 ) -> EngineCoreRequest:
     """One chunk of a streaming-input (resumable) request."""
     return EngineCoreRequest(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=None,
-        sampling_params=SamplingParams(
-            detokenize=False, output_kind=RequestOutputKind.DELTA
-        ),
+        sampling_params=sampling_params
+        or SamplingParams(detokenize=False, output_kind=RequestOutputKind.DELTA),
         pooling_params=None,
         arrival_time=0,
         lora_request=None,
@@ -1802,6 +1805,66 @@ def _make_streaming_input_request(
         resumable=True,
         external_req_id=f"{request_id}-ext",
     )
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE]
+)
+@pytest.mark.parametrize(
+    "skip_per_chunk",
+    [(False, True, False), (True, False, True), (False,) * 3, (True,) * 3],
+)
+def test_streaming_input_skip_special_tokens(
+    queued: bool, output_kind: RequestOutputKind, skip_per_chunk: tuple[bool, ...]
+):
+    """Each chunk's decoding setting takes effect only when that chunk starts."""
+    raw_tokenizer = Tokenizer(models.WordLevel({"x": 0, "<marker>": 1}, unk_token="x"))
+    raw_tokenizer.decoder = decoders.Fuse()
+    tokenizer = TokenizersBackend(
+        tokenizer_object=raw_tokenizer, additional_special_tokens=["<marker>"]
+    )
+    processor = OutputProcessor(tokenizer, collect_stats=False)
+    requests = [
+        _make_streaming_input_request(
+            "stream-req",
+            [0],
+            SamplingParams(
+                skip_special_tokens=skip, max_tokens=1, output_kind=output_kind
+            ),
+        )
+        for skip in skip_per_chunk
+    ]
+    processor.add_request(requests[0], None)
+    if queued:
+        for request in requests[1:]:
+            processor.add_request(request, None)
+
+    observed = []
+    expected = []
+    cumulative_text = ""
+    for index, skip in enumerate(skip_per_chunk):
+        if index and not queued:
+            processor.add_request(requests[index], None)
+        processed = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id="stream-req",
+                    new_token_ids=[1],
+                    finish_reason=FinishReason.LENGTH,
+                )
+            ]
+        )
+        request_output = processed.request_outputs[0]
+        assert isinstance(request_output.outputs, list)
+        output = request_output.outputs[0]
+        text = "" if skip else "<marker>"
+        cumulative_text += text
+        cumulative = output_kind == RequestOutputKind.CUMULATIVE
+        assert output.token_ids == [1] * (index + 1 if cumulative else 1)
+        observed.append(output.text)
+        expected.append(cumulative_text if cumulative else text)
+    assert observed == expected
 
 
 def _add_streaming_request_with_queued_chunk(
