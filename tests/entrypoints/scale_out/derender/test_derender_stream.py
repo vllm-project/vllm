@@ -3070,3 +3070,89 @@ async def test_streaming_derender_logprob_override(
     else:
         assert choice["logprobs"]["tokens"] == [expected]
         assert choice["logprobs"]["top_logprobs"] == [{expected: -0.5}]
+
+
+_MISTRAL_MODEL = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
+
+
+@pytest.fixture(scope="module")
+def mistral_blank_name_server():
+    with RemoteLaunchRenderServer(
+        _MISTRAL_MODEL,
+        [
+            "--tokenizer-mode",
+            "mistral",
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "mistral",
+            "--max-model-len",
+            "2048",
+        ],
+    ) as server:
+        yield server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_after", [False, True])
+async def test_mistral_blank_name_derender(mistral_blank_name_server, valid_after):
+    """HTTP streaming and full responses omit rejected calls, retaining valid ones."""
+    tokenizer = get_tokenizer(_MISTRAL_MODEL, tokenizer_mode="mistral")
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    chat_request = {
+        "model": _MISTRAL_MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "tools": tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": False,
+    }
+    vocab = tokenizer.get_vocab()
+    ids = [vocab["[TOOL_CALLS]"]]
+    ids += tokenizer.encode("{}", add_special_tokens=False)
+    if valid_after:
+        ids += [vocab["[TOOL_CALLS]"]]
+        ids += tokenizer.encode("bash", add_special_tokens=False)
+        ids += [vocab["[ARGS]"]]
+        ids += tokenizer.encode('{"command":"ls"}', add_special_tokens=False)
+    async with httpx.AsyncClient(
+        base_url=mistral_blank_name_server.url_for(""), timeout=60.0
+    ) as client:
+        result = await stream_chat_derender(
+            client, ids, [1] * len(ids), chat_request, 1, [1]
+        )
+        response = await client.post(
+            "/v1/chat/completions/derender",
+            json={
+                "model": _MISTRAL_MODEL,
+                "generate_response": {
+                    "request_id": "blank-name-test",
+                    "choices": [
+                        {"index": 0, "token_ids": ids, "finish_reason": "stop"}
+                    ],
+                },
+                "prompt_token_ids": [1],
+                "chat_request": chat_request,
+            },
+        )
+        assert response.status_code == 200, response.text
+    choice = response.json()["choices"][0]
+    names = [call["name"] for call in result["tool_calls"]]
+    full_calls = choice["message"].get("tool_calls") or []
+    assert names == (["bash"] if valid_after else [])
+    assert [call["function"]["name"] for call in full_calls] == names
+    expected_finish = "tool_calls" if valid_after else "stop"
+    assert result["finish_reason"] == expected_finish
+    assert choice["finish_reason"] == expected_finish
+    if valid_after:
+        assert json.loads(result["tool_calls"][0]["arguments"]) == {"command": "ls"}
+        assert json.loads(full_calls[0]["function"]["arguments"]) == {"command": "ls"}
