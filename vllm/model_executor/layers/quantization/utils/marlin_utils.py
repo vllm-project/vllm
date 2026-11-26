@@ -602,7 +602,7 @@ def _zero_point_interleave(num_bits: int) -> list[int]:
         return [0, 2, 4, 6, 1, 3, 5, 7]
     if num_bits == 8:
         return [0, 2, 1, 3]
-    raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+    raise Exception(f"num_bits must be 4 or 8, got {num_bits}")
 
 
 # Unpacked zero points take up to 8x the packed memory, so the MoE conversions
