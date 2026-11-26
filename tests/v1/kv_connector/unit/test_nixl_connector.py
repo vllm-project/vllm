@@ -31,7 +31,12 @@ from tests.v1.core.utils import new_kv_cache_group, uniform_spec
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm import LLM
-from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineTransferInfo,
     KVOutputAggregator,
@@ -2732,6 +2737,39 @@ def test_hisparse_dram_rank0_only_dram_only_read_completes(recv_worker):
     )
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("nnodes", [1, 2, 4])
+def test_hisparse_shared_host_pool_dram_reader_per_node(nnodes):
+    """Multi-node TP has one shared HiSparse host pool per node, so each node's
+    host leader must register and READ its DRAM part; otherwise the other
+    nodes' pools are never filled and decode reads stale host KV."""
+    tp_size = 8
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tp_size,
+            nnodes=nnodes,
+            distributed_executor_backend="mp",
+        )
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+        hisparse_shared_host_pool=True,
+    )
+    dram_readers = []
+    for tp_rank in range(tp_size):
+        worker = object.__new__(NixlConnectorWorker)
+        worker.vllm_config = vllm_config
+        worker.kv_cache_config = kv_cache_config
+        worker._mixed_mem_types = True
+        worker.tp_rank = tp_rank
+        if not worker._leaves_dram_xfer_to_host_leader():
+            dram_readers.append(tp_rank)
+
+    assert dram_readers == list(range(0, tp_size, tp_size // nnodes))
+
+
 def element_byte_addrs(view: torch.Tensor) -> list[int]:
     """Absolute byte addresses of every element of a (possibly strided) view."""
     offsets = torch.zeros(view.shape, dtype=torch.int64)
@@ -5418,9 +5456,9 @@ def test_pp_rejects_mamba_with_shared_error(
                 ["mamba0"],
                 MambaSpec(
                     block_size=block_size,
-                    shapes=((16, 4), (16, 4)),
+                    shapes=((16, 3), (2, 4, 4)),
                     dtypes=(torch.float16, torch.float32),
-                    mamba_type=MambaAttentionBackendEnum.MAMBA1,
+                    mamba_type=MambaAttentionBackendEnum.MAMBA2,
                 ),
             ),
         ],
