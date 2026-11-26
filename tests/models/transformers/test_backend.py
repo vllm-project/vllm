@@ -41,7 +41,11 @@ from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
-from vllm.model_executor.models.utils import StageMissingLayer, WeightsMapper
+from vllm.model_executor.models.utils import (
+    StageMissingLayer,
+    WeightsMapper,
+    _model_to_pp_missing_layer_names,
+)
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
@@ -1121,6 +1125,8 @@ def test_split_weights_splits_fused_gqa_qkv():
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
     weights = SplitWeights(converter, mapper, model)
+    # Cached by `id`, which a model freed by an earlier test may have had
+    _model_to_pp_missing_layer_names.pop(id(model), None)
     other = ("attention.query_key_value_norm.weight", torch.zeros(12))
     pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
 
