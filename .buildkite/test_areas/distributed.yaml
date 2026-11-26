@@ -27,9 +27,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Comm Ops'
+      label: ':amd: (MI300 DPX) Distributed Comm Ops'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 30
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -218,9 +218,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Torchrun + Shutdown'
+      label: ':amd: (MI300 DPX) Distributed Torchrun + Shutdown'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
       depends_on:
