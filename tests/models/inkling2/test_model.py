@@ -282,6 +282,7 @@ def test_portable_fp16_kv_config(tmp_path, looped):
 def test_tiny_model_generates(
     tmp_path,
     enable_pickle,
+    monkeypatch,
     draft_sample_method,
     kv_cache_dtype,
     moe_backend,
@@ -292,6 +293,9 @@ def test_tiny_model_generates(
     paged KV and conv-state caches and CUDA graphs, optionally speculating
     with the DSpark draft (target feature capture, draft KV and graphs).
     Probabilistic drafting caches the draft's bf16 logits for rejection."""
+    if draft_weight_quantization is not None:
+        # The custom dummy loader is registered only in this process.
+        monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     config = copy.deepcopy(TINY_LOOP_CONFIG if looped else TINY_CONFIG)
     (tmp_path / "config.json").write_text(json.dumps(config))
     # Exercise full draft quantization and heads-only through CLI-style overrides.
