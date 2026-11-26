@@ -485,7 +485,7 @@ class LoRAModelManager:
         # Layers that share a suffix with a LoRA layer but are not wrapped,
         # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
         self.unsupported_lora_modules: set[str] = set()
-        self.disabled_vocab_modules: set[str] = set()
+        self.disabled_embedding_modules: set[str] = set()
         if (
             self.lora_config.target_modules is None
             and not self.lora_config.enable_embedding_modules
@@ -493,7 +493,7 @@ class LoRAModelManager:
             # Use model declarations so every pipeline rank can check adapter
             # weights, even when the corresponding layer is on another rank.
             for module in self.model.modules():
-                self.disabled_vocab_modules.update(
+                self.disabled_embedding_modules.update(
                     getattr(module, "embedding_modules", None) or ()
                 )
 
@@ -506,7 +506,7 @@ class LoRAModelManager:
         for module_name, module in named_modules:
             if isinstance(module, PPMissingLayer):
                 continue
-            if module_name.rsplit(".", 1)[-1] in self.disabled_vocab_modules:
+            if module_name.rsplit(".", 1)[-1] in self.disabled_embedding_modules:
                 continue
 
             is_classifier_head = module_name in self.supported_modules_to_save
@@ -1282,15 +1282,15 @@ class LoRAModelManager:
                 org_module_name = text_name
         return lora_model.get_lora(org_module_name)
 
-    def warn_disabled_vocab_modules(self, lora_model: LoRAModel) -> None:
-        if not self.disabled_vocab_modules:
+    def warn_disabled_embedding_modules(self, lora_model: LoRAModel) -> None:
+        if not self.disabled_embedding_modules:
             return
-        disabled = self.disabled_vocab_modules.intersection(
+        disabled = self.disabled_embedding_modules.intersection(
             name.rsplit(".", 1)[-1] for name in lora_model.loras
         )
         if disabled:
             logger.warning_once(
-                "Ignoring weights for disabled vocabulary modules in LoRA adapter "
+                "Ignoring weights for disabled embedding modules in LoRA adapter "
                 "ID %d: %s. Enable them with --enable-lora-embedding-modules.",
                 lora_model.id,
                 ", ".join(sorted(disabled)),
