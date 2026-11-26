@@ -1420,7 +1420,7 @@ def fastsafetensors_weights_iterator(
         which loads under a group of one and issues none. Otherwise every rank
         must call this the same number of times in the same order: the budget
         all-reduces, and the loader broadcasts. A model is loaded once per
-        weights source, so a model whose ``secondary_weights`` differed between
+        weights source, so a model whose `secondary_weights` differed between
         ranks would leave the ranks issuing different numbers of collectives
         and the load would hang. Today every source list is built from config
         alone. Each source is planned separately and reads free memory at its
