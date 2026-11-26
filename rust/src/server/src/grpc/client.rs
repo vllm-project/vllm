@@ -6,7 +6,6 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use std::{
     collections::HashMap,
     num::NonZeroU32,
-    pin::Pin,
     sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
@@ -41,7 +40,7 @@ impl Call {
         let message = futures::future::poll_fn(|cx| {
             let mut response = self.response.lock().unwrap();
             match response.as_mut() {
-                Some(stream) => Pin::new(stream).poll_next(cx),
+                Some(stream) => stream.poll_next_unpin(cx),
                 None => std::task::Poll::Ready(None),
             }
         });
@@ -85,7 +84,8 @@ impl GrpcLlm {
                 let result =
                     tokio::time::timeout(std::time::Duration::from_secs(1), health.check(request))
                         .await;
-                ready.send_replace(matches!(result, Ok(Ok(reply)) if reply.get_ref().status == tonic_health::ServingStatus::Serving as i32));
+                let serving = matches!(result, Ok(Ok(reply)) if reply.get_ref().status == tonic_health::ServingStatus::Serving as i32);
+                ready.send_if_modified(|current| std::mem::replace(current, serving) != serving);
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         });
