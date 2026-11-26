@@ -6,15 +6,15 @@ private quantized copies of an already-loaded lm_head for speculative-decoding
 drafters (`draft_lm_head_quantization`)."""
 
 from abc import abstractmethod
-from collections.abc import Callable
 from itertools import chain
 from math import lcm
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, cast
 from weakref import WeakKeyDictionary
 
 import torch
 from torch.nn import Module, Parameter
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearKernel,
@@ -22,13 +22,11 @@ from vllm.model_executor.kernels.linear import (
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.online.fp8 import (
-    Fp8PtpcOnlineLinearMethod,
-    OnlineLinearBase,
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.online.nvfp4 import (
-    Nvfp4WeightOnlyOnlineLinearMethod,
-)
+from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
@@ -37,7 +35,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -216,17 +213,11 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
         return self.kernel.apply_weights(layer, x, bias)
 
 
-_LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
-    "fp8": Fp8PtpcOnlineLinearMethod,
-    "nvfp4": Nvfp4WeightOnlyOnlineLinearMethod,
-}
-
-
-def lm_head_quant_method(quantization: Literal["fp8", "nvfp4"]) -> OnlineLinearBase:
+def lm_head_quant_method(quantization: Literal["fp8", "nvfp4"]) -> QuantizeMethodBase:
     """The online method of a `quantization` lm_head, for a drafter that builds
     its own head quantized (`ParallelLMHead(..., quant_method=...)`) instead of
     sharing the target's."""
-    return _LM_HEAD_METHODS[quantization]()
+    return QuantizationConfig.get_draft_lm_head_quantization_method(quantization)
 
 
 def lm_head_padding_size(tp_size: int) -> int:
@@ -235,38 +226,11 @@ def lm_head_padding_size(tp_size: int) -> int:
     return lcm(DEFAULT_VOCAB_PADDING_SIZE, 16 * tp_size)
 
 
-def _lm_head_method_factory(quantization: str) -> Callable[[], OnlineLinearBase]:
-    # Platform formats first: a hardware plugin may provide or override one.
-    # A None entry claims the name with no execution path here; any non-empty
-    # mapping makes the platform own the whole format surface, and an empty
-    # one inherits the core (CUDA) formats.
-    platform_methods = current_platform.get_draft_lm_head_quantization_methods()
-    qualname = platform_methods.get(quantization)
-    if qualname is not None:
-        return resolve_obj_by_qualname(qualname)
-    if quantization in _LM_HEAD_METHODS and not platform_methods:
-        return _LM_HEAD_METHODS[quantization]
-    raise _unsupported(quantization, platform_methods)
-
-
-def _unsupported(
-    quantization: str, platform_methods: dict[str, str | None]
-) -> ValueError:
-    """Single error for a format with no execution path on this platform."""
-    if platform_methods:
-        # The platform owns the surface: list only what it actually runs.
-        available = sorted(k for k, v in platform_methods.items() if v is not None)
-    else:
-        # The platform declared nothing: the core (CUDA) formats run.
-        available = sorted(_LM_HEAD_METHODS)
-    formats = f"{available}" if available else "none"
-    return ValueError(
-        f"Unsupported draft_lm_head_quantization {quantization!r}; "
-        f"supported formats on this platform: {formats}"
-    )
-
-
-def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead:
+def _quantize_copy(
+    lm_head: ParallelLMHead,
+    quantization: str,
+    quant_config: type[QuantizationConfig],
+) -> ParallelLMHead:
     if (
         not isinstance(
             lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
@@ -290,7 +254,9 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             padding_size=lm_head.padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
-            quant_method=_lm_head_method_factory(quantization)(),
+            quant_method=quant_config.get_draft_lm_head_quantization_method(
+                quantization
+            ),
         )
     # Never loaded: a new param sharing the source storage, never a copy of it.
     head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
@@ -303,9 +269,11 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
     return head
 
 
-# Each quantized copy maps to the head it is derived from. Weak keys, and no
-# module attribute, so the copy never owns the source as a submodule.
-_SOURCES: WeakKeyDictionary[Module, tuple[ParallelLMHead, str]] = WeakKeyDictionary()
+# Keep the method selection with the source so refresh uses the same config.
+# Weak keys avoid making the copy own the source as a submodule.
+_SOURCES: WeakKeyDictionary[
+    Module, tuple[ParallelLMHead, str, type[QuantizationConfig]]
+] = WeakKeyDictionary()
 
 
 def quantized_lm_head_copy(
@@ -315,17 +283,26 @@ def quantized_lm_head_copy(
 
     "fp8" uses per-row weight and per-token activation scales on the platform's
     FP8 linear kernel; "nvfp4" is weight-only on the
-    platform's W4A16 kernel. The current platform may provide or replace these
-    through `Platform.get_draft_lm_head_quantization_methods`; a non-empty
-    platform mapping owns the whole format surface. `lm_head` is left
+    platform's W4A16 kernel. The draft copy's quantization config can
+    override these defaults. `lm_head` is left
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
     """
-    head = _quantize_copy(lm_head, quantization)
+    config = get_current_vllm_config_or_none()
+    # The base config supplies default methods through its class API.
+    quant_config = cast(type[QuantizationConfig], QuantizationConfig)
+    if config is not None:
+        if config.draft_lm_head_quantization_config is not None:
+            quant_config = resolve_obj_by_qualname(
+                config.draft_lm_head_quantization_config
+            )
+        elif config.quant_config is not None:
+            quant_config = type(config.quant_config)
+    head = _quantize_copy(lm_head, quantization, quant_config)
     # Keep it out of layerwise reload, which would re-run
     # process_weights_after_loading on the already-quantized weight.
     get_layerwise_info(head).reset()
-    _SOURCES[head] = (lm_head, quantization)
+    _SOURCES[head] = (lm_head, quantization, quant_config)
     logger.info(
         "Quantized a %s copy of the lm_head (%d x %d per rank).",
         quantization,

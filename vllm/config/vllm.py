@@ -498,6 +498,8 @@ class VllmConfig:
     """Logging configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
+    draft_lm_head_quantization_config: str | None = None
+    """Qualified name of the quantization config class for draft LM head copies."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 

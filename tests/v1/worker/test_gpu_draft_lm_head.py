@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.online.lm_head import (
     quantized_lm_head_copy,
     refresh_quantized_lm_heads,
@@ -79,105 +80,65 @@ def test_tracks_bf16_head_through_logits_processor(
     assert top1 > min_top1
 
 
-@requires_cuda
-def test_quantized_lm_head_copy_platform_format(
-    default_vllm_config, dist_init, monkeypatch
-):
-    """A format the platform provides through the hook builds a copy with
-    the hook's method factory."""
-    monkeypatch.setattr(
-        current_platform,
-        "get_draft_lm_head_quantization_methods",
-        lambda: {
-            "platform-fp8": (
-                "vllm.model_executor.layers.quantization.online.fp8"
-                ".Fp8PtpcOnlineLinearMethod"
-            )
-        },
-    )
-    head = _target_head(monkeypatch)
-    draft_head = quantized_lm_head_copy(head, "platform-fp8")
-    expected = _tensors(quantized_lm_head_copy(head, "fp8"))
-    for name, tensor in _tensors(draft_head).items():
-        if name != "workspace":
-            assert torch.equal(tensor, expected[name]), name
+_FP8_FACTORY = (
+    "vllm.model_executor.layers.quantization.online.fp8.Fp8PtpcOnlineLinearMethod"
+)
+
+
+class _DraftFP8Config(QuantizationConfig):
+    _LM_HEAD_METHODS = {"custom-fp8": _FP8_FACTORY, "nvfp4": _FP8_FACTORY}
 
 
 @requires_cuda
-def test_platform_format_takes_precedence_over_core(
-    default_vllm_config, dist_init, monkeypatch
-):
-    """A platform format using a core format's name resolves to the
-    platform's factory, not the core method."""
-    monkeypatch.setattr(
-        current_platform,
-        "get_draft_lm_head_quantization_methods",
-        lambda: {
-            "nvfp4": (
-                "vllm.model_executor.layers.quantization.online.fp8"
-                ".Fp8PtpcOnlineLinearMethod"
-            )
-        },
-    )
-    head = _target_head(monkeypatch)
-    draft_head = quantized_lm_head_copy(head, "nvfp4")
-    expected = _tensors(quantized_lm_head_copy(head, "fp8"))
-    for name, tensor in _tensors(draft_head).items():
-        if name != "workspace":
-            assert torch.equal(tensor, expected[name]), name
-
-
-@requires_cuda
-def test_unknown_format_lists_supported_formats(
-    default_vllm_config, dist_init, monkeypatch
-):
-    """An unknown format is rejected listing the platform's formats only."""
-    monkeypatch.setattr(
-        current_platform,
-        "get_draft_lm_head_quantization_methods",
-        lambda: {
-            "platform-fp4": "irrelevant.qualname",
-            "platform-fp8": "irrelevant.qualname",
-        },
-    )
-    head = _target_head(monkeypatch)
-    with pytest.raises(ValueError, match=r"bogus.*\['platform-fp4', 'platform-fp8'\]"):
-        quantized_lm_head_copy(head, "bogus")
-
-
-@requires_cuda
-@pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
-def test_claimed_format_has_no_execution_path(
+@pytest.mark.parametrize("format_name", ["custom-fp8", "nvfp4"])
+def test_quantized_lm_head_copy_uses_quantization_config(
     default_vllm_config, dist_init, monkeypatch, format_name
 ):
-    """A format the platform claims with None is rejected like an unknown
-    one, listing only the formats the platform actually runs."""
-    monkeypatch.setattr(
-        current_platform,
-        "get_draft_lm_head_quantization_methods",
-        lambda: {"platform-fp8": "irrelevant.qualname", format_name: None},
-    )
+    """An added or overridden format uses the selected config, including refresh."""
     head = _target_head(monkeypatch)
-    with pytest.raises(
-        ValueError, match=r"supported formats on this platform: \['platform-fp8'\]"
-    ):
-        quantized_lm_head_copy(head, format_name)
+    expected = _tensors(quantized_lm_head_copy(head, "fp8"))
+    default_vllm_config.draft_lm_head_quantization_config = (
+        f"{__name__}.{_DraftFP8Config.__name__}"
+    )
+    draft_head = quantized_lm_head_copy(head, format_name)
+    actual = _tensors(draft_head)
+    assert actual.keys() == expected.keys()
+    for name in actual.keys() - {"workspace"}:
+        assert torch.equal(actual[name], expected[name]), name
+
+    default_vllm_config.draft_lm_head_quantization_config = None
+    refresh_quantized_lm_heads(draft_head)
+    for name in actual.keys() - {"workspace"}:
+        assert torch.equal(_tensors(draft_head)[name], expected[name]), name
 
 
-@requires_cuda
-def test_all_none_mapping_lists_no_formats(
-    default_vllm_config, dist_init, monkeypatch
+@pytest.mark.parametrize(
+    ("methods", "format_name", "available"),
+    [
+        ({}, "bogus", "['fp8', 'nvfp4']"),
+        (
+            {"custom-fp8": _FP8_FACTORY, "custom-fp4": _FP8_FACTORY},
+            "bogus",
+            "['custom-fp4', 'custom-fp8']",
+        ),
+        ({"custom-fp8": _FP8_FACTORY}, "fp8", "['custom-fp8']"),
+        ({"custom-fp8": _FP8_FACTORY, "fp8": None}, "fp8", "['custom-fp8']"),
+        ({"custom-fp8": _FP8_FACTORY, "nvfp4": None}, "nvfp4", "['custom-fp8']"),
+        ({"fp8": None, "nvfp4": None}, "fp8", "none"),
+    ],
+)
+def test_draft_quantization_config_lists_only_supported_formats(
+    methods, format_name, available
 ):
-    """A platform claiming only core formats with None (no formats of its
-    own) rejects every request and reports that nothing is supported."""
-    monkeypatch.setattr(
-        current_platform,
-        "get_draft_lm_head_quantization_methods",
-        lambda: {"fp8": None, "nvfp4": None},
+    class DraftConfig(QuantizationConfig):
+        _LM_HEAD_METHODS = methods
+
+    with pytest.raises(ValueError) as exc_info:
+        DraftConfig.get_draft_lm_head_quantization_method(format_name)
+    assert str(exc_info.value) == (
+        f"Unsupported draft_lm_head_quantization {format_name!r}; "
+        f"supported formats on this platform: {available}"
     )
-    head = _target_head(monkeypatch)
-    with pytest.raises(ValueError, match=r"supported formats on this platform: none"):
-        quantized_lm_head_copy(head, "fp8")
 
 
 @requires_cuda

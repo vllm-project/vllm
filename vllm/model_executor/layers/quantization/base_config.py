@@ -5,7 +5,7 @@ import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import regex as re
 import torch
@@ -120,6 +120,45 @@ def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> 
 
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
+
+    _LM_HEAD_METHODS: ClassVar[dict[str, str | None]] = {
+        "fp8": (
+            "vllm.model_executor.layers.quantization.online.fp8"
+            ".Fp8PtpcOnlineLinearMethod"
+        ),
+        "nvfp4": (
+            "vllm.model_executor.layers.quantization.online.nvfp4"
+            ".Nvfp4WeightOnlyOnlineLinearMethod"
+        ),
+    }
+
+    @classmethod
+    def get_draft_lm_head_quantization_method(
+        cls, quantization: str
+    ) -> QuantizeMethodBase:
+        """Create the online method for a drafter's copy of a shared LM head."""
+        from vllm.utils.import_utils import resolve_obj_by_qualname
+
+        methods = cls._draft_lm_head_methods() or QuantizationConfig._LM_HEAD_METHODS
+        factory = methods.get(quantization)
+        if factory is None:
+            available = sorted(
+                name for name, method in methods.items() if method is not None
+            )
+            formats = f"{available}" if available else "none"
+            raise ValueError(
+                f"Unsupported draft_lm_head_quantization {quantization!r}; "
+                f"supported formats on this platform: {formats}"
+            )
+        return resolve_obj_by_qualname(factory)()
+
+    @classmethod
+    def _draft_lm_head_methods(cls) -> dict[str, str | None]:
+        """Map formats to zero-argument factory names, with None for unavailable
+        formats. A non-empty mapping defines all supported formats. An empty
+        mapping inherits the default formats.
+        """
+        return cls._LM_HEAD_METHODS
 
     _ignore_unexpected_suffixes = (
         ".q_scale",
