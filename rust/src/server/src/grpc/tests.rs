@@ -4084,7 +4084,7 @@ async fn render_raw_chat_rejects_unknown_model_with_engine_backed_state() {
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(
         EngineCoreLlm::new(client),
-        Arc::new(FakeRenderBackend) as Arc<dyn ChatTextBackend>,
+        Arc::new(FakeRenderBackend::default()) as Arc<dyn ChatTextBackend>,
     )
     .with_served_model_name("test-model");
     let service = RenderServiceImpl::new(Arc::new(AppState::new(vec!["test-model".into()], chat)));
