@@ -8,7 +8,7 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
 import importlib.metadata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.util import find_spec
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -47,7 +47,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.oracle.int8 import Int8MoeBackend
+from vllm.model_executor.layers.fused_moe.oracle.int8 import (
+    Int8MoeBackend,
+    select_int8_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
@@ -113,6 +116,7 @@ from vllm.model_executor.models.transformers import TransformersForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
+from vllm.utils.import_utils import has_humming
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -791,7 +795,10 @@ try:
         "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
     )
     HF_HUB_AMD_ORG_ACCESS = True
-except huggingface_hub.errors.RepositoryNotFoundError:
+except (
+    huggingface_hub.errors.RepositoryNotFoundError,
+    huggingface_hub.errors.OfflineModeIsEnabled,
+):
     HF_HUB_AMD_ORG_ACCESS = False
 
 
@@ -1732,6 +1739,32 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
         assert torch.isfinite(logits).all()
 
 
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability((7, 5))
+        and has_humming()
+    ),
+    reason="Requires Humming on CUDA SM>=7.5",
+)
+def test_quark_static_int8_rejects_activation_quantization_fallback(monkeypatch):
+    """A weight-only backend must not discard checkpoint activation scales."""
+    monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
+    monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", "indexed")
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", "0")
+    config = replace(_make_test_moe_config(), moe_backend="humming")
+    backend, experts_cls = select_int8_moe_backend(
+        config, kInt8StaticChannelSym, kInt8StaticTensorSym
+    )
+    assert backend == Int8MoeBackend.HUMMING
+    assert (
+        experts_cls.executed_activation_key(kInt8StaticChannelSym, kInt8StaticTensorSym)
+        is None
+    )
+    with pytest.raises(NotImplementedError, match="preserves static INT8"):
+        QuarkW8A8Int8MoEMethod(config, kInt8StaticChannelSym, kInt8StaticTensorSym)
+
+
 @pytest.mark.parametrize(
     "weight_key, act_key, per_act_token_quant, per_out_ch_quant",
     [
@@ -1760,29 +1793,25 @@ def test_quark_int8_moe_scale_layout_flags(
     and the weight layout from the weight quant key (the Triton kernels index
     W13/W2 channel scales off the weight layout, not the activation layout).
     """
-    static_act = act_key.scale.static
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
     moe_config = _make_test_moe_config()
-    # Pin the dynamic-activation backend so the test does not depend on the
-    # platform's backend priority.
+    # Pin the backend so this scale layout test is platform independent.
     with patch(
         "vllm.model_executor.layers.quantization.quark.quark_moe."
         "select_int8_moe_backend",
-        return_value=(Int8MoeBackend.TRITON, MagicMock()),
+        return_value=(Int8MoeBackend.TRITON, TritonExperts),
     ):
         method = QuarkW8A8Int8MoEMethod(moe_config, weight_key, act_key)
-    if static_act:
-        assert method.int8_backend is None  # static activations: legacy path
-    else:
-        assert method.int8_backend == Int8MoeBackend.TRITON
+    assert method.int8_backend == Int8MoeBackend.TRITON
 
-    intermediate = moe_config.intermediate_size
-    layer = SimpleNamespace(
-        w13_weight_scale=torch.ones(moe_config.num_experts, 2 * intermediate, 1),
-        w2_weight_scale=torch.ones(moe_config.num_experts, intermediate, 1),
-        w13_input_scale=torch.tensor(0.5) if static_act else None,
-        w2_input_scale=torch.tensor(0.25) if static_act else None,
-        w13_bias=None,
-        w2_bias=None,
+    layer = torch.nn.Module()
+    method.create_weights(
+        layer,
+        moe_config.num_experts,
+        moe_config.hidden_dim,
+        moe_config.intermediate_size,
+        torch.bfloat16,
     )
     quant_config = method.get_fused_moe_quant_config(layer)
 
@@ -1883,6 +1912,168 @@ def test_quark_int8_static_per_channel_weight_scales() -> None:
     for name, (routed_out, unrouted_out) in outputs.items():
         assert not torch.equal(baseline, routed_out), name
         torch.testing.assert_close(baseline, unrouted_out, atol=0, rtol=0, msg=name)
+
+
+def _quark_static_int8_target_scale_reference(
+    x: torch.Tensor,
+    a1_scale: float,
+    a2_scale: float,
+    output_scale: float = 1.0,
+    router_weight: float | torch.Tensor = 1.0,
+) -> torch.Tensor:
+    from torch.nn import functional as F
+
+    a1 = torch.tensor(a1_scale, device=x.device)
+    a2 = torch.tensor(a2_scale, device=x.device)
+    a1_q = torch.round(x.float() / a1).clamp(-128, 127)
+    w13 = (a1_q * a1).to(x.dtype)
+    activated = (F.silu(w13) * w13).to(x.dtype)
+    a2_q = torch.round(activated.float() / a2).clamp(-128, 127)
+    return (a2_q * a2 * output_scale * router_weight).to(x.dtype)
+
+
+def _quark_static_int8_dp_ep_worker(
+    pgi,
+    vllm_config: VllmConfig,
+    _cpu_group,
+) -> None:
+    from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(pgi.device)
+    hidden = 128
+    target_a1_scales = (0.25, 0.5)
+    target_a2_scales = (0.125, 0.25)
+    use_ep = vllm_config.parallel_config.enable_expert_parallel
+    router_weight = (
+        1.0 if use_ep else torch.tensor([1.0, 0.0], device=pgi.device).softmax(-1)[0]
+    )
+
+    quant_config = _make_qtensor_config(
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+    )
+    moe = FusedMoEFactory(
+        num_experts=2,
+        top_k=1,
+        hidden_size=hidden,
+        intermediate_size=hidden if use_ep else hidden * 2,
+        params_dtype=torch.bfloat16,
+        quant_config=quant_config,
+        renormalize=use_ep,
+        tp_size=1,
+        dp_size=2,
+        pcp_size=1,
+        prefix="quark_static_int8.experts",
+    )
+    experts = moe.routed_experts
+    assert isinstance(experts.quant_method, QuarkW8A8Int8MoEMethod)
+    output_scale = 1.0 / experts.moe_config.moe_parallel_config.tp_size
+    eye = torch.eye(hidden, device=pgi.device, dtype=torch.int8)
+    with torch.no_grad():
+        experts.w13_weight.copy_(torch.cat((eye, eye)).unsqueeze(0))
+        experts.w2_weight.copy_(eye.unsqueeze(0))
+        experts.w13_weight_scale.fill_(1)
+        experts.w2_weight_scale.fill_(output_scale)
+        experts.w13_input_scale.fill_(target_a1_scales[pgi.rank])
+        experts.w2_input_scale.fill_(target_a2_scales[pgi.rank])
+        for name, param in experts.named_parameters():
+            if "zero_point" in name:
+                param.zero_()
+    experts.quant_method.process_weights_after_loading(experts)
+
+    def run(token_counts: tuple[int, int], target_expert: int) -> torch.Tensor:
+        num_tokens = token_counts[pgi.rank]
+        x = torch.full(
+            (num_tokens, hidden), 0.7, device=pgi.device, dtype=torch.bfloat16
+        )
+        logits = torch.full(
+            (num_tokens, 2),
+            -10.0 if use_ep else 0.0,
+            device=pgi.device,
+            dtype=torch.float32,
+        )
+        logits[:, target_expert] = 10.0 if use_ep else 1.0
+        counts = torch.tensor(token_counts, dtype=torch.int32, device="cpu")
+        torch.distributed.barrier()
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=counts,
+        ):
+            return moe(x, logits)
+
+    def expected_output(out: torch.Tensor, target: int) -> torch.Tensor:
+        x = torch.full_like(out, 0.7)
+        if use_ep:
+            return _quark_static_int8_target_scale_reference(
+                x, target_a1_scales[target], target_a2_scales[target]
+            )
+        # Without EP, both DP ranks hold tensor shards of every expert.
+        # Each shard uses its own static scales before the AgRs sum.
+        partials = [
+            _quark_static_int8_target_scale_reference(
+                x,
+                target_a1_scales[rank],
+                target_a2_scales[rank],
+                output_scale,
+                router_weight,
+            )
+            for rank in range(2)
+        ]
+        return torch.stack(partials).sum(0)
+
+    # Rank 0 has no local input but must still receive and execute rank 1's token.
+    out = run((0, 1), target_expert=0)
+    if pgi.rank == 0:
+        assert out.shape == (0, hidden)
+    else:
+        expected = expected_output(out, 0)
+        torch.testing.assert_close(out, expected, rtol=0.02, atol=0.02)
+
+    # Both ranks route to the peer. Each result must use the target rank's
+    # distinct static scales, not the sender rank's scales.
+    target = 1 - pgi.rank
+    out = run((1, 1), target_expert=target)
+    expected = expected_output(out, target)
+    torch.testing.assert_close(out, expected, rtol=0.02, atol=0.02)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or torch.accelerator.device_count() < 2,
+    reason="requires two CUDA or ROCm GPUs",
+)
+@pytest.mark.parametrize("enable_expert_parallel", [True, False])
+def test_static_int8_naive_dp_ep_uses_target_rank_scales(
+    enable_expert_parallel: bool,
+) -> None:
+    from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
+        parallel_launch_with_config,
+    )
+    from vllm.config import ParallelConfig
+    from vllm.utils.network_utils import get_open_port
+
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            enable_expert_parallel=enable_expert_parallel,
+            all2all_backend="allgather_reducescatter",
+            data_parallel_master_port=get_open_port(),
+        )
+    )
+    env = {"VLLM_USE_DEEP_GEMM": "0"}
+    parallel_launch_with_config(2, _quark_static_int8_dp_ep_worker, vllm_config, env)
 
 
 @pytest.mark.parametrize("tp", [1])
@@ -2984,3 +3175,116 @@ def test_quark_dict_algo_config_engine_config():
     assert isinstance(vllm_config.quant_config, QuarkConfig)
     assert vllm_config.quant_config.quant_config["algo_config"]["name"] == "awq"
     assert vllm_config.quant_config.input_rotation_sizes == {}
+
+
+@pytest.fixture
+def quark_static_int8_moe_checkpoint(tmp_path):
+    """Derive a loading fixture, not a calibrated model-quality checkpoint."""
+    import json
+    from copy import deepcopy
+    from pathlib import Path
+
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    source = Path(hf_api().snapshot_download("amd/tiny-qwen3-moe-w8a8-int8"))
+    assert not (source / "model.safetensors.index.json").exists()
+    for path in source.iterdir():
+        if path.is_file() and path.name != "config.json":
+            (tmp_path / path.name).symlink_to(path.resolve())
+    config = json.loads((source / "config.json").read_text())
+    quant = config["quantization_config"]
+    static = deepcopy(quant["global_quant_config"])
+    static["input_tensors"].update(
+        is_dynamic=False,
+        qscheme="per_tensor",
+        ch_axis=None,
+        observer_cls="PerTensorMinMaxObserver",
+    )
+    quant.setdefault("layer_quant_config", {})["*mlp.experts*"] = static
+    with safe_open(source / "model.safetensors", framework="pt") as weights:
+        names = weights.keys()
+        scales = {
+            name.removesuffix(".weight") + ".input_scale": torch.tensor(
+                0.015625 if ".down_proj." in name else 0.03125
+            )
+            for name in names
+            if ".mlp.experts." in name and name.endswith(".weight")
+        }
+    assert len(scales) == 3 * config["num_experts"] * config["num_hidden_layers"]
+    save_file(scales, str(tmp_path / "static-scales.safetensors"))
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    return str(tmp_path)
+
+
+def test_quark_static_int8_moe_compilation(
+    quark_static_int8_moe_checkpoint, vllm_runner, monkeypatch
+):
+    """Load static scales and preserve compiled results under CUDA Graph replay."""
+    from vllm import SamplingParams
+    from vllm.config.compilation import CompilationMode, CUDAGraphMode
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
+    def check_model(model):
+        from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+            TritonInt8ScaledMMLinearKernel,
+        )
+
+        for layer in model.model.layers:
+            experts = layer.mlp.experts.routed_experts
+            method = experts.quant_method
+            assert isinstance(method, QuarkW8A8Int8MoEMethod)
+            assert method.activation_quant_key == kInt8StaticTensorSym
+            assert method.moe_kernel is not None
+            # Guards that quark_moe.py forwards `activation_key` to the experts.
+            fused_experts = method.moe_kernel.impl.fused_experts
+            assert getattr(fused_experts, "activation_key", None) == (
+                kInt8StaticTensorSym
+            )
+            assert experts.w13_input_scale.item() == 0.03125
+            assert experts.w2_input_scale.item() == 0.015625
+            assert isinstance(
+                layer.self_attn.qkv_proj.scheme.kernel, TritonInt8ScaledMMLinearKernel
+            )
+
+    outputs = []
+    for graph in (CUDAGraphMode.NONE, None):
+        compilation = {
+            "mode": CompilationMode.VLLM_COMPILE,
+            "cudagraph_mode": graph,
+            "cudagraph_capture_sizes": [1],
+        }
+        with vllm_runner(
+            quark_static_int8_moe_checkpoint,
+            dtype="bfloat16",
+            enforce_eager=False,
+            compilation_config=compilation,
+            max_model_len=64,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+            enable_chunked_prefill=False,
+            gpu_memory_utilization=0.1,
+            kernel_config={
+                "moe_backend": "triton",
+                # Keep INT8 linear independent of the FP8-only SM89 CUTLASS
+                # batch-invariant epilogue; the MoE path remains the target.
+                "linear_backend_per_quant": {"int8_w8a8": "triton"},
+                "enable_jit_warmup": False,
+            },
+        ) as llm:
+            llm.apply_model(check_model)
+            outputs.append(
+                llm.generate_w_logprobs(
+                    ["The capital of France is"],
+                    SamplingParams(
+                        temperature=0,
+                        max_tokens=4,
+                        logprobs=5,
+                        prompt_logprobs=5,
+                        ignore_eos=True,
+                    ),
+                )
+            )
+    assert len(outputs[0][0][0]) == len(outputs[0][0][2]) == 4
+    assert outputs[1] == outputs[0]

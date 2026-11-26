@@ -45,7 +45,7 @@ The RUN pair stays split on purpose: it is the thread boundary, and only
 `targets` should outlive the get -- carrying the Ray ref and the whole-buffer
 blob into the queue would keep both alive for the scatter's lifetime.
 
-See docs/training/weight_transfer/sharded_rdt.md for the design and the measured
+See docs/training/weight_updates/engines/sharded_rdt.md for the design and the measured
 results behind the choices here.
 """
 

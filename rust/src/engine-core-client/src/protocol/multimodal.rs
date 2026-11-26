@@ -85,6 +85,21 @@ pub struct PlaceholderRange {
     pub is_embed: Option<WireTensor>,
 }
 
+impl PlaceholderRange {
+    /// The number of positions that take embeddings, like Python's
+    /// `get_num_embeds()`. The `is_embed` mask must be stored inline.
+    pub fn num_embeds(&self) -> Result<usize, String> {
+        let Some(mask) = &self.is_embed else {
+            return Ok(self.length);
+        };
+        let mask = mask
+            .data
+            .as_raw_view()
+            .ok_or_else(|| "is_embed mask must be stored inline".to_string())?;
+        Ok(mask.iter().filter(|&&b| b != 0).count())
+    }
+}
+
 /// A dictionary of processed keyword arguments to pass to the model,
 /// corresponding to a single item in `MultiModalDataItems`.
 ///
@@ -326,10 +341,26 @@ mod tests {
     use rmpv::Value;
 
     use super::*;
+    use crate::protocol::tensor::WireArrayData;
 
     fn encode_value<T: Serialize>(value: &T) -> Value {
         let bytes = rmp_serde::to_vec_named(value).expect("encode value");
         rmpv::decode::read_value(&mut Cursor::new(bytes)).expect("decode value")
+    }
+
+    #[test]
+    fn num_embeds_counts_embed_positions() {
+        let mut range = PlaceholderRange {
+            offset: 3,
+            length: 4,
+            is_embed: None,
+        };
+        assert_eq!(range.num_embeds(), Ok(4));
+        range.is_embed =
+            Some(WireTensor::from_bool(vec![4], vec![true, false, true, false]).unwrap());
+        assert_eq!(range.num_embeds(), Ok(2));
+        range.is_embed.as_mut().unwrap().data = WireArrayData::AuxIndex(1);
+        assert!(range.num_embeds().is_err());
     }
 
     #[test]

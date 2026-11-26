@@ -50,9 +50,8 @@ __device__ __forceinline__ float2 add2(float2 const a, float2 const b) {
 constexpr int kVec = 8;
 constexpr int kPairs = kVec / 2;
 constexpr int kTaps = 4;
-// Inkling2's hidden size 4608 in chunks of 8 channels.
-constexpr int kRowVecs = 576;
-constexpr int kRowBytes = kRowVecs * sizeof(uint4);
+// A hidden row is RowVecs chunks of 8 channels (a template parameter: 576 for
+// hidden size 4608, 288 for 2304).
 constexpr int kMaxStack = 8;
 constexpr int kMaxStages = 4;
 constexpr int kMaxWorld = 8;
@@ -102,7 +101,7 @@ struct ConvMixParams {
   int64_t stackStride;
   bf16 const* last;
   float const* queries;    // [Q, D]
-  bf16 const* normWeight;  // [Q, D]
+  bf16 const* normWeight;  // [Q, D], or null: rawOut gets the fp32 mix
   float eps;
   float normEps;
   // [Q, outTokens, D], at rows tokenBase + t: out, or every rank's
@@ -112,6 +111,7 @@ struct ConvMixParams {
   // row gatherSlot at the start of the buffers (`seq_parallel.cu`), and
   // releases the other CTAs.
   bf16* out;
+  float* rawOut;
   char* const* outBases;
   int64_t outOffset;
   int outRanks;
@@ -298,8 +298,10 @@ __device__ __forceinline__ void expectBytes(uint64_t* bar, uint32_t bytes) {
                : "memory");
 }
 
+template <int RowVecs>
 __device__ __forceinline__ void copyRow(void* dst, void const* src,
                                         uint64_t* bar) {
+  constexpr int kRowBytes = RowVecs * sizeof(uint4);
   asm volatile(
       "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes "
       "[%0], [%1], %2, [%3];" ::"r"(smemAddr(dst)),
@@ -307,7 +309,9 @@ __device__ __forceinline__ void copyRow(void* dst, void const* src,
       : "memory");
 }
 
+template <int RowVecs>
 __device__ __forceinline__ void prefetchRow(void const* src) {
+  constexpr int kRowBytes = RowVecs * sizeof(uint4);
   asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(src),
                "r"(kRowBytes)
                : "memory");
@@ -396,26 +400,30 @@ constexpr int pow2Ceil(int x) {
 // Three queries hold more registers per channel; they run with three chunks
 // per thread, whose register cap (192 threads) is higher. One more warp
 // issues the copies.
-template <int Q>
+template <int Q, int RowVecs>
 struct Config {
-  static constexpr int kVecs = Q == 1 ? 2 : 3;
-  static constexpr int kThreads = kRowVecs / kVecs;
+  // One query: two chunks per thread, or one if that leaves a partial warp.
+  static constexpr int kVecs = Q == 1 ? (RowVecs % 64 == 0 ? 2 : 1) : 3;
+  static constexpr int kThreads = RowVecs / kVecs;
   static constexpr int kWarps = kThreads / 32;
+  static_assert(RowVecs % kVecs == 0 && kThreads % 32 == 0);
 };
 
 // Gather: push the mixes into every rank's all-gather buffer.
-template <int NStack, int Q, bool Gather>
-__global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
+template <int NStack, int Q, bool Gather, int RowVecs>
+__global__ void __launch_bounds__(Config<Q, RowVecs>::kThreads + 32, 1)
     convMixKernel(ConvMixParams p) {
+  constexpr int kRowVecs = RowVecs;
+  constexpr int kRowBytes = RowVecs * sizeof(uint4);
   // Unsharded batches start at token 0 without halo rows.
   int const tokenBase = Gather ? p.tokenBase : 0;
   int const haloRows = Gather ? p.haloRows : 0;
   bool const pushed = Gather && p.xSources > 1;
   // Read before this CTA counts itself done (the last CTA bumps it).
   uint32_t const epoch = Gather ? *p.gatherEpoch + 1 : 0;
-  constexpr int kVecs = Config<Q>::kVecs;
-  constexpr int kThreads = Config<Q>::kThreads;
-  constexpr int kWarps = Config<Q>::kWarps;
+  constexpr int kVecs = Config<Q, RowVecs>::kVecs;
+  constexpr int kThreads = Config<Q, RowVecs>::kThreads;
+  constexpr int kWarps = Config<Q, RowVecs>::kWarps;
   constexpr int kSources = NStack + 1;
   constexpr int kStats = pow2Ceil(kSources * (1 + Q));
   // Reductions per token: the source statistics, then each query's mix.
@@ -449,20 +457,24 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
     int64_t const off = int64_t(t) * p.dim;
     expectBytes(&full[stage], numRows * kRowBytes);
     for (int n = 0; n < NStack; ++n)
-      copyRow(dst + n * kRowVecs, p.stack + n * p.stackStride + off,
-              &full[stage]);
-    if (p.last) copyRow(dst + lastRow * kRowVecs, p.last + off, &full[stage]);
-    if (p.res) copyRow(dst + resRow * kRowVecs, p.res + off, &full[stage]);
+      copyRow<RowVecs>(dst + n * kRowVecs, p.stack + n * p.stackStride + off,
+                       &full[stage]);
+    if (p.last)
+      copyRow<RowVecs>(dst + lastRow * kRowVecs, p.last + off, &full[stage]);
+    if (p.res)
+      copyRow<RowVecs>(dst + resRow * kRowVecs, p.res + off, &full[stage]);
     if (p.resAddend)
-      copyRow(dst + addRow * kRowVecs, p.resAddend + off, &full[stage]);
+      copyRow<RowVecs>(dst + addRow * kRowVecs, p.resAddend + off,
+                       &full[stage]);
   };
   auto issueX = [&](int t, int stage) {
     bf16 const* src = p.x + int64_t(t + haloRows) * p.dim;
     if (pushed) {
       for (int r = 0; r < p.xSources; ++r)
-        prefetchRow(src + r * p.xSourceStride);
+        prefetchRow<RowVecs>(src + r * p.xSourceStride);
     } else {
-      copyRow(rows + (stage * numRows + xRow) * kRowVecs, src, &full[stage]);
+      copyRow<RowVecs>(rows + (stage * numRows + xRow) * kRowVecs, src,
+                       &full[stage]);
     }
   };
   // The producer's first thread issues the copies; the first ones start
@@ -478,9 +490,14 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
     for (int i = 0; i < 2 * kReductions; ++i)
       barrierInit(&reduced[i / kReductions][i % kReductions], kWarps);
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
-    expectBytes(&normFull, Q * kRowBytes);
-    for (int q = 0; q < Q; ++q)
-      copyRow(normRows + q * kRowVecs, p.normWeight + q * p.dim, &normFull);
+    if (p.normWeight) {
+      expectBytes(&normFull, Q * kRowBytes);
+      for (int q = 0; q < Q; ++q)
+        copyRow<RowVecs>(normRows + q * kRowVecs, p.normWeight + q * p.dim,
+                         &normFull);
+    } else {
+      barrierArrive(&normFull);
+    }
     for (int t = begin; t < prologue; ++t) issueOld(t, t - begin);
   }
   for (int i = threadIdx.x; i < end - begin; i += blockDim.x) {
@@ -705,9 +722,21 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
     }
     blockPost(stats, scratch[(t - begin) & 1], &reduced[(t - begin) & 1][0]);
   };
-  // out = mix * rstd * norm weight of query q.
+  // out = mix * rstd * norm weight of query q (or rawOut = mix).
   auto store = [&](int t, int q, float2 const(&mix)[kVecs][kPairs],
                    float sumSq) {
+    if (!Gather && !p.normWeight) {
+#pragma unroll
+      for (int v = 0; v < kVecs; ++v) {
+        float4* raw = reinterpret_cast<float4*>(
+            p.rawOut + (int64_t(q) * p.outTokens + t) * p.dim + cols[v]);
+        raw[0] =
+            make_float4(mix[v][0].x, mix[v][0].y, mix[v][1].x, mix[v][1].y);
+        raw[1] =
+            make_float4(mix[v][2].x, mix[v][2].y, mix[v][3].x, mix[v][3].y);
+      }
+      return;
+    }
     float const rstd =
         rsqrtApprox(__fadd_rn(__fdiv_rn(sumSq, float(p.dim)), p.normEps));
 #pragma unroll
@@ -838,10 +867,11 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
   cudaTriggerProgrammaticLaunchCompletion();
 }
 
-template <int Q, bool Gather, int... N>
+template <int Q, bool Gather, int RowVecs, int... N>
 auto selectKernel(int numStack, std::integer_sequence<int, N...>) {
   void (*kernel)(ConvMixParams) = nullptr;
-  ((numStack == N + 1 ? (kernel = &convMixKernel<N + 1, Q, Gather>, 0) : 0),
+  ((numStack == N + 1 ? (kernel = &convMixKernel<N + 1, Q, Gather, RowVecs>, 0)
+                      : 0),
    ...);
   return kernel;
 }
@@ -864,7 +894,8 @@ ConvMixParams makeParams(
     torch::stable::Tensor& conv_out, torch::stable::Tensor const& stack,
     std::optional<torch::stable::Tensor> const& last,
     torch::stable::Tensor const& queries,
-    torch::stable::Tensor const& norm_weight, double eps, double norm_eps) {
+    std::optional<torch::stable::Tensor> const& norm_weight, double eps,
+    double norm_eps) {
   ConvMixParams p{};
   p.x = static_cast<bf16 const*>(x.data_ptr());
   p.xSources = x.dim() == 3 ? x.size(0) : 1;
@@ -894,13 +925,13 @@ ConvMixParams makeParams(
   p.stackStride = stack.stride(0);
   p.last = optionalPtr<bf16>(last);
   p.queries = static_cast<float const*>(queries.data_ptr());
-  p.normWeight = static_cast<bf16 const*>(norm_weight.data_ptr());
+  p.normWeight = optionalPtr<bf16>(norm_weight);
   p.eps = eps;
   p.normEps = norm_eps;
   p.batchTokens = positions.size(0);
   int const blockSize = cache.size(2);
-  STD_TORCH_CHECK(p.dim == kRowVecs * kVec,
-                  "Inkling2 conv + mix requires hidden size 4608");
+  STD_TORCH_CHECK(p.dim == 4608 || p.dim == 2304,
+                  "Inkling2 conv + mix requires hidden size 4608 or 2304");
   STD_TORCH_CHECK(stream_width % kVec == 0 && stream_offset % kVec == 0);
   STD_TORCH_CHECK((blockSize & (blockSize - 1)) == 0);
   STD_TORCH_CHECK(cache.size(0) * blockSize <= int64_t(INT32_MAX));
@@ -908,8 +939,9 @@ ConvMixParams makeParams(
   return p;
 }
 
-template <bool Gather>
+template <bool Gather, int RowVecs>
 void launch(ConvMixParams& p, int numStack, int numQueries, int device) {
+  constexpr int kRowBytes = RowVecs * sizeof(uint4);
   STD_TORCH_CHECK(numStack >= 1 && numStack <= kMaxStack);
   STD_TORCH_CHECK(numQueries == 1 || numQueries == 3);
   int const ctas =
@@ -924,9 +956,9 @@ void launch(ConvMixParams& p, int numStack, int numQueries, int device) {
   STD_TORCH_CHECK(p.stages >= 1);
 
   auto seq = std::make_integer_sequence<int, kMaxStack>{};
-  void (*kernel)(ConvMixParams) = numQueries == 1
-                                      ? selectKernel<1, Gather>(numStack, seq)
-                                      : selectKernel<3, Gather>(numStack, seq);
+  void (*kernel)(ConvMixParams) =
+      numQueries == 1 ? selectKernel<1, Gather, RowVecs>(numStack, seq)
+                      : selectKernel<3, Gather, RowVecs>(numStack, seq);
   int const smem = metaBytes + p.stages * p.stageRows * kRowBytes;
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem);
@@ -935,8 +967,9 @@ void launch(ConvMixParams& p, int numStack, int numQueries, int device) {
   attrs[0].val.programmaticStreamSerializationAllowed = 1;
   cudaLaunchConfig_t config{};
   config.gridDim = dim3((p.numTokens + p.tokensPerCta - 1) / p.tokensPerCta);
-  config.blockDim =
-      dim3((numQueries == 1 ? Config<1>::kThreads : Config<3>::kThreads) + 32);
+  config.blockDim = dim3((numQueries == 1 ? Config<1, RowVecs>::kThreads
+                                          : Config<3, RowVecs>::kThreads) +
+                         32);
   config.dynamicSmemBytes = smem;
   config.stream = get_current_cuda_stream(device);
   config.attrs = attrs;
@@ -962,8 +995,8 @@ void inkling2_conv_mix(
     torch::stable::Tensor& conv_out, torch::stable::Tensor const& stack,
     std::optional<torch::stable::Tensor> last,
     torch::stable::Tensor const& queries,
-    torch::stable::Tensor const& norm_weight, double eps, double norm_eps,
-    torch::stable::Tensor& out) {
+    std::optional<torch::stable::Tensor> norm_weight, double eps,
+    double norm_eps, torch::stable::Tensor& out) {
   using namespace vllm::inkling2;
   int const device = conv_out.get_device_index();
   torch::stable::accelerator::DeviceGuard const device_guard(device);
@@ -971,11 +1004,17 @@ void inkling2_conv_mix(
       x, cache, conv_weight, positions, seq_idx, slots, block_table,
       query_start, stream_offset, stream_width, conv_scale, residual, addend,
       conv_out, stack, last, queries, norm_weight, eps, norm_eps);
-  p.out = static_cast<bf16*>(out.data_ptr());
+  if (p.normWeight)
+    p.out = static_cast<bf16*>(out.data_ptr());
+  else
+    p.rawOut = static_cast<float*>(out.data_ptr());
   p.outTokens = p.numTokens;
   STD_TORCH_CHECK(p.xSources == 1);
   if (p.numTokens == 0) return;
-  launch<false>(p, stack.size(0), queries.size(0), device);
+  if (p.dim == 4608)
+    launch<false, 576>(p, stack.size(0), queries.size(0), device);
+  else
+    launch<false, 288>(p, stack.size(0), queries.size(0), device);
 }
 
 void inkling2_seq_parallel_conv_mix(
@@ -1023,5 +1062,8 @@ void inkling2_seq_parallel_conv_mix(
   STD_TORCH_CHECK(tail_rows >= kTaps - 1 && align >= kTaps);
   STD_TORCH_CHECK(p.numTokens > 0 && token_base + p.numTokens <= out_tokens);
   STD_TORCH_CHECK(x.size(-2) == halo_rows + p.numTokens);
-  launch<true>(p, stack.size(0), queries.size(0), device);
+  if (p.dim == 4608)
+    launch<true, 576>(p, stack.size(0), queries.size(0), device);
+  else
+    launch<true, 288>(p, stack.size(0), queries.size(0), device);
 }

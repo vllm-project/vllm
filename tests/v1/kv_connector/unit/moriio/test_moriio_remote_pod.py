@@ -61,6 +61,7 @@ def test_release_reaches_the_peer_pod(finished_before_alloc, dp_rank, host, port
     scheduler._has_mamba = False
     scheduler._is_kv_master = False
     scheduler._reqs_need_recv = {}
+    scheduler._write_recvs_in_flight = {}
     scheduler.transfer_id_to_request_id = {}
     scheduler.request_id_to_transfer_id = {}
     released = []

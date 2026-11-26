@@ -77,7 +77,7 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.vllm_config.cache_config.enable_prefix_caching,
             self.num_speculative_blocks,
         )[:, 0]
 
@@ -203,7 +203,7 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.vllm_config.cache_config.enable_prefix_caching,
             self.num_speculative_blocks,
         )
         if state_indices_tensor.dim() == 1:

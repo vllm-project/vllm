@@ -2,19 +2,22 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use thiserror::Error;
-use thiserror_ext::{AsReport as _, Macro};
+use thiserror_ext::{AsReport as _, Construct, Macro};
+pub use vllm_text::ErrorKind;
 
 use crate::RendererSelection;
 
-type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
-#[derive(Debug, Error, Macro)]
+#[derive(Debug, Error, Construct, Macro)]
 #[thiserror_ext(macro(path = "crate::error"))]
 pub enum Error {
     #[error("chat request must contain at least one message")]
     EmptyMessages,
     #[error("cannot continue the final message when the last message is not from the assistant")]
     ContinueFinalAssistantWithoutFinalAssistant,
+    #[error("{renderer} renderer does not support continue_final_message")]
+    UnsupportedContinueFinalMessage { renderer: &'static str },
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
     #[error("chat template error: {0}")]
@@ -48,6 +51,12 @@ pub enum Error {
     UnsupportedInputAudioFormat { format: String },
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
+    #[error(
+        "`{modality}` input is not supported by the Rust frontend for this model; set \
+         VLLM_USE_RUST_FRONTEND=0 to serve it with the Python frontend, or pass \
+         --limit-mm-per-prompt '{{\"{modality}\": 0}}' to disable it"
+    )]
+    RustFrontendUnsupportedModality { modality: &'static str },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
@@ -59,6 +68,15 @@ pub enum Error {
         offset: usize,
         #[source]
         source: Box<Error>,
+    },
+    #[error(
+        "the Rust frontend cannot serve multimodal input for model `{model_id}` \
+         (model_type `{model_type}`); pass --language-model-only to serve it as a text-only \
+         model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"
+    )]
+    MultimodalModelUnsupported {
+        model_id: String,
+        model_type: String,
     },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
@@ -90,6 +108,22 @@ pub enum Error {
         name: String,
         #[source]
         error: BoxedError,
+    },
+    /// A parser that `auto` matched by model name but cannot build for the
+    /// model. This refuses the start rather than serving without the parser:
+    /// a managed engine gets the same selection, and would still wait for the
+    /// end of reasoning that the frontend no longer parses before applying
+    /// structured outputs.
+    #[error(
+        "{kind} parser `{name}` was selected automatically for model `{model_id}` but cannot be used with it; select a parser explicitly, or pass `{disable}` to disable {kind} parsing"
+    )]
+    UnusableAutoParser {
+        kind: &'static str,
+        name: String,
+        model_id: String,
+        disable: &'static str,
+        #[source]
+        error: Box<Error>,
     },
     #[error("failed to initialize request output parser")]
     OutputParserInitialization {
@@ -136,53 +170,76 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
-    /// Whether this error represents invalid user request parameters.
-    pub fn is_request_validation_error(&self) -> bool {
+    /// Classify this error as a client request-validation failure (with its
+    /// canonical OpenAI `param`, if any) or an internal server failure.
+    pub fn kind(&self) -> ErrorKind {
         match self {
+            Self::Text(error) => error.kind(),
+            Self::MediaAfterPreprocessed { source, .. } => source.kind(),
             Self::EmptyMessages
-            | Self::ContinueFinalAssistantWithoutFinalAssistant
-            | Self::ChatTemplateThrown { .. }
-            | Self::InvalidReasoningEffort(_)
+            | Self::UnsupportedChatRole { .. }
+            | Self::ToolReferenceNotFound { .. } => ErrorKind::invalid_param("messages"),
+            Self::ContinueFinalAssistantWithoutFinalAssistant
+            | Self::UnsupportedContinueFinalMessage { .. } => {
+                ErrorKind::invalid_param("continue_final_message")
+            }
+            Self::InvalidReasoningEffort(_) => ErrorKind::invalid_param("reasoning_effort"),
+            Self::DuplicateToolName { .. } | Self::AllToolsDeferred => {
+                ErrorKind::invalid_param("tools")
+            }
+            Self::ToolChoiceRequiresTools | Self::ToolChoiceFunctionNotFound { .. } => {
+                ErrorKind::invalid_param("tool_choice")
+            }
+            Self::UntrustedRequestChatTemplate | Self::UnsupportedRequestChatTemplate => {
+                ErrorKind::invalid_param("chat_template")
+            }
+            Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningControl { .. }
-            | Self::DuplicateToolName { .. }
-            | Self::ToolChoiceRequiresTools
-            | Self::ToolChoiceFunctionNotFound { .. }
-            | Self::ToolReferenceNotFound { .. }
-            | Self::AllToolsDeferred
             | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
-            | Self::UnsupportedChatRole { .. }
-            | Self::UntrustedRequestChatTemplate
-            | Self::UnsupportedRequestChatTemplate
-            | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
-            Self::Text(error) => error.is_request_validation_error(),
-            Self::OutputGrammar { error } => matches!(
-                error.downcast_ref(),
-                Some(vllm_parser::output_grammar::OutputGrammarError::UnsupportedRequest(_))
-            ),
-            Self::MediaAfterPreprocessed { source, .. } => source.is_request_validation_error(),
-            Self::UnsupportedMultimodalRenderer
+            | Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedContentPart(_)
             | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
+            | Self::RustFrontendUnsupportedModality { .. }
+            | Self::MmLimitExceeded { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
-            | Self::MmLimitExceeded { .. } => true,
+            | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => {
+                ErrorKind::invalid_request()
+            }
+            Self::OutputGrammar { error } => match error.downcast_ref() {
+                Some(vllm_parser::output_grammar::OutputGrammarError::UnsupportedRequest(_)) => {
+                    ErrorKind::invalid_request()
+                }
+                _ => ErrorKind::Internal,
+            },
             // A media host that timed out or failed, and a decoder that failed
             // on this side, stay server errors, as in Python.
-            Self::Media(error) => error.fault() == llm_multimodal::MediaFault::Client,
-
-            _ => false,
-        }
-    }
-
-    /// The request parameter a validation error refers to, reported as the
-    /// `param` of the OpenAI error object.
-    pub fn param(&self) -> Option<&'static str> {
-        match self {
-            Self::Text(error) => error.param(),
-            Self::UnsupportedRequestChatTemplate => Some("chat_template"),
-            _ => None,
+            Self::Media(error) => {
+                if error.fault() == llm_multimodal::MediaFault::Client {
+                    ErrorKind::invalid_request()
+                } else {
+                    ErrorKind::Internal
+                }
+            }
+            Self::MissingChatTemplate
+            | Self::ChatTemplate(_)
+            | Self::UnsupportedChatTemplateOption { .. }
+            | Self::MultimodalModelUnsupported { .. }
+            | Self::Multimodal(_)
+            | Self::IncompatibleParserSelections { .. }
+            | Self::ParserUnavailableByName { .. }
+            | Self::ParserInitialization { .. }
+            | Self::UnusableAutoParser { .. }
+            | Self::OutputParserInitialization { .. }
+            | Self::HarmonyParserOverrideUnsupported { .. }
+            | Self::HarmonyOutputParsing { .. }
+            | Self::StreamClosedBeforeTerminalOutput { .. }
+            | Self::ToolCallStreamInvariant { .. }
+            | Self::Tokenizer(vllm_tokenizer::TokenizerError::Backend { .. }) => {
+                ErrorKind::Internal
+            }
         }
     }
 
@@ -249,7 +306,7 @@ mod tests {
             .into_iter()
             .map(|error| {
                 let error = Error::from(MultiModalError::Media(error));
-                format!("{}: {error}", error.is_request_validation_error())
+                format!("{}: {error}", error.kind().is_invalid_request())
             })
             .join("\n");
         expect![[r#"

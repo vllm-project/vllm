@@ -552,8 +552,9 @@ def _kpool_decode_update_batched_kernel(
     Replaces the caller's per-token sequential launch loop. The intra-request
     iteration MUST stay in position order: a pool-completion at token t* reads
     the tail-ring slots that tokens t < t* (same request) just stashed in this
-    same invocation. `tl.range` iterates sequentially within the program, so
-    those stashes are visible to the later completion read. Cross-request
+    same invocation. The waves hold replicated copies of the BLOCK_D vector and
+    only one copy stores the stash, so every iteration ends with a barrier that
+    makes it visible to the other waves' later completion reads. Cross-request
     programs are independent (distinct tail blocks). RING >= POOL_SIZE.
     """
     req = tl.program_id(0)
@@ -687,6 +688,7 @@ def _kpool_decode_update_batched_kernel(
             score_current,
             mask=update_mask,
         )
+        tl.debug_barrier()
 
 
 def kpool_decode_update_and_maybe_write_cache_batched(

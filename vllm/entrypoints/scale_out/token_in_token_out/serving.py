@@ -168,6 +168,7 @@ class ServingTokens(GenerateBaseServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -180,6 +181,7 @@ class ServingTokens(GenerateBaseServing):
         self.render_lock = asyncio.Lock()
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
+        self.enable_force_include_usage = enable_force_include_usage
         self.force_no_detokenize = force_no_detokenize
         self.has_tokenizer = (
             not force_no_detokenize and self.renderer.tokenizer is not None
@@ -261,15 +263,14 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(
                 "prompt_logprob_token_ids are not available when stream=true."
             )
-        if self.force_no_detokenize and sampling_params.stop:
-            # SamplingParams rejects stop with detokenize=False at request
-            # validation, but this server forces detokenize=False afterwards,
-            # so the combination must be rejected here or stop strings are
-            # silently never applied.
+        if sampling_params.stop and not self.has_tokenizer:
+            # Without a tokenizer (or with detokenization forced off) stop
+            # strings would silently never be applied.
             return self.create_error_response(
-                "stop strings are not supported on a --tokens-only server "
-                "because detokenization is disabled. Check stop strings on "
-                "the coordinator, or use stop_token_ids."
+                "stop strings require a tokenizer and detokenization, but "
+                "this server does not load one (--tokens-only or "
+                "--skip-tokenizer-init). Check stop strings on the "
+                "coordinator, or use stop_token_ids."
             )
         if sampling_params.bad_words and not self.has_tokenizer:
             # bad_words are tokenized in the input processor, which skips
@@ -799,7 +800,7 @@ class ServingTokens(GenerateBaseServing):
         finish_reason_sent = [False] * sampling_params.n
 
         include_usage, include_continuous_usage = should_include_usage(
-            request.stream_options, False
+            request.stream_options, self.enable_force_include_usage
         )
 
         try:

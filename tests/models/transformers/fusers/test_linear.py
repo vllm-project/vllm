@@ -11,6 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.utils.deprecation import deprecate_kwarg
 
 from vllm.model_executor.models.transformers.fuser import Fusers, get_fuser, get_fusers
 from vllm.model_executor.models.transformers.fusers import (
@@ -307,6 +308,31 @@ class PerHeadQKNormAttention(FakeAttention):
         k = self.k_norm(self.k_proj(hidden_states).view(shape))
         v = self.v_proj(hidden_states).view(shape)
         return self.o_proj((q + k + v).flatten(-2)), None
+
+
+class DeprecatedKwargAttention(FakeAttention):
+    """Transformers v5.24 style: `cache` instead of `past_key_values`, with a
+    `deprecate_kwarg` wrapper fx can't trace -> the undecorated forward is traced."""
+
+    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
+    def forward(self, hidden_states, attention_mask=None, cache=None, **kwargs):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if cache is not None:
+            k, v = cache.update(k, v, self.layer_idx)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, attn_weights = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        return self.o_proj(attn_output), attn_weights
 
 
 class ResidDropoutAttention(FakeAttention):
@@ -1020,6 +1046,8 @@ def test_qkv_identifies_output_projection():
             PerHeadQKNormAttention,
             # A module between o_proj and the return is transparent.
             ResidDropoutAttention,
+            # A decorated forward with the renamed `cache` argument still traces.
+            DeprecatedKwargAttention,
         ]:
             fuser = get_fuser(cls(), QKVFuser)
             assert fuser is not None
