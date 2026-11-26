@@ -71,8 +71,10 @@ class MooncakeAuxObjectStore:
         cls, config_path: str | None = None, hard_pin: bool = False
     ) -> MooncakeAuxObjectStore:
         """Connect with the Mooncake configuration file `config_path`, or the
-        one at `MOONCAKE_CONFIG_PATH` if it is `None`. Objects are written
-        hard-pinned if `hard_pin`."""
+        one at `MOONCAKE_CONFIG_PATH` if it is `None`, with a master and pool
+        separate from any Mooncake KV store. Objects are written hard-pinned if
+        `hard_pin`, for a memory-only store; by default they are not pinned, for
+        a store that offloads to SSD on eviction."""
         from mooncake.store import MooncakeDistributedStore, ReplicateConfig
 
         from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (

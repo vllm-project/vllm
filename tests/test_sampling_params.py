@@ -7,6 +7,7 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
+from vllm.distributed.aux_output_connector.params import verify_aux_namespace
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
@@ -338,8 +339,8 @@ def test_aux_outputs_opt_out_keeps_logprobs(make, return_aux_outputs):
 def test_aux_namespace_is_validated(kwargs, error):
     params = SamplingParams(**kwargs)
     if error is None:
-        params.verify_aux_namespace()
+        verify_aux_namespace(params)
         return
     with pytest.raises(VLLMValidationError, match=error) as exc_info:
-        params.verify_aux_namespace()
+        verify_aux_namespace(params)
     assert exc_info.value.parameter == "aux_namespace"

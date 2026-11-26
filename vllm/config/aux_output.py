@@ -21,23 +21,16 @@ class AuxOutputConfig:
     Grows when every object is referenced."""
 
     object_key_prefix: str | None = None
-    """First segment of the keys of the shared objects that deliver the
-    routed experts of requests with `SamplingParams.aux_namespace`. Choose a
-    new one for every engine start. Requires `enable_return_routed_experts`."""
+    """Key prefix of the shared objects of `SamplingParams.aux_namespace`
+    requests; a new one per engine start."""
 
     object_store: str = "mooncake"
-    """Object store of those objects: `"mooncake"`, or the qualified name of a
-    class that implements
-    `vllm.distributed.aux_output_connector.object_store.AuxObjectStore`,
-    `create` included."""
+    """Store of those objects: `"mooncake"`, or the qualified name of an
+    `AuxObjectStore` class."""
 
     object_store_extra_config: dict[str, Any] = Field(default_factory=dict)
-    """Keyword arguments of the object store's `create`, read only by it. For
-    Mooncake: `"config_path"`, its configuration file (default:
-    `MOONCAKE_CONFIG_PATH`), with a master and pool separate from any Mooncake
-    KV store; `"hard_pin"`, to write objects hard-pinned for a memory-only
-    store (default: not pinned, for a store that offloads to SSD on
-    eviction)."""
+    """Keyword arguments of the object store's `create`, e.g.
+    `MooncakeAuxObjectStore.create`."""
 
     @model_validator(mode="after")
     def _check_object_key_prefix(self) -> Self:

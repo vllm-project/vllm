@@ -30,6 +30,10 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.aux_output_connector.connector import (
+    finished_aux_objects,
+    flush_aux_output,
+)
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
@@ -1034,13 +1038,7 @@ class EngineCore:
             if clear_cache:
                 self._reset_caches(reset_connector=reset_connector)
                 self._set_kv_cache_reclaimable(True)
-            connector = getattr(self.scheduler, "aux_output_connector", None)
-            if (
-                connector is not None
-                and (metadata := connector.flush_metadata()) is not None
-            ):
-                # Queue the object writes due; the pause does not wait for them.
-                self.collective_rpc("flush_aux_output", args=(metadata,))
+            flush_aux_output(self.scheduler, self.collective_rpc)
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
@@ -2591,7 +2589,7 @@ class EngineCoreProc(EngineCore):
         client_index: int,
         finish_reason: FinishReason,
         error: RequestError | None = None,
-        aux_objects: dict[str, list[tuple[str, int, int]] | None] | None = None,
+        aux_objects: dict[str, list[tuple[str, int, int]]] | None = None,
     ) -> None:
         outputs = [
             EngineCoreOutput(req_id, [], finish_reason=finish_reason, error=error)
@@ -2620,9 +2618,7 @@ class EngineCoreProc(EngineCore):
             by_client = defaultdict[int, set[str]](set)
             for request in aborted_reqs:
                 by_client[request.client_index].add(request.request_id)
-            aux_objects = None
-            if getattr(self.scheduler, "aux_output_connector", None) is not None:
-                aux_objects = {r.request_id: r.aux_objects for r in aborted_reqs}
+            aux_objects = finished_aux_objects(aborted_reqs)
             for client_index, req_ids in by_client.items():
                 self._send_finish_outputs_to_client(
                     list(req_ids),

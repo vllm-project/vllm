@@ -81,11 +81,8 @@ class CompletionOutput:
             single-sequence (`n == 1`) requests.
         weight_versions: Contiguous weight version spans over output-token indexes.
             Set on the final output only.
-        aux_objects: For a request with `aux_namespace`, `(key, start, end)` of
-            the shared objects that hold its auxiliary outputs from its
-            `aux_prompt_start` on, in position order: positions `[start, end)`
-            are the first `end - start` rows of object `key`. Set on the final
-            output only.
+        aux_objects: For an `aux_namespace` request, `(key, start, end)`: positions
+            `[start, end)` are the first rows of object `key`. Final output only.
 
     """
 

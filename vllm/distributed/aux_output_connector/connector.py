@@ -6,14 +6,15 @@ from __future__ import annotations
 
 import uuid
 from collections import Counter, OrderedDict
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import chain, islice
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 import vllm.envs as envs
+from vllm.distributed.aux_output_connector.params import skips_aux_outputs
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     get_routed_experts_bytes_per_token,
 )
@@ -41,6 +42,27 @@ def check_aux_output_config(config: AuxOutputConfig) -> None:
         return
     if not config.enabled:
         raise ValueError("object_key_prefix requires enable_return_routed_experts.")
+
+
+def flush_aux_output(scheduler: object, collective_rpc: Callable[..., Any]) -> None:
+    """Queue the object writes due when the engine pauses; the pause does not
+    wait for them."""
+    connector = getattr(scheduler, "aux_output_connector", None)
+    if connector is not None and (metadata := connector.flush_metadata()) is not None:
+        collective_rpc("flush_aux_output", args=(metadata,))
+
+
+def finished_aux_objects(
+    requests: Iterable[Request],
+) -> dict[str, list[tuple[str, int, int]]] | None:
+    """Object listings of the finished requests that have one, for their final
+    outputs."""
+    listing = {
+        request.request_id: request.aux_objects
+        for request in requests
+        if request.aux_objects is not None
+    }
+    return listing or None
 
 
 def object_put_timeout_s() -> float:
@@ -566,8 +588,7 @@ class AuxOutputSchedulerConnector:
 
     @staticmethod
     def _skips(request: Request) -> bool:
-        params = request.sampling_params
-        return params is not None and not params.return_aux_outputs
+        return skips_aux_outputs(request.sampling_params)
 
     def loads_failed(self, request_ids: set[str]) -> None:
         """Requests about to end with an error because KV they hold failed to

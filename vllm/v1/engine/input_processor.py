@@ -8,7 +8,7 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.utils import hash_factors
-from vllm.distributed.aux_output_connector.object_store import aux_namespace_cache_salt
+from vllm.distributed.aux_output_connector.params import prepare_aux_request
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -490,30 +490,20 @@ class InputProcessor:
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
             )
-            for name in ("routed_experts_prompt_start", "aux_prompt_start"):
-                if not 0 <= (value := getattr(sampling_params, name)) <= prompt_len:
-                    raise VLLMValidationError(
-                        f"{name} must be between 0 and "
-                        f"the prompt length ({prompt_len}), inclusive.",
-                        parameter=name,
-                        value=value,
-                    )
-            aux_config = self.vllm_config.aux_output_config
-            if aux_config.enabled:
-                sampling_params._fold_prompt_start_alias()
-            if (namespace := sampling_params.aux_namespace) is not None:
-                sampling_params.verify_aux_namespace()
-                if (key_prefix := aux_config.object_key_prefix) is None:
-                    raise VLLMValidationError(
-                        "aux_namespace requires AuxOutputConfig.object_key_prefix.",
-                        parameter="aux_namespace",
-                    )
-                if resumable:
-                    raise VLLMValidationError(
-                        "aux_namespace does not support streaming input.",
-                        parameter="aux_namespace",
-                    )
-                cache_salt = aux_namespace_cache_salt(key_prefix, namespace, cache_salt)
+            if not 0 <= sampling_params.routed_experts_prompt_start <= prompt_len:
+                raise VLLMValidationError(
+                    f"routed_experts_prompt_start must be between 0 and "
+                    f"the prompt length ({prompt_len}), inclusive.",
+                    parameter="routed_experts_prompt_start",
+                    value=sampling_params.routed_experts_prompt_start,
+                )
+            cache_salt = prepare_aux_request(
+                self.vllm_config.aux_output_config,
+                sampling_params,
+                prompt_len,
+                resumable,
+                cache_salt,
+            )
             start = sampling_params.prompt_logprob_start or 0
             if start and start >= prompt_len - 1:
                 raise VLLMValidationError(
