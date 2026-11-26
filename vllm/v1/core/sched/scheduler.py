@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import heapq
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -46,7 +45,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.core.sched.dp_prefill_hold import PrefillHold, PrefillQueueState
+from vllm.v1.core.sched.dp_prefill_hold import PrefillHold
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -430,19 +429,7 @@ class Scheduler(SchedulerInterface):
         # Whether the last release stopped for lack of KV blocks, or preempted.
         self.prefill_kv_stopped = False
         if self.scheduler_config.prefill_hold_ttft_target is not None:
-            spec = self.vllm_config.speculative_config
-            draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
-            self.prefill_hold = PrefillHold(
-                self._prefill_queue_state,
-                self.scheduler_config.prefill_hold_ttft_target,
-                self.scheduler_config.prefill_hold_ttft_weight,
-                self.max_num_scheduled_tokens,
-                input_budget=self.scheduler_config.max_num_batched_tokens,
-                decode_tokens_per_req=1 + self.num_spec_tokens,
-                draft_slots_per_req=draft_slots,
-                lag_steps=self.vllm_config.max_concurrent_batches - 1,
-                log_stats=self.parallel_config.data_parallel_rank == 0,
-            )
+            self.prefill_hold = PrefillHold(self)
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -3175,48 +3162,6 @@ class Scheduler(SchedulerInterface):
                 self.scheduler_config.max_num_batched_tokens // num_eligible_reqs,
             )
         return threshold
-
-    def _prefill_queue_state(self) -> PrefillQueueState:
-        num_running, num_waiting = self.get_request_counts()
-        return PrefillQueueState(
-            self.running,
-            # HiSparse also tracks async KV loads parked in kv_holding_waiting.
-            [r for r in self._inflight_prefills if r.status == RequestStatus.RUNNING],
-            self._startable_waiting,
-            num_waiting,
-            # Sessions waiting for their next streaming input keep their slots.
-            self.max_num_active_reqs - self.num_waiting_for_streaming_input,
-            self.kv_cache_manager.get_num_cached_tokens,
-            self.kv_cache_manager.block_pool.get_num_free_blocks()
-            - self._inflight_prefill_reserved_blocks()
-            if self.prefill_kv_stopped
-            else None,
-            self._num_blocks_to_admit,
-            self._effective_long_prefill_threshold(num_running + num_waiting),
-        )
-
-    def _num_blocks_to_admit(self, request: Request, cached_tokens: int) -> int:
-        """Roughly the KV blocks a waiting request needs to be admitted: those
-        of its full sequence it lacks, less its prefix hit's share."""
-        blocks = self._request_remaining_blocks(request)
-        if request.num_computed_tokens or not cached_tokens:
-            return blocks
-        return blocks - blocks * cached_tokens // max(request.num_tokens, 1)
-
-    def _startable_waiting(self) -> Iterator[Request]:
-        """Waiting requests that can start now, in the order `schedule` admits
-        them: `kv_holding_waiting` first, then `waiting` and `async_kv_waiting`
-        merged as `_next_waiting_queue` picks."""
-        merged = heapq.merge(
-            self.waiting,
-            self.async_kv_waiting,
-            key=None
-            if self.policy == SchedulingPolicy.PRIORITY
-            else lambda r: r.arrival_time,
-        )
-        return filter(
-            self._can_start_waiting, itertools.chain(self.kv_holding_waiting, merged)
-        )
 
     def get_dp_state(self) -> Sequence[float] | None:
         return None if self.prefill_hold is None else self.prefill_hold.local_row()

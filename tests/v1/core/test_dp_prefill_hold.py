@@ -3,7 +3,6 @@
 import math
 import random
 import time
-from unittest.mock import Mock
 
 import pytest
 
@@ -98,7 +97,7 @@ def test_cold_start_median_and_stall_recovery():
     """Cold-start median drops an initial compile spike; a single stall is
     rejected, while `_MAX_STALL_REJECTS` consecutive high steps adapt to a true
     regime shift."""
-    hold = PrefillHold(Mock(), T, 1.0, 8192)
+    _, hold = _hold_scheduler()
     # First sync skipped; next 3 samples include a 0.5s compile spike.
     hold.update([_row(done=1, period=0.02, decodes=16)] * RANKS)
     hold.update([_row(done=1, period=0.50, decodes=16)] * RANKS)
@@ -141,7 +140,7 @@ def test_cold_start_median_and_stall_recovery():
 @pytest.mark.parametrize("bad_val", [math.nan, math.inf, -math.inf])
 def test_non_finite_row_fails_open(bad_val: float):
     """Any NaN or Inf in gathered rows immediately releases and skips learning."""
-    hold = PrefillHold(Mock(), T, 1.0, 8192)
+    _, hold = _hold_scheduler()
     _warm(hold, random.Random(0))
     assert hold.update(_one_rank_queued()) == "wait"
     assert hold.hold
@@ -157,7 +156,7 @@ def test_non_finite_row_fails_open(bad_val: float):
 def test_steady_state_collinearity_and_elastic_ep_reset():
     """Repeated full-budget batches preserve learned (F, a, b) ratios instead of
     collapsing; changing rank count (Elastic EP) resets the cost model."""
-    hold = PrefillHold(Mock(), T, 1.0, 8192)
+    _, hold = _hold_scheduler()
     _warm(hold, random.Random(0))
     assert hold._cost.has_3d
     f0, a0, b0 = hold._cost.f, hold._cost.a, hold._cost.b
@@ -193,7 +192,7 @@ def test_steady_state_collinearity_and_elastic_ep_reset():
 def test_ski_rental_holds_then_releases_and_ignores_non_amortizable_b():
     """Online Ski-Rental holds while accumulated rent < 0.5 * D * waste_s, then
     releases; purely non-amortizable `b * S` cost does not justify holding."""
-    hold = PrefillHold(Mock(), T, 1.0, 8192)
+    _, hold = _hold_scheduler()
     _warm(hold, random.Random(0))
     assert hold.update(_one_rank_queued()) == "wait"
     assert hold.hold
@@ -212,14 +211,15 @@ def test_ski_rental_holds_then_releases_and_ignores_non_amortizable_b():
     assert hold.update(_one_rank_queued()) == "cost"
 
     # Pure b * S hardware (F = 0, a = 0, b = 10 ms/ktok): zero amortizable waste.
-    b_only = PrefillHold(Mock(), T, 1.0, 8192)
+    _, b_only = _hold_scheduler()
     _warm(b_only, random.Random(0), truth=(0.0, 0.0, 10.0))
     assert b_only.update(_one_rank_queued()) == "cost"
 
 
 def test_ttft_target_and_lag_steps_bound_the_hold():
     """Tight slack or async `lag_steps` releases via deadline."""
-    hold = PrefillHold(Mock(), T, 1.0, 8192, lag_steps=2)
+    _, hold = _hold_scheduler()
+    hold.lag_steps = 2
     _warm(hold, random.Random(0))
     assert hold.update(_one_rank_queued(slack=0.01)) == "deadline"
     assert not hold.hold
@@ -229,7 +229,7 @@ def test_ttft_target_and_lag_steps_bound_the_hold():
 
 def test_idle_n_avail_and_no_local_decode_boundaries():
     """Covers idle hold, n_avail == 0/1, and no_local_decode piggyback."""
-    hold = PrefillHold(Mock(), T, 1.0, 8192)
+    _, hold = _hold_scheduler()
     _warm(hold, random.Random(0))
 
     # All ranks blocked (work=1, x=0) -> "blocked".
@@ -548,7 +548,7 @@ def test_paused_streaming_and_stale_output_not_work():
 @pytest.mark.parametrize("policy", ["fcfs", "priority"])
 def test_scans_waiting_queues_in_admission_order(policy):
     """Requests in `async_kv_waiting` and `waiting` are scanned in admission order."""
-    scheduler, _ = _hold_scheduler(
+    scheduler, hold = _hold_scheduler(
         use_kv_connector=MockKVConfig(), scheduling_policy=policy
     )
     scheduler.scheduler_config.max_num_inflight_kv_loads = 8
@@ -559,7 +559,7 @@ def test_scans_waiting_queues_in_admission_order(policy):
         scheduler.add_request(req)
     assert len(scheduler.async_kv_waiting) == len(scheduler.waiting) == 3
 
-    scanned = [r.request_id for r in scheduler._prefill_queue_state().waiting()]
+    scanned = [r.request_id for r in hold._startable_waiting()]
     admitted = [r.req_id for r in scheduler.schedule().scheduled_new_reqs]
     assert scanned == admitted
 

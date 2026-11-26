@@ -14,16 +14,21 @@ total tokens `S`), then applies Online Ski-Rental against the amortizable waste
 `(F, a)` while bounding each request's hold time by the TTFT target `T`.
 """
 
+import heapq
+import itertools
 import math
 import time
 from collections import deque
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.logger import init_logger
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
+from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.scheduler import Scheduler
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -215,27 +220,6 @@ class _Cost3D:
         return max(0.0, self.mean_y), 0.0, 0.0
 
 
-class PrefillQueueState(NamedTuple):
-    """A read-only view of the scheduler's queues for the hold."""
-
-    running: Sequence["Request"]
-    # Running requests with prefill left.
-    prefill_chunks: Collection["Request"]
-    # Waiting requests that can start now, in the order the scheduler admits
-    # them.
-    waiting: Callable[[], Iterator["Request"]]
-    # Requests in the waiting queues, whether or not they can start.
-    num_waiting: int
-    max_active_reqs: int
-    num_cached_tokens: Callable[["Request"], int]
-    # Free KV blocks if the last release stopped for lack of them, else None.
-    kv_free_blocks: int | None
-    # Estimated KV blocks needed to admit `(request, cached_tokens)`.
-    num_blocks_needed: Callable[["Request", int], int]
-    # Effective per-request prefill token cap for the next step (0 = uncapped).
-    long_prefill_token_threshold: int = 0
-
-
 class PrefillHold:
     """Decides, once per step and identically on every DP rank, whether all
     ranks hold their prefills on the next step.
@@ -244,45 +228,31 @@ class PrefillHold:
     through the scheduler; without that, it never holds.
 
     Args:
-        queue_state: Returns a read-only view of the scheduler's queues.
-        ttft_target_s: TTFT target `T` in seconds.
-        ttft_weight: Weight on waiting requests' TTFT against running decodes'
-            stall time. `1.0` targets end-to-end latency; higher values hold
-            less (favouring TTFT), lower values hold longer (favouring ITL).
-        token_budget: Max scheduled tokens per step per rank.
-        input_budget: Max model-input tokens per step per rank. Defaults to
-            `token_budget`.
-        decode_tokens_per_req: Scheduled tokens consumed per running decode
-            request (`1 + num_spec_tokens`).
-        draft_slots_per_req: Extra input-budget slots reserved per request for
-            drafting.
-        lag_steps: Steps between a decision and the step it takes effect on
-            the GPU beyond the next one (`max_concurrent_batches - 1`).
-        log_stats: Whether this rank logs a periodic summary; DP rank 0 does.
+        scheduler: The scheduler whose queues and configuration the hold reads.
 
     """
 
-    def __init__(
-        self,
-        queue_state: Callable[[], PrefillQueueState],
-        ttft_target_s: float,
-        ttft_weight: float,
-        token_budget: int,
-        input_budget: int | None = None,
-        decode_tokens_per_req: int = 1,
-        draft_slots_per_req: int = 0,
-        lag_steps: int = 0,
-        log_stats: bool = False,
-    ) -> None:
-        self._queue_state = queue_state
-        self.ttft_target = ttft_target_s
-        self.ttft_weight = ttft_weight
-        self.token_budget = token_budget
-        self.input_budget = token_budget if input_budget is None else input_budget
-        self.decode_tokens_per_req = decode_tokens_per_req
-        self.draft_slots_per_req = draft_slots_per_req
-        self.lag_steps = lag_steps
-        self.log_stats = log_stats
+    def __init__(self, scheduler: "Scheduler") -> None:
+        config = scheduler.scheduler_config
+        spec = scheduler.vllm_config.speculative_config
+        assert config.prefill_hold_ttft_target is not None
+        self._scheduler = scheduler
+        # TTFT target `T` in seconds.
+        self.ttft_target = config.prefill_hold_ttft_target
+        self.ttft_weight = config.prefill_hold_ttft_weight
+        # Max scheduled and model-input tokens per step per rank.
+        self.token_budget = scheduler.max_num_scheduled_tokens
+        self.input_budget = config.max_num_batched_tokens
+        # Scheduled tokens consumed per running decode request.
+        self.decode_tokens_per_req = 1 + scheduler.num_spec_tokens
+        # Extra input-budget slots reserved per request for drafting.
+        self.draft_slots_per_req = (
+            spec.max_num_new_slots_for_drafting if spec is not None else 0
+        )
+        # Steps between a decision and the step it takes effect on the GPU
+        # beyond the next one.
+        self.lag_steps = scheduler.vllm_config.max_concurrent_batches - 1
+        self.log_stats = scheduler.parallel_config.data_parallel_rank == 0
         self.hold = False
 
         # Global state: identical on every rank, updated only from the rows.
@@ -372,7 +342,7 @@ class PrefillHold:
 
     def local_row(self) -> _RankRow:
         """This rank's row for the next all-gather."""
-        state = self._queue_state()
+        sched = self._scheduler
         now = time.monotonic()
         held = self._held(now)
         period = 0.0 if self._last_sync is None else now - self._last_sync
@@ -385,15 +355,19 @@ class PrefillHold:
             done_tokens = float(self._done_tokens)
             self._done_tokens = None
 
-        chunks = state.prefill_chunks
-        if len(self._cached_tokens) > 2 * state.num_waiting + 256:
+        # HiSparse also tracks async KV loads parked in kv_holding_waiting.
+        chunks = [
+            r for r in sched._inflight_prefills if r.status == RequestStatus.RUNNING
+        ]
+        num_running, num_waiting = sched.get_request_counts()
+        if len(self._cached_tokens) > 2 * num_waiting + 256:
             self._cached_tokens = {
                 r.request_id: self._cached_tokens[r.request_id]
-                for r in state.waiting()
+                for r in self._startable_waiting()
                 if r.request_id in self._cached_tokens
             }
-        decodes = float(max(0, len(state.running) - len(chunks)))
-        if not chunks and next(state.waiting(), None) is None:
+        decodes = float(max(0, len(sched.running) - len(chunks)))
+        if not chunks and next(self._startable_waiting(), None) is None:
             return _RankRow(
                 done, period, done_tokens, 0.0, 0.0, decodes, 0.0, self.ttft_target
             )
@@ -404,7 +378,8 @@ class PrefillHold:
                 done, period, done_tokens, 1.0, 0.0, decodes, 0.0, self.ttft_target
             )
 
-        x, queued, slack = self._scan_queue(state, budget, held)
+        cap = sched._effective_long_prefill_threshold(num_running + num_waiting)
+        x, queued, slack = self._scan_queue(chunks, budget, cap, held)
         return _RankRow(
             done, period, done_tokens, 1.0, float(x), decodes, float(queued), slack
         )
@@ -417,14 +392,15 @@ class PrefillHold:
         return self._clock - self._hold_start + since_sync
 
     def _scan_queue(
-        self, state: PrefillQueueState, budget: int, held: float
+        self, chunks: list["Request"], budget: int, cap: int, held: float
     ) -> tuple[int, int, float]:
+        """Scan the prefill queue under the per-request prefill token cap `cap`
+        (0 = uncapped)."""
         wall = time.time()
         target = self.ttft_target
-        cap = state.long_prefill_token_threshold
         x = queued = queue_tokens = 0
         slack = target
-        for arrival, remaining, in_progress in self._prefill_queue(state):
+        for arrival, remaining, in_progress in self._prefill_queue(chunks):
             if x < budget:
                 step_cap = min(remaining, cap) if cap > 0 else remaining
                 x += min(step_cap, budget - x)
@@ -442,18 +418,27 @@ class PrefillHold:
         return x, queued, slack
 
     def _prefill_queue(
-        self, state: PrefillQueueState
+        self, chunks: list["Request"]
     ) -> Iterator[tuple[float, int, bool]]:
         """Yield `(arrival_time, uncached_tokens, in_progress)` in admission order."""
-        for req in sorted(state.prefill_chunks, key=lambda r: r.arrival_time):
+        for req in sorted(chunks, key=lambda r: r.arrival_time):
             remaining = req.num_tokens - req.num_computed_tokens
             if remaining > 0:
                 yield req.arrival_time, remaining, True
+        sched = self._scheduler
         cached_tokens = self._cached_tokens
-        probe = state.num_cached_tokens
-        free = state.kv_free_blocks
-        slots = min(state.max_active_reqs - len(state.running), _MAX_QUEUE_SCAN)
-        for req in state.waiting():
+        probe = sched.kv_cache_manager.get_num_cached_tokens
+        # Free KV blocks if the last release stopped for lack of them.
+        free = (
+            sched.kv_cache_manager.block_pool.get_num_free_blocks()
+            - sched._inflight_prefill_reserved_blocks()
+            if sched.prefill_kv_stopped
+            else None
+        )
+        # Sessions waiting for their next streaming input keep their slots.
+        slots = sched.max_num_active_reqs - sched.num_waiting_for_streaming_input
+        slots = min(slots - len(sched.running), _MAX_QUEUE_SCAN)
+        for req in self._startable_waiting():
             slots -= 1
             if slots < 0:
                 return
@@ -461,12 +446,36 @@ class PrefillHold:
             if cached is None:
                 cached = cached_tokens[req.request_id] = probe(req)
             if free is not None:
-                free -= state.num_blocks_needed(req, cached)
+                free -= self._num_blocks_to_admit(req, cached)
                 if free < 0:
                     return
             # Full prefix hits leave 1 token, which the scheduler never defers.
             if req.num_tokens - cached > 1:
                 yield req.arrival_time, req.num_tokens - cached, False
+
+    def _startable_waiting(self) -> Iterator["Request"]:
+        """Waiting requests that can start now, in the order `schedule` admits
+        them: `kv_holding_waiting` first, then `waiting` and `async_kv_waiting`
+        merged as `_next_waiting_queue` picks."""
+        sched = self._scheduler
+        merged = heapq.merge(
+            sched.waiting,
+            sched.async_kv_waiting,
+            key=None
+            if sched.policy == SchedulingPolicy.PRIORITY
+            else lambda r: r.arrival_time,
+        )
+        return filter(
+            sched._can_start_waiting, itertools.chain(sched.kv_holding_waiting, merged)
+        )
+
+    def _num_blocks_to_admit(self, request: "Request", cached_tokens: int) -> int:
+        """Roughly the KV blocks a waiting request needs to be admitted: those
+        of its full sequence it lacks, less its prefix hit's share."""
+        blocks = self._scheduler._request_remaining_blocks(request)
+        if request.num_computed_tokens or not cached_tokens:
+            return blocks
+        return blocks - blocks * cached_tokens // max(request.num_tokens, 1)
 
     def update(self, rows: Sequence[Sequence[float]]) -> str:
         """Advance global state with all ranks' rows and set `hold`.
