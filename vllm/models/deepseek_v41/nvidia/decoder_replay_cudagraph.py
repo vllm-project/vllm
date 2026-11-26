@@ -90,7 +90,7 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         if self.layers.has_early_aux():
             stream = None
 
-        def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
+        def create_forward_fn(desc: BatchExecutionDescriptor):
             prepare(desc)
             assert self.layers.replay_batch is not None
             context = self.layers.replay_batch.forward_context

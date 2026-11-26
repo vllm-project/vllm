@@ -7,7 +7,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from itertools import groupby, product
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -100,16 +100,7 @@ def make_cudagraph_stats(
     )
 
 
-class CreateForwardFn(Protocol):
-    """Factory that prepares inputs (OUTSIDE the graph) and returns a
-    forward_fn. Called with warmup=True for the warmup pass and warmup=False
-    for the captured pass."""
-
-    def __call__(
-        self,
-        desc: BatchExecutionDescriptor,
-        warmup: bool,
-    ) -> Callable[[CUDAGraphMode], None]: ...
+CreateForwardFn = Callable[[BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]]
 
 
 def _is_compatible(
@@ -448,6 +439,10 @@ class CudaGraphManager:
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
 
+    def _warmup_for_capture(self, forward_fn: Callable[[CUDAGraphMode], None]) -> None:
+        """Run the prepared forward eagerly before capturing this descriptor."""
+        forward_fn(CUDAGraphMode.NONE)
+
     def _capture_stream(self, desc: BatchExecutionDescriptor) -> torch.cuda.Stream:
         """Capture on the stream used by the microbatch threads."""
         if desc.num_ubatches > 1:
@@ -467,9 +462,8 @@ class CudaGraphManager:
         Args:
             create_forward_fn: Factory that prepares inputs (OUTSIDE graph) and
                 returns a forward_fn. For FULL and breakable PIECEWISE modes,
-                it is invoked once with warmup=True and again with warmup=False
-                because attention backends may mutate or lazily initialize
-                metadata during warmup.
+                it is called again after warmup to prepare fresh attention
+                metadata for capture.
             progress_bar_desc: Description shown on the capture progress bar.
             stream: Capture on this stream instead of a new one.
 
@@ -499,10 +493,8 @@ class CudaGraphManager:
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
                     # Prepare inputs and get forward function
-                    forward_fn = create_forward_fn(desc, warmup=True)
-
-                    # Warmup
-                    forward_fn(CUDAGraphMode.NONE)
+                    forward_fn = create_forward_fn(desc)
+                    self._warmup_for_capture(forward_fn)
 
                     # Capture
                     logger.debug(
@@ -517,7 +509,7 @@ class CudaGraphManager:
                         forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
                         # Capture with fresh attention state.
-                        forward_fn = create_forward_fn(desc, warmup=False)
+                        forward_fn = create_forward_fn(desc)
                         if desc.cg_mode == CUDAGraphMode.PIECEWISE:
                             forward_fn(CUDAGraphMode.PIECEWISE)
                             continue
@@ -745,7 +737,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     self.intermediate_tensors[k][:num_tokens] = v
 
         def create_forward_fn(
-            desc: BatchExecutionDescriptor, warmup: bool
+            desc: BatchExecutionDescriptor,
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)

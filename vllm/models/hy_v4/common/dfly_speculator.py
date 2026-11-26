@@ -338,7 +338,7 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
         self.reuse.validate_storage()
 
         def create_forward_fn(
-            desc: BatchExecutionDescriptor, warmup: bool
+            desc: BatchExecutionDescriptor,
         ) -> Callable[[CUDAGraphMode], None]:
             count = desc.num_tokens
             batch = count // self.num_query_per_req
