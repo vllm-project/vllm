@@ -4,7 +4,6 @@
 use std::slice;
 
 use indexmap::IndexMap;
-use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use vllm_chat::{AllowedToolsMode, ChatTool};
@@ -105,7 +104,7 @@ mod tests {
     use serde_json::{Value, json};
     use vllm_chat::ChatTool;
 
-    use super::{ChatMessage, Function};
+    use super::{ChatMessage, Function, ImageDetail, ImageUrl};
 
     /// An omitted or `null` schema means none, and is echoed back as `null`.
     #[test]
@@ -126,6 +125,17 @@ mod tests {
             );
             assert_eq!(ChatTool::from(function).parameters, parameters);
         }
+    }
+
+    /// OpenAI accepts `"detail": null` as omitted, and `original` as its own value.
+    #[test]
+    fn image_url_detail_reads_null_as_omitted_and_keeps_original() {
+        let detail = |json| serde_json::from_str::<ImageUrl>(json).unwrap().detail;
+        assert_eq!(detail(r#"{"url": "u", "detail": null}"#), None);
+        assert_eq!(
+            detail(r#"{"url": "u", "detail": "original"}"#),
+            Some(ImageDetail::Original)
+        );
     }
 
     #[test]
@@ -229,7 +239,30 @@ impl ContentPart {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ImageUrl {
     pub url: String,
+    #[serde(default)]
     pub detail: Option<ImageDetail>,
+}
+
+/// Image `detail` as OpenAI's chat and Responses APIs spell it.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageDetail {
+    Auto,
+    Low,
+    High,
+    Original,
+}
+
+impl From<ImageDetail> for llm_multimodal::ImageDetail {
+    /// Image preprocessing does not read the detail; `original` asks for the full
+    /// resolution, which `high` is closest to.
+    fn from(detail: ImageDetail) -> Self {
+        match detail {
+            ImageDetail::Auto => Self::Auto,
+            ImageDetail::Low => Self::Low,
+            ImageDetail::High | ImageDetail::Original => Self::High,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
