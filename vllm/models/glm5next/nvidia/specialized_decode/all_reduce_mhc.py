@@ -160,6 +160,7 @@ class _BoundaryDeviceKernel:
         rms_eps: float,
         pre_eps: float,
         norm_eps: float,
+        fp32_post_max_tokens: int = 0,
     ) -> None:
         if tp != HC:
             raise ValueError("one rank lane per hc stream: tp must be 4")
@@ -179,6 +180,7 @@ class _BoundaryDeviceKernel:
         self.rms_eps = rms_eps
         self.pre_eps = pre_eps
         self.norm_eps = norm_eps
+        self.fp32_post_max_tokens = fp32_post_max_tokens
 
     def smem_size_in_bytes(self) -> int:
         first = (self.warps + self.cluster_size + 1) * self.values
@@ -359,6 +361,10 @@ class _BoundaryDeviceKernel:
             bf16x8_to_packed_u32x4(stream_bf16),
         )
         stream_values = stream_bf16.to(Float32)
+        # TileLang's small-batch projection consumes the unrounded post.
+        if cutlass.const_expr(self.fp32_post_max_tokens > 0):  # noqa: SIM102
+            if cute.arch.grid_dim()[0] <= Int32(self.fp32_post_max_tokens):
+                stream_values = mixed
 
         partial = cute.make_rmem_tensor(cute.make_layout((self.values,)), Float32)
         for row in cutlass.range_constexpr(MIX):
@@ -412,11 +418,14 @@ class _BoundaryDeviceKernel:
                     collapse[k], offset=1 << offset, mask=-1, mask_and_clamp=31
                 )
         prenorm = collapse.load().to(BFloat16).to(Float32)
+        variance_values = prenorm
+        if cutlass.const_expr(self.fp32_post_max_tokens > 0):
+            variance_values = collapse.load()
 
         square = cute.make_rmem_tensor(cute.make_layout((1,)), Float32)
         square[0] = Float32(0.0)
         if lane == 0:
-            square[0] = (prenorm * prenorm).reduce(
+            square[0] = (variance_values * variance_values).reduce(
                 cute.ReductionOp.ADD, init_val=Float32(0.0), reduction_profile=0
             )
         self._block_reduce_to_cluster(
@@ -734,10 +743,34 @@ class _GroupBoundaryDeviceKernel(_BoundaryDeviceKernel):
             store_global_u32x4(
                 Int64((residual_output.iterator + output).toint()), words
             )
-            partial = [
-                _dot_bf16x8(fn_rows[row, None].load(), words) for row in range(MIX)
-            ]
-            partial.append(_dot_bf16x8(words, words))
+            if cutlass.const_expr(self.fp32_post_max_tokens > 0):
+                # hopper specialized code
+                stream_values = stream_bf16.to(Float32)
+                if m <= Int32(self.fp32_post_max_tokens):
+                    stream_values = mixed
+                partial = [
+                    (
+                        packed_u32x4_to_bf16x8(fn_rows[row, None].load()).to(Float32)
+                        * stream_values
+                    ).reduce(
+                        cute.ReductionOp.ADD,
+                        init_val=Float32(0.0),
+                        reduction_profile=0,
+                    )
+                    for row in range(MIX)
+                ]
+                partial.append(
+                    (stream_values * stream_values).reduce(
+                        cute.ReductionOp.ADD,
+                        init_val=Float32(0.0),
+                        reduction_profile=0,
+                    )
+                )
+            else:
+                partial = [
+                    _dot_bf16x8(fn_rows[row, None].load(), words) for row in range(MIX)
+                ]
+                partial.append(_dot_bf16x8(words, words))
             for _ in cutlass.range_constexpr(WARP_SIZE - values):
                 partial.append(Float32(0.0))
             total = _warp_reduce_scatter(partial)
@@ -820,7 +853,10 @@ class _GroupBoundaryDeviceKernel(_BoundaryDeviceKernel):
                     )
             prenorm = collapse.load().to(BFloat16)
             kept[t, None].store(bf16x8_to_packed_u32x4(prenorm))
-            square = (prenorm.to(Float32) * prenorm.to(Float32)).reduce(
+            variance_values = prenorm.to(Float32)
+            if cutlass.const_expr(self.fp32_post_max_tokens > 0):
+                variance_values = collapse.load()
+            square = (variance_values * variance_values).reduce(
                 cute.ReductionOp.ADD, init_val=Float32(0.0), reduction_profile=0
             )
             squares.append(
@@ -1043,6 +1079,13 @@ class AllReduceMhcBoundary:
                 )
                 for dtype in (torch.float32, torch.bfloat16)
             }
+            fp32_post_max_tokens = 0
+            if torch.cuda.get_device_capability(device)[0] == 9:
+                from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                    _FUSED_POST_PRE_MAX_TOKENS,
+                )
+
+                fp32_post_max_tokens = _FUSED_POST_PRE_MAX_TOKENS
             boundary = dict(
                 hidden=hidden,
                 tp=tp,
@@ -1051,6 +1094,7 @@ class AllReduceMhcBoundary:
                 rms_eps=rms_eps,
                 pre_eps=hc_eps,
                 norm_eps=norm_eps,
+                fp32_post_max_tokens=fp32_post_max_tokens,
             )
             self.cluster_tokens = dict(cluster_tokens or {})
             self._boundary = {}

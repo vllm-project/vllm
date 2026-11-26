@@ -7,6 +7,7 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import math
 from typing import Any
 
 import torch
@@ -410,7 +411,23 @@ def kernel_unified_attention(
     # window. Enabled by the launcher for plain causal sliding windows only;
     # ``reduce_segments`` must be launched with the same value.
     WINDOW_SEGMENTS: tl.constexpr = False,
+    # Per-token-head K/V alignment and offset of V from K (kv_tile_alignment).
+    v_cache_delta: tl.int64 = 0,
+    K_ALIGN: tl.constexpr = 1,
+    V_ALIGN: tl.constexpr = 1,
 ):
+    # Strides as visible multiples of the alignment found by kv_tile_alignment,
+    # and V addressed from K, let the K/V tile loads compile to vector loads.
+    if K_ALIGN > 1:
+        stride_k_cache_0 = stride_k_cache_0 // K_ALIGN * K_ALIGN
+        stride_k_cache_1 = stride_k_cache_1 // K_ALIGN * K_ALIGN
+        stride_k_cache_2 = stride_k_cache_2 // K_ALIGN * K_ALIGN
+    if V_ALIGN > 1:
+        value_cache_ptr = key_cache_ptr + v_cache_delta // V_ALIGN * V_ALIGN
+        stride_v_cache_0 = stride_v_cache_0 // V_ALIGN * V_ALIGN
+        stride_v_cache_1 = stride_v_cache_1 // V_ALIGN * V_ALIGN
+        stride_v_cache_2 = stride_v_cache_2 // V_ALIGN * V_ALIGN
+
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
         KV_QUANT_MODE <= 3
@@ -924,6 +941,24 @@ def reduce_segments(
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
 
 
+def kv_tile_alignment(k: torch.Tensor, v: torch.Tensor) -> tuple[int, int, int]:
+    """Alignment of per-token-head K/V tile loads, which Triton cannot infer.
+
+    Returns:
+        `(k_align, v_align, v_delta)`: the powers of two, at most 16, dividing
+        the K address and strides, and also the V strides and `v_delta`, the
+        offset of `v` from `k`. `v_align` is 1 unless `v` starts inside `k`.
+
+    """
+    if k.element_size() != 1:
+        return 1, 1, 0
+    k_align = math.gcd(16, k.data_ptr(), *k.stride()[:3])
+    v_delta = v.data_ptr() - k.data_ptr()
+    if not 0 < v_delta < k.stride(0) * k.shape[0]:
+        return k_align, 1, 0
+    return k_align, math.gcd(k_align, v_delta, *v.stride()[:3]), v_delta
+
+
 def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     """Detect Gemma3 models via unique (head_size, sliding_window) signature.
 
@@ -1435,6 +1470,10 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
+    k_align, v_align, v_cache_delta = 1, 1, 0
+    if k_scale_cache is not None and not use_td:
+        k_align, v_align, v_cache_delta = kv_tile_alignment(k, v)
+
     kernel_unified_attention[grid](
         output_ptr=out,
         segm_output_ptr=segm_output_ptr,
@@ -1512,6 +1551,9 @@ def unified_attention(
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
         WINDOW_SEGMENTS=window_segments,
+        v_cache_delta=v_cache_delta,
+        K_ALIGN=k_align,
+        V_ALIGN=v_align,
         **launch_kwargs,
     )
 

@@ -71,6 +71,11 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.context import (
+    estimate_video_pixel_element_size,
+    get_video_frame_dimensions,
+    validate_video_preprocessing_budget,
+)
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -140,6 +145,36 @@ def _get_tower_quant_config(
 _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
+
+
+def _video_patch_bytes(
+    video: Any,
+    frame_count: int,
+    processor: Any,
+    kwargs: Mapping[str, Any],
+) -> int:
+    height, width, channels = get_video_frame_dimensions(video)
+    patch_size = kwargs.get("patch_size", processor.patch_size)
+    pooling_kernel_size = kwargs.get(
+        "pooling_kernel_size", processor.pooling_kernel_size
+    )
+    max_soft_tokens = kwargs.get("max_soft_tokens", processor.max_soft_tokens)
+    if min(patch_size, pooling_kernel_size, max_soft_tokens) <= 0:
+        raise ValueError(
+            "Video patch, pooling, and soft token limits must be positive."
+        )
+
+    patch_count = max_soft_tokens * pooling_kernel_size**2
+    if not kwargs.get("do_resize", processor.do_resize):
+        patch_count = max(patch_count, (height // patch_size) * (width // patch_size))
+
+    return (
+        frame_count
+        * patch_count
+        * patch_size**2
+        * channels
+        * estimate_video_pixel_element_size(video, processor, kwargs)
+    )
 
 
 def _get_max_soft_tokens(
@@ -750,16 +785,39 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         video_outputs: dict[str, Any] = {}
         if videos := hf_data.pop("videos", []):
             assert isinstance(videos, list)
-            processor = self.info.get_hf_processor()
+            # Video frames go through the image processor with a video token cap.
+            video_mm_kwargs = dict(
+                hf_kwargs, images_kwargs={}, max_soft_tokens=_VIDEO_MAX_SOFT_TOKENS
+            )
+            frame_processor = self.info.get_hf_processor(**video_mm_kwargs)
+            image_kwargs = self.info.ctx.get_hf_processor_kwargs(
+                frame_processor, video_mm_kwargs, scope="images_kwargs"
+            )
+
+            video_do_resize = _get_do_resize(
+                self.info.ctx.get_merged_mm_kwargs(video_mm_kwargs),
+                frame_processor.image_processor.do_resize,
+            )
 
             all_video_pixel_values: list[torch.Tensor] = []
             all_video_position_ids: list[torch.Tensor] = []
+            video_tensor_bytes = 0
             video_num_soft_tokens_per_video: list[list[int]] = []
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
 
             for item in videos:
                 video_array, metadata = item
+
+                estimated_bytes = _video_patch_bytes(
+                    video_array,
+                    len(video_array),
+                    frame_processor.image_processor,
+                    image_kwargs,
+                )
+                validate_video_preprocessing_budget(
+                    video_tensor_bytes + 2 * estimated_bytes
+                )
 
                 # Convert frames to PIL images
                 if isinstance(video_array, np.ndarray):
@@ -775,20 +833,8 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 frame_indices = metadata.get("frames_indices", list(range(len(frames))))
                 timestamps = [idx / fps for idx in frame_indices]
 
-                # Process frames as images with max_soft_tokens=70
-                video_mm_kwargs = dict(hf_kwargs)
-                # Override configured image options too: these inputs are video
-                # frames, whose cache keys exclude images_kwargs.
-                video_mm_kwargs["images_kwargs"] = {}
-                video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
+                dummy_prompt = ("\t" + frame_processor.image_token) * len(frames)
 
-                dummy_prompt = ("\t" + processor.image_token) * len(frames)
-
-                video_processor = self.info.get_hf_processor(**video_mm_kwargs)
-                video_do_resize = _get_do_resize(
-                    self.info.ctx.get_merged_mm_kwargs(video_mm_kwargs),
-                    video_processor.image_processor.do_resize,
-                )
                 # Compute soft tokens per frame
                 num_soft_per_frame = []
                 for img in frames:
@@ -803,7 +849,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     num_soft_per_frame.append(n)
 
                 frame_outputs = self.info.ctx.call_hf_processor(
-                    video_processor,
+                    frame_processor,
                     dict(text=dummy_prompt, **{"images": frames}),
                     video_mm_kwargs,
                 )
@@ -814,7 +860,12 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                         "image_position_ids"
                     )
 
-                all_video_pixel_values.append(frame_outputs["pixel_values"])
+                video_pixels = frame_outputs["pixel_values"]
+                video_tensor_bytes += (
+                    video_pixels.untyped_storage().nbytes() + video_pixels.nbytes
+                )
+                validate_video_preprocessing_budget(video_tensor_bytes)
+                all_video_pixel_values.append(video_pixels)
                 all_video_position_ids.append(frame_outputs["pixel_position_ids"])
 
                 video_num_soft_tokens_per_video.append(num_soft_per_frame)

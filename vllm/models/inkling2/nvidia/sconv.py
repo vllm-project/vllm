@@ -24,6 +24,7 @@ from vllm.models.inkling.nvidia.sconv_swa_attn import (
 from .ops.allreduce import Inkling2AllReduceWorkspace, all_reduce_conv_mix
 from .ops.conv_mix import conv_mix as fused_conv_mix
 from .ops.linear import linear_k_groups
+from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.sconv import short_conv
 from .ops.seq_parallel import SeqParallel
 
@@ -104,6 +105,8 @@ class Inkling2ShortConv(nn.Module):
             4,
         ):
             return linear_k_groups(x.contiguous(), self.weight_proj, x.dtype)
+        if use_sm12x_bf16_ll_gemm(x, self.weight_proj):
+            return sm12x_bf16_ll_gemm(x, self.weight_proj)
         return nn.functional.linear(x, self.weight_proj)
 
     def forward(
@@ -113,22 +116,26 @@ class Inkling2ShortConv(nn.Module):
         addend: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
+        owner: InklingConvState | None = None,
     ) -> torch.Tensor:
         """Static conv of `x`; with `addend`, returns `(residual + addend)
-        + conv(x)` accumulated in fp32 (written to `out` if given)."""
+        + conv(x)` accumulated in fp32 (written to `out` if given). `owner`
+        overrides the conv-state cache (a loop pass after the first)."""
         assert not self.dynamic
-        m = conv_metadata(self.owner)
+        if owner is None:
+            owner = self.owner
+        m = conv_metadata(owner)
         if m is None:
             # No conv state (profile run): skip the conv, keep the residual sum.
             if addend is not None:
                 acc = addend.float() if residual is None else residual + addend.float()
                 x = (acc + x.to(addend.dtype).float()).to(addend.dtype)
             return x if out is None else out.copy_(x)
-        offset, width = self.owner.stream_ranges[self.stream]
+        offset, width = owner.stream_ranges[self.stream]
         return short_conv(
             x,
             self.conv_weight,
-            self.owner.kv_cache,
+            owner.kv_cache,
             positions,
             m.block_table,
             m.seq_idx,
@@ -149,25 +156,29 @@ class Inkling2ShortConv(nn.Module):
         stack: torch.Tensor,
         last: torch.Tensor | None,
         queries: torch.Tensor,
-        norm: nn.Module,
+        norm: nn.Module | None,
         addend: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
         sp: SeqParallel | None = None,
         halo: int = 0,
         prefix_align: int = 0,
+        owner: InklingConvState | None = None,
     ) -> torch.Tensor:
         """Convolve the reduced `x` into `out` like `forward` and return
         the AttnRes mixes of `[*stack, (last +) out]` with `queries`
-        through `norm`. With `sp`, the hidden stream is this rank's token
-        shard, `x` its reduce-scatter (after `halo` rows) and the mixes
-        are all-gathered; profile runs (no conv-state cache) need `sp`."""
+        through `norm` (the fp32 mixes without it). With `sp`, the hidden
+        stream is this rank's token shard, `x` its reduce-scatter (after
+        `halo` rows) and the mixes are all-gathered. `owner` overrides the
+        conv-state cache (a loop pass after the first)."""
         assert not self.dynamic
-        m = conv_metadata(self.owner)
-        cache = self.owner.kv_cache
+        if owner is None:
+            owner = self.owner
+        m = conv_metadata(owner)
+        cache = owner.kv_cache
         if m is None:
-            assert sp is not None
-            m, cache, prefix_align = self._profile_metadata(positions)
-        offset, width = self.owner.stream_ranges[self.stream]
+            m, cache, align = self._profile_metadata(positions)
+            prefix_align = align if sp is not None else 0
+        offset, width = owner.stream_ranges[self.stream]
         return fused_conv_mix(
             x,
             self.conv_weight,
@@ -185,8 +196,8 @@ class Inkling2ShortConv(nn.Module):
             stack,
             last,
             queries,
-            norm.weight,
-            norm.eps,
+            None if norm is None else norm.weight,
+            0.0 if norm is None else norm.eps,
             sp=sp,
             halo=halo,
             prefix_align=prefix_align,
@@ -200,26 +211,30 @@ class Inkling2ShortConv(nn.Module):
         stack: torch.Tensor,
         last: torch.Tensor | None,
         queries: torch.Tensor,
-        norm: nn.Module,
+        norm: nn.Module | None,
         x: torch.Tensor | None = None,
         combine: tuple[torch.Tensor, torch.Tensor] | None = None,
         addend: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
         two_shot: bool = False,
+        owner: InklingConvState | None = None,
     ) -> torch.Tensor:
         """All-reduce this rank's partial sum (`x`, or the MoE `combine`)
         in one or `two_shot`s, convolve it into `out` like `forward`,
         and return the AttnRes mixes of `[*stack, (last +) out]` with
-        `queries` through `norm`."""
-        m = conv_metadata(self.owner)
+        `queries` through `norm` (the fp32 mixes without it). `owner`
+        overrides the conv-state cache."""
+        if owner is None:
+            owner = self.owner
+        m = conv_metadata(owner)
         assert m is not None and not self.dynamic
-        offset, width = self.owner.stream_ranges[self.stream]
+        offset, width = owner.stream_ranges[self.stream]
         return all_reduce_conv_mix(
             workspace,
             x,
             combine,
             self.conv_weight,
-            self.owner.kv_cache,
+            owner.kv_cache,
             positions,
             m.block_table,
             m.seq_idx,
@@ -233,8 +248,8 @@ class Inkling2ShortConv(nn.Module):
             stack,
             last,
             queries,
-            norm.weight,
-            norm.eps,
+            None if norm is None else norm.weight,
+            0.0 if norm is None else norm.eps,
             two_shot=two_shot,
         )
 

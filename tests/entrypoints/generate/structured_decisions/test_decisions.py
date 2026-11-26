@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.decisions.adapters import (
 from vllm.entrypoints.openai.decisions.protocol import DecisionRequest
 from vllm.entrypoints.openai.decisions.question_types import (
     StructuredDecisionError,
+    build_question,
 )
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -27,15 +28,23 @@ def request(**kwargs):
     )
 
 
-def test_predicate_returns_probability_of_true_and_null_name():
+def test_predicate_returns_probability_of_yes_and_null_name():
     question = request().questions[0]
     read = make_read_question(0, question)
-    assert [option.name for option in read.options] == ["false", "true"]
-    assert make_answer(question, [0.1, 0.9], 0.5).model_dump() == {
+    assert [option.name for option in read.options] == ["yes", "no"]
+    assert make_answer(question, [0.9, 0.1], 0.5).model_dump() == {
         "type": "predicate",
         "name": None,
         "probability": 0.9,
     }
+
+
+def test_predicate_reads_like_a_systemone_noul_question():
+    question = request().questions[0]
+    noul = build_question("0", "noul", "Is it damaged?", None, max_options=26)
+    read = make_read_question(0, question)
+    assert read == noul
+    assert read.raw == noul.raw
 
 
 def test_choice_preserves_boolean_and_string_values():
@@ -238,3 +247,21 @@ def test_backend_rejects_more_choices_than_single_token_labels():
     ).questions[0]
     with pytest.raises(StructuredDecisionError, match="at most 26 choices"):
         make_read_question(0, question)
+
+
+def test_unlabeled_reads_take_more_choices_than_labels():
+    question = request(
+        questions=[
+            {
+                "type": "choice",
+                "instructions": "x",
+                "choices": [{"value": str(i)} for i in range(40)],
+            }
+        ]
+    ).questions[0]
+    read = make_read_question(0, question, 255, labeled=False)
+    assert len(read.options) == 40
+    with pytest.raises(StructuredDecisionError, match="at most 26 choices"):
+        make_read_question(0, question, 255)
+    with pytest.raises(StructuredDecisionError, match="at most 30 choices"):
+        make_read_question(0, question, 30, labeled=False)

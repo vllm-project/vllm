@@ -24,6 +24,7 @@ from collections.abc import Iterable
 import regex as re
 import torch
 from torch import nn
+from transformers import InklingTextConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -35,7 +36,6 @@ from vllm.model_executor.models.interfaces import SupportsMultiModalEmbeddings
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.sequence import IntermediateTensors
 
-from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .model import (
     InklingDecoderLayer,
@@ -75,7 +75,7 @@ class InklingMTPDepthLayer(nn.Module):
 
     def __init__(
         self,
-        config: InklingModelConfig,
+        config: InklingTextConfig,
         prefix: str,
         is_local: bool,
         quant_config: QuantizationConfig | None = None,
@@ -116,7 +116,7 @@ class InklingMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
-        config: InklingModelConfig = (
+        config: InklingTextConfig = (
             vllm_config.speculative_config.draft_model_config.hf_config
         )
         self.config = config
@@ -264,7 +264,7 @@ class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
-        config: InklingModelConfig = (
+        config: InklingTextConfig = (
             vllm_config.speculative_config.draft_model_config.hf_config
         )
         self.config = config
@@ -275,8 +275,8 @@ class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
         # never materialized here (same reasoning as model.embed_tokens).
         self.lm_head: ParallelLMHead = None  # type: ignore[assignment]
         self.logits_processor = LogitsProcessor(
-            config.padded_vocab_size,
-            org_vocab_size=config.vocab_size,
+            config.vocab_size,
+            org_vocab_size=config.unpadded_vocab_size or config.vocab_size,
             soft_cap=config.final_logit_softcapping,
         )
         self._logits_zero: torch.Tensor | None = None
