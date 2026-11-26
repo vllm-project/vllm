@@ -3148,6 +3148,64 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
     assert key not in tracker._pending_event_metadata
 
 
+def test_scheduler_keeps_event_context_until_pending_work_drains(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+        blocks_per_chunk=1,
+    )
+    raw_events: list[OffloadingEvent] = []
+    pending = True
+
+    def take_raw_events():
+        yield from raw_events
+        raw_events.clear()
+
+    runner.manager.lookup.return_value = LookupResult.MISS
+    runner.manager.take_events.side_effect = take_raw_events
+    runner.manager.has_pending_work.side_effect = lambda: pending
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(list(keys))
+    )
+
+    runner.new_request(token_ids=[10, 11, 12, 13, 14, 15, 16, 17])
+    req_id = str(runner.req_id)
+    # The CPU store completes and removes the request while a secondary-tier
+    # store is still pending.
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1))
+    assert req_id not in runner.connector_scheduler._req_status
+
+    key0 = runner.manager.complete_store.call_args.args[0][0]
+    # A cache reset drops the per-key snapshots, so only the request context
+    # can describe the secondary store the reset drains.
+    runner.connector_scheduler.reset_cache()
+    assert list(runner.connector_scheduler.take_events()) == []
+
+    def secondary_stored() -> OffloadingEvent:
+        return OffloadingEvent(
+            keys=[key0],
+            medium=Medium.STORAGE,
+            removed=False,
+            req_id=req_id,
+            positions=[4],
+        )
+
+    # The secondary store finishes and clears the pending work.
+    pending = False
+    raw_events.append(secondary_stored())
+    [stored] = list(runner.connector_scheduler.take_events())
+    assert isinstance(stored, BlockStored)
+    assert stored.token_ids == [10, 11, 12, 13]
+    assert stored.block_size == 4
+
+    # Drained with no pending work: the retired context is pruned.
+    raw_events.append(secondary_stored())
+    [placeholder] = list(runner.connector_scheduler.take_events())
+    assert isinstance(placeholder, BlockStored)
+    assert placeholder.block_size == 0
+
+
 @pytest.mark.parametrize("blocks_per_chunk", [1, 2])
 def test_promotion_hit_precedes_stored_event_translation(
     request_runner,

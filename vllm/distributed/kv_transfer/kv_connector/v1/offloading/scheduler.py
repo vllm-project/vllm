@@ -437,6 +437,7 @@ class OffloadingConnectorScheduler:
     def _remove_request(self, req_id: ReqId) -> None:
         """Remove the state of a request, and tell each store handler."""
         del self._req_status[req_id]
+        self._events_tracker.on_request_removed(req_id)
         for handler in self._store_handlers.values():
             handler.on_request_removed(req_id)
 
@@ -907,9 +908,7 @@ class OffloadingConnectorScheduler:
         except Exception:
             del self._req_status[request.request_id]
             raise
-        self._events_tracker.on_new_request(
-            req_context, request, self.config.kv_group_configs
-        )
+        self._events_tracker.on_new_request(request, self.config.kv_group_configs)
 
     def get_num_new_matched_tokens(
         self,
@@ -1693,9 +1692,13 @@ class OffloadingConnectorScheduler:
         # clear then discards unpublished.
         with self._manager_locked():
             manager_events = list(self.manager.take_events())
+            # Pending work can still emit events for requests already removed.
+            can_prune_retired = not self.manager.has_pending_work()
         # Still a generator, so callers testing the result for truthiness keep
         # seeing a non-empty object the way they do today.
         yield from self._events_tracker.take_events(manager_events)
+        if can_prune_retired:
+            self._events_tracker.prune_retired_requests()
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""

@@ -154,13 +154,15 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
-def test_cpu_stored_event_carries_request_context():
+def test_cpu_stored_event_carries_req_id_and_positions():
     manager = CPUOffloadingManager(
-        num_chunks=1,
+        num_chunks=2,
         enable_events=True,
     )
     req_context = make_req_context("writer")
-    keys = to_keys([1])
+    keys = to_keys([1, 2])
+    req_context.set_offload_key_position(keys[0], 16)
+    req_context.set_offload_key_position(keys[1], 32)
     assert (
         manager.prepare_store(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)
         is not None
@@ -168,7 +170,21 @@ def test_cpu_stored_event_carries_request_context():
     manager.complete_store(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)
 
     [event] = manager.take_events()
-    assert event.req_context is req_context
+    assert event.req_id == "writer"
+    assert event.positions == [16, 32]
+
+    unpositioned = make_req_context("no-pos")
+    extra = to_keys([3])
+    assert (
+        manager.prepare_store(extra, unpositioned, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(extra, unpositioned, trigger=StoreTrigger.ON_COMPUTE)
+
+    events = list(manager.take_events())
+    [stored] = [e for e in events if not e.removed]
+    assert stored.req_id == "no-pos"
+    assert stored.positions is None
 
 
 def test_cpu_eviction_removed_precedes_stored():

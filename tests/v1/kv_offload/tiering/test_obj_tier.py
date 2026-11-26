@@ -116,6 +116,7 @@ def make_job(
     job_id: int,
     keys: list[OffloadKey],
     chunk_ids: list[int] | None = None,
+    req_context: ReqContext = _CTX,
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
@@ -124,7 +125,7 @@ def make_job(
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int32),
         is_promotion=False,
-        req_context=_CTX,
+        req_context=req_context,
     )
 
 
@@ -704,7 +705,10 @@ class TestObjTierKVEvents:
     def test_successful_store_emits_stored_event(self):
         """A completed store transfer emits one stored event with the job's keys."""
         keys = [key(1), key(2)]
-        self.tier.submit_store(make_job(1, keys, [0, 1]))
+        ctx = ReqContext(req_id="obj-writer")
+        ctx.set_offload_key_position(keys[0], 16)
+        ctx.set_offload_key_position(keys[1], 32)
+        self.tier.submit_store(make_job(1, keys, [0, 1], req_context=ctx))
         assert all(r.success for r in drain(self.tier))
 
         events = list(self.tier.take_events())
@@ -713,9 +717,16 @@ class TestObjTierKVEvents:
         assert events[0].medium == Medium.STORAGE
         assert events[0].locality is Locality.REMOTE
         assert not events[0].removed
-        assert events[0].req_context is _CTX
+        assert events[0].req_id == "obj-writer"
+        assert events[0].positions == [16, 32]
         # take_events drains the buffer.
         assert list(self.tier.take_events()) == []
+
+        self.tier.submit_store(make_job(2, [key(3)], [2]))
+        assert all(r.success for r in drain(self.tier))
+        [unpositioned] = list(self.tier.take_events())
+        assert unpositioned.req_id == _CTX.req_id
+        assert unpositioned.positions is None
 
     @pytest.mark.parametrize(
         ("locality", "expected"),

@@ -304,13 +304,23 @@ class FileSystemTierManager(SecondaryTierManager):
                 # Successful store makes previously absent keys known-present.
                 self._lookup_manager.mark_present(job.keys)
                 if self.events is not None and job.keys:
+                    keys = list(job.keys)
+                    positions = [
+                        pos
+                        for k in keys
+                        if (pos := job.req_context.get_offload_key_position(k))
+                        is not None
+                    ]
                     self.events.append(
                         OffloadingEvent(
-                            keys=list(job.keys),
+                            keys=keys,
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
-                            req_context=job.req_context,
+                            req_id=job.req_context.req_id,
+                            positions=(
+                                positions if len(positions) == len(keys) else None
+                            ),
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
