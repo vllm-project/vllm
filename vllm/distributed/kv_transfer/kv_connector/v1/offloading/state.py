@@ -22,6 +22,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
+    TierFilter,
     make_offload_key,
 )
 from vllm.v1.request import Request
@@ -259,12 +260,19 @@ class RequestGroupState:
     lookup_hit_end_chunk_idx: int = 0
 
 
+class _RequestTokens(NamedTuple):
+    num_computed_tokens: int
+    num_in_flight_tokens: int
+    num_prompt_tokens: int
+    num_tokens: int
+
+
 @dataclass(slots=True)
 class RequestOffloadState:
     config: SchedulerOffloadConfig
     req: Request
-    req_context: ReqContext
     offloading_context: RequestOffloadingContext
+    load_tier_filter: TierFilter = TierFilter.ALL
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     # upper bound on tokens to load for this request; None means no cap
     max_load_tokens: int | None = None
@@ -289,6 +297,10 @@ class RequestOffloadState:
     # A load for this request failed; all its later lookups, including after
     # preemption, skip the offloaded cache so a faulting load is not retried.
     load_failed: bool = False
+    # Frozen counts captured at request_finished() for post-finish calls.
+    frozen_tokens: _RequestTokens | None = None
+    # End-token position per key, forwarded to per-call ReqContext snapshots.
+    offload_key_positions: dict[OffloadKey, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -320,6 +332,30 @@ class RequestOffloadState:
                 self.max_offload_tokens,
             )
 
+    def freeze_tokens(self) -> None:
+        self.frozen_tokens = _RequestTokens(
+            self.req.num_computed_tokens,
+            self.req.num_in_flight_tokens,
+            self.req.num_prompt_tokens,
+            self.req.num_tokens,
+        )
+
+    def make_req_context(self) -> ReqContext:
+        tokens: Request | _RequestTokens = (
+            self.frozen_tokens if self.frozen_tokens is not None else self.req
+        )
+        return ReqContext(
+            req_id=self.req.request_id,
+            kv_transfer_params=self.req.kv_transfer_params,
+            kv_hints=self.req.kv_hints,
+            load_tier_filter=self.load_tier_filter,
+            num_computed_tokens=tokens.num_computed_tokens,
+            num_in_flight_tokens=tokens.num_in_flight_tokens,
+            num_prompt_tokens=tokens.num_prompt_tokens,
+            num_tokens=tokens.num_tokens,
+            _offload_key_positions=self.offload_key_positions,
+        )
+
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
@@ -329,9 +365,8 @@ class RequestOffloadState:
             for req_block_hash in self.req.block_hashes[start::stride]:
                 key = make_offload_key(req_block_hash, group_config.group_idx)
                 group_state.offload_keys.append(key)
-                self.req_context.set_offload_key_position(
-                    key,
-                    len(group_state.offload_keys) * group_config.tokens_per_chunk,
+                self.offload_key_positions[key] = (
+                    len(group_state.offload_keys) * group_config.tokens_per_chunk
                 )
 
     def update_block_id_groups(
@@ -375,7 +410,7 @@ class RequestOffloadState:
     def register_boundary_key(self, group_idx: int, boundary_tokens: int) -> OffloadKey:
         hash_idx = boundary_tokens // self.config.tokens_per_hash - 1
         key = make_offload_key(self.req.block_hashes[hash_idx], group_idx)
-        self.req_context.set_offload_key_position(key, boundary_tokens)
+        self.offload_key_positions[key] = boundary_tokens
         return key
 
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:

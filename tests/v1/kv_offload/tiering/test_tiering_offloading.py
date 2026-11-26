@@ -1470,6 +1470,49 @@ class TestTieringOffloadingManager:
         tier2_on_request_finished.assert_called_once_with(ctx)
         assert self.manager._req_state == {}
 
+    @pytest.mark.parametrize("mode", ["immediate", "deferred", "reset"])
+    def test_on_request_finished_forwards_finish_context_to_secondaries(
+        self, manager_setup, monkeypatch, mode: str
+    ):
+        """Secondary tiers receive the finish-time ReqContext, not the start one."""
+        chunks = to_keys(range(2))
+        start_ctx = ReqContext(
+            req_id=f"req_finish_ctx_{mode}",
+            num_computed_tokens=0,
+            num_in_flight_tokens=0,
+            num_prompt_tokens=64,
+            num_tokens=64,
+        )
+        finish_ctx = ReqContext(
+            req_id=start_ctx.req_id,
+            num_computed_tokens=80,
+            num_in_flight_tokens=0,
+            num_prompt_tokens=64,
+            num_tokens=80,
+        )
+
+        tier1_finish = MagicMock(wraps=self.secondary_tier1.on_request_finished)
+        tier2_finish = MagicMock(wraps=self.secondary_tier2.on_request_finished)
+        monkeypatch.setattr(self.secondary_tier1, "on_request_finished", tier1_finish)
+        monkeypatch.setattr(self.secondary_tier2, "on_request_finished", tier2_finish)
+
+        self._start_request(start_ctx)
+        if mode != "immediate":
+            self.manager.prepare_store(
+                chunks, start_ctx, trigger=StoreTrigger.ON_COMPUTE
+            )
+        self.manager.on_request_finished(finish_ctx)
+
+        if mode == "deferred":
+            self.manager.complete_store(
+                chunks, finish_ctx, trigger=StoreTrigger.ON_COMPUTE, success=True
+            )
+        elif mode == "reset":
+            self.manager.reset_cache()
+
+        tier1_finish.assert_called_once_with(finish_ctx)
+        tier2_finish.assert_called_once_with(finish_ctx)
+
     def test_reset_cache_clears_pending_primary_stores_for_active_request(
         self, manager_setup, monkeypatch
     ):

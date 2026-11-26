@@ -413,16 +413,13 @@ def test_kvcr_tier_refreshes_processed_prefix(
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
 
-    ctx = ReqContext(req_id="req")
-    if computed is not None:
-
-        class TokenCountContext(ReqContext):
-            num_computed_tokens = computed
-            num_in_flight_tokens = in_flight
-            num_prompt_tokens = 64
-            num_tokens = total_tokens
-
-        ctx = TokenCountContext(req_id="req")
+    ctx = ReqContext(
+        req_id="req",
+        num_computed_tokens=computed,
+        num_in_flight_tokens=in_flight,
+        num_prompt_tokens=64 if computed is not None else None,
+        num_tokens=total_tokens if computed is not None else None,
+    )
     keys = [make_offload_key(bytes([index]), 0) for index in range(5)]
     for position, key in enumerate(keys):
         ctx.set_offload_key_position(key, (position + 1) * 16)

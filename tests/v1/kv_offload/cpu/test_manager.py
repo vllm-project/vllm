@@ -2614,11 +2614,12 @@ def test_older_lru_request_does_not_demote_a_newer_shared_access():
 
 
 def test_lru_incremental_stores_do_not_rescan_the_prefix():
-    class CountingContext(ReqContext):
-        position_lookups = 0
+    position_lookups = 0
 
+    class CountingContext(ReqContext):
         def get_offload_key_position(self, key: OffloadKey) -> int | None:
-            self.position_lookups += 1
+            nonlocal position_lookups
+            position_lookups += 1
             return super().get_offload_key_position(key)
 
     keys = to_keys(list(range(64)))
@@ -2632,7 +2633,7 @@ def test_lru_incremental_stores_do_not_rescan_the_prefix():
         )
         manager.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
 
-    assert 0 < ctx.position_lookups <= 3 * len(keys)
+    assert 0 < position_lookups <= 3 * len(keys)
 
 
 @pytest.mark.parametrize("ready_on_insert", [False, True])

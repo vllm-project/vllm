@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pickle
 import weakref
 from collections.abc import Callable, Iterable
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from itertools import chain, repeat
 from types import SimpleNamespace
 from typing import Any, cast
@@ -118,6 +119,8 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     StoreTrigger,
+    TierFilter,
+    TierMatcher,
     get_offload_block_hash,
     get_offload_group_idx,
     make_offload_key,
@@ -156,14 +159,14 @@ def test_update_offload_keys_without_scanning_hash_prefix():
         for group_idx, stride in enumerate((1, 2, 4))
     ]
     request = MagicMock(kv_transfer_params=None, block_hashes=IndexOnlyHashes())
-    context = ReqContext("test")
-    state = RequestOffloadState(config, request, context, RequestOffloadingContext())
+    state = RequestOffloadState(config, request, RequestOffloadingContext())
 
     for num_hashes in (0, 1, 4, 7, 7, 8):
         request.block_hashes.extend(
             BlockHash(bytes([i])) for i in range(len(request.block_hashes), num_hashes)
         )
         state.update_offload_keys()
+        context = state.make_req_context()
         for group_idx, stride in enumerate((1, 2, 4)):
             expected = [
                 make_offload_key(bytes([i]), group_idx)
@@ -205,7 +208,7 @@ def test_streaming_resume_refreshes_recomputed_offload_keys(monkeypatch):
         assert group.offload_keys[unchanged_chunks:] != old[unchanged_chunks:]
         assert group.offload_keys == expected
         for chunk_idx, key in enumerate(expected, 1):
-            assert state.req_context.get_offload_key_position(key) == (
+            assert state.make_req_context().get_offload_key_position(key) == (
                 chunk_idx * config.tokens_per_chunk
             )
 
@@ -292,16 +295,16 @@ def test_swa_offload_window_covers_unaligned_hit(
     if left_state in ("present", "loading"):
         ready.append(left_key)
     store = manager.prepare_store(
-        ready, state.req_context, trigger=StoreTrigger.ON_COMPUTE
+        ready, state.make_req_context(), trigger=StoreTrigger.ON_COMPUTE
     )
     assert store is not None and not store.evicted_keys
     manager.complete_store(
-        store.keys_to_store, state.req_context, trigger=StoreTrigger.ON_COMPUTE
+        store.keys_to_store, state.make_req_context(), trigger=StoreTrigger.ON_COMPUTE
     )
     if left_state == "pending":
         assert (
             manager.prepare_store(
-                [left_key], state.req_context, trigger=StoreTrigger.ON_COMPUTE
+                [left_key], state.make_req_context(), trigger=StoreTrigger.ON_COMPUTE
             )
             is not None
         )
@@ -337,7 +340,7 @@ def test_swa_offload_window_covers_unaligned_hit(
     job = next(iter(sched._job_statuses.values()))
     if needs_left:
         assert {left_key, swa[end - 1]} <= set(job.keys)
-    manager.complete_load(job.keys, state.req_context)
+    manager.complete_load(job.keys, state.make_req_context())
 
 
 def _make_partial_tail_scheduler(
@@ -606,7 +609,7 @@ def test_create_req_context_preserves_kv_hints():
         kv_hints=kv_hints,
     )
 
-    assert _create_req_context(request, MagicMock()).kv_hints is kv_hints
+    assert _create_req_context(request).kv_hints is kv_hints
 
 
 def _on_compute(scheduler: OffloadingConnectorScheduler) -> OnComputeStoreHandler:
@@ -673,7 +676,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
 
     assert len(jobs) == 1
     offered_keys = _as_mock(scheduler.manager.prepare_store).call_args.args[0]
-    req_context = scheduler._req_status["req"].req_context
+    req_context = scheduler._req_status["req"].make_req_context()
     assert all(req_context.get_offload_key_position(key) == 28 for key in offered_keys)
     [job_id] = jobs
     src_spec = jobs[job_id].src_spec
@@ -1211,7 +1214,9 @@ def test_normal_store_excludes_prefix_caching_mamba_sources():
         scheduler.config.kv_group_configs, req_status.group_states
     ):
         assert (
-            req_status.req_context.get_offload_key_position(group_state.offload_keys[0])
+            req_status.make_req_context().get_offload_key_position(
+                group_state.offload_keys[0]
+            )
             == group_config.tokens_per_chunk
         )
     _as_mock(scheduler.manager.prepare_store).side_effect = (
@@ -1326,11 +1331,13 @@ def test_partial_tail_lookup_delays_duplicate_inflight_load():
         for group_config in scheduler.config.kv_group_configs
     ]
     stored = manager.prepare_store(
-        boundary_keys, first_state.req_context, trigger=StoreTrigger.ON_COMPUTE
+        boundary_keys, first_state.make_req_context(), trigger=StoreTrigger.ON_COMPUTE
     )
     assert stored is not None
     manager.complete_store(
-        stored.keys_to_store, first_state.req_context, trigger=StoreTrigger.ON_COMPUTE
+        stored.keys_to_store,
+        first_state.make_req_context(),
+        trigger=StoreTrigger.ON_COMPUTE,
     )
 
     assert scheduler.get_num_new_matched_tokens(first, 16) == (12, True)
@@ -1817,7 +1824,6 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
     req_status = RequestOffloadState(
         config=scheduler.config,
         req=request,
-        req_context=ReqContext(req_id=request.request_id),
         offloading_context=RequestOffloadingContext(policy=OffloadPolicy.CHUNK_LEVEL),
     )
     for group_idx, group_state in enumerate(req_status.group_states):
@@ -1952,7 +1958,6 @@ def test_external_cache_hit_sources_use_loaded_attention_ranges(
     req_status = RequestOffloadState(
         config=scheduler.config,
         req=request,
-        req_context=ReqContext(req_id=request.request_id),
         offloading_context=RequestOffloadingContext(policy=OffloadPolicy.CHUNK_LEVEL),
         num_locally_computed_tokens=local_tokens,
     )
@@ -2254,7 +2259,7 @@ def test_partial_lookup_keeps_tail_below_longer_attention_prefix(
     scheduler = OffloadingConnectorScheduler(spec, config, kv_config)
     request = create_request(num_tokens=num_tokens, block_size=4)
     scheduler.on_new_request(request)
-    context = scheduler._req_status[request.request_id].req_context
+    context = scheduler._req_status[request.request_id].make_req_context()
     positions = [(0, 16), (0, 32), (0, 28), (1, 16), (1, 28)]
     if expected_hit < 16:
         positions = [(0, expected_hit), (1, expected_hit)]
@@ -3131,7 +3136,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
     assert (
         runner.connector_scheduler._maximal_prefix_lookup(
             [key],
-            req_status.req_context,
+            req_status.make_req_context(),
             req_status.req,
             group_config,
             0,
@@ -3543,54 +3548,105 @@ def test_request_preemption(request_runner, async_scheduling: bool, cpu_hit: boo
 
 
 @pytest.mark.parametrize("registered", [True, False])
-def test_req_context_counts_live_until_request_finished(registered):
-    """Finished counts survive late outputs and request cleanup."""
+def test_req_context_counts_snapshot_per_call_and_freeze_at_finish(registered):
+    """Each manager call receives a frozen ReqContext; finish freezes counts."""
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    manager = _as_mock(scheduler.manager)
+    manager.on_new_request.return_value = RequestOffloadingContext()
+    manager.lookup.return_value = LookupResult.MISS
 
-    class RequestStub(SimpleNamespace):
-        pass
-
-    counts = dict(
-        num_computed_tokens=0,
-        num_in_flight_tokens=16,
-        num_prompt_tokens=64,
-        num_tokens=80,
-    )
-    request = RequestStub(
-        request_id="req", kv_transfer_params=None, kv_hints=None, **counts
-    )
+    expected_filter = TierFilter(matchers=(TierMatcher(medium=Medium.CPU),))
+    request = create_request(num_tokens=64, block_size=16)
+    request.kv_transfer_params = {"kv_load_tiers": [{"medium": "CPU"}]}
+    request.num_computed_tokens = 0
+    request.num_in_flight_tokens = 16
     request_ref = weakref.ref(request)
-    scheduler = object.__new__(OffloadingConnectorScheduler)
-    scheduler.config = SimpleNamespace(kv_group_configs=())
-    scheduler.manager = MagicMock(spec=OffloadingManager)
-    scheduler._events_tracker = SimpleNamespace(on_new_request=lambda *_: None)
-    scheduler._step_region = None
-    scheduler._req_status = {}
 
-    def on_new_request(ctx):
-        assert {name: getattr(ctx, name) for name in counts} == counts
-        return RequestOffloadingContext()
+    def snapshot(ctx: ReqContext) -> dict[str, int | None]:
+        return {
+            "num_computed_tokens": ctx.num_computed_tokens,
+            "num_in_flight_tokens": ctx.num_in_flight_tokens,
+            "num_prompt_tokens": ctx.num_prompt_tokens,
+            "num_tokens": ctx.num_tokens,
+        }
 
-    scheduler.manager.on_new_request.side_effect = on_new_request
+    initial_counts = {
+        "num_computed_tokens": 0,
+        "num_in_flight_tokens": 16,
+        "num_prompt_tokens": 64,
+        "num_tokens": 64,
+    }
+    first_key = make_offload_key(request.block_hashes[0], 0)
     if registered:
         scheduler.on_new_request(request)
-        ctx = scheduler.manager.on_new_request.call_args.args[0]
-        for name in counts:
-            counts[name] += 16
-            setattr(request, name, counts[name])
-        assert {name: getattr(ctx, name) for name in counts} == counts
+        start_ctx = manager.on_new_request.call_args.args[0]
+        assert start_ctx.load_tier_filter == expected_filter
+        assert snapshot(start_ctx) == initial_counts
+        with pytest.raises(FrozenInstanceError):
+            start_ctx.num_computed_tokens = 1
+        assert not hasattr(start_ctx, "set_state")
 
+        request.num_computed_tokens = 32
+        request.num_in_flight_tokens = 8
+        request.append_output_token_ids([1, 2, 3, 4])
+        mid_counts = {
+            "num_computed_tokens": 32,
+            "num_in_flight_tokens": 8,
+            "num_prompt_tokens": 64,
+            "num_tokens": 68,
+        }
+        assert snapshot(start_ctx) == initial_counts
+
+        scheduler.get_num_new_matched_tokens(request, 0)
+        mid_ctx = manager.lookup.call_args.args[1]
+        assert mid_ctx is not start_ctx
+        assert mid_ctx.load_tier_filter == expected_filter
+        assert snapshot(mid_ctx) == mid_counts
+        assert mid_ctx.get_offload_key_position(first_key) == 16
+
+        request.num_computed_tokens = 68
+        request.num_in_flight_tokens = 0
+        finish_counts = {
+            "num_computed_tokens": 68,
+            "num_in_flight_tokens": 0,
+            "num_prompt_tokens": 64,
+            "num_tokens": 68,
+        }
+        assert snapshot(mid_ctx) == mid_counts
+    else:
+        finish_counts = initial_counts
+
+    req_id = request.request_id
+    request.status = RequestStatus.FINISHED_STOPPED
     scheduler.request_finished(request)
-    ctx = scheduler.manager.on_new_request.call_args.args[0]
-    for name in counts:
-        setattr(request, name, 0)
-    assert {name: getattr(ctx, name) for name in counts} == counts
-    scheduler._req_status.clear()
+    request.num_computed_tokens = 0
+    request.num_in_flight_tokens = 0
+    if registered:
+        output = _empty_scheduler_output()
+        output.finished_req_ids.add(req_id)
+        scheduler.build_connector_meta(output)
+
+    finish_ctx = manager.on_request_finished.call_args.args[0]
+    assert finish_ctx.load_tier_filter == expected_filter
+    assert snapshot(finish_ctx) == finish_counts
+    if registered:
+        assert finish_ctx is not start_ctx
+        assert finish_ctx is not mid_ctx
+        assert finish_ctx.get_offload_key_position(first_key) == 16
+
     del request
     assert request_ref() is None
-    assert {name: getattr(ctx, name) for name in counts} == counts
+    assert snapshot(finish_ctx) == finish_counts
+    roundtripped = pickle.loads(pickle.dumps(finish_ctx))
+    assert roundtripped == finish_ctx
+    if registered:
+        assert roundtripped.get_offload_key_position(first_key) == 16
 
     synthetic = ReqContext(req_id="synthetic")
-    assert all(getattr(synthetic, name) is None for name in counts)
+    assert all(v is None for v in snapshot(synthetic).values())
 
 
 def test_stores_pass_the_trigger_to_prepare_and_complete(request_runner):
@@ -4621,14 +4677,14 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
     state.update_offload_keys()
     full, swa = (g.offload_keys for g in state.group_states)
     ready = manager.prepare_store(
-        full[:4] + swa[:2], state.req_context, trigger=StoreTrigger.ON_COMPUTE
+        full[:4] + swa[:2], state.make_req_context(), trigger=StoreTrigger.ON_COMPUTE
     )
     assert ready is not None
     manager.complete_store(
-        ready.keys_to_store, state.req_context, trigger=StoreTrigger.ON_COMPUTE
+        ready.keys_to_store, state.make_req_context(), trigger=StoreTrigger.ON_COMPUTE
     )
     pending = manager.prepare_store(
-        swa[3:4], state.req_context, trigger=StoreTrigger.ON_COMPUTE
+        swa[3:4], state.make_req_context(), trigger=StoreTrigger.ON_COMPUTE
     )
     assert pending is not None
 
@@ -4639,7 +4695,7 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
     [(job_id, load)] = metadata.load_jobs.items()
     assert isinstance(load.dst_spec, GPULoadStoreSpec)
     assert load.dst_spec.group_sizes == [2, 2]
-    assert manager.lookup(swa[3], state.req_context) is LookupResult.HIT_PENDING
+    assert manager.lookup(swa[3], state.make_req_context()) is LookupResult.HIT_PENDING
 
     runner.scheduler.update_from_output(
         output,
@@ -4654,7 +4710,7 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
     )
     resumed = runner.scheduler.schedule()
     assert resumed.num_scheduled_tokens == {"0": 9}
-    assert manager.lookup(swa[3], state.req_context) is LookupResult.HIT_PENDING
+    assert manager.lookup(swa[3], state.make_req_context()) is LookupResult.HIT_PENDING
 
 
 @pytest.mark.parametrize("alignment_chunk_count", [4, 8, 64])
@@ -4935,7 +4991,7 @@ def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
     block_id, block_hash = block.block_id, block.block_hash
     assert block_hash is not None
     scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
-    assert manager.lookup(key, state.req_context) is LookupResult.HIT_PENDING
+    assert manager.lookup(key, state.make_req_context()) is LookupResult.HIT_PENDING
 
     scheduler.finish_requests(request_a.request_id, RequestStatus.FINISHED_STOPPED)
     output = scheduler.schedule()
@@ -4968,7 +5024,7 @@ def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
                 ),
             ),
         )
-        assert manager.lookup(key, state.req_context) is LookupResult.HIT
+        assert manager.lookup(key, state.make_req_context()) is LookupResult.HIT
     else:
         assert b_block.block_hash != block_hash
         assert jobs <= (metadata.jobs_to_flush or set())
@@ -7422,7 +7478,7 @@ def test_dcp_partial_tail_store_is_independent_of_handoff_batching(split_handoff
                 pairs.append((source.block_ids.tolist(), source.block_indices))
 
     assert pairs == [([12, 25], [1, 3])]
-    context = scheduler._req_status[request.request_id].req_context
+    context = scheduler._req_status[request.request_id].make_req_context()
     earlier_attention_key = make_offload_key(request.block_hashes[11], 0)
     assert scheduler.manager.lookup(earlier_attention_key, context) is LookupResult.MISS
 

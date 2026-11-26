@@ -4,8 +4,7 @@ import time
 from collections import Counter
 from collections.abc import Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -120,58 +119,25 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
     return TierFilter(matchers=tuple(matchers))
 
 
-class _RequestTokens(NamedTuple):
-    num_computed_tokens: int
-    num_in_flight_tokens: int
-    num_prompt_tokens: int
-    num_tokens: int
-
-
-@dataclass(slots=True)
-class _VllmReqContext(ReqContext):
-    _scheduler: "OffloadingConnectorScheduler" = field(
-        kw_only=True, repr=False, compare=False
-    )
-
-    @property
-    def _request_tokens(self) -> Request | _RequestTokens:
-        tokens = self.get_state(_RequestTokens)
-        if tokens is not None:
-            return tokens
-        return self._scheduler._req_status[self.req_id].req
-
-    @property
-    def num_computed_tokens(self) -> int:
-        return self._request_tokens.num_computed_tokens
-
-    @property
-    def num_in_flight_tokens(self) -> int:
-        return self._request_tokens.num_in_flight_tokens
-
-    @property
-    def num_prompt_tokens(self) -> int:
-        return self._request_tokens.num_prompt_tokens
-
-    @property
-    def num_tokens(self) -> int:
-        return self._request_tokens.num_tokens
-
-
-def _create_req_context(
-    req: Request, scheduler: "OffloadingConnectorScheduler"
-) -> ReqContext:
-    params = req.kv_transfer_params
-    load_filter = TierFilter.ALL
+def _parse_load_tier_filter(params: dict[str, Any] | None) -> TierFilter:
     if params:
         raw = params.get(KV_LOAD_TIERS_KEY)
         if raw is not None:
-            load_filter = _parse_tier_filter(raw)
-    return _VllmReqContext(
+            return _parse_tier_filter(raw)
+    return TierFilter.ALL
+
+
+def _create_req_context(req: Request) -> ReqContext:
+    params = req.kv_transfer_params
+    return ReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
-        load_tier_filter=load_filter,
-        _scheduler=scheduler,
+        load_tier_filter=_parse_load_tier_filter(params),
+        num_computed_tokens=req.num_computed_tokens,
+        num_in_flight_tokens=req.num_in_flight_tokens,
+        num_prompt_tokens=req.num_prompt_tokens,
+        num_tokens=req.num_tokens,
     )
 
 
@@ -624,7 +590,7 @@ class OffloadingConnectorScheduler:
                     looked_up_full_attention = True
                     num_hit_chunks = self._maximal_prefix_lookup(
                         offload_keys,
-                        req_status.req_context,
+                        req_status.make_req_context(),
                         req_status.req,
                         group_config,
                         start_chunk_idx,
@@ -646,7 +612,7 @@ class OffloadingConnectorScheduler:
                     num_hit_chunks = self._sliding_window_lookup(
                         offload_keys,
                         required_window,
-                        req_status.req_context,
+                        req_status.make_req_context(),
                         initial_window,
                     )
                 if num_hit_chunks == 0:
@@ -809,12 +775,14 @@ class OffloadingConnectorScheduler:
                 pending |= key in (self._chunks_being_loaded or ())
                 if group_state.lookup_hit_end_chunk_idx <= bridge_chunk_idx:
                     unconfirmed_bridge_keys.append((group_config, key))
-            for _, key in unconfirmed_bridge_keys:
-                result = self.manager.lookup(key, req_status.req_context)
-                if result is LookupResult.MISS:
-                    max_boundary = bridge_boundary - tokens_per_hash
-                    break
-                pending |= result is not LookupResult.HIT
+            if unconfirmed_bridge_keys:
+                req_context = req_status.make_req_context()
+                for _, key in unconfirmed_bridge_keys:
+                    result = self.manager.lookup(key, req_context)
+                    if result is LookupResult.MISS:
+                        max_boundary = bridge_boundary - tokens_per_hash
+                        break
+                    pending |= result is not LookupResult.HIT
         bridge_pending = pending
         # A tail of this request may lie below a sibling's longer full-attention
         # prefix. A block-aligned boundary there is a complete chunk, which the
@@ -856,7 +824,7 @@ class OffloadingConnectorScheduler:
         bridge chunk is not ready yet.
         """
         req = req_status.req
-        req_context = req_status.req_context
+        req_context = req_status.make_req_context()
         pending = bridge_pending
         boundary_keys: list[tuple[GroupOffloadConfig, OffloadKey]] = []
         for group_config in self.config.kv_group_configs:
@@ -894,17 +862,18 @@ class OffloadingConnectorScheduler:
 
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
-        req_context = _create_req_context(request, self)
         req_status = RequestOffloadState(
             config=self.config,
             req=request,
-            req_context=req_context,
             offloading_context=RequestOffloadingContext(),
+            load_tier_filter=_parse_load_tier_filter(request.kv_transfer_params),
         )
         self._req_status[request.request_id] = req_status
         try:
             with self._manager_locked():
-                req_status.offloading_context = self.manager.on_new_request(req_context)
+                req_status.offloading_context = self.manager.on_new_request(
+                    req_status.make_req_context()
+                )
         except Exception:
             del self._req_status[request.request_id]
             raise
@@ -1038,13 +1007,12 @@ class OffloadingConnectorScheduler:
         events: list[tuple[int, int, CacheHitSource]] = [
             (end, 0, CacheHitSource.EXTERNAL_UNSPECIFIED)
         ]
+        req_context = req_status.make_req_context()
         for lo, hi, key in req_status.load_key_ranges:
             lo, hi = max(start, lo), min(end, hi)
             if lo >= hi:
                 continue
-            source = CacheHitSource(
-                self.manager.get_load_source(key, req_status.req_context)
-            )
+            source = CacheHitSource(self.manager.get_load_source(key, req_context))
             events.extend(((lo, 1, source), (hi, -1, source)))
 
         # Sweep endpoints instead of rescanning every range for each interval.
@@ -1192,7 +1160,9 @@ class OffloadingConnectorScheduler:
         for handler in self._store_handlers.values():
             handler.on_load_scheduled(req_status, num_cached_tokens)
 
-        src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
+        src_spec = self.manager.prepare_load(
+            keys_to_load, req_status.make_req_context()
+        )
         dst_spec = GPULoadStoreSpec(
             dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
         )
@@ -1433,7 +1403,7 @@ class OffloadingConnectorScheduler:
             if req_status is None:
                 continue
             req_status.finished_signaled = True
-            self.manager.on_request_finished(req_status.req_context)
+            self.manager.on_request_finished(req_status.make_req_context())
             if not req_status.transfer_jobs:
                 self._remove_request(req_id)
         self._current_batch_load_jobs = {}
@@ -1562,7 +1532,7 @@ class OffloadingConnectorScheduler:
                 assert job_status.trigger is not None
                 self.manager.complete_store(
                     job_status.keys,
-                    req_status.req_context,
+                    req_status.make_req_context(),
                     trigger=job_status.trigger,
                     success=not job_status.failed,
                 )
@@ -1575,7 +1545,9 @@ class OffloadingConnectorScheduler:
                         job_status.req_id,
                     )
                     req_status.load_failed = True
-                self.manager.complete_load(job_status.keys, req_status.req_context)
+                self.manager.complete_load(
+                    job_status.keys, req_status.make_req_context()
+                )
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
             if self._block_id_to_pending_jobs:
@@ -1633,28 +1605,17 @@ class OffloadingConnectorScheduler:
 
         """
         req_status = self._req_status.get(request.request_id)
-        req_context = (
-            req_status.req_context
-            if req_status is not None
-            else _create_req_context(request, self)
-        )
-        # Freeze at logical completion, independent of deferred tier callbacks.
-        req_context.set_state(
-            _RequestTokens(
-                request.num_computed_tokens,
-                request.num_in_flight_tokens,
-                request.num_prompt_tokens,
-                request.num_tokens,
-            )
-        )
-
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
+            req_context = _create_req_context(request)
             with self._manager_locked():
                 self.manager.on_new_request(req_context)
                 self.manager.on_request_finished(req_context)
             return False, None
+
+        # Freeze at logical completion, independent of deferred tier callbacks.
+        req_status.freeze_tokens()
 
         self._maybe_observe_lookup_async_delay(req_status)
 
@@ -1722,7 +1683,7 @@ class OffloadingConnectorScheduler:
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
                 if not status.finished_signaled:
-                    self.manager.on_request_finished(status.req_context)
+                    self.manager.on_request_finished(status.make_req_context())
                 self._remove_request(req_id)
 
         # Reset offloading manager cache

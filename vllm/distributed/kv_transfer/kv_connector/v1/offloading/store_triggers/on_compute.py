@@ -151,7 +151,9 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 continue
 
             next_idxs = self._next_idxs(req_status)
-            store_output = sink.prepare_store(new_offload_keys, req_status.req_context)
+            store_output = sink.prepare_store(
+                new_offload_keys, req_status.make_req_context()
+            )
             if store_output is None:
                 logger.warning("Request %s: cannot store chunks", req_id)
                 continue

@@ -336,8 +336,8 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Pending promotion requests accumulated during lookup() calls; flushed
         # as one batched submit_load() per (tier, request) in on_schedule_end().
-        # Outer key: tier index. Inner key: req_context.req_id — the same ReqContext
-        # object is reused for all chunk lookups of a given request per engine step.
+        # Keyed by (tier_idx, req_context.req_id) so multiple lookup() calls for
+        # the same request within a step coalesce into one PendingPromotion.
         self._pending_load_submissions: dict[int, dict[str, PendingPromotion]] = {}
 
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
@@ -1185,6 +1185,7 @@ class TieringOffloadingManager(OffloadingManager):
     ) -> None:
         self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
+        state.req_context = req_context
         state.is_finished = True
         self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
 
