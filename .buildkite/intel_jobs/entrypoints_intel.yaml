@@ -111,7 +111,7 @@ steps:
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Scale Out)"
   key: entrypoints-integration-api-server-scale-out-intel
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
     label: production
@@ -135,6 +135,7 @@ steps:
     pytest -v -s entrypoints/scale_out
     --deselect="tests/entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_parity[n2]"
     --deselect="tests/entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_stream_parity[n2]"'
+  parallelism: 2
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Generate)"
   key: entrypoints-integration-api-server-generate-intel
