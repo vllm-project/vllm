@@ -2585,7 +2585,8 @@ mod tests {
         assert!(
             input_audio_data_url("AAAA", Some("flac"))
                 .unwrap_err()
-                .is_request_validation_error()
+                .kind()
+                .is_invalid_request()
         );
     }
 
@@ -2735,7 +2736,7 @@ mod tests {
         );
         // Confirms the HTTP-mapping bug found during implementation stays fixed:
         // this must map to 400, not 500.
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 
     #[test]
