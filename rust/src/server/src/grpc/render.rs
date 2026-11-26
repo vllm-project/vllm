@@ -322,15 +322,23 @@ async fn derender_stream(
     };
     check_chat_api(request.api)?;
     let RawChat { prepared, stream } = prepare_raw_chat(state, &request.body).await?;
-    if prepared.n.get() > 1 {
-        return Err(Status::invalid_argument(
-            "DerenderStream does not support `n` greater than 1",
-        ));
-    }
-    if prepared.options.include_prompt_logprobs {
-        return Err(Status::invalid_argument(
-            "DerenderStream does not support prompt logprobs",
-        ));
+    // `UNIMPLEMENTED` lets a gateway fall back to HTTP for these.
+    let unsupported = [
+        (prepared.n.get() > 1, "`n` greater than 1"),
+        (prepared.options.include_prompt_logprobs, "prompt logprobs"),
+        (
+            prepared.chat_request.return_prompt_text,
+            "`return_prompt_text`",
+        ),
+        (
+            prepared.options.return_weight_versions,
+            "`return_weight_versions`",
+        ),
+    ];
+    if let Some((_, feature)) = unsupported.iter().find(|(requested, _)| *requested) {
+        return Err(Status::unimplemented(format!(
+            "DerenderStream does not support {feature}"
+        )));
     }
 
     let context = ChatOutputContext {

@@ -4516,7 +4516,25 @@ async fn derender_stream_rejects_unsupported_requests() {
             "multiple choices",
             pb::Api::Chat as i32,
             serde_json::json!({"n": 2}),
-            tonic::Code::InvalidArgument,
+            tonic::Code::Unimplemented,
+        ),
+        (
+            "prompt logprobs",
+            pb::Api::Chat as i32,
+            serde_json::json!({"prompt_logprobs": 1}),
+            tonic::Code::Unimplemented,
+        ),
+        (
+            "prompt text",
+            pb::Api::Chat as i32,
+            serde_json::json!({"return_prompt_text": true}),
+            tonic::Code::Unimplemented,
+        ),
+        (
+            "weight versions",
+            pb::Api::Chat as i32,
+            serde_json::json!({"return_weight_versions": true}),
+            tonic::Code::Unimplemented,
         ),
     ] {
         let mut start = derender_start_request(derender_body(serde_json::json!({}))).await;
@@ -4623,16 +4641,27 @@ async fn derender_stream_returns_output_logprobs() {
 
 #[tokio::test]
 async fn derender_stream_rejects_misaligned_logprobs() {
-    let mut output = with_derender_logprobs(derender_sequence_output("one", None));
-    output.ranks.pop();
-    let status = derender_stream_responses(vec![
-        derender_start_request(derender_body(serde_json::json!({"logprobs": true}))).await,
-        derender_output_frame(output),
-    ])
-    .await
-    .expect_err("misaligned logprobs");
+    let mut short_ranks = with_derender_logprobs(derender_sequence_output("one", None));
+    short_ranks.ranks.pop();
+    let mut no_logprobs = with_derender_logprobs(derender_sequence_output("one", None));
+    no_logprobs.logprobs.clear();
+    for (name, output) in [
+        ("short ranks", short_ranks),
+        ("ranks without logprobs", no_logprobs),
+    ] {
+        let status = derender_stream_responses(vec![
+            derender_start_request(derender_body(serde_json::json!({"logprobs": true}))).await,
+            derender_output_frame(output),
+        ])
+        .await
+        .expect_err(name);
 
-    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "{name}: {status:?}"
+        );
+    }
 }
 
 /// Both sides run the same stop matcher, so a different match means they

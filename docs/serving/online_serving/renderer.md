@@ -106,8 +106,11 @@ If the worker does not match stop strings (`response.output_text = false`),
 the `stop_string` in `finished`. The worker never sent it, so cancel
 `GenerateStream` when you see it.
 
-Not supported yet: `n > 1`, prompt logprobs, and APIs other than `API_CHAT`.
-`DerenderStream` reports no per-request metrics.
+Not supported yet: `n > 1`, prompt logprobs, `return_prompt_text`,
+`return_weight_versions`, and APIs other than `API_CHAT`. `DerenderStream`
+rejects these at `start` with `UNIMPLEMENTED`, so a gateway can fall back to
+HTTP. Send `start` before submitting `GenerateStream` so that a rejected request
+generates nothing. `DerenderStream` reports no per-request metrics.
 
 The render server uses default response options, so the output can differ from
 a `vllm serve` started with `--enable-prompt-tokens-details` or

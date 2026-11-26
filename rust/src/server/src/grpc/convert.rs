@@ -504,7 +504,7 @@ fn prompt_logprobs_to_proto(
 pub(super) fn output_logprobs_from_proto(
     output: &pb::SequenceOutput,
 ) -> Result<Option<Logprobs>, Status> {
-    if output.logprobs.is_empty() {
+    if output.logprobs.is_empty() && output.ranks.is_empty() && output.candidate_tokens.is_empty() {
         return Ok(None);
     }
     let len = output.token_ids.len();
