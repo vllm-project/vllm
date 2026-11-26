@@ -1011,7 +1011,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         scoped_mm_kwargs = merged_mm_kwargs.get(scope, {})
         size = self._get_vision_size(
             scoped_mm_kwargs,
-            default_size=image_processor.size,
+            default_size=(
+                image_processor.size
+                if modality == "image"
+                else self._get_video_default_size()
+            ),
         )
 
         if do_resize:
@@ -1134,9 +1138,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs({})
         size = self._get_vision_size(
             merged_mm_kwargs.get("videos_kwargs", {}),
-            default_size=self.get_image_processor().size,
+            default_size=self._get_video_default_size(),
         )
         return self.get_image_size_with_most_features(max_pixels=size["longest_edge"])
+
+    def _get_video_default_size(self) -> Mapping[str, int]:
+        video_processor = getattr(self.get_hf_processor(), "video_processor", None)
+        if video_processor is None:
+            return self.get_image_processor().size
+        return video_processor.size
 
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()
@@ -1216,11 +1226,43 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             video_options and (video_options.width or video_options.height)
         ):
             return max_size, max_size_frames
-        if video_options and video_options.num_frames:
-            max_frames = min(max_frames, video_options.num_frames)
-
         max_step_tokens = num_tokens(max_size, temporal_patch_size)
         min_step_tokens = num_tokens(ImageSize(unit, unit), temporal_patch_size)
+
+        if video_options and video_options.num_frames:
+            max_frames = min(max_frames, video_options.num_frames)
+        elif dict(self._get_video_default_size()) != dict(image_processor.size):
+            merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs({})
+            image_size = self.get_image_size_with_most_features(
+                max_pixels=self._get_vision_size(
+                    merged_mm_kwargs.get("videos_kwargs", {}),
+                    default_size=image_processor.size,
+                )["longest_edge"]
+            )
+            image_tokens = (
+                (image_size.width // unit)
+                * (image_size.height // unit)
+                * cdiv(max_frames, temporal_patch_size)
+            )
+            max_frames = max(
+                max_frames,
+                cdiv(image_tokens, max_step_tokens) * temporal_patch_size,
+            )
+            video_tokens = seq_len // max(mm_counts.get("video", 0), 1)
+            best = (max_size, max_size_frames)
+            best_tokens = num_tokens(*best)
+            for num_steps in range(1, cdiv(max_frames, temporal_patch_size) + 1):
+                step_tokens = min(video_tokens // num_steps, max_step_tokens)
+                if step_tokens < min_step_tokens:
+                    break
+                size = self.get_image_size_with_most_features(
+                    max_pixels=step_tokens * unit * unit
+                )
+                num_frames = num_steps * temporal_patch_size
+                tokens = num_tokens(size, num_frames)
+                if best_tokens < tokens <= video_tokens:
+                    best, best_tokens = (size, num_frames), tokens
+            return best
 
         video_tokens = seq_len // max(mm_counts.get("video", 0), 1)
         num_steps = min(

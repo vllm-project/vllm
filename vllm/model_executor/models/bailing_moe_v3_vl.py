@@ -189,6 +189,9 @@ class BailingMoeV3VLProcessingInfo(Qwen2VLProcessingInfo):
     def _get_video_size_with_most_features(self) -> ImageSize:
         return self.get_image_size_with_most_features()
 
+    def _get_video_default_size(self) -> Mapping[str, int]:
+        return self.get_image_processor().size
+
 
 class BailingMoeV3VLDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
