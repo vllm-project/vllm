@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 
 import torch
@@ -19,6 +20,28 @@ _TOPK_WORKSPACE_BYTES = 1024 * 1024
 # row by row. Up to max rows this beats the tiled kernel; measured with the
 # 168-page decode table on MI300X and MI325X (CDNA3) and MI355X (CDNA4).
 _ROWS_KERNEL_PROFILES = {3: (32, 32, 4), 4: (128, 128, 2)}
+
+
+# FP8 K/V sparse attention on 128-CU CDNA4 (MI350P): (programs below, block_n,
+# splits, warps) by programs before splitting; under 16 programs the CDNA4 profile.
+_FP8_FEW_CUS_PROFILES = (
+    (16,),
+    (24, 128, 16, 2),
+    (32, 32, 16, 4),
+    (48, 64, 16, 1),
+    (64, 32, 16, 2),
+    (96, 64, 8, 1),
+    (128, 32, 8, 2),
+    (192, 32, 8, 1),
+    (256, 32, 4, 2),
+    (384, 32, 4, 1),
+    (math.inf, 128, 1, 1),
+)
+
+
+@functools.cache
+def _num_compute_units() -> int:
+    return current_platform.num_compute_units()
 
 
 @triton.jit
@@ -1126,7 +1149,14 @@ def qsa_sparse_paged_attention(
         block_m = max(block_m, 16)
     small_profile_limit = 8 if block_m <= 8 else 4
 
-    if fp8_dots and base_programs < 32:
+    few_cus_profile = None
+    if fp8_dots and cdna_version == 4 and _num_compute_units() <= 128:
+        few_cus_profile = next(
+            (p for limit, *p in _FP8_FEW_CUS_PROFILES if base_programs < limit), None
+        )
+    if few_cus_profile:
+        block_n, target_splits, partial_warps = few_cus_profile
+    elif fp8_dots and base_programs < 32:
         block_n, partial_warps = 32, 4
         target_splits = 64 if base_programs <= small_profile_limit else 32
     elif fp8_dots and cdna_version == 3:
