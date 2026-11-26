@@ -251,6 +251,7 @@ steps:
     - >-
       pytest -v -s -rs
       "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_restore_matches_recompute[tp2]"
+      "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_synchronous_restore_survives_block_zeroing[mixed-precision-tp2]"
       "v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py::test_objects_outlive_the_writer_and_restore_on_another_gpu"
 
 # Single-node MoRIIO P/D on dummy weights, WRITE and READ mode: prefill and
@@ -853,6 +854,7 @@ steps:
         - pytest -v -s v1/determinism/test_batch_invariance.py
         - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
         - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+        - pytest -v -s v1/determinism/test_batch_invariance_vlm.py -k vision_fa3
         - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
         - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
     # Run on PRs even when the H100 step is optional (nightly only).
@@ -939,7 +941,7 @@ steps:
         - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
         - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
         - VLLM_TEST_MODEL=ibm-granite/granite-3.0-1b-a400m-base VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
-    mi300_4:
+    mi300_dpx_4:
       optional: true
       timeout_in_minutes: 45
       source_file_dependencies:

@@ -19,7 +19,7 @@ steps:
         # The SM90-only checkpoint currently contains a removed weight_chan_scale
         # parameter. It was not exercised by the previous L4 job.
         - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
-    mi300_1:
+    mi300_dpx:
       timeout_in_minutes: 115
       working_dir: "/vllm-workspace/tests"
       source_file_dependencies:

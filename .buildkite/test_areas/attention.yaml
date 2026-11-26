@@ -9,8 +9,11 @@ steps:
       timeout_in_minutes: 85
       source_file_dependencies:
         - csrc/hisparse_kernels.cu
+        - vllm/models/hy_v4_flash/nvidia/
+        - tests/models/hy_v4/test_flash_swa_kv_cache_dtype.py
       commands:
         - pytest -v -s v1/attention
+        - pytest -v -s models/hy_v4/test_flash_swa_kv_cache_dtype.py
     mi300_1:
       timeout_in_minutes: 125
       source_file_dependencies:

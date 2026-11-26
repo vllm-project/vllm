@@ -183,7 +183,7 @@ class MultiModalFeatures(BaseModel):
         if self.mm_metadata is not None and set(self.mm_metadata) != modalities:
             raise ValueError("mm_metadata must use the same modalities as mm_hashes")
 
-        flattened_ranges: list[tuple[int, int]] = []
+        spans: dict[tuple[int, int], list[tuple[str, list[bool] | None]]] = {}
         for modality in modalities:
             num_hashes = len(self.mm_hashes[modality])
             num_placeholders = len(self.mm_placeholders[modality])
@@ -206,17 +206,29 @@ class MultiModalFeatures(BaseModel):
                 raise ValueError(
                     f"{modality} mm_metadata and mm_hashes must have the same length"
                 )
-            flattened_ranges.extend(
-                (placeholder.offset, placeholder.offset + placeholder.length)
-                for placeholder in self.mm_placeholders[modality]
-            )
-
-        flattened_ranges.sort()
-        for (_, end), (next_offset, _) in zip(flattened_ranges, flattened_ranges[1:]):
-            if next_offset < end:
-                raise ValueError(
-                    "mm_placeholders must be globally non-overlapping and sorted"
+            for placeholder in self.mm_placeholders[modality]:
+                spans.setdefault((placeholder.offset, placeholder.length), []).append(
+                    (modality, placeholder.is_embed)
                 )
+
+        # Placeholders must not overlap, except that items of different
+        # modalities may share one span when they embed disjoint positions:
+        # Qwen2.5-Omni and Qwen3-Omni place a video and its audio track this
+        # way with `use_audio_in_video`.
+        end = 0
+        for (offset, length), items in sorted(spans.items()):
+            masks = [is_embed or [True] * length for _, is_embed in items]
+            if (
+                offset < end
+                or len({modality for modality, _ in items}) < len(items)
+                or any(sum(position) > 1 for position in zip(*masks))
+            ):
+                raise ValueError(
+                    "mm_placeholders must be non-overlapping, except that items "
+                    "of different modalities may share one span with disjoint "
+                    "is_embed masks"
+                )
+            end = offset + length
         return self
 
 

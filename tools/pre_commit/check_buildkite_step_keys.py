@@ -98,9 +98,13 @@ def device_key_problems(steps: object) -> list[str]:
 
 def _amd_family(device: str) -> tuple[str, str] | None:
     """(family, pool size) of an AMD device: `mi355_4` -> (`mi355`, `4`),
-    `mi300_dpx` -> (`mi300`, `dpx`), `r9700_1` -> (`r9700`, `1`)."""
+    `mi300_dpx` and `mi300_dpx_2` -> (`mi300`, `dpx`), `r9700_1` -> (`r9700`,
+    `1`)."""
     family, sep, size = device.partition("_")
     letters = family.rstrip("0123456789")
+    dpx, _, dpx_count = size.partition("_")
+    if dpx == "dpx" and dpx_count.isdigit():
+        size = dpx
     if (
         sep
         and letters in ("mi", "r")

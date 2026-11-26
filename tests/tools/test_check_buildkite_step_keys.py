@@ -74,6 +74,7 @@ def test_nested_steps_are_rejected():
         ("cpu", "cpu", "cpu"),
         ("mi355_4", "amd", "mi355"),
         ("mi300_dpx", "amd", "mi300-dpx"),
+        ("mi300_dpx_2", "amd", "mi300-dpx"),
         ("r9700_1", "amd", "r9700"),
     ],
 )

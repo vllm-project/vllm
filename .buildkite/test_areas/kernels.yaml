@@ -322,7 +322,7 @@ steps:
       # Keep the ROCm exclusions from #50519: incompatible FlyDSL TurboQuant
       # and a CUDA source check whose files are absent from the AMD test image.
       commands:
-        - pytest -v -s kernels/test_apply_repetition_penalties.py kernels/test_awq_int4_to_int8.py kernels/test_bf16_skinny_gemm.py kernels/test_cache_kernels.py kernels/test_compressor_kv_cache.py kernels/test_cp_gather_fp8.py kernels/test_deepseek_v4_cpu_kernels.py kernels/test_dsv41_mega_attn_layouts.py kernels/test_engram.py kernels/test_flashinfer_bf16_gemm.py kernels/test_flex_attention.py kernels/test_fp32_router_gemm.py kernels/test_fused_deepseek_v32_norm_rope.py kernels/test_fused_indexer_q_rope_quant.py kernels/test_fused_inv_rope_fp8_quant.py kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py kernels/test_fused_quant_activation.py kernels/test_gemm_rs_ar.py kernels/test_hy_v4_flash_kernels.py kernels/test_kpool_decode_update_batched.py kernels/test_minimax_m3_amd_ops.py kernels/test_minimax_m3_sparse_attn_fp8_scale.py kernels/test_muse_spark_router_bf16x3.py kernels/test_onednn.py kernels/test_relu2_fp8_quant.py --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
+        - pytest -v -s kernels/test_apply_repetition_penalties.py kernels/test_awq_int4_to_int8.py kernels/test_bf16_skinny_gemm.py kernels/test_cache_kernels.py kernels/test_compressor_kv_cache.py kernels/test_cp_gather_fp8.py kernels/test_deepseek_v4_cpu_kernels.py kernels/test_dsv41_mega_attn_layouts.py kernels/test_engram.py kernels/test_flashinfer_bf16_gemm.py kernels/test_flex_attention.py kernels/test_fp32_router_gemm.py kernels/test_fused_deepseek_v32_norm_rope.py kernels/test_fused_indexer_q_rope_quant.py kernels/test_fused_inv_rope_fp8_quant.py kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py kernels/test_fused_quant_activation.py kernels/test_gemm_rs_ar.py kernels/test_hy_v4_flash_kernels.py kernels/test_kpool_decode_update_batched.py kernels/test_minimax_m3_amd_ops.py kernels/test_minimax_m3_sparse_attn_fp8_scale.py kernels/test_muse_spark_rocm_decode_moe.py kernels/test_muse_spark_router_bf16x3.py kernels/test_onednn.py kernels/test_relu2_fp8_quant.py --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
         - pytest -v -s kernels/test_fused_muse_spark_qknorm_rope_kv_insert.py -k rocm
   automatic_shard: true
   source_file_dependencies:
@@ -506,7 +506,7 @@ steps:
       timeout_in_minutes: 50
       source_file_dependencies:
         - csrc/quantization/w8a8/cutlass/moe/
-    mi300_1:
+    mi300_dpx:
       timeout_in_minutes: 55
       source_file_dependencies:
         - vllm/_aiter_ops.py
@@ -552,6 +552,7 @@ steps:
     - vllm/model_executor/layers/mamba/gdn
     - vllm/models/qwen3_5/
     - vllm/model_executor/layers/mamba/ops
+    - vllm/third_party/flash_linear_attention/ops/fused_recurrent_replayssm.py
     - vllm/triton_utils/allocation.py
     - vllm/triton_utils/tensor_descriptor.py
     - vllm/v1/attention/backends/gdn_attn.py
@@ -882,6 +883,19 @@ steps:
 #   commands:
 #     - pip install helion==1.4.0
 #     - pytest -v -s kernels/helion/ --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: MoE Kernels
+  key: kernels-moe-test-dgx-spark
+  devices:
+    dgx-spark:
+      num_devices: 1
+      timeout_in_minutes: 25
+  automatic_shard: true
+  source_file_dependencies:
+    - vllm/model_executor/layers/fused_moe/fused_moe.py
+    - tests/kernels/moe/test_moe.py
+  commands:
+    - pytest -v -s kernels/moe/test_moe.py
 
 - label: FP8 MoE Kernels
   key: kernels-fp8-moe-test-1xh100

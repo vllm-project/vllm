@@ -18,7 +18,7 @@ steps:
         - pytest -v -s distributed/test_shm_buffer.py
         - pytest -v -s distributed/test_shm_storage.py
         - pytest -v -s distributed/test_pipeline_partition.py
-    mi300_2:
+    mi300_dpx_2:
       timeout_in_minutes: 30
       source_file_dependencies:
         - vllm/platforms/rocm.py
@@ -152,7 +152,7 @@ steps:
         - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
         - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
         - pytest -v -s v1/worker/test_worker_memory_snapshot.py
-    mi300_2:
+    mi300_dpx_2:
       timeout_in_minutes: 35
       source_file_dependencies:
         - vllm/platforms/rocm.py
@@ -501,7 +501,10 @@ steps:
         - tests/distributed/test_quick_all_reduce.py
         - tests/distributed/test_aiter_rms_fallback.py
         - tests/distributed/test_muse_spark_token_shard.py
+        - tests/distributed/test_muse_spark_decode_moe.py
         - vllm/models/muse_spark/amd/model.py
+        - vllm/models/muse_spark/amd/
+        - tests/models/test_muse_spark_rocm_mono.py
         - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
         - tests/utils.py
         - tests/distributed/test_weight_transfer.py
@@ -523,6 +526,7 @@ steps:
         - pytest -v -s tests/distributed/test_quick_all_reduce.py
         - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
         - pytest -v -s tests/distributed/test_muse_spark_token_shard.py
+        - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
   automatic_shard: true
   working_dir: "/vllm-workspace/"
 
