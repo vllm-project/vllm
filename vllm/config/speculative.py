@@ -107,6 +107,7 @@ MTPModelTypes = Literal[
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
 DSparkModelTypes = Literal["dspark"]
+DNeoModelTypes = Literal["dneo"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
 ]
@@ -118,6 +119,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
+    DNeoModelTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]

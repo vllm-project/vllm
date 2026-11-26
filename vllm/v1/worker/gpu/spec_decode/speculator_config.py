@@ -366,6 +366,7 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "mtp": _builtin("mtp.config", "MTPSpeculatorConfig"),
     "dflash": _builtin("dflash.config", "DFlashSpeculatorConfig"),
     "dspark": _builtin("dspark.config", "DSparkSpeculatorConfig"),
+    "dneo": _builtin("dneo.config", "DNeoSpeculatorConfig"),
     "dfly": _builtin("dfly.config", "DFlySpeculatorConfig"),
 }
 
