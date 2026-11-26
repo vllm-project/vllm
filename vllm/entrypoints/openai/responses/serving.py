@@ -256,7 +256,7 @@ class OpenAIServingResponses(GenerateBaseServing):
     def _validate_create_responses_input(
         self, request: ResponsesRequest
     ) -> ErrorResponse | None:
-        if request.store and not self.enable_store and request.background:
+        if request.background and not self.enable_store:
             return self.create_error_response(
                 err_type="invalid_request_error",
                 message=(
