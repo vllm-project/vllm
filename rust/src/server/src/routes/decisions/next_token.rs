@@ -167,6 +167,11 @@ impl NextTokenReads {
             question_label_ids.push(label_ids);
         }
 
+        // TODO: on hybrid models with prefix caching, prefill the prompts'
+        // common prefix (at least 128 tokens) once before the reads, like
+        // Python's `NextTokenStrategy._warm_shared_prefix`. Reads that start
+        // together cannot reuse each other's recurrent state, so each read
+        // prefills it again and reports fewer `cached_tokens` than Python.
         let outputs = future::try_join_all(prepared.into_iter().map(|prepared| async {
             let mut streams = (text.generate_prepared_n(prepared, NonZeroU32::MIN).await)
                 .map_err(|error| text_submit_error("failed to submit a decision read", error))?;
