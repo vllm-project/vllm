@@ -4,7 +4,6 @@
 use std::slice;
 
 use indexmap::IndexMap;
-use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use vllm_chat::{AllowedToolsMode, ChatTool};
@@ -126,14 +125,17 @@ pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationEr
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatMessage, StringOrArray, validate_stop};
+    use super::{ChatMessage, ImageDetail, ImageUrl, StringOrArray, validate_stop};
 
+    /// OpenAI accepts `"detail": null` as omitted, and `original` as its own value.
     #[test]
-    fn image_url_detail_rejects_null() {
-        serde_json::from_str::<ChatMessage>(
-            r#"{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u", "detail": null}}]}"#,
-        )
-        .expect_err("null detail should be rejected");
+    fn image_url_detail_reads_null_as_omitted_and_keeps_original() {
+        let detail = |json| serde_json::from_str::<ImageUrl>(json).unwrap().detail;
+        assert_eq!(detail(r#"{"url": "u", "detail": null}"#), None);
+        assert_eq!(
+            detail(r#"{"url": "u", "detail": "original"}"#),
+            Some(ImageDetail::Original)
+        );
     }
 
     #[test]
@@ -277,29 +279,30 @@ impl ContentPart {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ImageUrl {
     pub url: String,
-    #[serde(default, deserialize_with = "deserialize_image_detail")]
+    #[serde(default)]
     pub detail: Option<ImageDetail>,
 }
 
-/// Reads OpenAI's `original` image detail as `high`; image preprocessing ignores the detail.
-pub fn deserialize_image_detail<'de, D>(deserializer: D) -> Result<Option<ImageDetail>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum WireImageDetail {
-        Auto,
-        Low,
-        #[serde(alias = "original")]
-        High,
-    }
+/// Image `detail` as OpenAI's chat and Responses APIs spell it.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageDetail {
+    Auto,
+    Low,
+    High,
+    Original,
+}
 
-    Ok(Some(match WireImageDetail::deserialize(deserializer)? {
-        WireImageDetail::Auto => ImageDetail::Auto,
-        WireImageDetail::Low => ImageDetail::Low,
-        WireImageDetail::High => ImageDetail::High,
-    }))
+impl From<ImageDetail> for llm_multimodal::ImageDetail {
+    /// Image preprocessing does not read the detail; `original` asks for the full
+    /// resolution, which `high` is closest to.
+    fn from(detail: ImageDetail) -> Self {
+        match detail {
+            ImageDetail::Auto => Self::Auto,
+            ImageDetail::Low => Self::Low,
+            ImageDetail::High | ImageDetail::Original => Self::High,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

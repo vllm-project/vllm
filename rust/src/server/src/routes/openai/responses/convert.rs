@@ -542,7 +542,7 @@ fn convert_content_parts(content: ResponseMessageContent) -> Result<ChatContent,
                         };
                         converted.push(ChatContentPart::ImageUrl {
                             image_url,
-                            detail,
+                            detail: detail.map(Into::into),
                             uuid: None,
                         });
                     }
@@ -1138,9 +1138,10 @@ mod tests {
     }
 
     #[test]
-    fn input_image_detail_reads_original_as_high() {
+    fn input_image_detail_reads_null_as_omitted_and_original_as_high() {
         let content = serde_json::from_value(json!([
             {"type": "input_image", "image_url": "u"},
+            {"type": "input_image", "image_url": "u", "detail": null},
             {"type": "input_image", "image_url": "u", "detail": "original"}
         ]))
         .expect("deserialize Responses image content");
@@ -1154,6 +1155,7 @@ mod tests {
         assert_eq!(
             converted,
             ChatContent::Parts(vec![
+                image(None),
                 image(None),
                 image(Some(llm_multimodal::ImageDetail::High))
             ])
