@@ -1481,6 +1481,9 @@ class DrexStrategy(ReadStrategy):
         super().__init__(context)
         model_config = context.engine_client.model_config
         self.max_model_len = model_config.max_model_len
+        # The reference server reads a packed row up to its context window, so
+        # serving uses the model's window rather than the training caps.
+        self.max_state = self.max_branch = self.max_packed = self.max_model_len
         self.tokenizer = context.online_renderer.renderer.get_tokenizer()
 
     def limits(self) -> DecisionLimits:
@@ -1520,6 +1523,10 @@ class DrexStrategy(ReadStrategy):
             raise StructuredDecisionError(
                 "this model reads a fixed prompt, so it takes no instructions"
             )
+        if media and any(media.values()):
+            raise StructuredDecisionError(
+                "this model reads text only, so it takes no media"
+            )
         state = self.render_state(state)
 
         rows: list[tuple[list[str], list[int], list[int], int]] = []
@@ -1527,7 +1534,13 @@ class DrexStrategy(ReadStrategy):
             texts, order = self._options(q)
             try:
                 ids = drex_prompt.pack(
-                    self.tokenizer, state, q.instructions or "", texts
+                    self.tokenizer,
+                    state,
+                    q.instructions or "",
+                    texts,
+                    max_state=self.max_state,
+                    max_branch=self.max_branch,
+                    max_packed=self.max_packed,
                 )
             except ValueError as e:
                 raise StructuredDecisionError(f"question {q.id!r}: {e}") from e
@@ -1580,7 +1593,7 @@ class DrexStrategy(ReadStrategy):
             probs = label_softmax(scores)
             reads.append(
                 QuestionRead(
-                    probs=[probs[i] for i in order],
+                    probs=drex_prompt.apply_order(probs, order),
                     label_mass=1.0,
                     argmax_is_label=True,
                     input_tokens=len(ids),
