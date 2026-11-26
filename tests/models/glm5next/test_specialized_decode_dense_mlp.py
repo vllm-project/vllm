@@ -15,7 +15,8 @@ from .test_specialized_decode_shared_expert import _packed, _quant, _weight
 HIDDEN, INTER, LIMIT = 4096, 3072, 10.0
 
 pytestmark = pytest.mark.skipif(
-    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    not current_platform.is_cuda()
+    or not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
     reason="Requires SM90 or SM100",
 )
 

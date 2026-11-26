@@ -14,7 +14,8 @@ from vllm.platforms import current_platform
 DIM, POOL, GROUPS, WIDTH, BLOCK = 128, 4, 512, 2176, 64
 
 pytestmark = pytest.mark.skipif(
-    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    not current_platform.is_cuda()
+    or not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
     reason="Requires SM90 or SM100",
 )
 

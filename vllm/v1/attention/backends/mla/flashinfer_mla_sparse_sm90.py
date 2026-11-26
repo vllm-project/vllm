@@ -266,7 +266,6 @@ class _SM90State:
         index_topk: int,
         index_kpool: int,
         workspace: torch.Tensor | None = None,
-        reset_kv_indices_on_plan: bool = False,
     ) -> None:
         from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
@@ -276,11 +275,9 @@ class _SM90State:
             else workspace
         )
         self.device = device
-        self.reset_kv_indices_on_plan = reset_kv_indices_on_plan
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
         self.max_tokens = max_tokens
-        self.topk_width = topk_width
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.sm_scale = sm_scale
@@ -307,11 +304,17 @@ class _SM90State:
             backend="fa3",
         )
         self._arange_cpu = torch.arange(self.max_tokens + 1, dtype=torch.int32)
-        self._qo_cpu = torch.empty(self.max_tokens + 1, dtype=torch.int32)
-        self._kv_cpu = torch.empty(self.max_tokens + 1, dtype=torch.int32)
-        self._lens_cpu = torch.full(
-            (self.max_tokens,), self.topk_width, dtype=torch.int32
-        )
+        self._lens_cpu = torch.empty(0, dtype=torch.int32)
+        self._zero_indices_cpu: torch.Tensor | None = None
+        self._validate_fa_plan: Callable[..., None] | None
+        try:
+            from flashinfer.mla._batch_mla._backends._fa_common import (
+                _validate_fa_plan_workload,
+            )
+        except ImportError:
+            self._validate_fa_plan = None
+        else:
+            self._validate_fa_plan = _validate_fa_plan_workload
         # Planned per-work kv_end of the current plan, restored by each clamp;
         # sized on first plan to the planner's work capacity.
         self._saved_kv_end = torch.empty(0, dtype=torch.int32, device=device)
@@ -361,43 +364,20 @@ class _SM90State:
         self._clamp_kv_end(cam, req_id_per_token, row_ids)
 
     def _plan(self, num_tokens: int, kv_lens: torch.Tensor) -> None:
-        # CPU staging buffers are filled in place: plan() runs per step
-        # (once per draft/verify metadata build), so per-call allocations and
-        # device round trips are on the hot path. Passing CPU tensors lets
-        # the wrapper's internal .to("cpu") no-op; its reserved-buffer
-        # copy_ then performs the single H2D transfer per tensor.
-        # use_cuda_graph=True makes the wrapper copy qo/kv indptr into its
-        # fixed (max_tokens+1)-sized buffers with exact-size copy_, so the
-        # indptr must always be full-size. Rows past num_tokens are padded
-        # empty (qo_indptr flat at num_tokens) — zero-query rows read no q
-        # and schedule no work. FlashInfer 0.7 requires packed CSR offsets
-        # matching the exact lengths, including zero-length padded rows.
-        torch.clamp(self._arange_cpu, max=num_tokens, out=self._qo_cpu)
-        self._lens_cpu.zero_()
-        self._lens_cpu[:num_tokens] = kv_lens
-        self._kv_cpu[0] = 0
-        torch.cumsum(self._lens_cpu, dim=0, out=self._kv_cpu[1:])
-        num_indices = max(int(self._kv_cpu[-1]), 1)
-        kv_indices = self.kv_indices[:num_indices]
-        # The forward writes kv_indices after planning, but FlashInfer records
-        # the planned page range from them: with HiSparse, stale slots from a
-        # step over the hot cache would reject the smaller staging workspace.
-        if self.reset_kv_indices_on_plan:
-            kv_indices.zero_()
-        self.wrapper.plan(
-            self._qo_cpu,
-            self._kv_cpu,
-            kv_indices,
-            self._lens_cpu,
-            self.num_heads,
-            self.kv_lora_rank,  # head_dim_ckv
-            self.qk_rope_head_dim,  # 0 (NoPE) or 64 (rope MLA)
-            1,  # page_size: top-k slots are the page table
-            False,  # causal: encoded by the indexer's selection
-            self.sm_scale,
-            q_data_type=torch.bfloat16,
-            kv_data_type=self.kv_dtype,
-        )
+        # each replan gets fresh pinned storage so an in-flight H2D copy
+        # cannot read metadata overwritten by the next plan
+        pin_memory = self.device.type == "cuda"
+        qo_indptr, kv_indptr, lens = torch.empty(
+            (3, self.max_tokens + 1), dtype=torch.int32, pin_memory=pin_memory
+        ).unbind()
+        lens = lens[:-1]
+        torch.clamp(self._arange_cpu, max=num_tokens, out=qo_indptr)
+        lens[:num_tokens] = kv_lens
+        lens[num_tokens:].zero_()
+        kv_indptr[0] = 0
+        torch.cumsum(lens, dim=0, out=kv_indptr[1:])
+        self._plan_flashinfer(num_tokens, qo_indptr, kv_indptr, lens)
+        self._lens_cpu = lens
         plan_info = [int(x) for x in self.wrapper._plan_info]
         assert len(plan_info) == _PLAN_INFO_LEN, plan_info
         # Per-work arrays are laid out back to back at the planner's capacity.
@@ -417,6 +397,83 @@ class _SM90State:
         )
         kv_end_off = self._plan_offsets[3]
         self._saved_kv_end.copy_(self._int_ws[kv_end_off : kv_end_off + max_works])
+
+    def _plan_flashinfer(
+        self,
+        num_tokens: int,
+        qo_indptr: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        lens: torch.Tensor,
+    ) -> None:
+        num_indices = int(kv_indptr[-1])
+        backend = getattr(self.wrapper, "_planned_backend", None)
+        native_plan = getattr(
+            getattr(backend, "_cached_module", None),
+            "plan_with_staged_workspace_bytes",
+            None,
+        )
+        if (
+            backend is not None
+            and native_plan is not None
+            and self._validate_fa_plan is not None
+        ):
+            if (
+                not 0 <= num_indices <= self.kv_indices.numel()
+                or (lens[:num_tokens] < 0).any()
+            ):
+                raise ValueError("Invalid KV lengths for the reserved SM90 page table.")
+            self._validate_fa_plan(
+                qo_indptr,
+                lens,
+                self.num_heads,
+                False,
+                self.device,
+                "fa3",
+                self.kv_dtype,
+            )
+            plan_info, staged_bytes = native_plan(
+                self.workspace,
+                backend._int_workspace_buffer,
+                backend._pin_memory_int_workspace_buffer,
+                qo_indptr,
+                kv_indptr,
+                lens,
+                self.num_heads,
+                self.kv_lora_rank,
+                False,
+            )
+            backend._qo_indptr_buf.copy_(qo_indptr, non_blocking=True)
+            self.kv_indptr.copy_(kv_indptr, non_blocking=True)
+            self.kv_len_arr.copy_(lens, non_blocking=True)
+            backend._plan_info = self.wrapper._plan_info = plan_info
+            backend._staged_int_workspace_bytes = staged_bytes
+            backend._planned_query_shape = (num_tokens, self.num_heads)
+            backend._planned_kv_page_range = (0, int(num_indices > 0))
+            self._zero_indices_cpu = None
+            return
+
+        num_indices = max(num_indices, 1)
+        if (
+            self._zero_indices_cpu is None
+            or self._zero_indices_cpu.numel() < num_indices
+        ):
+            self._zero_indices_cpu = torch.zeros(
+                num_indices, dtype=torch.int32, pin_memory=qo_indptr.is_pinned()
+            )
+        self.wrapper.plan(
+            qo_indptr,
+            kv_indptr,
+            self._zero_indices_cpu[:num_indices],
+            lens,
+            self.num_heads,
+            self.kv_lora_rank,  # head_dim_ckv
+            self.qk_rope_head_dim,  # 0 (NoPE) or 64 (rope MLA)
+            1,  # page_size: top-k slots are the page table
+            False,  # causal: encoded by the indexer's selection
+            self.sm_scale,
+            q_data_type=torch.bfloat16,
+            kv_data_type=self.kv_dtype,
+        )
 
     def _clamp_kv_end(
         self,
@@ -507,7 +564,6 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             sm_scale=impl.scale,
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
-            reset_kv_indices_on_plan=hisparse,
         )
         self.state = make_state()
         self.prefill_state = (

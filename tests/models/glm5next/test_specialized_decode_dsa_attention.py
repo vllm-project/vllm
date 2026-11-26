@@ -13,7 +13,8 @@ HEADS, NOPE, LATENT, V = 16, 256, 512, 256
 Q_LORA = 1536
 
 pytestmark = pytest.mark.skipif(
-    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    not current_platform.is_cuda()
+    or not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
     reason="Requires SM90 or SM100",
 )
 
