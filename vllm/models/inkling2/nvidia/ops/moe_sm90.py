@@ -9,6 +9,7 @@ gathers each row's token, the down GEMM reads and writes row by row, and
 """
 
 import json
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -21,6 +22,9 @@ from vllm.triton_utils import tl, triton
 from .activation import _situ
 from .linear import k_group_partials
 from .moe import _load_bias, _local_experts, _select_experts
+
+if TYPE_CHECKING:
+    from vllm.utils.humming import HummingInputSchema
 
 # Row block size when no Humming tuning range covers the row count.
 _DEFAULT_BLOCK_M = 64
@@ -162,6 +166,7 @@ class HummingExperts:
             and, for NVFP4, the per-expert global scales `[E]` (else None).
         shapes: `(N, K)` of each projection.
         nvfp4: NVFP4 (else MXFP8) weights.
+        input_schema: Quantized input contract, or None for BF16 activations.
 
     """
 
@@ -170,6 +175,7 @@ class HummingExperts:
         weights: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
         shapes: tuple[tuple[int, int], tuple[int, int]],
         nvfp4: bool,
+        input_schema: "HummingInputSchema | None" = None,
     ) -> None:
         from vllm.utils.humming import (
             GemmType,
@@ -206,7 +212,7 @@ class HummingExperts:
                 shape_k=k,
                 pad_n_to_multiple=256,
                 pad_k_to_multiple=128,
-                input_schema=HummingInputSchema(),
+                input_schema=input_schema or HummingInputSchema(),
                 weight_schema=schema,
                 num_experts=num_experts,
                 torch_dtype=torch.bfloat16,
