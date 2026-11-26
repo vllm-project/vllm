@@ -341,6 +341,12 @@ class VocabParallelEmbedding(PluggableLayer):
             )
 
         self.quant_method: QuantizeMethodBase = quant_method
+        if (
+            current_platform.is_cpu()
+            and isinstance(quant_method, UnquantizedEmbeddingMethod)
+            and not hasattr(self, "process_weights_after_loading")
+        ):
+            self.process_weights_after_loading = self._finalize_cpu_embedding
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -376,7 +382,7 @@ class VocabParallelEmbedding(PluggableLayer):
         )
         self.update_param_tp_status()
 
-    def process_weights_after_loading(self) -> None:
+    def _finalize_cpu_embedding(self) -> None:
         if current_platform.is_cpu() and isinstance(
             self.quant_method, UnquantizedEmbeddingMethod
         ):
