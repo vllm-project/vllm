@@ -341,18 +341,17 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-def fused_recurrent_gated_delta_rule_packed_decode(
+def validate_packed_decode_inputs(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor,
-    scale: float,
     initial_state: torch.Tensor,
     out: torch.Tensor,
     ssm_state_indices: torch.Tensor,
-    use_qk_l2norm_in_kernel: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[int, int, int, int, int]:
+    """Validate the packed decode inputs and return `(B, H, HV, K, V)`."""
     if mixed_qkv.ndim != 2:
         raise ValueError(
             f"`mixed_qkv` must be a 2D tensor (got ndim={mixed_qkv.ndim})."
@@ -433,6 +432,25 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError(
             f"Invalid head config inferred from mixed_qkv: H={H}, HV={HV}."
         )
+    return B, H, HV, K, V
+
+
+def fused_recurrent_gated_delta_rule_packed_decode(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    out: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    B, H, HV, K, V = validate_packed_decode_inputs(
+        mixed_qkv, a, b, A_log, dt_bias, initial_state, out, ssm_state_indices
+    )
+    dev = mixed_qkv.device
 
     BK = triton.next_power_of_2(K)
     if triton.cdiv(K, BK) != 1:

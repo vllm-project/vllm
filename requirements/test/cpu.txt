@@ -2468,10 +2468,6 @@ instanttensor==0.2.2 \
     --hash=sha256:d43097e15922fd90e45a19308efc2ec63290e51f308f8501eaae705d7249df87 \
     --hash=sha256:fd1757e57d9561a6c28dfb18568890fd50d1f3e331d7ec247034c011f3086be9
     # via -r requirements/test/cuda.in
-interegular==0.3.3 \
-    --hash=sha256:b0c07007d48c89d6d19f7204972d369b2a77222722e126b6aa63aa721dc3b19c \
-    --hash=sha256:d9b697b21b34884711399ba0f0376914b81899ce670032486d0d048344a76600
-    # via lm-format-enforcer
 interface-meta==2.0.1 \
     --hash=sha256:902bd9a95a12f195f15753a1080075d4eca7a2cb934fac7ac03c9e362b50796a \
     --hash=sha256:f38016bef9a4429b6d0792d809be7b65e9781820c674bf7f463999086b6e6323
@@ -2937,10 +2933,6 @@ lm-eval==0.4.12 \
     --hash=sha256:02971ff68284dd14cfa7fce9310a58452c4162e8d413ba96aa7988a0ff9352ef \
     --hash=sha256:45938d7c8024d5eee5c8a0da36abe7cc09c252413c577cf81666f0fcd28b4345
     # via -r requirements/test/cuda.in
-lm-format-enforcer==0.11.3 \
-    --hash=sha256:cf586350875def1ae7a8fba84fcbbfc8371424b6c9d05c1fcba70aa233fbf06f \
-    --hash=sha256:e68081c108719cce284a9bcc889709b26ffb085a1945b5eba3a12cfa96d528da
-    # via -r requirements/test/../common.txt
 loguru==0.7.3 \
     --hash=sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6 \
     --hash=sha256:31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c
@@ -4195,7 +4187,6 @@ packaging==26.3 \
     #   fastparquet
     #   huggingface-hub
     #   lazy-loader
-    #   lm-format-enforcer
     #   matplotlib
     #   optuna
     #   peft
@@ -4292,9 +4283,9 @@ patsy==1.0.1 \
     --hash=sha256:751fb38f9e97e62312e921a1954b81e1bb2bcda4f5eeabaf94db251ee791509c \
     --hash=sha256:e786a9391eec818c054e359b737bbce692f051aee4c661f4141cc88fb459c0c4
     # via statsmodels
-peft==0.21.1 \
-    --hash=sha256:6b99d659a33acc17295c0838f1e58267337b8c30ac9aef0c8f2d48364d3f24e2 \
-    --hash=sha256:95f239f84da1919a6d0c64c4049650a6a79804e3a87c78f35c597da771e31f68
+peft==0.22.0 \
+    --hash=sha256:397f09710e3e1b6ad730211468839aa271732b51a50e99d4f44f2a6e8d9a9f0b \
+    --hash=sha256:e7fca396b98e6c1b0b02538e45efd84875c4d0d074c29c837e372cd7c845647a
     # via -r requirements/test/cuda.in
 perceptron==0.1.4 \
     --hash=sha256:62fd190efb74925e2cc33c0cd38761e19959be3bdb7b24fbf9e3386d6961f690 \
@@ -5023,7 +5014,6 @@ pydantic==2.14.3 \
     #   fastapi
     #   fastapi-cloud-cli
     #   gpt-oss
-    #   lm-format-enforcer
     #   mcp
     #   mcp-types
     #   mistral-common
@@ -5690,7 +5680,6 @@ pyyaml==6.0.3 \
     #   datasets
     #   genai-perf
     #   huggingface-hub
-    #   lm-format-enforcer
     #   optuna
     #   peft
     #   ray
@@ -7299,9 +7288,9 @@ traitlets==5.16.1 \
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.23.0 \
-    --hash=sha256:018e82fd07490ad5bb58414f65e31576033dc7f36bed10c574843f69b90991bf \
-    --hash=sha256:19d647a4d5d903a7c644ca5cde2d86efc3dde7d8c687ae7988806ff2205efa71
+transformers==5.24.1 \
+    --hash=sha256:505b39d3e45a3715f3acb81b858eb245ce1a462373b7f99e26f0dcd41ed4cd0f \
+    --hash=sha256:71fae247d9ad61f553fb84de2089f427f5ff2c080686f9deb51e660487e8c270
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in

@@ -194,8 +194,9 @@ vllm serve <model> \
     --reasoning-parser hf
 ```
 
-Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the `thinking` or `tool_calls`
-field the selected parser needs. The `hf` parser cannot be combined with other reasoning or tool call parsers.
+Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the field the selected parser
+needs: `reasoning_content` (or its legacy alias `thinking`) for reasoning, `tool_calls` for tool calls. The `hf` parser cannot be combined with
+other reasoning or tool call parsers.
 
 When streaming, each tool call is emitted whole once its region parses. A call cut off before its closer, for example by a closer that is also a
 stop token, is parsed from the text generated so far; a call that does not parse is dropped.
@@ -370,15 +371,6 @@ Known issues:
 * Although this implementation also supports InternLM2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
-
-### Jamba Models (`jamba`)
-
-AI21's Jamba-1.5 models are supported.
-
-* `ai21labs/AI21-Jamba-1.5-Mini`
-* `ai21labs/AI21-Jamba-1.5-Large`
-
-Flags: `--tool-call-parser jamba`
 
 ### xLAM Models (`xlam`)
 

@@ -6,3 +6,4 @@ DeepSeek-V2-Lite-Instruct-FP8.yaml
 Qwen3-Next-FP8-EP2_MI355.yaml
 Qwen3-30B-A3B-Thinking-2507-FP8.yaml
 Qwen3-30B-A3B-Thinking-2507-PTPC-FP8.yaml
+gpt-oss-20b-AITER-W4A16-DEP2-ROCm.yaml

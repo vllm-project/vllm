@@ -127,6 +127,7 @@ def generate_and_test(
 )
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
+    vllm_runner,
     gptoss20b_lora_files,
     mxfp4_use_marlin,
     specialize_active_lora,
@@ -134,7 +135,7 @@ def test_gpt_oss_lora(
 ):
     _enable_deterministic_lora_shrink(monkeypatch)
 
-    llm = vllm.LLM(
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -148,10 +149,10 @@ def test_gpt_oss_lora(
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
             cudagraph_specialize_lora=False,
         ),
-    )
-
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gptoss20b_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gptoss20b_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -170,6 +171,7 @@ def test_gpt_oss_lora(
     ],
 )
 def test_gpt_oss_lora_tp2(
+    vllm_runner,
     gptoss20b_lora_files,
     fully_sharded_loras,
     mxfp4_use_marlin,
@@ -177,7 +179,7 @@ def test_gpt_oss_lora_tp2(
 ):
     _enable_deterministic_lora_shrink(monkeypatch)
 
-    llm = vllm.LLM(
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -193,19 +195,20 @@ def test_gpt_oss_lora_tp2(
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=False,
         ),
-    )
-
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gptoss20b_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gptoss20b_lora_files, lora_id=2)
 
 
 def test_gpt_oss_lora_mixed_moe_format(
+    vllm_runner,
     gptoss20b_lora_files,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _enable_deterministic_lora_shrink(monkeypatch)
 
-    llm = vllm.LLM(
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -217,7 +220,11 @@ def test_gpt_oss_lora_mixed_moe_format(
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=False,
         ),
-    )
-
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1, is_3d_lora_weight=True)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2, is_3d_lora_weight=True)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(
+            runner.llm, gptoss20b_lora_files, lora_id=1, is_3d_lora_weight=True
+        )
+        generate_and_test(
+            runner.llm, gptoss20b_lora_files, lora_id=2, is_3d_lora_weight=True
+        )

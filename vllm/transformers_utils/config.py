@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
+import regex as re
 import torch
 import transformers
 import transformers.configuration_utils as hf_configuration_utils
@@ -53,6 +54,64 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+
+class InvalidSentenceTransformersModulePath(ValueError):
+    pass
+
+
+def get_sentence_transformers_module_file(
+    model: str | Path, folder: str, filename: str
+) -> str:
+    if not isinstance(folder, str):
+        raise InvalidSentenceTransformersModulePath("Invalid module path")
+
+    relative_path = Path(folder) / filename
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise InvalidSentenceTransformersModulePath(
+            "Module path leaves model directory"
+        )
+
+    model_path = Path(model)
+    if model_path.is_dir():
+        model_path = model_path.resolve()
+        module_file = model_path / relative_path
+        resolved_file = module_file.resolve()
+        if not resolved_file.is_relative_to(model_path) and not _is_hub_cache_blob(
+            model_path, module_file, resolved_file
+        ):
+            raise InvalidSentenceTransformersModulePath(
+                "Module path leaves model directory"
+            )
+
+    return relative_path.as_posix()
+
+
+def _is_hub_cache_blob(snapshot: Path, module_file: Path, resolved_file: Path) -> bool:
+    cache_root = Path(constants.HF_HUB_CACHE).resolve()
+    repo = snapshot.parent.parent
+    if not (
+        repo.parent == cache_root
+        and repo.name.startswith("models--")
+        and snapshot.parent.name == "snapshots"
+        and re.fullmatch(r"[0-9a-f]{40}", snapshot.name)
+        and module_file.is_symlink()
+    ):
+        return False
+
+    # Hub snapshots link individual files through their repository's blob directory.
+    parent = module_file.parent.resolve()
+    repo_blobs = repo / "blobs"
+    link_target = Path(os.path.abspath(parent / module_file.readlink()))
+    return (
+        parent.is_relative_to(snapshot)
+        and link_target.parent == repo_blobs
+        and (
+            resolved_file.parent == repo_blobs
+            or resolved_file.parent.parent == cache_root / "blobs"
+        )
+    )
+
+
 CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "total_num_kv_heads": (
         "n_head_kv",  # Falcon
@@ -62,8 +121,8 @@ CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "num_attention_groups",  # Step3p5
     ),
     "num_experts": (
-        "num_experts",  # Jamba
-        "moe_num_experts",  # Dbrx
+        "num_experts",  # Qwen3-MoE
+        "moe_num_experts",  # ERNIE-4.5
         "n_routed_experts",  # DeepSeek
         "num_local_experts",  # Mixtral
     ),
@@ -178,6 +237,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     **{"deepseek_v41": "DeepseekV41Config"},
     flint="FlintConfig",
     inkling2="Inkling2MMConfig",
+    inkling2_loop="Inkling2LoopMMConfig",
     inkling2_model="Inkling2ModelConfig",
 )
 
@@ -191,8 +251,6 @@ _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
 
 # Checkpoints whose served model is nested in `thinker_config`
 _THINKER_MODEL_TYPES: set[str] = {"qwen3_asr", "qwen2_5_omni", "qwen3_omni_moe"}
-
-_PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
 # Model types whose checkpoints carry shared RoPE parameters alongside the
 # per-layer-type dicts. Since transformers 5.17, `validate_rope` treats every
@@ -281,37 +339,6 @@ def _install_hf_config_validator(
         stack.extend(cls.__subclasses__())
 
 
-def _patch_hf_transformers_validate_rope():
-    """Transformers v5 moved the ignore_keys option from the method signature of
-    validate_rope and replaced it with the ignore_keys_at_rope_validation parameter
-    in the PreTrainedConfig class. This is a patch to make older versions of
-    validate_rope() with the ignore_keys parameter work with newer versions of
-    hf transformers (from v5 onwards)
-    """
-    if hasattr(PreTrainedConfig.validate_rope, "__vllm_patched__"):
-        return
-
-    _original_validate_rope = PreTrainedConfig.validate_rope
-
-    @wraps(_original_validate_rope)
-    def patched_validate_rope(self, *args, **kwargs):
-        ignore_keys_param = kwargs.pop("ignore_keys", None)
-        original_ignore_keys = self.ignore_keys_at_rope_validation
-        if ignore_keys_param is not None:
-            logger.warning(
-                "validate_rope() was called with the legacy 'ignore_keys' "
-                "argument; use 'ignore_keys_at_rope_validation' instead"
-            )
-        self.ignore_keys_at_rope_validation = original_ignore_keys or ignore_keys_param
-        result = _original_validate_rope(self, *args, **kwargs)
-        return result
-
-    patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
-    _install_hf_config_validator(
-        "validate_rope", patched_validate_rope, _original_validate_rope
-    )
-
-
 def _patch_hf_transformers_nested_rope_validation() -> None:
     """Drop shared entries sitting alongside a nested `rope_parameters` dict.
 
@@ -389,9 +416,6 @@ class HFConfigParser(ConfigParserBase):
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
 
-        if model_type in _PATCH_HF_VALIDATE_ROPE:
-            _patch_hf_transformers_validate_rope()
-
         if model_type in _PATCH_HF_NESTED_ROPE_VALIDATION:
             _patch_hf_transformers_nested_rope_validation()
 
@@ -424,8 +448,8 @@ class HFConfigParser(ConfigParserBase):
                 from transformers import Qwen3ASRConfig
 
                 # Original checkpoints nest their fields in `thinker_config`
-                audio_config = thinker_config["audio_config"]
-                audio_config["model_type"] = "qwen3_asr_encoder"
+                thinker_config["audio_config"]["model_type"] = "qwen3_asr_encoder"
+                thinker_config["text_config"]["model_type"] = "qwen3"
                 config_dict = {**thinker_config, **config_dict}
                 if thinker_config["model_type"] == "qwen3_forced_aligner":
                     config_dict["architectures"] = [
@@ -1133,7 +1157,9 @@ def get_pooling_config(
     if pooling:
         from vllm.config.pooler import SEQ_POOLING_TYPES, TOK_POOLING_TYPES
 
-        pooling_file_name = "{}/config.json".format(pooling["path"])
+        pooling_file_name = get_sentence_transformers_module_file(
+            model, pooling["path"], "config.json"
+        )
         pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision) or {}
 
         logger.info("Found pooling configuration.")
@@ -1434,13 +1460,17 @@ def try_get_dense_modules(
         for module in dense_modules:
             folder = module.get("path", "")
 
-            config_path = f"{folder}/config.json" if folder else "config.json"
+            config_path = get_sentence_transformers_module_file(
+                model, folder, "config.json"
+            )
             layer_config = get_hf_file_to_dict(config_path, model, revision)
             if not layer_config:
                 continue
             layer_config["folder"] = folder
             layer_configs.append(layer_config)
         return layer_configs
+    except InvalidSentenceTransformersModulePath:
+        raise
     except Exception:
         return None
 
