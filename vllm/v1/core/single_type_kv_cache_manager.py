@@ -2563,13 +2563,8 @@ class MambaManager(SingleTypeKVCacheManager):
         idx = processed_tokens // self.block_size - 1
         if idx < num_prompt_tokens // self.block_size:
             return None
-        checkpoint = self._checkpoints.get(request_id)
-        if (
-            checkpoint is not None
-            and checkpoint[1] == idx
-            and checkpoint[0] != (idx + 1) * self.block_size
-        ):
-            # A resumed prefill exported an off-boundary checkpoint into it.
+        if idx in self._mid_block_states.get(request_id, {}):
+            # A resumed prefill left a state other than the block end in it.
             return None
         return idx
 
