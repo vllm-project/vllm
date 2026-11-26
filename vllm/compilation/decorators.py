@@ -29,15 +29,11 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .monitor import monitor_profiling_run, monitor_torch_compile
 
 DynamicArgDims: TypeAlias = dict[str, int | list[int] | dict[int, str]]
 """Argument name -> the dynamic dimension(s) of that argument."""
-
-# shape_id parameter was added to mark_unbacked in PyTorch 2.11.0
-_SUPPORTS_SHAPE_ID = is_torch_equal_or_newer("2.11.0")
 
 if TYPE_CHECKING:
     # Only added on nightly/2.10 so wrap
@@ -456,29 +452,20 @@ def _support_torch_compile(
             arg: torch.Tensor, dim_shape_pairs: list[tuple[int, str | None]]
         ) -> None:
             if ds_type == DynamicShapesType.UNBACKED:
-                if is_torch_equal_or_newer("2.10.0"):
-                    for dim, shape_id in dim_shape_pairs:
-                        if shape_id is not None:
-                            if not _SUPPORTS_SHAPE_ID:
-                                raise RuntimeError(
-                                    f"shape_id='{shape_id}' requires PyTorch >= 2.11.0"
-                                )
-                            torch._dynamo.decorators.mark_unbacked(
-                                arg,
-                                dim,
-                                hint_override=arg.size()[dim],
-                                shape_id=shape_id,
-                            )
-                        else:
-                            torch._dynamo.decorators.mark_unbacked(
-                                arg,
-                                dim,
-                                hint_override=arg.size()[dim],
-                            )
-                else:
-                    # For older versions, we can't use hint_override or shape_id
-                    dims = [dim for dim, _ in dim_shape_pairs]
-                    torch._dynamo.decorators.mark_unbacked(arg, dims)
+                for dim, shape_id in dim_shape_pairs:
+                    if shape_id is not None:
+                        torch._dynamo.decorators.mark_unbacked(
+                            arg,
+                            dim,
+                            hint_override=arg.size()[dim],
+                            shape_id=shape_id,
+                        )
+                    else:
+                        torch._dynamo.decorators.mark_unbacked(
+                            arg,
+                            dim,
+                            hint_override=arg.size()[dim],
+                        )
             else:
                 dims = [dim for dim, _ in dim_shape_pairs]
                 torch._dynamo.mark_dynamic(arg, dims)
@@ -530,13 +517,10 @@ def _support_torch_compile(
                     dims = [dims_val] if isinstance(dims_val, int) else list(dims_val)
                     if isinstance(arg, torch.Tensor):
                         dims = [arg.ndim + d if d < 0 else d for d in dims]
-                        if is_torch_equal_or_newer("2.10.0"):
-                            for dim in dims:
-                                torch._dynamo.decorators.mark_unbacked(
-                                    arg, dim, hint_override=arg.size()[dim]
-                                )
-                        else:
-                            torch._dynamo.decorators.mark_unbacked(arg, dims)
+                        for dim in dims:
+                            torch._dynamo.decorators.mark_unbacked(
+                                arg, dim, hint_override=arg.size()[dim]
+                            )
 
     def __call__(self: type[_T], *args: Any, **kwargs: Any) -> Any:
         # torch.compiler.is_compiling() means we are inside the compilation
@@ -668,27 +652,18 @@ def _support_torch_compile(
         # of symbolic shape guards can improve guard overhead. But, since
         # vllm skip guards anyways, setting this flag to False can improve
         # compile time.
-        dynamo_config_patches = {}
-        try:
-            _ = torch._dynamo.config.enable_cpp_symbolic_shape_guards
-            dynamo_config_patches["enable_cpp_symbolic_shape_guards"] = False
-        except AttributeError:
-            # Note: this config is not available in torch 2.6, we can skip
-            # if the config doesn't exist
-            logger.debug("enable_cpp_symbolic_shape_guards config not available")
+        dynamo_config_patches = {"enable_cpp_symbolic_shape_guards": False}
 
         # Prepare backed_size_oblivious config patch if needed
         fx_config_patches = {}
         if ds_type == DynamicShapesType.BACKED_SIZE_OBLIVIOUS:
             fx_config_patches["backed_size_oblivious"] = True
 
-        # Prepare inductor config patches
-        # assume_32bit_indexing is only available in torch 2.10.0+
-        inductor_config_patches = {}
-        if is_torch_equal_or_newer("2.10.0"):
-            inductor_config_patches["assume_32bit_indexing"] = (
+        inductor_config_patches = {
+            "assume_32bit_indexing": (
                 self.compilation_config.dynamic_shapes_config.assume_32_bit_indexing
             )
+        }
 
         with (
             patch.object(
