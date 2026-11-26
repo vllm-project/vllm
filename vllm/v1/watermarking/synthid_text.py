@@ -26,7 +26,11 @@ def synthid_text_logits(
     probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
     for layer in range(depth):
         g_values = ((words >> layer) & 1).to(torch.float32)
-        probs = probs * (1 + g_values - (probs * g_values).sum(dim=-1, keepdim=True))
+        zero_mass = (probs * (1 - g_values)).sum(dim=-1, keepdim=True)
+        one_mass = (probs * g_values).sum(dim=-1, keepdim=True)
+        # 1 + g - G with G = one_mass / (zero_mass + one_mass), written so that a
+        # G that rounds to 1 cannot make the g = 0 probabilities negative.
+        probs = probs * (g_values + zero_mass / (zero_mass + one_mass))
     return probs.log()
 
 

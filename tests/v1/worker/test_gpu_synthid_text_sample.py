@@ -89,3 +89,38 @@ def test_rows_sample_the_same_token_in_any_batch():
         alone["temperatures"] = batch["temperatures"]
         alone["seeds"] = batch["seeds"]
         assert _sample(alone, 30).item() == full[row].item()
+
+
+def test_peaked_top_k_rows_match_reference():
+    """Peaked bf16 rows with all but 40 tokens masked, as the sampler passes them.
+
+    Their layer means round to 1, which must not make a multiplier negative: the
+    NaN scores that followed let masked tokens win.
+    """
+    num_rows, vocab_size = 64, 151936
+    torch.manual_seed(0)
+    rows = torch.arange(num_rows, device=DEVICE)
+    logits = torch.randn(num_rows, vocab_size, device=DEVICE) * 4
+    logits[rows, rows * 997] += torch.linspace(10, 30, num_rows, device=DEVICE)
+    kth = logits.topk(40).values[:, -1:]
+    logits = logits.masked_fill(logits < kth, float("-inf")).to(torch.bfloat16)
+    contexts = torch.randint(0, vocab_size, (num_rows, 4), device=DEVICE)
+    temperatures = torch.ones(num_rows, device=DEVICE)
+    watermarked = synthid_text_logits(logits, contexts, PhiloxPRF(KEY), 30)
+    expected = gumbel_sample(watermarked, rows, temperatures, rows, rows, False, False)
+
+    tokens = synthid_text_sample(
+        logits,
+        contexts,
+        KEY,
+        30,
+        torch.zeros(num_rows, dtype=torch.bool, device=DEVICE),
+        rows,
+        temperatures,
+        rows,
+        rows,
+    )
+
+    assert logits[rows, tokens].isfinite().all()
+    assert not watermarked.isnan().any()
+    assert torch.equal(tokens, expected)

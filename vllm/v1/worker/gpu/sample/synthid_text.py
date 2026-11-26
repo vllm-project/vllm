@@ -68,13 +68,16 @@ def _log_multiplier_kernel(
     offset = (row * NUM_CHUNKS + CHUNK) * (1 << CHUNK_BITS)
     patterns = tl.arange(0, 1 << CHUNK_BITS)
     mass = tl.load(mass_ptr + offset + patterns).to(tl.float32)
-    total = tl.sum(mass, axis=0)
     multiplier = tl.full([1 << CHUNK_BITS], 1.0, tl.float32)
     for bit in tl.static_range(CHUNK_BITS):
         if CHUNK * CHUNK_BITS + bit < DEPTH:
-            g = ((patterns >> bit) & 1).to(tl.float32)
-            mean = tl.sum(mass * multiplier * g, axis=0) / total
-            multiplier *= 1 + g - mean
+            g = ((patterns >> bit) & 1) != 0
+            layer_mass = mass * multiplier
+            zero = tl.sum(tl.where(g, 0.0, layer_mass), axis=0)
+            one = tl.sum(tl.where(g, layer_mass, 0.0), axis=0)
+            # 1 + g - G with G = one / (zero + one), written so that a G that
+            # rounds to 1 cannot make the g = 0 multipliers negative.
+            multiplier *= g.to(tl.float32) + zero / (zero + one)
     tl.store(log_multipliers_ptr + offset + patterns, tl.log(multiplier))
 
 
