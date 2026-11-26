@@ -133,8 +133,26 @@ residual to 2D to be free.
 """
 
 
+def fused_add_rms_norm_functional(
+    x: Tensor,
+    x_residual: Tensor,
+    weight: Tensor | None,
+    epsilon: float,
+    variance_size: int | None = None,
+) -> tuple[Tensor, Tensor]:
+    assert variance_size is None
+    assert x.dtype in (torch.float16, torch.bfloat16)
+    if weight is None:
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
+    return torch.ops.vllm_aiter.fused_add_rms_norm(x, x_residual, weight, epsilon)
+
+
 @ir.ops.fused_add_rms_norm.register_impl(
-    "aiter", supports_args=rms_add_no_var_16bit_only, supported=AITER_SUPPORTED
+    "aiter",
+    supports_args=rms_add_no_var_16bit_only,
+    supported=AITER_SUPPORTED,
+    inplace=True,
+    functional_impl=fused_add_rms_norm_functional,
 )
 def fused_add_rms_norm(
     x: Tensor,
@@ -147,7 +165,8 @@ def fused_add_rms_norm(
     assert x.dtype in (torch.float16, torch.bfloat16)
     if weight is None:
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
-    return torch.ops.vllm_aiter.fused_add_rms_norm(x, x_residual, weight, epsilon)
+    torch.ops.vllm_aiter.fused_add_rms_norm_inplace(x, x_residual, weight, epsilon)
+    return x, x_residual
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
@@ -165,9 +184,6 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
     x = x.reshape(-1, hidden_size)
     residual = residual.reshape(-1, hidden_size)
 
-    # TODO can out = x and residual_out = residual to save memory?
-    #  Need to check if the kernel supports in-place residual output
-    #  (if yes set mutates_args and inplace)
     residual_out = torch.empty_like(residual)
     out = torch.empty_like(x)
     rmsnorm2d_fwd_with_add(
@@ -198,6 +214,49 @@ direct_register_aiter_op(
     op_name="fused_add_rms_norm",
     op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
     fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
+)
+
+
+def _rocm_aiter_rmsnorm2d_fwd_with_add_inplace_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    gemma_norm: bool = False,
+) -> None:
+    from aiter import rmsnorm2d_fwd_with_add
+
+    hidden_size = x.shape[-1]
+    x_2d = x.reshape(-1, hidden_size)
+    residual_2d = residual.reshape(-1, hidden_size)
+
+    # The kernel reduces a row before writing it, so the output may alias the
+    # input and the residual output the residual input. It indexes both outputs
+    # densely though, while flattening to 2D is free for strided activations as
+    # well, so those go through a dense temporary and are copied back.
+    out = x_2d if x_2d.is_contiguous() else x_2d.contiguous()
+    residual_out = (
+        residual_2d if residual_2d.is_contiguous() else residual_2d.contiguous()
+    )
+    rmsnorm2d_fwd_with_add(
+        out,  # output
+        out,  # input (aliases the output)
+        residual_out,  # residual input
+        residual_out,  # residual output (aliases the residual input)
+        weight,
+        variance_epsilon,
+        gemma_norm=gemma_norm,
+    )
+    if out is not x_2d:
+        x_2d.copy_(out)
+    if residual_out is not residual_2d:
+        residual_2d.copy_(residual_out)
+
+
+direct_register_aiter_op(
+    op_name="fused_add_rms_norm_inplace",
+    op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_inplace_impl,
+    mutates_args=["x", "residual"],  # These tensors are modified in-place
 )
 
 
