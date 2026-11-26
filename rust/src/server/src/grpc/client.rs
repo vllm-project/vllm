@@ -24,19 +24,19 @@ use vllm_proto::{self as pb, inference_client::InferenceClient};
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
-struct Call {
-    request_id: String,
+struct InflightRequest {
+    external_request_id: String,
     cancel: CancellationToken,
     response: Mutex<Option<Streaming<pb::GenerateResponse>>>,
 }
 
-impl Call {
+impl InflightRequest {
     fn abort(&self) {
         self.cancel.cancel();
         self.response.lock().unwrap().take();
     }
 
-    async fn next(&self) -> Result<Option<pb::GenerateResponse>> {
+    async fn next_response(&self) -> Result<Option<pb::GenerateResponse>> {
         let message = futures::future::poll_fn(|cx| {
             let mut response = self.response.lock().unwrap();
             match response.as_mut() {
@@ -46,23 +46,23 @@ impl Call {
         });
         tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => Err(remote("request aborted")),
-            result = message => result.transpose().map_err(status),
+            _ = self.cancel.cancelled() => Err(remote_error("request aborted")),
+            result = message => result.transpose().map_err(status_to_llm_error),
         }
     }
 }
 
-type Active = Arc<Mutex<HashMap<Uuid, Arc<Call>>>>;
+type InflightRequests = Arc<Mutex<HashMap<Uuid, Arc<InflightRequest>>>>;
 
 /// Token-only client for a vllm.Inference endpoint.
 pub struct GrpcLlm {
     readiness: watch::Receiver<bool>,
-    _probe: AbortOnDropHandle<()>,
+    _readiness_task: AbortOnDropHandle<()>,
     channel: Channel,
     model: String,
     info: LlmInfo,
     health: watch::Sender<bool>,
-    active: Active,
+    inflight: InflightRequests,
 }
 
 impl GrpcLlm {
@@ -75,7 +75,7 @@ impl GrpcLlm {
     pub(super) fn from_channel(channel: Channel, model: String, max_model_len: NonZeroU32) -> Self {
         let (ready, readiness) = watch::channel(false);
         let mut health = tonic_health::pb::health_client::HealthClient::new(channel.clone());
-        let probe = tokio::spawn(async move {
+        let readiness_task = tokio::spawn(async move {
             loop {
                 let mut request = Request::new(tonic_health::pb::HealthCheckRequest {
                     service: "vllm.Inference".to_owned(),
@@ -92,7 +92,7 @@ impl GrpcLlm {
         Self {
             channel,
             readiness,
-            _probe: AbortOnDropHandle::new(probe),
+            _readiness_task: AbortOnDropHandle::new(readiness_task),
             model,
             info: LlmInfo {
                 max_model_len: max_model_len.get(),
@@ -110,27 +110,28 @@ impl GrpcLlm {
                 },
             },
             health: watch::channel(true).0,
-            active: Default::default(),
+            inflight: Default::default(),
         }
     }
 }
 
-fn remote(e: impl ToString) -> Error {
+fn remote_error(error: impl ToString) -> Error {
     Error::Remote {
-        message: e.to_string(),
+        message: error.to_string(),
     }
 }
-fn status(s: Status) -> Error {
-    match s.code() {
+
+fn status_to_llm_error(status: Status) -> Error {
+    match status.code() {
         Code::InvalidArgument | Code::OutOfRange | Code::FailedPrecondition => {
             Error::RemoteInvalidRequest {
-                message: s.to_string(),
+                message: status.to_string(),
             }
         }
         Code::Unavailable | Code::ResourceExhausted => Error::Unavailable {
-            message: s.to_string(),
+            message: status.to_string(),
         },
-        _ => remote(s),
+        _ => remote_error(status),
     }
 }
 
@@ -146,37 +147,47 @@ fn numbers_fit_protobuf_struct(value: &serde_json::Value) -> bool {
     }
 }
 
-fn encode(model: &str, wire_id: Uuid, r: GenerateRequest) -> Result<Request<pb::GenerateRequest>> {
-    let s = r.sampling_params;
+fn to_grpc_request(
+    model: &str,
+    rpc_request_id: Uuid,
+    request: GenerateRequest,
+) -> Result<Request<pb::GenerateRequest>> {
+    let sampling_params = request.sampling_params;
     for (field, present) in [
-        ("multimodal inputs", r.mm_features.is_some()),
-        ("lora_request", r.lora_request.is_some()),
-        ("kv_hints", r.kv_hints.is_some()),
-        ("data_parallel_rank", r.data_parallel_rank.is_some()),
-        ("extra_args", s.extra_args.is_some()),
-        ("structured_outputs", s.structured_outputs.is_some()),
+        ("multimodal inputs", request.mm_features.is_some()),
+        ("lora_request", request.lora_request.is_some()),
+        ("kv_hints", request.kv_hints.is_some()),
+        ("data_parallel_rank", request.data_parallel_rank.is_some()),
+        ("extra_args", sampling_params.extra_args.is_some()),
+        (
+            "structured_outputs",
+            sampling_params.structured_outputs.is_some(),
+        ),
         (
             "logprobs",
-            s.logprobs.is_some() || s.logprob_token_ids.is_some(),
+            sampling_params.logprobs.is_some() || sampling_params.logprob_token_ids.is_some(),
         ),
         (
             "prompt_logprobs",
-            s.prompt_logprobs.is_some()
-                || s.prompt_logprob_start.is_some()
-                || s.prompt_logprob_token_ids.is_some(),
+            sampling_params.prompt_logprobs.is_some()
+                || sampling_params.prompt_logprob_start.is_some()
+                || sampling_params.prompt_logprob_token_ids.is_some(),
         ),
-        ("repetition_detection", s.repetition_detection.is_some()),
-        ("stream_interval", s.stream_interval.is_some()),
+        (
+            "repetition_detection",
+            sampling_params.repetition_detection.is_some(),
+        ),
+        ("stream_interval", sampling_params.stream_interval.is_some()),
         (
             "routed_experts_prompt_start",
-            s.routed_experts_prompt_start != 0,
+            sampling_params.routed_experts_prompt_start != 0,
         ),
     ] {
         if present {
             return Err(Error::Unsupported { field });
         }
     }
-    let kwargs = r
+    let kwargs = request
         .reasoning_parser_kwargs
         .filter(|k| !k.chat_template_kwargs.is_empty())
         .map(|k| {
@@ -189,27 +200,27 @@ fn encode(model: &str, wire_id: Uuid, r: GenerateRequest) -> Result<Request<pb::
             Ok(super::convert::json_to_proto_struct(&value).expect("JSON object"))
         })
         .transpose()?;
-    let mut req = Request::new(pb::GenerateRequest {
+    let mut grpc_request = Request::new(pb::GenerateRequest {
         model: model.into(),
-        request_id: wire_id.to_string(),
+        request_id: rpc_request_id.to_string(),
         prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-            ids: r.prompt_token_ids,
+            ids: request.prompt_token_ids,
         })),
-        temperature: Some(s.temperature),
+        temperature: Some(sampling_params.temperature),
         sampling: Some(pb::RandomSampling {
             num_sequences: 1,
-            top_p: Some(s.top_p),
-            top_k: Some(s.top_k),
-            min_p: Some(s.min_p),
-            seed: s.seed,
+            top_p: Some(sampling_params.top_p),
+            top_k: Some(sampling_params.top_k),
+            min_p: Some(sampling_params.min_p),
+            seed: sampling_params.seed,
         }),
         decoding: Some(pb::DecodingParameters {
-            presence_penalty: s.presence_penalty,
-            frequency_penalty: s.frequency_penalty,
-            repetition_penalty: s.repetition_penalty,
-            allowed_token_ids: s.allowed_token_ids.unwrap_or_default(),
-            logit_bias: s.logit_bias.unwrap_or_default(),
-            bad_words_token_ids: s
+            presence_penalty: sampling_params.presence_penalty,
+            frequency_penalty: sampling_params.frequency_penalty,
+            repetition_penalty: sampling_params.repetition_penalty,
+            allowed_token_ids: sampling_params.allowed_token_ids.unwrap_or_default(),
+            logit_bias: sampling_params.logit_bias.unwrap_or_default(),
+            bad_words_token_ids: sampling_params
                 .bad_words_token_ids
                 .unwrap_or_default()
                 .into_iter()
@@ -218,15 +229,15 @@ fn encode(model: &str, wire_id: Uuid, r: GenerateRequest) -> Result<Request<pb::
             ..Default::default()
         }),
         stopping: Some(pb::StoppingCriteria {
-            max_new_tokens: s.max_tokens,
-            min_new_tokens: s.min_tokens,
-            stop_token_ids: s.stop_token_ids,
-            ignore_eos: s.eos_token_id.is_none(),
-            thinking_token_budget: s
+            max_new_tokens: sampling_params.max_tokens,
+            min_new_tokens: sampling_params.min_tokens,
+            stop_token_ids: sampling_params.stop_token_ids,
+            ignore_eos: sampling_params.eos_token_id.is_none(),
+            thinking_token_budget: sampling_params
                 .thinking_token_budget
                 .map(i64::try_from)
                 .transpose()
-                .map_err(remote)?,
+                .map_err(remote_error)?,
             ..Default::default()
         }),
         response: Some(pb::ResponseOptions {
@@ -235,67 +246,67 @@ fn encode(model: &str, wire_id: Uuid, r: GenerateRequest) -> Result<Request<pb::
             prompt_token_ids: true,
             ..Default::default()
         }),
-        priority: r.priority,
-        session_id: r.session_id,
-        watermarking: Some(s.watermarking),
+        priority: request.priority,
+        session_id: request.session_id,
+        watermarking: Some(sampling_params.watermarking),
         kv: Some(pb::KvCacheParameters {
-            cache_salt: r.cache_salt.unwrap_or_default(),
-            bypass_prefix_cache: s.skip_reading_prefix_cache.unwrap_or(false),
+            cache_salt: request.cache_salt.unwrap_or_default(),
+            bypass_prefix_cache: sampling_params.skip_reading_prefix_cache.unwrap_or(false),
             ..Default::default()
         }),
-        engine_reasoning_gate: (r.reasoning_ended.is_some() || kwargs.is_some()).then_some(
+        engine_reasoning_gate: (request.reasoning_ended.is_some() || kwargs.is_some()).then_some(
             pb::EngineReasoningGate {
-                reasoning_ended: r.reasoning_ended,
+                reasoning_ended: request.reasoning_ended,
                 chat_template_kwargs: kwargs,
             },
         ),
         ..Default::default()
     });
-    for (key, value) in r.trace_headers.into_iter().flatten() {
+    for (key, value) in request.trace_headers.into_iter().flatten() {
         let key =
             tonic::metadata::MetadataKey::<tonic::metadata::Ascii>::from_bytes(key.as_bytes())
-                .map_err(remote)?;
-        req.metadata_mut().insert(key, value.parse().map_err(remote)?);
+                .map_err(remote_error)?;
+        grpc_request.metadata_mut().insert(key, value.parse().map_err(remote_error)?);
     }
-    Ok(req)
+    Ok(grpc_request)
 }
 
-struct Guard {
-    key: Uuid,
-    call: Arc<Call>,
-    active: Active,
+struct RequestGuard {
+    rpc_request_id: Uuid,
+    call: Arc<InflightRequest>,
+    inflight: InflightRequests,
 }
-impl Drop for Guard {
+impl Drop for RequestGuard {
     fn drop(&mut self) {
-        self.active.lock().unwrap().remove(&self.key);
+        self.inflight.lock().unwrap().remove(&self.rpc_request_id);
     }
 }
 
-fn finish(f: &pb::FinishInfo) -> Result<FinishReason> {
-    use pb::finish_info::{FinishReason as F, StopReason as S};
-    match F::try_from(f.finish_reason) {
-        Ok(F::Length) => Ok(FinishReason::Length),
-        Ok(F::Aborted) => Ok(FinishReason::Abort),
-        Ok(F::Stop) => Ok(FinishReason::Stop(match &f.stop_reason {
-            Some(S::StopTokenId(id)) => Some(StopReason::TokenId(*id)),
-            Some(S::StopString(s)) => Some(StopReason::Text(s.clone())),
+fn finish_reason_from_proto(info: &pb::FinishInfo) -> Result<FinishReason> {
+    use pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
+    match PbFinishReason::try_from(info.finish_reason) {
+        Ok(PbFinishReason::Length) => Ok(FinishReason::Length),
+        Ok(PbFinishReason::Aborted) => Ok(FinishReason::Abort),
+        Ok(PbFinishReason::Stop) => Ok(FinishReason::Stop(match &info.stop_reason {
+            Some(PbStopReason::StopTokenId(id)) => Some(StopReason::TokenId(*id)),
+            Some(PbStopReason::StopString(s)) => Some(StopReason::Text(s.clone())),
             _ => None,
         })),
-        _ => Err(remote("invalid worker finish reason")),
+        _ => Err(remote_error("invalid worker finish reason")),
     }
 }
 
 #[try_stream]
-async fn outputs(
+async fn generate_outputs_from_proto(
     request_id: String,
     frames: impl Stream<Item = Result<pb::GenerateResponse>> + Send,
     mut y: TryYielder<GenerateOutput, Error>,
 ) -> Result<()> {
     futures::pin_mut!(frames);
-    let first = frames.try_next().await?.ok_or_else(|| remote("missing prompt frame"))?;
-    let prompt = first.prompt_info.ok_or_else(|| remote("missing prompt info"))?;
+    let first = frames.try_next().await?.ok_or_else(|| remote_error("missing prompt frame"))?;
+    let prompt = first.prompt_info.ok_or_else(|| remote_error("missing prompt info"))?;
     if first.outputs.is_some() || prompt.token_ids.len() != prompt.num_prompt_tokens as usize {
-        return Err(remote("invalid prompt frame"));
+        return Err(remote_error("invalid prompt frame"));
     }
     let mut prompt = Some(Box::new(GeneratePromptInfo {
         prompt_token_ids: prompt.token_ids.into(),
@@ -304,23 +315,23 @@ async fn outputs(
     }));
     let mut output_tokens = 0u64;
     while let Some(frame) = frames.try_next().await? {
-        let out = frame.outputs.ok_or_else(|| remote("missing sequence output"))?;
+        let out = frame.outputs.ok_or_else(|| remote_error("missing sequence output"))?;
         if frame.prompt_info.is_some()
             || out.index != 0
             || out.token_ids.len() != out.num_tokens as usize
         {
-            return Err(remote("invalid token delta"));
+            return Err(remote_error("invalid token delta"));
         }
         output_tokens += u64::from(out.num_tokens);
         let terminal = out.finish_info.as_ref();
-        let finish_reason = terminal.map(finish).transpose()?;
+        let finish_reason = terminal.map(finish_reason_from_proto).transpose()?;
         // A worker can send a terminal message followed by a non-OK RPC status.
         if let Some(info) = terminal {
             if frames.try_next().await?.is_some() {
-                return Err(remote("output after finish"));
+                return Err(remote_error("output after finish"));
             }
             if u64::from(info.num_output_tokens) != output_tokens {
-                return Err(remote(format!(
+                return Err(remote_error(format!(
                     "worker reported {} output tokens, streamed token count was {output_tokens}",
                     info.num_output_tokens
                 )));
@@ -350,7 +361,7 @@ async fn outputs(
             return Ok(());
         }
     }
-    Err(remote("generation ended without finish info"))
+    Err(remote_error("generation ended without finish info"))
 }
 
 #[tonic::async_trait]
@@ -366,48 +377,50 @@ impl Llm for GrpcLlm {
     }
     async fn generate_n(
         &self,
-        mut r: GenerateRequest,
+        mut request: GenerateRequest,
         n: NonZeroU32,
     ) -> Result<Vec<BoxGenerateOutputStream>> {
         if n.get() != 1 {
             return Err(Error::Unsupported { field: "n > 1" });
         }
-        let id = std::mem::take(&mut r.request_id);
-        let key = Uuid::new_v4();
-        let req = encode(&self.model, key, r)?;
-        let call = Arc::new(Call {
-            request_id: id,
+        let external_request_id = std::mem::take(&mut request.request_id);
+        let rpc_request_id = Uuid::new_v4();
+        let grpc_request = to_grpc_request(&self.model, rpc_request_id, request)?;
+        let call = Arc::new(InflightRequest {
+            external_request_id,
             cancel: CancellationToken::new(),
             response: Mutex::new(None),
         });
-        self.active.lock().unwrap().insert(key, call.clone());
-        let guard = Guard {
-            key,
+        self.inflight.lock().unwrap().insert(rpc_request_id, call.clone());
+        let guard = RequestGuard {
+            rpc_request_id,
             call,
-            active: self.active.clone(),
+            inflight: self.inflight.clone(),
         };
         let mut client = InferenceClient::new(self.channel.clone());
-        let res = tokio::select! {
-            _ = guard.call.cancel.cancelled() => return Err(remote("request aborted")),
-            response = client.generate_stream(req) => response.map_err(status)?,
+        let response = tokio::select! {
+            _ = guard.call.cancel.cancelled() => return Err(remote_error("request aborted")),
+            response = client.generate_stream(grpc_request) => response.map_err(status_to_llm_error)?,
         };
         {
             let mut stream = guard.call.response.lock().unwrap();
             if guard.call.cancel.is_cancelled() {
-                return Err(remote("request aborted"));
+                return Err(remote_error("request aborted"));
             }
-            *stream = Some(res.into_inner());
+            *stream = Some(response.into_inner());
         }
-        let request_id = guard.call.request_id.clone();
+        let external_request_id = guard.call.external_request_id.clone();
         let frames = futures::stream::try_unfold(guard, |guard| async move {
-            let frame = guard.call.next().await?;
+            let frame = guard.call.next_response().await?;
             Ok(frame.map(|frame| (frame, guard)))
         });
-        Ok(vec![outputs(request_id, frames).boxed()])
+        Ok(vec![
+            generate_outputs_from_proto(external_request_id, frames).boxed(),
+        ])
     }
-    async fn abort(&self, ids: &[String]) -> Result<()> {
-        for call in self.active.lock().unwrap().values() {
-            if ids.is_empty() || ids.contains(&call.request_id) {
+    async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        for call in self.inflight.lock().unwrap().values() {
+            if external_ids.is_empty() || external_ids.contains(&call.external_request_id) {
                 call.abort();
             }
         }
@@ -462,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_count_must_match_streamed_tokens() {
         let frames = futures::stream::iter(terminal_frames(2));
-        let mut decoded = outputs("test".into(), frames).boxed();
+        let mut decoded = generate_outputs_from_proto("test".into(), frames).boxed();
         assert!(
             matches!(decoded.next().await, Some(Err(Error::Remote { message }))
             if message.contains("token count"))
@@ -471,12 +484,10 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_frame_requires_successful_rpc_status() {
-        let frames = futures::stream::iter(
-            terminal_frames(1)
-                .into_iter()
-                .chain([Err(status(Status::unavailable("worker stopped")))]),
-        );
-        let mut decoded = outputs("test".into(), frames).boxed();
+        let frames = futures::stream::iter(terminal_frames(1).into_iter().chain([Err(
+            status_to_llm_error(Status::unavailable("worker stopped")),
+        )]));
+        let mut decoded = generate_outputs_from_proto("test".into(), frames).boxed();
         let error = decoded
             .next()
             .await
