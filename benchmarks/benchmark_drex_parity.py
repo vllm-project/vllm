@@ -132,7 +132,8 @@ def _load_reference(reference_dir: str):
         reference_dir: Snapshot holding ``code/kev``, ``head.pt`` and shards.
 
     Returns:
-        The reference ``api`` module and the checkpoint ``load`` callable.
+        The reference ``api`` module, the checkpoint ``load`` callable, and the
+        serving packing limits to pass to ``DecisionModel.encode``.
 
     Raises:
         SystemExit: The snapshot has no importable ``code/kev`` package.
@@ -152,7 +153,15 @@ def _load_reference(reference_dir: str):
     spec.loader.exec_module(package)
     api = importlib.import_module("drex_reference.api")
     checkpoint = importlib.import_module("drex_reference.checkpoint")
-    return api, checkpoint.load
+    model_module = importlib.import_module("drex_reference.model")
+    # `encode` defaults to the training caps; the deployed reference packs
+    # within the serving window, which is what vLLM mirrors.
+    limits = {
+        name: getattr(model_module, f"SERVE_{name.upper()}")
+        for name in ("max_state", "max_branch")
+        if hasattr(model_module, f"SERVE_{name.upper()}")
+    }
+    return api, checkpoint.load, limits
 
 
 def main() -> int:
@@ -167,7 +176,7 @@ def main() -> int:
     parser.add_argument("--max-diff", type=float, default=1e-3)
     args = parser.parse_args()
 
-    ref_api, ref_load = _load_reference(args.reference_dir)
+    ref_api, ref_load, encode_limits = _load_reference(args.reference_dir)
 
     dtype = getattr(torch, args.dtype) if args.dtype else None
     tokenizer, model = ref_load(args.reference_dir, device=args.device, dtype=dtype)
@@ -184,7 +193,8 @@ def main() -> int:
         labels = case.pop("labels", {})
         reference_request = ref_api.SystemOneRequest(**case)
         record, meta = ref_api.to_record(reference_request)
-        reference = model.probs(model.encode(tokenizer, record))
+        packed = model.encode(tokenizer, record, **encode_limits)
+        reference = model.probs(packed)
 
         answers = _post(args.url, args.model, case)
         for meta_q, probs in zip(meta, reference):
