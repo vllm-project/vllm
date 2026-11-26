@@ -566,8 +566,10 @@ mod tests {
             crate::Error::UntrustedRequestChatTemplate
         ));
         let error = prepare(NATIVE_CONFIG).await;
-        assert!(error.is_request_validation_error());
-        assert_eq!(error.param(), Some("chat_template"));
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::invalid_param("chat_template")
+        );
         expect_test::expect!["chat_template is not supported by this chat renderer"]
             .assert_eq(&error.to_report_string());
     }
@@ -728,12 +730,75 @@ mod tests {
                 .unwrap(),
         ];
         for error in errors {
-            assert!(error.is_request_validation_error());
+            assert!(error.kind().is_invalid_request());
             assert_eq!(
                 error.to_report_string(),
                 "this request needs a tokenizer, which is not loaded when \
                  `--skip-tokenizer-init` is set"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_prepare_short_circuits_invalid_text_params_before_rendering() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"llama"}"#,
+            r#"{"chat_template":"{{ messages[0].content }}"}"#,
+        );
+        let processor = crate::ChatRequestProcessor::new(Arc::new(backend), None, None);
+
+        // Include an untrusted per-request template so reaching the renderer
+        // would fail with `UntrustedRequestChatTemplate` instead of the shared
+        // `vllm-text` parameter error.
+        let base_request = || {
+            let mut request = request_with_user_text("hello");
+            request.chat_options.chat_template = Some("{{ messages[0].content }}!".to_string());
+            request
+        };
+
+        type Mutate = fn(&mut ChatRequest);
+        let cases: &[(&str, Mutate, crate::ErrorKind)] = &[
+            (
+                "temperature",
+                |r| r.sampling_params.temperature = Some(3.0),
+                crate::ErrorKind::invalid_param("temperature"),
+            ),
+            (
+                "max_tokens",
+                |r| r.sampling_params.max_tokens = Some(0),
+                crate::ErrorKind::invalid_param("max_tokens"),
+            ),
+            (
+                "min_tokens > max_tokens",
+                |r| {
+                    r.sampling_params.min_tokens = Some(10);
+                    r.sampling_params.max_tokens = Some(5);
+                },
+                crate::ErrorKind::invalid_request(),
+            ),
+            (
+                "logprobs",
+                |r| r.sampling_params.logprobs = Some(-2),
+                crate::ErrorKind::invalid_param("logprobs"),
+            ),
+            (
+                "stop",
+                |r| r.decode_options.stop_strings = Some(vec![String::new()]),
+                crate::ErrorKind::invalid_param("stop"),
+            ),
+            (
+                "cache_salt",
+                |r| r.cache_salt = Some(String::new()),
+                crate::ErrorKind::invalid_param("cache_salt"),
+            ),
+        ];
+
+        for &(label, mutate, expected_kind) in cases {
+            let mut request = base_request();
+            mutate(&mut request);
+            let error = processor.prepare_for_tokenization(request).await.expect_err(label);
+            assert_eq!(error.kind(), expected_kind, "{label}: {error}");
         }
     }
 }
