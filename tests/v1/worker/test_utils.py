@@ -1581,8 +1581,7 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         attention_config=SimpleNamespace(hisparse_config=None),
     )
     config.cache_config.kv_cache_layout = layout.name
-    budget = 4 * 256
-    kv_config = get_kv_cache_config_from_groups(config, groups, budget)
+    kv_config = get_kv_cache_config_from_groups(config, groups, num_blocks=4)
     assert kv_config.num_blocks == 4
     pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
     pages = {name: pages[name] for name in reversed(names)}
@@ -1590,7 +1589,7 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     bind_kv_cache(pages, ctx, runner_pages)
     initialize_replayssm_ring_trackers(kv_config, ctx)
     # ROCm rounds the shared allocation up to a 4 KiB RDMA page.
-    expected_storage_size = 4096 if current_platform.is_rocm() else budget
+    expected_storage_size = 4096 if current_platform.is_rocm() else 4 * 256
     assert pages[names[0]].untyped_storage().nbytes() == expected_storage_size
     for mixer in mixers:
         assert len(mixer.kv_cache) == 5
@@ -1754,7 +1753,7 @@ def test_bind_kv_cache(default_vllm_config):
 def test_bind_kv_cache_non_attention(default_vllm_config):
     from vllm.model_executor.layers.attention import Attention
 
-    # example from Jamba PP=2
+    # attention layers of a hybrid model on one PP rank
     ctx = {
         "model.layers.20.attn": Attention(32, 128, 0.1, prefix="model.layers.20.attn"),
         "model.layers.28.attn": Attention(32, 128, 0.1, prefix="model.layers.28.attn"),
