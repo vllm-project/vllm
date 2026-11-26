@@ -71,6 +71,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers impo
     OnComputeStoreHandler,
     OnHandoffStoreHandler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.boundary import (  # noqa: E501
+    build_aligned_boundary_store_jobs,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
@@ -762,10 +765,13 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
-    handler = _on_handoff(scheduler)
     sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
-    handler._build_aligned_boundary_store_jobs(
-        {"req": [(1, 98, 16)]}, scheduler._req_status, sink
+    build_aligned_boundary_store_jobs(
+        scheduler.config,
+        scheduler._events_tracker,
+        {"req": [(1, 98, 16)]},
+        scheduler._req_status,
+        sink,
     )
     [job_id] = sink.jobs
     job = sink.jobs[job_id]
@@ -1472,8 +1478,12 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
         generate_store_output(keys)
     )
     sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
-    _on_handoff(scheduler)._build_aligned_boundary_store_jobs(
-        {"req": [(1, 77, 16)]}, scheduler._req_status, sink
+    build_aligned_boundary_store_jobs(
+        scheduler.config,
+        scheduler._events_tracker,
+        {"req": [(1, 77, 16)]},
+        scheduler._req_status,
+        sink,
     )
     [job_id] = sink.jobs
     stored.update(scheduler._job_statuses[job_id].keys)
@@ -7389,13 +7399,25 @@ def test_sparse_mamba_decode_checkpoint_roundtrip(
     """Resume the last retained decode state after clearing GPU prefix keys."""
     engine = _make_sparse_mamba_offload_engine(prompt_only)
     try:
+        connector = engine.connector
+        assert isinstance(connector, OffloadingConnector)
         producer = _finish_sparse_mamba_producer(engine, write_limit, max_tokens)
+        finished_decode_trigger = None
         for _ in range(4):
             if not engine.has_requests():
                 break
             output = engine.schedule()
             meta = output.kv_connector_metadata
             assert isinstance(meta, OffloadingConnectorMetadata)
+            for job_id, job in meta.store_jobs.items():
+                if (
+                    isinstance(job.src_spec, GPULoadStoreSpec)
+                    and job.src_spec.group_sizes == [0, 1]
+                    and job.src_spec.block_indices == [0, 5]
+                ):
+                    finished_decode_trigger = connector.scheduler._job_statuses[
+                        job_id
+                    ].trigger
             engine.update_from_output(
                 output,
                 create_model_runner_output(
@@ -7407,9 +7429,9 @@ def test_sparse_mamba_decode_checkpoint_roundtrip(
                 ),
             )
         assert not engine.has_requests()
+        if external_tokens == 96:
+            assert finished_decode_trigger is StoreTrigger.ON_COMPUTE
 
-        connector = engine.connector
-        assert isinstance(connector, OffloadingConnector)
         manager = connector.scheduler.manager
         assert isinstance(manager, CPUOffloadingManager)
         context = ReqContext(req_id="probe")
