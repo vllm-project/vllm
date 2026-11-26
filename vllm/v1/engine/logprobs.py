@@ -56,10 +56,9 @@ class LogprobsProcessor:
         num_prompt_logprobs = sampling_params.prompt_logprobs
         prompt_logprobs = None
         if num_prompt_logprobs is not None:
-            prompt_logprobs = create_prompt_logprobs(sampling_params.flat_logprobs)
-            # Positions up to prompt_logprob_start are not scored.
-            for _ in range(sampling_params.prompt_logprob_start or 0):
-                prompt_logprobs.append(None)
+            prompt_logprobs = create_prompt_logprobs(
+                sampling_params.flat_logprobs, sampling_params.prompt_logprob_start or 0
+            )
         return cls(
             tokenizer=tokenizer,
             cumulative_logprob=(None if num_logprobs is None else 0.0),
