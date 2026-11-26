@@ -195,6 +195,35 @@ async def test_native_hf_renderer_truncated_echo(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "renderer_mode",
+    ["hf", "deepseek_v32", "deepseek_v4", "deepseek_v41", "kimi_k3", "inkling"],
+)
+async def test_native_hf_renderer_exact_fit_echo_keeps_text(
+    hf_renderer_config, renderer_mode
+):
+    """A prompt that fits `truncate_prompt_tokens` exactly is not truncated,
+    so its echo is the text as sent, not decoded from its (lossy) tokens."""
+    config, tokenizer = hf_renderer_config
+    renderer = RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)
+    prompt = "<bos>  Hello world"
+    token_ids = tokenizer.encode(prompt)
+    params = TokenizeParams(
+        max_total_tokens=32,
+        truncate_prompt_tokens=len(token_ids),
+        needs_detokenization=True,
+    )
+    try:
+        (sync,) = renderer.render_cmpl([{"prompt": prompt}], params)
+        (asynchronous,) = await renderer.render_cmpl_async([{"prompt": prompt}], params)
+        for result in (sync, asynchronous):
+            assert result["prompt"] == prompt
+            assert result["prompt_token_ids"] == token_ids
+    finally:
+        renderer.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("truncate_limit", [None, 8])
 async def test_hf_renderer_padding_keeps_cached_text(
     hf_renderer_config, truncate_limit
