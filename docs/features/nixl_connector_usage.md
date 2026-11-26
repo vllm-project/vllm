@@ -4,6 +4,10 @@ NixlConnector is a high-performance KV cache transfer connector for vLLM's disag
 
 `NixlPullConnector` is the canonical name for the pull connector; `NixlConnector` remains an alias, including inside `MultiConnector`. Both names use the same configuration checks and defaults.
 
+NIXL validates incoming receive metadata before admitting a request. Invalid
+metadata returns a request validation error before the connector starts
+tracking or allocating resources for the transfer.
+
 For feature compatibility details (supported model architectures, TP configurations, and feature interactions), see the [NixlConnector Compatibility Matrix](nixl_connector_compatibility.md).
 
 ## Prerequisites

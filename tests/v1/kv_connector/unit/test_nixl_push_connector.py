@@ -1966,14 +1966,14 @@ def test_shared_region_reads_once_per_group_from_one_descriptor_list():
     )
     assert (pairs.local, pairs.group) == ([0, 0, 1], [0, 1, 0])
     desc_ids = worker._compute_desc_ids(
-        block_ids=[[1, 2], [5]],
+        block_ids=[[1, 2], [3]],
         dst_num_blocks=10,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
         region_num_blocks=[4, 7],
         pairs=(pairs.local, pairs.group),
     )
-    assert desc_ids.tolist() == [1, 2, 5, 6, 5]
+    assert desc_ids.tolist() == [1, 2, 5, 6, 3]
 
 
 def test_layer_metadata_round_trip():

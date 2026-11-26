@@ -637,32 +637,32 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Get descs ids. Pair k reads remote region pairs.remote[k] into local
-        # region pairs.local[k], at its cache group's blocks (its own regions'
-        # blocks for region-mapped reads).
-        remote_block_descs_ids = self._compute_desc_ids(
-            block_ids=remote_block_ids,
-            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-            block_size_ratio=None,
-            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=remote_region_num_blocks,
-            pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
-            ssm_regions=pairs.remote_ssm_regions,
-        )
-        local_block_descs_ids = self._compute_desc_ids(
-            block_ids=local_block_ids,
-            dst_num_blocks=self.dst_num_blocks[self.engine_id],
-            block_size_ratio=block_size_ratio,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=self.region_num_blocks or None,
-            pairs=(pairs.local, pairs.local if by_region else pairs.group),
-        )
-
-        assert len(local_block_descs_ids) == len(remote_block_descs_ids)
-
-        # Prepare transfer with Nixl.
         handle = None
         try:
+            # Get descs ids. Pair k reads remote region pairs.remote[k] into local
+            # region pairs.local[k], at its cache group's blocks (its own regions'
+            # blocks for region-mapped reads).
+            remote_block_descs_ids = self._compute_desc_ids(
+                block_ids=remote_block_ids,
+                dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+                block_size_ratio=None,
+                physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+                region_num_blocks=remote_region_num_blocks,
+                pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
+                ssm_regions=pairs.remote_ssm_regions,
+            )
+            local_block_descs_ids = self._compute_desc_ids(
+                block_ids=local_block_ids,
+                dst_num_blocks=self.dst_num_blocks[self.engine_id],
+                block_size_ratio=block_size_ratio,
+                physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+                region_num_blocks=self.region_num_blocks or None,
+                pairs=(pairs.local, pairs.local if by_region else pairs.group),
+            )
+
+            if len(local_block_descs_ids) != len(remote_block_descs_ids):
+                raise ValueError("NIXL local and remote descriptor counts differ")
+
             if self._mixed_mem_types:
                 self._read_blocks_mixed(
                     request_id=request_id,

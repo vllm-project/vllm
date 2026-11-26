@@ -308,7 +308,7 @@ def create_request(
             do_remote_decode=False,
             remote_engine_id="my-engine-id",
             remote_request_id=f"prefill-{request_id}",
-            remote_block_ids=list(range(num_remote_blocks)),
+            remote_block_ids=(list(range(num_remote_blocks)),),
             remote_host="my-host",
             remote_port=1234,
             tp_size=1,

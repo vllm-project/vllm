@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -25,8 +26,75 @@ GET_META_MSG = b"get_meta_msg"
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 
-# Lease renewal notification, D worker -> P worker: HB_NOTIF_PREFIX + "req1,req2".
+# Lease renewal notification, D worker -> P worker.
 HB_NOTIF_PREFIX = "HB:"
+
+_REMOTE_STRING_FIELDS = (
+    "remote_engine_id",
+    "remote_request_id",
+    "remote_host",
+)
+
+# int32 bounds used by _compute_desc_ids (np.asarray(..., dtype=np.int32)).
+_I32_MAX = 2**31 - 1
+
+
+def _valid_block_ids(block_ids: object) -> bool:
+    """Return True when *block_ids* is a valid `BlockIds` value.
+
+    Checks structure (sequence of sequences of ints), non-negativity, and
+    that every element fits in int32 — the dtype used by
+    `_compute_desc_ids`.  Rejects `None`, non-int entries, negatives,
+    and values that would overflow `np.int32`.
+    """
+    if not isinstance(block_ids, (list, tuple)):
+        return False
+    for group in block_ids:
+        if not isinstance(group, (list, tuple)):
+            return False
+        for bid in group:
+            if not isinstance(bid, int) or isinstance(bid, bool):
+                return False
+            if bid < 0 or bid > _I32_MAX:
+                return False
+    return True
+
+
+def validate_recv_params(params: dict[str, Any], *, require_blocks: bool) -> None:
+    """Validate peer metadata before the scheduler can promise any remote KV."""
+    for key in _REMOTE_STRING_FIELDS:
+        value = params.get(key)
+        if not isinstance(value, str) or not value:
+            raise VLLMValidationError(
+                f"NIXL requires a nonempty {key}.", parameter="kv_transfer_params"
+            )
+    port = params.get("remote_port")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise VLLMValidationError(
+            "NIXL requires a valid remote port.", parameter="kv_transfer_params"
+        )
+    if require_blocks and not _valid_block_ids(params.get("remote_block_ids")):
+        raise VLLMValidationError(
+            "NIXL requires valid remote block IDs.", parameter="kv_transfer_params"
+        )
+    if not require_blocks and "tp_size" not in params:
+        raise VLLMValidationError(
+            "NIXL push requires tp_size.", parameter="kv_transfer_params"
+        )
+    for key in ("tp_size", "dcp_size", "pp_size"):
+        if key in params and (type(params[key]) is not int or params[key] <= 0):
+            raise VLLMValidationError(
+                f"NIXL requires a positive integer {key}.",
+                parameter="kv_transfer_params",
+            )
+    tokens = params.get("remote_num_tokens")
+    if tokens is not None and (type(tokens) is not int or tokens < 0):
+        raise VLLMValidationError(
+            "NIXL requires a nonnegative remote token count.",
+            parameter="kv_transfer_params",
+        )
+
+
 #
 # NIXL Connector Version
 #

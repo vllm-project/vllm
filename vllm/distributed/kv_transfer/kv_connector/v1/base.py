@@ -665,6 +665,10 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def validate_request(self, request: "Request") -> None:
+        """Validate connector inputs before any connector records the request."""
+        return
+
     def on_new_request(self, request: "Request") -> None:
         """Called by the scheduler when a new request is added.
 

@@ -3206,6 +3206,8 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if self.connector is not None:
+                self.connector.validate_request(request)
             if request.resumable:
                 request.streaming_queue = deque()
             if self.connector is not None:

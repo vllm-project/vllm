@@ -223,6 +223,11 @@ class _RemoteStage:
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
 
 
+def _check_block_id_bounds(blocks: np.ndarray, limit: int) -> None:
+    if blocks.min() < 0 or blocks.max() >= limit:
+        raise ValueError("NIXL block ID is outside the registered region")
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -287,13 +292,17 @@ class NixlBaseConnectorWorker:
         # All-attention fast path.
         if num_ssm_regions == 0:
             regions, keys = pairs
-            offsets = region_offsets[np.asarray(regions, dtype=np.int64)]
+            region_indices = np.asarray(regions, dtype=np.int64)
+            offsets = region_offsets[region_indices]
+            limits = np.asarray(region_num_blocks)[region_indices]
             keys_array = np.asarray(keys, dtype=np.int64)
             desc_ids = []
             for key in np.unique(keys_array).tolist():
                 blocks = np.asarray(block_ids[key], dtype=np.int64)
                 if blocks.size:
-                    key_offsets = offsets[keys_array == key]
+                    key_mask = keys_array == key
+                    _check_block_id_bounds(blocks, int(limits[key_mask].min()))
+                    key_offsets = offsets[key_mask]
                     desc_ids.append((key_offsets[:, None] + blocks[None, :]).ravel())
             if not desc_ids:
                 return np.array([], dtype=np.int64)
@@ -327,8 +336,11 @@ class NixlBaseConnectorWorker:
                 continue
             spec_type = self._group_spec_types[i]
             if _is_attention_spec(spec_type):
+                limit = min(region_num_blocks[region] for region in group_regions)
+                _check_block_id_bounds(blocks, limit)
                 desc_ids = region_offsets[group_regions][:, None] + blocks[None, :]
             elif _is_ssm_spec(spec_type):
+                _check_block_id_bounds(blocks, logical_blocks)
                 if i == self._ple_group_index:
                     ssm_desc_ids = np.array([num_ssm_descs], dtype=np.int64)
                 else:

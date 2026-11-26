@@ -27,8 +27,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
     NixlHandshakePayload,
     ReqId,
+    validate_recv_params,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -200,6 +202,29 @@ class NixlBaseConnectorScheduler:
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+
+    def validate_request(self, request: "Request") -> None:
+        """Validate a new request before recording any connector state."""
+        params = request.kv_transfer_params
+        if params is None:
+            return
+        if not isinstance(params, dict):
+            raise VLLMValidationError(
+                "NIXL transfer parameters must be an object.",
+                parameter="kv_transfer_params",
+            )
+        if params.get("do_remote_prefill"):
+            # Pre-admission aborts may arrive before the producer has any KV.
+            if not request.abort_immediately or params.get("remote_engine_id"):
+                validate_recv_params(
+                    params, require_blocks=self._TRANSFER_MODE == "pull"
+                )
+        elif (
+            self.is_bidirectional_kv_xfer_enabled
+            and params.get("do_remote_decode")
+            and params.get("remote_block_ids")
+        ):
+            validate_recv_params(params, require_blocks=True)
 
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
