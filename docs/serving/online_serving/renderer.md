@@ -26,6 +26,14 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## DeepSeek tool-schema rendering
+
+For DeepSeek V4 and V4.1, the Python and Rust frontends include
+`"description": null` in the rendered tool schema when a tool omits its
+`description`. An explicitly empty description stays `""`. The optional
+`strict` field is omitted when unset and preserves explicit `true` or `false`.
+These fields are part of the prompt and affect its token IDs.
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model
