@@ -66,13 +66,13 @@ pub struct GrpcLlm {
 }
 
 impl GrpcLlm {
-    /// Connect lazily to a worker with the given served model and context limit.
-    pub fn new(url: &str, model: String, max_model_len: NonZeroU32) -> anyhow::Result<Self> {
+    /// Connect lazily to a worker using model information supplied by the caller.
+    pub fn new(url: &str, model: String, info: LlmInfo) -> anyhow::Result<Self> {
         let channel = Endpoint::from_shared(url.to_owned())?.connect_lazy();
-        Ok(Self::from_channel(channel, model, max_model_len))
+        Ok(Self::from_channel(channel, model, info))
     }
 
-    pub(super) fn from_channel(channel: Channel, model: String, max_model_len: NonZeroU32) -> Self {
+    pub(super) fn from_channel(channel: Channel, model: String, info: LlmInfo) -> Self {
         let (ready, readiness) = watch::channel(false);
         let mut health = tonic_health::pb::health_client::HealthClient::new(channel.clone());
         let readiness_task = tokio::spawn(async move {
@@ -94,21 +94,7 @@ impl GrpcLlm {
             readiness,
             _readiness_task: AbortOnDropHandle::new(readiness_task),
             model,
-            info: LlmInfo {
-                max_model_len: max_model_len.get(),
-                model_dtype: None,
-                supports_lora: false,
-                allow_missing_mm_embeddings: false,
-                vllm_version: "unknown".to_owned(),
-                fingerprint: vllm_llm::LlmFingerprint {
-                    vllm_version: "unknown".to_owned(),
-                    config_hash: None,
-                    tensor_parallel_size: 1,
-                    pipeline_parallel_size: 1,
-                    data_parallel_size: 1,
-                    enable_expert_parallel: false,
-                },
-            },
+            info,
             health: watch::channel(true).0,
             inflight: Default::default(),
         }

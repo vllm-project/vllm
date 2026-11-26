@@ -75,6 +75,7 @@ use super::{
 };
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::model_names::ServedModelNames;
+use crate::remote_llm_info;
 use crate::render::RenderState;
 use crate::state::AppState;
 use crate::tls;
@@ -911,7 +912,7 @@ async fn grpc_llm_round_trips_through_inference_to_engine_core() {
     .await;
     let (channel, server_task) =
         start_grpc_test_server(inference, control, health, Default::default()).await;
-    let llm = GrpcLlm::from_channel(channel, "test-model".into(), 512.try_into().unwrap());
+    let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
     let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(
@@ -2256,7 +2257,7 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
 #[serial]
 async fn grpc_llm_abort_reaches_engine_while_output_is_idle() {
     let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
-    let llm = GrpcLlm::from_channel(channel, "test-model".into(), 512.try_into().unwrap());
+    let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
     let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), submitted_rx)
         .await
@@ -2275,7 +2276,7 @@ async fn grpc_llm_abort_reaches_engine_while_output_is_idle() {
 #[serial]
 async fn dropping_unpolled_grpc_llm_stream_aborts_engine_request() {
     let (channel, server_task, engine_task, submitted_rx) = pending_generation_server().await;
-    let llm = GrpcLlm::from_channel(channel, "test-model".into(), 512.try_into().unwrap());
+    let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
     let stream = llm.generate(grpc_llm_request()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), submitted_rx)
         .await

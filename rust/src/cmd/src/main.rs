@@ -159,7 +159,7 @@ fn main() -> ExitCode {
 
 async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Frontend(args) => args.into_config().into_server()?.serve(shutdown_signal()).await,
+        Command::Frontend(args) => args.into_config().into_server().serve(shutdown_signal()).await,
         Command::Bench(BenchCommand::Serve(bench_args)) => {
             vllm_bench::prepare_process();
             vllm_bench::run(bench_args).await
@@ -167,7 +167,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Command::Serve(args) => {
             let (engine_config, frontend, shutdown_timeout) = match args.resolve_config()? {
                 ServeConfig::Frontend(config) => {
-                    return config.into_server()?.serve(shutdown_signal()).await;
+                    return config.into_server().serve(shutdown_signal()).await;
                 }
                 ServeConfig::ManagedEngine {
                     engine,
@@ -184,7 +184,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             let mut serve_task = if let Some(config) = frontend {
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let result = config.into_server()?.serve(shutdown).await;
+                    let result = config.into_server().serve(shutdown).await;
                     if result.is_ok() {
                         info!("OpenAI server shut down gracefully");
                     }

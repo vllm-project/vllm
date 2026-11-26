@@ -42,8 +42,8 @@ use vllm_server::{
     AccessLogConfig, AdmissionLimits, ApiServerOptions, ChatTemplateContentFormatOption,
     CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    DefaultMmLoras, EngineCoreConfig, FingerprintMode, GrpcLlm, HttpListenerMode, LlmSource,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
+    DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode, LlmSource, LoraModulePath,
+    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
     RendererSelection, Server, ServerConfig,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
@@ -888,36 +888,15 @@ pub struct SharedRuntimeArgs {
 }
 
 /// Server settings and the source of its LLM.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct FrontendConfig {
     pub server: ServerConfig,
-    llm_source: LlmSourceConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "one config per server startup; boxing would add an allocation"
-)]
-enum LlmSourceConfig {
-    EngineCore(EngineCoreConfig),
-    RemoteGrpc {
-        url: String,
-        max_model_len: NonZeroU32,
-    },
+    llm_source: LlmSource,
 }
 
 impl FrontendConfig {
-    pub fn into_server(self) -> anyhow::Result<Server> {
-        let llm_source = match self.llm_source {
-            LlmSourceConfig::EngineCore(config) => LlmSource::EngineCore(config),
-            LlmSourceConfig::RemoteGrpc { url, max_model_len } => {
-                let model = self.server.served_model_name.first().unwrap_or(&self.server.model);
-                let llm = GrpcLlm::new(&url, model.clone(), max_model_len)?;
-                LlmSource::Provided(Box::new(llm))
-            }
-        };
-        Ok(Server::new(self.server, llm_source))
+    pub fn into_server(self) -> Server {
+        Server::new(self.server, self.llm_source)
     }
 }
 
@@ -1073,6 +1052,7 @@ impl SharedRuntimeArgs {
         FrontendConfig {
             server: ServerConfig {
                 model: model.id,
+                max_model_len: None,
                 revision: model.revision,
                 tokenizer,
                 hf_config,
@@ -1110,7 +1090,7 @@ impl SharedRuntimeArgs {
                 keep_alive_on_engine_death: self.keep_alive_on_engine_death,
                 keep_alive_timeout,
             },
-            llm_source: LlmSourceConfig::EngineCore(EngineCoreConfig {
+            llm_source: LlmSource::EngineCore(EngineCoreConfig {
                 transport_mode: TransportMode::Bootstrapped {
                     input_listener_fd,
                     output_listener_fd,
@@ -1465,15 +1445,7 @@ impl FrontendArgs {
 #[command(override_usage = "vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]")]
 pub struct ServeArgs {
     /// Send token generation to a vllm.Inference gRPC endpoint.
-    #[arg(long, requires = "max_model_len", conflicts_with_all = [
-        "headless", "python_args", "python", "handshake_host", "handshake_port",
-        "data_parallel_size", "data_parallel_size_local", "data_parallel_rank",
-        "data_parallel_start_rank", "data_parallel_external_lb", "data_parallel_hybrid_lb",
-        "lora_modules", "default_mm_loras", "stream_interval", "max_num_queued_reqs",
-        "max_num_queued_tokens", "engine_ready_timeout_secs", "disable_log_stats",
-        "custom_histogram_buckets", "log_stats_interval", "disable_request_id_randomization",
-        "profiler_config",
-    ])]
+    #[arg(long, conflicts_with = "headless")]
     pub remote_generation_url: Option<String>,
     /// Only launch the managed Python headless engine and do not start the Rust
     /// frontend.
@@ -1524,9 +1496,20 @@ pub(super) enum ServeConfig {
 impl ServeArgs {
     pub(super) fn resolve_config(&self) -> anyhow::Result<ServeConfig> {
         if let Some(url) = self.remote_generation_url.as_deref() {
-            return Ok(ServeConfig::Frontend(
-                self.to_remote_generation_config(url)?,
-            ));
+            let mut server = self.to_server_config();
+            if let Some(value) = self.managed_engine.max_model_len.as_deref() {
+                let Some(limit) = parse_human_readable_int(value)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .and_then(NonZeroU32::new)
+                else {
+                    anyhow::bail!("remote --max-model-len must be a positive token count");
+                };
+                server.max_model_len = Some(limit);
+            }
+            return Ok(ServeConfig::Frontend(FrontendConfig {
+                server,
+                llm_source: LlmSource::RemoteGrpc(url.to_owned()),
+            }));
         }
         let topology = self.data_parallel_lb.resolve(&self.managed_engine, self.headless)?;
         let handshake_port = self.managed_engine.resolve_handshake_port()?;
@@ -1578,7 +1561,7 @@ impl ServeArgs {
     ) -> FrontendConfig {
         FrontendConfig {
             server: self.to_server_config(),
-            llm_source: LlmSourceConfig::EngineCore(
+            llm_source: LlmSource::EngineCore(
                 self.to_engine_core_config(handshake_address, topology),
             ),
         }
@@ -1619,28 +1602,6 @@ impl ServeArgs {
         }
     }
 
-    fn to_remote_generation_config(&self, url: &str) -> anyhow::Result<FrontendConfig> {
-        let Some(limit) = self
-            .managed_engine
-            .max_model_len
-            .as_deref()
-            .and_then(parse_human_readable_int)
-            .and_then(|n| u32::try_from(n).ok())
-            .and_then(NonZeroU32::new)
-        else {
-            anyhow::bail!(
-                "--remote-generation-url requires a positive --max-model-len such as 512 or 1K"
-            );
-        };
-        Ok(FrontendConfig {
-            server: self.to_server_config(),
-            llm_source: LlmSourceConfig::RemoteGrpc {
-                url: url.to_owned(),
-                max_model_len: limit,
-            },
-        })
-    }
-
     fn to_server_config(&self) -> ServerConfig {
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
@@ -1671,6 +1632,7 @@ impl ServeArgs {
 
         ServerConfig {
             model: model.id,
+            max_model_len: None,
             revision: model.revision,
             tokenizer,
             hf_config,

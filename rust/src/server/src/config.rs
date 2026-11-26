@@ -336,6 +336,9 @@ pub type DefaultMmLoras = IndexMap<MmModality, String>;
 pub struct ServerConfig {
     /// Backend model identifier used for engine-core loading.
     pub model: String,
+    /// Operator-specified context length in tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_model_len: Option<NonZeroU32>,
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
     /// Source of the tokenizer files and the chat template, or `None` for `model`.

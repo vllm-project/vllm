@@ -154,6 +154,9 @@ impl HfSpecialTokens {
 pub struct ModelConfig {
     model_type: Option<String>,
     vocab_size: Option<u32>,
+    // Validate these when selecting a context limit for remote generation.
+    model_max_length: Option<Value>,
+    max_position_embeddings: Option<Value>,
     /// Real vocabulary size when `vocab_size` is the padded embedding size
     /// (Inkling).
     unpadded_vocab_size: Option<u32>,
@@ -271,6 +274,22 @@ impl ModelConfig {
     /// the top-level config itself or the innermost of nested text configs.
     fn effective_text_config(&self) -> &Self {
         self.text_config.as_deref().map_or(self, Self::effective_text_config)
+    }
+
+    /// Return the context length declared by the checkpoint.
+    pub(super) fn checkpoint_context_len(&self) -> Result<Option<u32>> {
+        let text = self.effective_text_config();
+        text.model_max_length
+            .as_ref()
+            .or(text.max_position_embeddings.as_ref())
+            .map(u32::deserialize)
+            .transpose()
+            .map_err(|error| {
+                Error::Tokenizer(format!(
+                    "invalid context length in config.json: {}",
+                    error.as_report()
+                ))
+            })
     }
 
     /// Return the effective Hugging Face `model_type` used by the Rust

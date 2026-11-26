@@ -148,6 +148,11 @@ pub trait TextBackend: Send + Sync {
         None
     }
 
+    /// Return the context length declared in the model config, if any.
+    fn checkpoint_context_len(&self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).
     /// Used to range-check `bad_words` token IDs and token-id prompts.
     fn tokenizer_vocab_size(&self) -> usize {

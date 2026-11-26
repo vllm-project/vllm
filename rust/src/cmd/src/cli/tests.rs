@@ -18,13 +18,13 @@ use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
-    BenchCommand, Cli, Command, DtypeArg, FrontendConfig, LlmSourceConfig, LogStatsInterval,
-    ServeConfig, SharedRuntimeArgs, parse_int_flag, parse_runtime_args_json,
+    BenchCommand, Cli, Command, DtypeArg, FrontendConfig, LlmSource, LogStatsInterval, ServeConfig,
+    SharedRuntimeArgs, parse_int_flag, parse_runtime_args_json,
 };
 
 impl FrontendConfig {
     fn engine_core(&self) -> &EngineCoreConfig {
-        let LlmSourceConfig::EngineCore(config) = &self.llm_source else {
+        let LlmSource::EngineCore(config) = &self.llm_source else {
             panic!("expected engine-core config");
         };
         config
@@ -33,7 +33,7 @@ impl FrontendConfig {
     /// Validate both halves, as the server does before starting.
     fn validate(&self) -> anyhow::Result<()> {
         self.server.validate()?;
-        if let LlmSourceConfig::EngineCore(config) = &self.llm_source {
+        if let LlmSource::EngineCore(config) = &self.llm_source {
             config.validate(&self.server)?;
         }
         Ok(())
@@ -1440,34 +1440,34 @@ fn int_flag_parses_like_python_bool_int() {
     .assert_eq(&parsed);
 }
 
-#[tokio::test]
-async fn remote_generation_accepts_pod_local_sockets_and_rejects_engine_launch_args() {
+#[test]
+fn remote_generation_resolves_frontend_only_config() {
     let args = [
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--uds=/run/llm-d/frontend-http.sock",
         "--remote-generation-url=unix:///run/llm-d/generation.sock",
-        "--max-model-len=1K",
     ];
     let Command::Serve(mut serve) = Cli::try_parse_from(args).unwrap().command else {
         panic!("expected serve args");
     };
-    let ServeConfig::Frontend(config) = serve.resolve_config().unwrap() else {
-        panic!("remote generation must run only the frontend");
-    };
-    config.into_server().unwrap();
+    for (flag, expected) in [(None, None), (Some("1K"), Some(1024))] {
+        serve.managed_engine.max_model_len = flag.map(String::from);
+        let ServeConfig::Frontend(FrontendConfig {
+            llm_source: LlmSource::RemoteGrpc(url),
+            server,
+        }) = serve.resolve_config().unwrap()
+        else {
+            panic!("expected a frontend with a remote gRPC source");
+        };
+        assert_eq!(url, "unix:///run/llm-d/generation.sock");
+        assert_eq!(server.max_model_len.map(|n| n.get()), expected);
+    }
     serve.managed_engine.max_model_len = Some("auto".into());
     assert!(serve.resolve_config().is_err());
 
-    for argument in [
-        "--headless",
-        "--lora-modules=adapter=/weights/adapter",
-        "--stream-interval=8",
-    ] {
-        let error = Cli::try_parse_from(args.into_iter().chain([argument])).unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
-    }
+    let error = Cli::try_parse_from(args.into_iter().chain(["--headless"])).unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
 
 #[test]
@@ -3927,7 +3927,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     let mut config =
         args.to_frontend_config("tcp://192.0.2.10:29550".to_string(), &topology(&args));
 
-    let LlmSourceConfig::EngineCore(engine_core) = &mut config.llm_source else {
+    let LlmSource::EngineCore(engine_core) = &mut config.llm_source else {
         panic!("expected engine-core config");
     };
     let TransportMode::HandshakeOwner {
@@ -3957,6 +3957,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         FrontendConfig {
             server: ServerConfig {
                 model: "Qwen/Qwen3-0.6B",
+                max_model_len: None,
                 revision: None,
                 tokenizer: None,
                 hf_config: None,
@@ -4080,7 +4081,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
         "serve",
         "Qwen/Qwen3-0.6B",
         "--data-parallel-address",
-        "192.0.2.10",
+        "10.99.48.128",
         "--data-parallel-size",
         "4",
         "--data-parallel-size-local",
@@ -4091,21 +4092,123 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://192.0.2.10:29550".to_string(), &topology(&args));
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
 
     expect![[r#"
-        HandshakeOwner {
-            handshake_address: "tcp://192.0.2.10:29550",
-            advertised_host: "192.0.2.10",
-            engine_start_index: 0,
-            engine_count: 4,
-            data_parallel_size: 4,
-            ready_timeout: 600s,
-            local_input_address: None,
-            local_output_address: None,
+        FrontendConfig {
+            server: ServerConfig {
+                model: "Qwen/Qwen3-0.6B",
+                max_model_len: None,
+                revision: None,
+                tokenizer: None,
+                hf_config: None,
+                skip_tokenizer_init: false,
+                hf_token: None,
+                hf_overrides: HfOverrides(
+                    {},
+                ),
+                generation_config: Auto,
+                override_generation_config: {},
+                served_model_name: [],
+                listener_mode: BindTcp {
+                    host: "127.0.0.1",
+                    port: 8000,
+                },
+                grpc_listener_mode: None,
+                tool_call_parser: Auto,
+                reasoning_parser: Auto,
+                tool_strict_level: None,
+                structured_outputs_backend: Xgrammar,
+                renderer: Auto,
+                language_model_only: false,
+                chat_template: None,
+                default_chat_template_kwargs: None,
+                reasoning_effort_map: {},
+                trust_request_chat_template: false,
+                exclude_tools_when_tool_choice_none: false,
+                limit_mm_per_prompt: {},
+                mm_processor_kwargs: {},
+                chat_template_content_format: Auto,
+                max_logprobs: None,
+                api_server_options: ApiServerOptions {
+                    enable_log_requests: false,
+                    log_outputs: OutputLogConfig {
+                        outputs: Disabled,
+                        max_log_len: None,
+                    },
+                    enable_prompt_tokens_details: false,
+                    default_return_tokens_as_token_ids: false,
+                    enable_per_request_metrics: false,
+                    force_include_usage: false,
+                    enable_request_id_headers: false,
+                    log_error_stack: false,
+                    enable_scale_out: false,
+                    skip_model_name_validation: false,
+                    server_dev_mode: false,
+                    allow_runtime_lora_updating: false,
+                    sse_keep_alive_interval: None,
+                    request_body_limit_bytes: Some(
+                        33554432,
+                    ),
+                    max_n_sequences: 16384,
+                },
+                fingerprint_mode: Full,
+                cors: CorsConfig {
+                    allow_origins: [],
+                    allow_methods: [
+                        "*",
+                    ],
+                    allow_headers: [
+                        "*",
+                    ],
+                    allow_credentials: false,
+                },
+                access_log: AccessLogConfig {
+                    enabled: true,
+                    excluded_paths: [],
+                },
+                tls: None,
+                root_path: None,
+                api_keys: [],
+                shutdown_timeout: 0ns,
+                keep_alive_on_engine_death: false,
+                keep_alive_timeout: 5s,
+            },
+            llm_source: EngineCore(
+                EngineCoreConfig {
+                    transport_mode: HandshakeOwner {
+                        handshake_address: "tcp://10.99.48.128:29550",
+                        advertised_host: "10.99.48.128",
+                        engine_start_index: 0,
+                        engine_count: 4,
+                        data_parallel_size: 4,
+                        ready_timeout: 600s,
+                        local_input_address: None,
+                        local_output_address: None,
+                    },
+                    coordinator_mode: MaybeInProc,
+                    lora_modules: [],
+                    default_mm_loras: {},
+                    stream_interval: 1,
+                    admission_limits: AdmissionLimits {
+                        max_num_queued_reqs: None,
+                        max_num_queued_tokens: None,
+                    },
+                    disable_log_stats: false,
+                    log_stats_interval: Some(
+                        10s,
+                    ),
+                    custom_histogram_buckets: CustomHistogramBuckets(
+                        {},
+                    ),
+                    disable_request_id_randomization: false,
+                    manages_engine: true,
+                    profiler: None,
+                },
+            ),
         }
     "#]]
-    .assert_debug_eq(&config.engine_core().transport_mode);
+    .assert_debug_eq(&config);
 }
 
 #[test]
@@ -4258,29 +4361,119 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
     let config = args.into_config();
 
     expect![[r#"
-        (
-            InheritedFd {
-                fd: 3,
+        FrontendConfig {
+            server: ServerConfig {
+                model: "Qwen/Qwen3-0.6B",
+                max_model_len: None,
+                revision: None,
+                tokenizer: None,
+                hf_config: None,
+                skip_tokenizer_init: false,
+                hf_token: None,
+                hf_overrides: HfOverrides(
+                    {},
+                ),
+                generation_config: Auto,
+                override_generation_config: {},
+                served_model_name: [],
+                listener_mode: InheritedFd {
+                    fd: 3,
+                },
+                grpc_listener_mode: None,
+                tool_call_parser: None,
+                reasoning_parser: None,
+                tool_strict_level: None,
+                structured_outputs_backend: Xgrammar,
+                renderer: Auto,
+                language_model_only: false,
+                chat_template: None,
+                default_chat_template_kwargs: None,
+                reasoning_effort_map: {},
+                trust_request_chat_template: false,
+                exclude_tools_when_tool_choice_none: false,
+                limit_mm_per_prompt: {},
+                mm_processor_kwargs: {},
+                chat_template_content_format: Auto,
+                max_logprobs: None,
+                api_server_options: ApiServerOptions {
+                    enable_log_requests: false,
+                    log_outputs: OutputLogConfig {
+                        outputs: Disabled,
+                        max_log_len: None,
+                    },
+                    enable_prompt_tokens_details: false,
+                    default_return_tokens_as_token_ids: false,
+                    enable_per_request_metrics: false,
+                    force_include_usage: false,
+                    enable_request_id_headers: false,
+                    log_error_stack: false,
+                    enable_scale_out: false,
+                    skip_model_name_validation: false,
+                    server_dev_mode: false,
+                    allow_runtime_lora_updating: false,
+                    sse_keep_alive_interval: None,
+                    request_body_limit_bytes: Some(
+                        33554432,
+                    ),
+                    max_n_sequences: 16384,
+                },
+                fingerprint_mode: Full,
+                cors: CorsConfig {
+                    allow_origins: [],
+                    allow_methods: [
+                        "*",
+                    ],
+                    allow_headers: [
+                        "*",
+                    ],
+                    allow_credentials: false,
+                },
+                access_log: AccessLogConfig {
+                    enabled: true,
+                    excluded_paths: [],
+                },
+                tls: None,
+                root_path: None,
+                api_keys: [],
+                shutdown_timeout: 0ns,
+                keep_alive_on_engine_death: false,
+                keep_alive_timeout: 5s,
             },
-            Bootstrapped {
-                input_listener_fd: 999999,
-                output_listener_fd: 999998,
-                engine_start_index: 3,
-                engine_count: 1,
-                data_parallel_size: 4,
-                ready_timeout: 600s,
-            },
-            External {
-                address: "tcp://127.0.0.1:7000",
-            },
-        )
+            llm_source: EngineCore(
+                EngineCoreConfig {
+                    transport_mode: Bootstrapped {
+                        input_listener_fd: 999999,
+                        output_listener_fd: 999998,
+                        engine_start_index: 3,
+                        engine_count: 1,
+                        data_parallel_size: 4,
+                        ready_timeout: 600s,
+                    },
+                    coordinator_mode: External {
+                        address: "tcp://127.0.0.1:7000",
+                    },
+                    lora_modules: [],
+                    default_mm_loras: {},
+                    stream_interval: 1,
+                    admission_limits: AdmissionLimits {
+                        max_num_queued_reqs: None,
+                        max_num_queued_tokens: None,
+                    },
+                    disable_log_stats: false,
+                    log_stats_interval: Some(
+                        10s,
+                    ),
+                    custom_histogram_buckets: CustomHistogramBuckets(
+                        {},
+                    ),
+                    disable_request_id_randomization: false,
+                    manages_engine: false,
+                    profiler: None,
+                },
+            ),
+        }
     "#]]
-    .assert_debug_eq(&(
-        &config.server.listener_mode,
-        &config.engine_core().transport_mode,
-        &config.engine_core().coordinator_mode,
-    ));
-    assert!(!config.engine_core().manages_engine);
+    .assert_debug_eq(&config);
 }
 
 #[test]

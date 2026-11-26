@@ -62,7 +62,7 @@ pub use vllm_chat::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 pub use vllm_llm::AdmissionLimits;
-use vllm_llm::{EngineCoreLlm, Llm};
+use vllm_llm::{EngineCoreLlm, Llm, LlmFingerprint, LlmInfo};
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
@@ -155,7 +155,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
 
-    let (llm, engine_core) = match llm {
+    let (llm, engine_core): (Box<dyn Llm>, _) = match llm {
         LlmSource::EngineCore(engine_core) => {
             let (llm, server_info) = connect_engine_core(
                 config,
@@ -164,10 +164,27 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
                 metrics_model_name.clone(),
             )
             .await?;
-            (
-                Box::new(llm) as Box<dyn Llm>,
-                Some((engine_core, server_info)),
-            )
+            (Box::new(llm), Some((engine_core, server_info)))
+        }
+        LlmSource::RemoteGrpc(url) => {
+            let max_model_len = if let Some(limit) = config.max_model_len {
+                limit.get()
+            } else {
+                let limit = text_backend
+                    .checkpoint_context_len()?
+                    .context("config.json has no context length; pass --max-model-len")?;
+                anyhow::ensure!(
+                    limit > 0,
+                    "invalid context length in config.json: expected a positive token count"
+                );
+                limit
+            };
+            let llm = GrpcLlm::new(
+                &url,
+                metrics_model_name.clone(),
+                remote_llm_info(max_model_len),
+            )?;
+            (Box::new(llm), None)
         }
         LlmSource::Provided(llm) => (llm, None),
     };
@@ -259,7 +276,27 @@ async fn connect_engine_core(
 /// Extra routes merged into the finalized vLLM router.
 type RouterExtension = Box<dyn FnOnce(Router) -> Router + Send>;
 
+fn remote_llm_info(max_model_len: u32) -> LlmInfo {
+    LlmInfo {
+        max_model_len,
+        model_dtype: None,
+        supports_lora: false,
+        allow_missing_mm_embeddings: false,
+        vllm_version: "unknown".to_owned(),
+        fingerprint: LlmFingerprint {
+            vllm_version: "unknown".to_owned(),
+            config_hash: None,
+            tensor_parallel_size: 1,
+            pipeline_parallel_size: 1,
+            data_parallel_size: 1,
+            enable_expert_parallel: false,
+        },
+    }
+}
+
 /// Where the server's [`Llm`] comes from.
+#[derive(educe::Educe)]
+#[educe(Debug)]
 #[allow(
     clippy::large_enum_variant,
     reason = "built once per server, so boxing the config would only burden callers"
@@ -268,6 +305,8 @@ pub enum LlmSource {
     /// The server connects to engine-core and serves it through an
     /// [`EngineCoreLlm`].
     EngineCore(EngineCoreConfig),
+    /// Connect to the worker's vLLM gRPC endpoint.
+    RemoteGrpc(String),
     /// A caller-built `Llm`, such as a router over several engines or a client
     /// for a remote one. The server treats it as opaque, even when it is an
     /// [`EngineCoreLlm`]: routes and gRPC services that drive the engine-core
@@ -276,7 +315,7 @@ pub enum LlmSource {
     /// The server shuts it down after serving. If startup fails or is
     /// cancelled, it is dropped without [`Llm::shutdown`], so its `Drop` must
     /// release what it holds.
-    Provided(Box<dyn Llm>),
+    Provided(#[educe(Debug(ignore))] Box<dyn Llm>),
 }
 
 /// The OpenAI-compatible HTTP server, with an optional gRPC server.

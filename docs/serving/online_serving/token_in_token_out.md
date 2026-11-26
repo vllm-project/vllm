@@ -209,7 +209,8 @@ With `--tokens-only`, the same handler is also served at `POST /abort_requests` 
 ## Rust frontend with a remote generation worker
 
 Set `--remote-generation-url` to the worker’s gRPC address and use the same
-model and context limit as the worker.
+model and context limit as the worker. When omitted, `--max-model-len` defaults
+to the context length declared in the model’s `config.json`.
 
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B --remote-generation-url http://worker:50051 --max-model-len 512
