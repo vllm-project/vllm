@@ -58,7 +58,7 @@ import threading
 import time
 from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +229,13 @@ ARCHS: dict[str, ArchCase] = {
         env={"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "0"},
         hybrid=False,
     ),
+    "qwen3_dense_aiter_shuffled": ArchCase(
+        model="Qwen/Qwen3-32B",
+        overrides=_qwen3_dense_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1"},
+        hybrid=False,
+    ),
     "deepseek_v3": ArchCase(
         model="deepseek-ai/DeepSeek-V3",
         overrides=_deepseek_v3_overrides,
@@ -335,6 +342,14 @@ CASES = [
         "NONE",
         server_args=("--block-size", "64"),
     ),
+    Case(
+        "qwen3_dense_aiter_shuffled",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        # AITER's shuffled BF16 decode kernel uses 16-token pages.
+        server_args=("--block-size", "16"),
+    ),
     # Without the hybrid KV cache manager: one cache group per model.
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, hma_off=True),
     Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, hma_off=True),
@@ -374,6 +389,14 @@ READ_CASES = [
         "NONE",
         "NONE",
         server_args=("--block-size", "64"),
+        read_mode=True,
+    ),
+    Case(
+        "qwen3_dense_aiter_shuffled",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "16"),
         read_mode=True,
     ),
     Case("kimi_linear", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, read_mode=True),
@@ -984,12 +1007,10 @@ def test_corrupted_prefill_state_is_detected_read(arch_name: str):
 def _check_corrupted_prefill_state_is_detected(arch_name: str, read_mode: bool) -> None:
     arch = ARCHS[arch_name]
     default = next(c for c in CASES if c.arch == arch_name)
-    case = Case(
-        arch_name,
-        default.attention_backend,
-        _DEFAULT,
-        _DEFAULT,
-        default.hma_off,
+    case = replace(
+        default,
+        prefill_graph=_DEFAULT,
+        decode_graph=_DEFAULT,
         read_mode=read_mode,
     )
     overrides = _arch_overrides(arch)

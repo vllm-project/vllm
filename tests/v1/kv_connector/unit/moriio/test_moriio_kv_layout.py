@@ -355,6 +355,73 @@ def test_packed_kernel_blocks_transfer_complete_manager_blocks(
         )
 
 
+@pytest.mark.parametrize("block_size", [16, 32])
+@pytest.mark.parametrize("local_blocks,remote_blocks", [(1, 3), (3, 1), (3, 5)])
+def test_shuffled_planes_transfer_last_block_between_different_pool_sizes(
+    block_size, local_blocks, remote_blocks
+):
+    """Each K/V plane has its own pool-size-dependent base address."""
+    spec = AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        num_head_slots=2,
+        state_content_bytes=8 * 128 * 2,
+    )
+    offset = 64
+    buffers, views = [], []
+    for num_blocks in (local_blocks, remote_blocks):
+        size = offset + num_blocks * spec.page_size_bytes
+        raw = torch.full((size,), 255, dtype=torch.uint8)
+        placement = KVCacheTensor(
+            size=size,
+            layers=["layer"],
+            layer_stride=num_blocks * spec.page_size_bytes,
+            block_stride=spec.page_size_bytes // 2,
+            offset=offset,
+        )
+        buffers.append(raw)
+        views.append(
+            create_kv_cache_views(
+                raw, spec, num_blocks, KVCacheLayout.LHBNC, placement
+            )[0]
+        )
+    src, dst = buffers
+    source, target = views
+    src.copy_(
+        torch.arange(src.numel(), dtype=torch.int32).remainder(251).to(torch.uint8)
+    )
+    specs = {"layer": spec}
+    for view, raw in zip(views, buffers):
+        with pytest.raises(ValueError, match="packed K/V planes"):
+            moriio_layout.get_layer_head_layout("layer", view, specs)
+        [(region, length)] = moriio_layout.iter_layer_registration_regions(
+            "layer", view, specs
+        )
+        assert region.data_ptr() == view.data_ptr()
+        assert length == raw.numel() - offset
+    local, remote, sizes = moriio_layout.compute_block_transfer_offsets(
+        "layer",
+        source,
+        specs,
+        [local_blocks - 1],
+        [remote_blocks - 1],
+        remote_num_blocks=remote_blocks,
+    )
+    assert len(sizes) == 2
+    assert sum(sizes) == spec.page_size_bytes
+    for start, end, length in zip(local, remote, sizes):
+        assert offset + start + length <= src.numel()
+        assert offset + end + length <= dst.numel()
+        dst[offset + end : offset + end + length].copy_(
+            src[offset + start : offset + start + length]
+        )
+    assert torch.equal(target[-1].view(torch.uint8), source[-1].view(torch.uint8))
+    assert torch.all(target[:-1].view(torch.uint8) == 255)
+    assert torch.all(dst[:offset] == 255)
+
+
 @pytest.mark.parametrize(
     "shape",
     [

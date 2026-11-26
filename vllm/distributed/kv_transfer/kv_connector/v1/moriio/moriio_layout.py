@@ -288,6 +288,34 @@ def get_layer_transfer_geometry(
                 f"{kernel_blocks_per_block} kernel blocks"
             )
         num_blocks = shape[0] // kernel_blocks_per_block
+        if spec.num_head_slots == 2 and stride[1] >= stride[0]:
+            # LHBNC stores all K blocks before all V blocks. Each plane's
+            # base depends on its own pool size, so transfer them separately.
+            plane_block_size = shape[2] * shape[3]
+            expected_stride = (
+                plane_block_size,
+                num_blocks * plane_block_size,
+                shape[3],
+                1,
+            )
+            block_len = plane_block_size * element_size
+            if kernel_blocks_per_block != 1 or stride != expected_stride:
+                raise ValueError(
+                    f"MoRIIO K/V planes for layer {layer_name} must be dense "
+                    "with unsplit blocks"
+                )
+            return LayerTransferGeometry(
+                num_blocks=num_blocks,
+                block_size=spec.block_size,
+                block_len=block_len,
+                slot_size_bytes=shape[3] * element_size,
+                block_stride=stride[0],
+                local_kv_stride=stride[1],
+                remote_kv_stride=stride[0] * (remote_num_blocks or num_blocks),
+                transfers_per_block=2,
+                regions_per_block=2,
+                split_kv_regions=False,
+            )
         grouped = group_kernel_blocks(kv_cache, num_blocks)
         block_stride = grouped.stride(0)
         slot_size_bytes = shape[1] * shape[3] * element_size
@@ -710,6 +738,11 @@ def get_layer_head_layout(
         and shape[2] == spec.num_states
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
+        if spec.num_head_slots == 2 and shape[3] == spec.num_kv_heads * spec.head_size:
+            raise ValueError(
+                f"MoRIIO cannot slice KV heads of layer {layer_name}: "
+                "packed K/V planes do not expose per-head strides"
+            )
         return HeadLayout(
             num_heads=shape[1],
             num_tokens=shape[2],
