@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 
+import copy
 import math
 from collections import defaultdict
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence, Set
@@ -36,7 +37,7 @@ import torch
 import torch.types
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers import BatchFeature, PreTrainedConfig
+from transformers import BatchFeature, LlamaConfig, PreTrainedConfig
 from transformers.dynamic_module_utils import (
     get_class_from_dynamic_module,
     resolve_trust_remote_code,
@@ -55,7 +56,6 @@ from vllm.model_executor.layers.resampler import (
     Resampler2,
     get_2d_sincos_pos_embed,
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
@@ -1414,7 +1414,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.llm.model(
+        hidden_states = self.llm(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
@@ -1977,6 +1977,25 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
     ) -> nn.Module:
         return MiniCPMForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+
+        # Call self.llm.model directly; MiniCPMForCausalLM.forward applies scale_width.
+        return self.llm.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+
     def init_vision_module(
         self,
         config: PreTrainedConfig,
@@ -2054,6 +2073,36 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         return torch.vstack(res)
 
 
+def _build_llama_text_config(config: PreTrainedConfig) -> LlamaConfig:
+    """Build a flat `LlamaConfig` for MiniCPM-V Llama-based backbones."""
+    kwargs: dict[str, Any] = {
+        "vocab_size": config.vocab_size,
+        "hidden_size": config.hidden_size,
+        "intermediate_size": config.intermediate_size,
+        "num_hidden_layers": config.num_hidden_layers,
+        "num_attention_heads": config.num_attention_heads,
+        "num_key_value_heads": getattr(config, "num_key_value_heads", None),
+        "hidden_act": getattr(config, "hidden_act", "silu"),
+        "max_position_embeddings": getattr(config, "max_position_embeddings", 2048),
+        "rms_norm_eps": getattr(config, "rms_norm_eps", 1e-6),
+        "attention_bias": getattr(config, "attention_bias", False),
+        "mlp_bias": getattr(config, "mlp_bias", False),
+        "pad_token_id": getattr(config, "pad_token_id", None),
+        "bos_token_id": getattr(config, "bos_token_id", 1),
+        "eos_token_id": getattr(config, "eos_token_id", 2),
+        "tie_word_embeddings": False,
+    }
+    for optional_field in (
+        "head_dim",
+        "rope_theta",
+        "rope_parameters",
+        "logit_scale",
+    ):
+        if (value := getattr(config, optional_field, None)) is not None:
+            kwargs[optional_field] = copy.deepcopy(value)
+    return LlamaConfig(**kwargs)
+
+
 class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -2076,7 +2125,12 @@ class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        return LlamaForCausalLM(vllm_config=vllm_config, prefix=prefix)
+        return init_vllm_registered_model(
+            vllm_config,
+            hf_config=_build_llama_text_config(vllm_config.model_config.hf_config),
+            architectures=["TransformersForCausalLM"],
+            prefix=prefix,
+        )
 
     def init_vision_module(
         self,
@@ -2277,7 +2331,12 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        return LlamaForCausalLM(vllm_config=vllm_config, prefix=prefix)
+        return init_vllm_registered_model(
+            vllm_config,
+            hf_config=_build_llama_text_config(vllm_config.model_config.hf_config),
+            architectures=["TransformersForCausalLM"],
+            prefix=prefix,
+        )
 
     def init_vision_module(
         self,

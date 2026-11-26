@@ -2,8 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
+from transformers import AutoModel, PreTrainedConfig
 
-from vllm.model_executor.models.minicpmv import MiniCPMV2_6
+from vllm.model_executor.models.minicpmv import (
+    MiniCPMV2_0,
+    MiniCPMV2_5,
+    MiniCPMV2_6,
+    _build_llama_text_config,
+)
 from vllm.model_executor.models.minicpmv4_6 import (
     MiniCPMV4_6ForConditionalGeneration,
     _expand_flags,
@@ -189,3 +195,118 @@ class TestPerItemMergerFlags:
 
         # The common case still makes a single encoder call.
         assert calls == ["16x"]
+
+
+@pytest.mark.parametrize(
+    ("extra_fields", "expected_head_dim", "expected_rope_type"),
+    [
+        (
+            {
+                "hidden_size": 4096,
+                "intermediate_size": 14336,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "vocab_size": 128256,
+                "max_position_embeddings": 8192,
+                "rms_norm_eps": 1e-5,
+                "rope_theta": 500000.0,
+            },
+            128,
+            "default",
+        ),
+        (
+            {
+                "hidden_size": 2560,
+                "intermediate_size": 10240,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "vocab_size": 73448,
+                "max_position_embeddings": 32768,
+                "rms_norm_eps": 1e-6,
+                "logit_scale": 0.5,
+                "rope_parameters": {
+                    "rope_type": "longrope",
+                    "rope_theta": 10000.0,
+                    "short_factor": [1.0] * 64,
+                    "long_factor": [1.0] * 64,
+                    "original_max_position_embeddings": 32786,
+                    "factor": 1.0,
+                },
+            },
+            128,
+            "longrope",
+        ),
+    ],
+)
+def test_build_llama_text_config_for_minicpmv_versions(
+    extra_fields: dict,
+    expected_head_dim: int,
+    expected_rope_type: str,
+):
+    """Ensure 2.5 and 4.0 (head_dim=128 + longrope) build valid LlamaModels."""
+    hf_config = PreTrainedConfig(
+        hidden_act="silu",
+        attention_bias=False,
+        mlp_bias=False,
+        tie_word_embeddings=True,
+        **extra_fields,
+    )
+
+    llama_config = _build_llama_text_config(hf_config)
+
+    assert llama_config.tie_word_embeddings is False
+    assert llama_config.head_dim == expected_head_dim
+    assert getattr(llama_config, "logit_scale", None) == extra_fields.get("logit_scale")
+    expected_theta = extra_fields.get(
+        "rope_theta", extra_fields.get("rope_parameters", {}).get("rope_theta")
+    )
+    assert llama_config.rope_parameters["rope_theta"] == expected_theta
+
+    with torch.device("meta"):
+        model = AutoModel.from_config(llama_config)
+
+    assert model.rotary_emb.rope_type == expected_rope_type
+    assert model.layers[0].self_attn.q_proj.weight.shape == (
+        extra_fields["num_attention_heads"] * expected_head_dim,
+        extra_fields["hidden_size"],
+    )
+
+
+def test_minicpmv_forward_dispatch():
+    """Ensure MiniCPMV2_0 calls llm.model directly while 2.5 calls llm."""
+    calls: list[tuple[str, object]] = []
+
+    class DummyLLM:
+        def model(self, **kwargs):
+            calls.append(("llm.model", kwargs["inputs_embeds"]))
+            return torch.zeros(1)
+
+        def __call__(self, **kwargs):
+            calls.append(("llm", kwargs["inputs_embeds"]))
+            return torch.ones(1)
+
+    for cls, expected_target in ((MiniCPMV2_0, "llm.model"), (MiniCPMV2_5, "llm")):
+        model = object.__new__(cls)
+        torch.nn.Module.__init__(model)
+        model.llm = DummyLLM()  # type: ignore[assignment]
+
+        embeds = torch.zeros(1, 2)
+        model.forward(
+            input_ids=None,
+            positions=torch.zeros(1, dtype=torch.long),
+            inputs_embeds=embeds,
+        )
+        assert calls[-1][0] == expected_target
+        assert calls[-1][1] is embeds
+        if cls is MiniCPMV2_0:
+            # MiniCPMV2_0 clears inputs_embeds when intermediate_tensors is set.
+            model.forward(
+                input_ids=None,
+                positions=torch.zeros(1, dtype=torch.long),
+                intermediate_tensors=object(),  # type: ignore[arg-type]
+                inputs_embeds=embeds,
+            )
+            assert calls[-1] == ("llm.model", None)
