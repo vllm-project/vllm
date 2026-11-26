@@ -263,10 +263,14 @@ class AuxOutputSchedulerConnector:
             if block_hashes is not None
         )
         self._finished_requests = {}
+        size = self._object_size
         for state in self._namespaces.values():
-            if state.running:
-                # Only settled steps publish.
-                self._write_blocks(state, self._settled(state.request))
+            # Only settled steps publish; most steps complete no span.
+            if (
+                state.running
+                and (settled := self._settled(state.request)) >= state.written + size
+            ):
+                self._write_blocks(state, settled)
         metadata = AuxOutputConnectorMetadata(
             self._generation,
             scheduled_requests,
