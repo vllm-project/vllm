@@ -1099,9 +1099,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) Batch Invariance (Distributed)"
+      label: ":amd: (MI300 DPX) Batch Invariance (Distributed)"
       dind: false
-      device: mi300_4
+      device: mi300_dpx_4
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
