@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -51,7 +52,9 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{
+    BoxGenerateOutputStream, EngineCoreLlm, GenerateRequest, Llm, LlmFingerprint, LlmInfo,
+};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
@@ -457,6 +460,8 @@ struct FakeChatBackend {
     sampling_hints: vllm_text::SamplingHints,
     /// Serve without a tokenizer, like `--skip-tokenizer-init`.
     skip_tokenizer_init: bool,
+    /// A model's own renderer replacing the fake chat format.
+    chat_renderer: Option<DynChatRenderer>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -474,6 +479,9 @@ fn fake_chat_tokenizer() -> TestTokenizer {
         .with_regular_token("<|END_THINKING|>", 0xF004)
         .with_regular_token("◁think▷", 0xF005)
         .with_regular_token("◁/think▷", 0xF006)
+        .with_regular_token("<｜fim▁hole｜>", 128800)
+        .with_regular_token("<｜fim▁begin｜>", 128801)
+        .with_regular_token("<｜fim▁end｜>", 128802)
 }
 
 impl FakeChatBackend {
@@ -483,6 +491,14 @@ impl FakeChatBackend {
             multimodal_model_info: None,
             sampling_hints: Default::default(),
             skip_tokenizer_init: false,
+            chat_renderer: None,
+        }
+    }
+
+    fn with_chat_renderer(chat_renderer: DynChatRenderer) -> Self {
+        Self {
+            chat_renderer: Some(chat_renderer),
+            ..Self::new()
         }
     }
 
@@ -496,9 +512,7 @@ impl FakeChatBackend {
     fn with_model_id(model_id: impl Into<String>) -> Self {
         Self {
             model_id: model_id.into(),
-            multimodal_model_info: None,
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
+            ..Self::new()
         }
     }
 
@@ -506,10 +520,8 @@ impl FakeChatBackend {
         multimodal_model_info: vllm_chat::multimodal::MultimodalModelInfo,
     ) -> Self {
         Self {
-            model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
+            ..Self::new()
         }
     }
 }
@@ -545,7 +557,7 @@ impl TextBackend for FakeChatBackend {
 
 impl ChatBackend for FakeChatBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(self.clone())
+        (self.chat_renderer.clone()).unwrap_or_else(|| Arc::new(self.clone()))
     }
 
     fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
@@ -956,12 +968,11 @@ async fn dev_routes_follow_api_server_options() {
     for (server_dev_mode, expected) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
         let (chat, engine_task) = test_chat_with_engine_handle().await;
         let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
+            (AppState::new(vec!["model".to_string()], chat).with_engine_core_client())
+                .with_api_server_options(ApiServerOptions {
                     server_dev_mode,
                     ..Default::default()
-                },
-            ),
+                }),
         ));
 
         let response = app
@@ -978,6 +989,42 @@ async fn dev_routes_follow_api_server_options() {
             expected,
             "server_dev_mode={server_dev_mode}"
         );
+
+        engine_task.abort_and_join().await;
+    }
+}
+
+/// `VLLM_ALLOW_RUNTIME_LORA_UPDATING` reaches the router through
+/// `ApiServerOptions`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn lora_routes_follow_api_server_options() {
+    // A registered POST-only route answers GET with 405.
+    for (allow_runtime_lora_updating, expected) in [
+        (false, StatusCode::NOT_FOUND),
+        (true, StatusCode::METHOD_NOT_ALLOWED),
+    ] {
+        let (chat, engine_task) = test_chat_with_engine_handle().await;
+        let app = build_router(Arc::new(
+            (AppState::new(vec!["model".to_string()], chat).with_engine_core_client())
+                .with_api_server_options(ApiServerOptions {
+                    allow_runtime_lora_updating,
+                    ..Default::default()
+                }),
+        ));
+
+        for uri in ["/v1/load_lora_adapter", "/v1/unload_lora_adapter"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("build request"))
+                .await
+                .expect("call app");
+            assert_eq!(
+                response.status(),
+                expected,
+                "{uri} allow_runtime_lora_updating={allow_runtime_lora_updating}"
+            );
+        }
 
         engine_task.abort_and_join().await;
     }
@@ -1295,68 +1342,6 @@ async fn generative_scoring_rejects_invalid_requests_before_submission() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cohere_routes_follow_the_python_gates() {
-    const CHAT: &str = "/cohere/v2/chat";
-    const RENDER: &str = "/cohere/v2/chat/render";
-    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-        b"engine-cohere-routes",
-        default_stream_output_specs(),
-        Arc::new(FakeChatBackend::new()),
-    )
-    .await;
-    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
-
-    async fn post_status(app: &axum::Router, uri: &str) -> StatusCode {
-        app.clone()
-            .call(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("call app")
-            .status()
-    }
-
-    let enabled = build_router_with_gates(
-        state.clone(),
-        RouteGates {
-            scale_out: true,
-            cohere_api: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_route_not_supported(&enabled, "POST", CHAT, CHAT).await;
-    assert_route_not_supported(&enabled, "POST", RENDER, RENDER).await;
-
-    let no_scale_out = build_router_with_gates(
-        state.clone(),
-        RouteGates {
-            cohere_api: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_route_not_supported(&no_scale_out, "POST", CHAT, CHAT).await;
-    assert_eq!(
-        post_status(&no_scale_out, RENDER).await,
-        StatusCode::NOT_FOUND
-    );
-
-    let disabled = build_router_with_gates(
-        state,
-        RouteGates {
-            scale_out: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_eq!(post_status(&disabled, CHAT).await, StatusCode::NOT_FOUND);
-    assert_eq!(post_status(&disabled, RENDER).await, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn scale_out_generate_and_abort_routes_are_disabled_by_default() {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-scale-out-disabled",
@@ -1663,44 +1648,6 @@ async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn tokenizer_info_route_follows_api_server_options() {
-    for enabled in [false, true] {
-        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-            b"engine-tokenizer-info",
-            default_stream_output_specs(),
-            Arc::new(FakeChatBackend::new()),
-        )
-        .await;
-        let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
-                    enable_tokenizer_info_endpoint: enabled,
-                    ..Default::default()
-                },
-            ),
-        ));
-
-        if enabled {
-            assert_route_not_supported(&app, "GET", "/tokenizer_info", "/tokenizer_info").await;
-        } else {
-            let response = app
-                .clone()
-                .call(
-                    Request::builder()
-                        .method("GET")
-                        .uri("/tokenizer_info")
-                        .body(Body::empty())
-                        .expect("build request"),
-                )
-                .await
-                .expect("call app");
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        }
-    }
-}
-
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.
@@ -1743,10 +1690,10 @@ async fn test_dev_mode_app_with_ready(
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let app = build_router_with_gates(
-        Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        )),
+        Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_engine_core_client(),
+        ),
         RouteGates {
             dev_mode: true,
             ..RouteGates::default()
@@ -1875,7 +1822,6 @@ where
                 dev_mode: true,
                 runtime_lora_updating: true,
                 scale_out: true,
-                ..RouteGates::default()
             },
         ),
         engine_task,
@@ -1933,10 +1879,10 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
     (
-        Arc::new(configure(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        Arc::new(configure(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_engine_core_client(),
+        )),
         engine_task,
     )
 }
@@ -2776,6 +2722,62 @@ async fn completions_reject_missing_prompt() {
     engine_task.abort_and_join().await;
 }
 
+/// A request over a queue limit gets a retryable 503 before it reaches the
+/// engine, on both the text and the chat path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn requests_over_a_queue_limit_return_503() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-queue-limit".to_vec(),
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let llm = test_llm(client).with_admission_limits(crate::AdmissionLimits {
+        max_num_queued_reqs: Some(0),
+        max_num_queued_tokens: None,
+    });
+    let chat = ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()))
+        .with_served_model_name("test-model");
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let mut results = Vec::new();
+    for (uri, body) in [
+        (
+            "/v1/completions",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+            }),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        results.push(format!("{uri} -> {status} {json}"));
+    }
+    expect_test::expect![[r#"
+        /v1/completions -> 503 Service Unavailable {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}
+        /v1/chat/completions -> 503 Service Unavailable {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&results.join("\n"));
+    engine_task.abort_and_join().await;
+}
+
 /// The render route lowers the same request, so it rejects a missing prompt
 /// too and shows the tokens of the accepted ones. Unlike Python, which rejects
 /// `prompt: ""` before tokenizing, an empty text prompt is left to
@@ -2805,6 +2807,107 @@ async fn completions_render_checks_prompt_presence() {
         {"model":"render-model","prompt":""} -> 200 OK [256]
         {"model":"render-model","prompt":"","add_special_tokens":false} -> 400 Bad Request {"error":{"message":"token_ids must contain at least one token ID.","type":"BadRequestError","param":"token_ids","code":400}}
         {"model":"render-model","prompt":"hello","prompt_embeds":[]} -> 200 OK [256,104,101,108,108,111]"#]].assert_eq(&results.join("\n"));
+}
+
+fn completion_suffix_render_app(chat_renderer: DynChatRenderer) -> axum::Router {
+    let backend = Arc::new(FakeChatBackend::with_chat_renderer(chat_renderer));
+    build_render_router(Arc::new(RenderState {
+        model: "backend-model".to_string(),
+        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
+        max_model_len: Some(128),
+        text: TextRequestProcessor::new(backend.clone(), 128),
+        chat: ChatRequestProcessor::new(backend, None, None),
+        lora_modules: Vec::new(),
+    }))
+}
+
+/// Like Python's DeepSeek V4 and V4.1 renderers, a completions `suffix` turns
+/// each text prompt into a fill-in-the-middle prompt before tokenization; an
+/// empty prompt is an empty prefix.
+#[tokio::test]
+async fn completions_render_suffix_as_fill_in_the_middle_prompt() {
+    let renderers: [DynChatRenderer; 2] = [
+        Arc::new(vllm_chat::DeepSeekV4ChatRenderer::default()),
+        Arc::new(vllm_chat::DeepSeekV41ChatRenderer::default()),
+    ];
+    for chat_renderer in renderers {
+        let mut app = completion_suffix_render_app(chat_renderer);
+        let mut results = Vec::new();
+        for body in [
+            json!({"model": "render-model", "prompt": "a", "suffix": "z"}),
+            json!({"model": "render-model", "prompt": ["a", ""], "suffix": "z", "add_special_tokens": false}),
+        ] {
+            let (status, json) = post_json(&mut app, "/v1/completions/render", body.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{body} -> {json}");
+            let token_ids = (json.as_array().unwrap().iter())
+                .map(|request| request["token_ids"].to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            results.push(format!("{body} -> {token_ids}"));
+        }
+        expect_test::expect![[r#"
+            {"model":"render-model","prompt":"a","suffix":"z"} -> [256,128801,97,128800,122,128802]
+            {"model":"render-model","prompt":["a",""],"suffix":"z","add_special_tokens":false} -> [128801,97,128800,122,128802] [128801,128800,122,128802]"#]]
+        .assert_eq(&results.join("\n"));
+    }
+}
+
+/// Like Python, a `suffix` is rejected with `echo`, prompt truncation, which
+/// could cut off the fill-in-the-middle markers, token-ID prompts, and models
+/// without a fill-in-the-middle format.
+#[tokio::test]
+async fn completions_render_suffix_rejects_unsupported_inputs() {
+    let mut fim_app =
+        completion_suffix_render_app(Arc::new(vllm_chat::DeepSeekV4ChatRenderer::default()));
+    let mut results = Vec::new();
+    for body in [
+        json!({"model": "render-model", "prompt": "a", "suffix": "z", "echo": true}),
+        json!({"model": "render-model", "prompt": "a", "suffix": "z", "truncate_prompt_tokens": 4}),
+        json!({"model": "render-model", "prompt": [97], "suffix": "z"}),
+    ] {
+        let (status, json) = post_json(&mut fim_app, "/v1/completions/render", body.clone()).await;
+        results.push(format!("{body} -> {status} {}", json["error"]));
+    }
+    let body = json!({"model": "render-model", "prompt": "a", "suffix": "z"});
+    let (status, json) = post_json(
+        &mut test_render_app(),
+        "/v1/completions/render",
+        body.clone(),
+    )
+    .await;
+    results.push(format!("{body} without FIM -> {status} {}", json["error"]));
+    expect_test::expect![[r#"
+        {"model":"render-model","prompt":"a","suffix":"z","echo":true} -> 400 Bad Request {"message":"Echo is unsupported with suffix.","type":"BadRequestError","param":"suffix","code":400}
+        {"model":"render-model","prompt":"a","suffix":"z","truncate_prompt_tokens":4} -> 400 Bad Request {"message":"suffix is not supported with truncate_prompt_tokens","type":"BadRequestError","param":"suffix","code":400}
+        {"model":"render-model","prompt":[97],"suffix":"z"} -> 400 Bad Request {"message":"suffix requires text prompt input for FIM completion rendering","type":"BadRequestError","param":"suffix","code":400}
+        {"model":"render-model","prompt":"a","suffix":"z"} without FIM -> 400 Bad Request {"message":"suffix is only supported for models with FIM completion rendering","type":"BadRequestError","param":"suffix","code":400}"#]].assert_eq(&results.join("\n"));
+}
+
+/// `/v1/completions` lowers a `suffix` like the render route and submits the
+/// fill-in-the-middle prompt to the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_suffix_submits_fill_in_the_middle_prompt() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::with_chat_renderer(Arc::new(
+            vllm_chat::DeepSeekV4ChatRenderer::default(),
+        ))),
+        |request| {
+            assert_eq!(
+                decode_prompt_token_ids(request),
+                Some(vec![256, 128801, 97, 128800, 122, 128802])
+            );
+        },
+    )
+    .await;
+    let (status, json) = post_json(
+        &mut app.clone(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "a", "suffix": "z"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
 }
 
 /// Like Python's `TokenizeParams` check, a requested output budget above the
@@ -7031,7 +7134,7 @@ async fn happy_path_returns_sse_stream() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let after_headers = METRICS.render().unwrap();
@@ -7614,6 +7717,20 @@ async fn engine_request_errors_map_to_http_status() {
                        "logprobs": 1, "stream": true}),
                 StatusCode::OK,
             ),
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello", "echo": true, "stream": true}),
+                StatusCode::OK,
+            ),
+            // Building the echoed prompt's logprobs fails (no tokenizer piece
+            // for token 10000; `return_token_ids` skips decoding the echoed
+            // text), but the engine's error comes first.
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": [10000, 65], "echo": true, "logprobs": 0,
+                       "return_token_ids": true, "stream": true}),
+                StatusCode::OK,
+            ),
         ];
         for (uri, request, expected_status) in cases {
             let engine_error = error.clone();
@@ -7664,7 +7781,90 @@ async fn engine_request_errors_map_to_http_status() {
                     && text.contains(&error.message),
                 "{uri} {request}: {text}"
             );
+            // Like Python, an echoed prompt does not precede the error of the
+            // update it belongs to.
+            if uri == "/v1/completions" && request["stream"] == true {
+                let first_frame = text.split("\n\n").next().unwrap_or_default();
+                assert!(first_frame.contains("\"error\""), "{request}: {text}");
+            }
         }
+    }
+}
+
+/// A request the engine finishes during prefill, such as an abort, gets no
+/// prompt logprobs. Like Python, the echoed prompt still has one `logprobs`
+/// entry per token, each `null`, and `prompt_logprobs` is the first token's
+/// `[null]`.
+#[tokio::test]
+async fn completions_echo_logprobs_of_request_aborted_during_prefill() {
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    for stream in [false, true] {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-openai",
+            |request_id| {
+                RequestBatchOutputs {
+                    outputs: vec![EngineCoreOutput {
+                        request_id: request_id.to_string(),
+                        finish_reason: Some(EngineCoreFinishReason::Abort),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router(Arc::new(AppState::new(vec![model.to_string()], chat)));
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model": model, "prompt": "Hi!", "echo": true, "logprobs": 0,
+                               "add_special_tokens": false, "stream": stream})
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        let choices: Vec<serde_json::Value> = if stream {
+            assert!(!text.contains("\"error\""), "{text}");
+            sse_json_payloads(&text)
+                .into_iter()
+                .flat_map(|event| event["choices"].as_array().cloned().unwrap_or_default())
+                .collect()
+        } else {
+            let response: serde_json::Value = serde_json::from_str(&text).expect("json response");
+            assert_eq!(response["choices"][0]["prompt_logprobs"], json!([null]));
+            response["choices"].as_array().cloned().unwrap_or_default()
+        };
+        let tokens: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice["logprobs"]["tokens"].as_array())
+            .flatten()
+            .collect();
+        let token_logprobs: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice["logprobs"]["token_logprobs"].as_array())
+            .flatten()
+            .collect();
+        assert_eq!(tokens, [&json!("H"), &json!("i"), &json!("!")], "{text}");
+        assert_eq!(token_logprobs, [&serde_json::Value::Null; 3], "{text}");
+        assert_eq!(
+            choices.last().expect("a choice")["finish_reason"],
+            json!("abort"),
+            "{text}"
+        );
     }
 }
 
@@ -9230,7 +9430,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
@@ -9747,7 +9947,7 @@ async fn completions_happy_path_returns_sse_stream() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
@@ -11174,6 +11374,48 @@ async fn weight_checker_route_merges_worker_checksums_and_compares() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn finish_weight_update_compares_weights_against_baseline() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let workers = Value::Array(vec![Value::Map(vec![(
+                Value::from("tp0:a"),
+                Value::from("1"),
+            )])]);
+            for (method, result) in [
+                ("finish_weight_update", Value::Array(vec![Value::Nil])),
+                ("compute_weight_checksums", workers),
+            ] {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                assert_eq!(
+                    array[3].as_array().expect("rpc args")[0],
+                    Value::from(method)
+                );
+                let call_id = array[1].as_u64().expect("call id");
+                let envelope = UtilityResultEnvelope::without_type_info(result);
+                send_outputs(push, utility_outputs(call_id, envelope)).await;
+            }
+        })
+    })
+    .await;
+
+    let (status, body) = post_json(
+        &mut app,
+        "/finish_weight_update",
+        json!({"baseline": {"tp0:a": "9"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"message": "Weight update finished", "match": false, "mismatches": ["tp0:a"]})
+    );
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn weight_checker_route_rejects_invalid_requests_before_engine_calls() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
         boxed_test_future(async move {
@@ -12091,6 +12333,195 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
     }
+
+    engine_task.abort_and_join().await;
+}
+
+/// An `Llm` without an engine-core client, standing in for a remote engine
+/// that cannot take requests right now.
+struct UnavailableLlm {
+    info: LlmInfo,
+    health: Arc<tokio::sync::watch::Sender<bool>>,
+    readiness: tokio::sync::watch::Sender<bool>,
+}
+
+impl UnavailableLlm {
+    fn new() -> Self {
+        Self {
+            info: LlmInfo {
+                max_model_len: 4096,
+                model_dtype: None,
+                supports_lora: true,
+                allow_missing_mm_embeddings: false,
+                vllm_version: "test".to_string(),
+                fingerprint: LlmFingerprint {
+                    vllm_version: "test".to_string(),
+                    config_hash: None,
+                    tensor_parallel_size: 1,
+                    pipeline_parallel_size: 1,
+                    data_parallel_size: 1,
+                    enable_expert_parallel: false,
+                },
+            },
+            health: Arc::new(tokio::sync::watch::channel(true).0),
+            readiness: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    /// The sender of the health this `Llm` reports.
+    fn health(&self) -> Arc<tokio::sync::watch::Sender<bool>> {
+        self.health.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Llm for UnavailableLlm {
+    fn info(&self) -> &LlmInfo {
+        &self.info
+    }
+
+    fn subscribe_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.health.subscribe()
+    }
+
+    fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.readiness.subscribe()
+    }
+
+    async fn generate_n(
+        &self,
+        _request: GenerateRequest,
+        _n: NonZeroU32,
+    ) -> vllm_llm::Result<Vec<BoxGenerateOutputStream>> {
+        Err(vllm_llm::Error::Unavailable {
+            message: "no engine can take the request".to_string(),
+        })
+    }
+
+    async fn abort(&self, _external_ids: &[String]) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(self: Box<Self>) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn llm_without_engine_core_serves_generation_routes_only() {
+    let llm = UnavailableLlm::new();
+    let health = llm.health();
+    let chat = ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()));
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+        RouteGates {
+            dev_mode: true,
+            runtime_lora_updating: true,
+            ..RouteGates::default()
+        },
+    );
+
+    // Routes that drive the engine-core client are not registered, even with
+    // dev mode and runtime LoRA updating enabled.
+    for (method, uri) in [
+        ("POST", "/sleep"),
+        ("POST", "/reset_prefix_cache"),
+        ("POST", "/v1/load_lora_adapter"),
+        ("GET", "/kv_event_sources"),
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    let response = app
+        .clone()
+        .call(Request::builder().uri("/health").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Generation goes through the `Llm`, and its unavailability maps to 503.
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({ "model": "test-model", "prompt": "hello" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "test-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    // `/health` follows the `Llm`.
+    health.send_replace(false);
+    let response = app
+        .clone()
+        .call(Request::builder().uri("/health").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn provided_engine_core_llm_is_opaque() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-provided",
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    // Only an `EngineCoreLlm` the server connected itself drives the
+    // engine-core routes; one passed in as `LlmSource::Provided` does not.
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_prefix_cache")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     engine_task.abort_and_join().await;
 }
