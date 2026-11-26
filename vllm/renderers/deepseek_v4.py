@@ -12,7 +12,7 @@ from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 from vllm.tokenizers.deepseek_v4 import DeepseekV4Tokenizer
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
+from .hf import BaseHfRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
@@ -22,7 +22,7 @@ _FIM_HOLE = "<｜fim▁hole｜>"
 _FIM_END = "<｜fim▁end｜>"
 
 
-class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
+class DeepseekV4Renderer(BaseHfRenderer[DeepseekV4Tokenizer]):
     def __init__(
         self,
         config: VllmConfig,
