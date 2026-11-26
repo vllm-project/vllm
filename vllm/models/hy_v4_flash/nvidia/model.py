@@ -128,7 +128,7 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
             layer_id - 1: index
             for index, layer_id in enumerate(self.config.engram_layer_ids)
         }
-        fused = self.uses_fused_ihc(use_ihc_sequence_parallel=False)
+        fused = self.uses_fused_ihc()
         carry: IHCCarry | None = None
         for index, layer in enumerate(self.layers):
             if index in hash_indices:
@@ -142,6 +142,9 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
             else:
                 hidden, _ = layer(positions, hidden, None)
         if carry is not None:
+            output = self.hc_head.fused_post(*carry, self.norm)
+            if output is not None:
+                return output
             hidden = layer.hc_mlp_layer.post(*carry)
         return self.norm(self.hc_head(hidden))
 
@@ -151,10 +154,15 @@ class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM):
     supports_lora = False  # type: ignore[assignment]
     supports_pp = False  # type: ignore[assignment]
     requires_raw_input_tokens = True
-    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+    }
     hf_to_vllm_mapper = HYV4_MLP_MAPPER | WeightsMapper(
         orig_to_new_substr={".compressed_indexer.": ".indexer."},
         orig_to_new_stacked={
+            ".self_attn.q_a_proj.": (".self_attn.fused_qkv_a_proj.", 0),
+            ".self_attn.kv_a_proj_with_mqa.": (".self_attn.fused_qkv_a_proj.", 1),
             ".indexer.key_value_projection.": (".indexer.key_projection.", 0),
             ".indexer.key_gate_projection.": (".indexer.key_projection.", 1),
         },

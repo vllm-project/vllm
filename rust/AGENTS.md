@@ -41,6 +41,17 @@ The remaining crates are tooling and infrastructure (`vllm-metrics`, `vllm-traci
 
 8. **Keep compatibility code to real consumers.** Internal Rust APIs can change freely: migrate the callers and delete the old path in the same PR. A compatibility layer on a wire contract needs an actual consumer, such as independently versioned gRPC clients or a rolling upgrade, and stays narrow at the wire boundary.
 
+## Request validation
+
+Define each request invariant once (single source of truth), in the lowest layer that owns its semantics:
+
+- **Wire parsing (`serde`)**: JSON shape, field types, and closed wire enums. HTTP handlers take `Result<Json<T>, JsonRejection>` directly (which extracts `body.<path>` on data errors); do not add `validator` derive macros or duplicate bounds onto DTO structs.
+- **Route boundary (`vllm-server` `validate.rs` / `convert.rs`)**: protocol-only invariants that lower crates do not see (such as `stream_options` requiring `stream`, `top_logprobs` requiring `logprobs`, or route-specific `metadata` limits), lowering-time format conversions, and server-state or per-route policy checks (`model_names.check`, `VLLM_MAX_N_SEQUENCES`). Keep temporary rejections of unimplemented fields isolated in `reject_unsupported_fields`.
+- **Shared domain (`vllm-text` / `vllm-chat`)**: cross-route rules — sampling parameter bounds, `max_tokens >= 1`, `min_tokens <= max_tokens`, logprobs, stop strings (non-empty and `VLLM_MAX_STOP_STRINGS`), token IDs and vocab bounds, `cache_salt`, prompt length and truncation, chat messages, tools, templates, and multimodal limits.
+- **Fault classification and `param`**: `vllm_text::Error::kind()` and `vllm_chat::Error::kind()` classify every variant exhaustively into `ErrorKind::InvalidRequest { param }` or `ErrorKind::Internal`. Report the shared layer's canonical `param` name without per-protocol remapping, and leave `param` as `None` only for cross-field or non-field errors.
+
+Upper stages may call the owner's check early to short-circuit before expensive work such as chat template rendering or outbound media fetches.
+
 ## Python frontend parity
 
 - Match the Python frontend's wire behavior: serialization, omitted fields versus `null`, defaults, error status codes, and SSE frame order. Check the actual output, not the Python source alone.

@@ -232,8 +232,13 @@ def create_scheduler(
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
     hash_block_size: int | None = None,
+    scheduler_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
-    """Initialize Scheduler For Testing."""
+    """Initialize Scheduler For Testing.
+
+    `scheduler_block_size` defaults to `cache_config.block_size`; pass the LCM
+    of the group block sizes when they differ, as the engine does.
+    """
     block_size = vllm_config.cache_config.block_size
     if kv_cache_config is None:
         kv_cache_config = KVCacheConfig(
@@ -261,7 +266,7 @@ def create_scheduler(
         kv_cache_config=kv_cache_config,
         collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
-        block_size=block_size,
+        block_size=scheduler_block_size or block_size,
         hash_block_size=hash_block_size,
     )
 

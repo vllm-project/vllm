@@ -11,6 +11,7 @@ use std::sync::Arc;
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{StreamExt as _, future, pin_mut};
@@ -47,7 +48,6 @@ use crate::routes::openai::utils::choices::{
 };
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
@@ -73,8 +73,9 @@ pub(crate) fn lower_completion_request(
 pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
+    body: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Json(body) = body?;
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
@@ -313,6 +314,7 @@ async fn collect_completion(
         collected.timestamps,
         collected.usage.output_token_count,
         collected.spec_decode_metrics,
+        None,
     );
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None);
 
@@ -400,6 +402,7 @@ async fn completion_chunk_stream(
     // for stop strings or incomplete UTF-8 lags the tokens.
     let mut next_text_offset = 0_u32;
     let mut first_chunk = true;
+    let mut first_content_token_ts = None;
     // The prompt chunk of the first update, or the error building it, goes
     // out with that update's text, so an engine error on the update ends the
     // stream alone, like Python.
@@ -478,6 +481,7 @@ async fn completion_chunk_stream(
                 decoded,
                 sampled:
                     SampledDelta {
+                        timestamp,
                         token_ids,
                         logprobs,
                         ..
@@ -492,6 +496,13 @@ async fn completion_chunk_stream(
                 }
                 if let Some(chunk) = pending_prompt_chunk.take() {
                     yield_chunk!(chunk?);
+                }
+                if first_content_token_ts.is_none()
+                    && !prompt_only
+                    && !delta.is_empty()
+                    && timestamp > 0.0
+                {
+                    first_content_token_ts = Some(timestamp);
                 }
                 // Prompt-only streaming already emitted the echoed prompt in the Start chunk.
                 // The one generated token is only used to drive the engine to a finished event,
@@ -537,6 +548,7 @@ async fn completion_chunk_stream(
                                 finished.timestamps,
                                 finished.usage.output_token_count,
                                 finished.spec_decode_metrics,
+                                first_content_token_ts,
                             );
                             y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                                 &envelope,
@@ -637,6 +649,7 @@ async fn completion_chunk_stream(
                             finished.timestamps,
                             finished.usage.output_token_count,
                             finished.spec_decode_metrics,
+                            first_content_token_ts,
                         );
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
@@ -804,6 +817,7 @@ mod tests {
         DecodedTextEvent::TextDelta {
             decoded: DecodedText::unattributed(text),
             sampled: SampledDelta {
+                timestamp: finished.as_ref().map_or(0.0, |value| value.timestamps.last_token_ts),
                 token_ids,
                 logprobs,
                 sampling_mask: None,
@@ -950,7 +964,7 @@ mod tests {
 
     #[tokio::test]
     async fn completion_chunk_stream_maps_streaming_logprobs() {
-        let stream = stream::iter(vec![
+        let mut outputs = vec![
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2, 3, 4, 5].into(),
                 prompt_logprobs: None,
@@ -1030,7 +1044,12 @@ mod tests {
                     routed_experts: None,
                 }),
             )),
-        ]);
+        ];
+        // Decoding can release text later than the first generated token.
+        if let Ok(DecodedTextEvent::TextDelta { sampled, .. }) = &mut outputs[1] {
+            sampled.timestamp = 10.75;
+        }
+        let stream = stream::iter(outputs);
 
         let chunks = completion_chunk_stream(
             stream,
@@ -1111,6 +1130,7 @@ mod tests {
             CompletionSseChunk::Usage(chunk) => {
                 assert!(chunks[..3].iter().all(|chunk| chunk_response(chunk).metrics.is_none()));
                 let metrics = chunk.metrics.as_ref().expect("per-request metrics");
+                assert!((metrics.time_to_first_content_token_ms.unwrap() - 550.0).abs() < 1e-9);
                 assert!((metrics.queue_time_ms.unwrap() - 200.0).abs() < 1e-9);
                 assert!((metrics.tokens_per_second.unwrap() - 2.5).abs() < 1e-9);
                 assert_eq!(
@@ -1508,7 +1528,12 @@ mod tests {
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
-                    timestamps: Default::default(),
+                    timestamps: vllm_llm::RequestTimestamps {
+                        queued_ts: 10.0,
+                        scheduled_ts: 10.2,
+                        first_token_ts: 10.5,
+                        last_token_ts: 10.5,
+                    },
                 }),
             )),
         ]);
@@ -1521,7 +1546,10 @@ mod tests {
             "model".to_string(),
             1,
             None,
-            ApiServerOptions::default(),
+            ApiServerOptions {
+                enable_per_request_metrics: true,
+                ..Default::default()
+            },
             ResponseOptions {
                 include_usage: true,
                 prompt_only: true,
@@ -1559,6 +1587,9 @@ mod tests {
         match &chunks[2] {
             CompletionSseChunk::Usage(chunk) => {
                 let usage = chunk.usage.as_ref().expect("usage");
+                let metrics = chunk.metrics.as_ref().expect("metrics");
+                assert!(metrics.time_to_first_token_ms.is_some());
+                assert_eq!(metrics.time_to_first_content_token_ms, None);
                 assert_eq!(usage.prompt_tokens, 2);
                 assert_eq!(usage.completion_tokens, Some(1));
                 assert_eq!(usage.total_tokens, 3);
