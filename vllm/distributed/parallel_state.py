@@ -2264,11 +2264,17 @@ def initialize_model_parallel(
         and config.model_config is not None
         and (
             config.model_config.architecture == "DeepseekV41ForCausalLM"
-            # Qwen4Exp only shares its PLE table over this group. embedding_across_dp
-            # spreads the table's vocab over the DP ranks, so they hold different rows.
+            # Qwen4Exp and HY4-Flash share their tables over this group only
+            # when asked. embedding_across_dp spreads the table's vocab over
+            # the DP ranks, so they hold different rows.
             or (
                 config.model_config.architecture
-                in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+                in (
+                    "Qwen4ExpForCausalLM",
+                    "Qwen4ExpForConditionalGeneration",
+                    "HYV4FlashForCausalLM",
+                    "HYV4FlashVLForConditionalGeneration",
+                )
                 and engram_config.dp_shared_memory
                 and not engram_config.embedding_across_dp
             )

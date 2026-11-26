@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flash frozen n-gram embeddings with TP head sharding and V2 lookback."""
 
+import math
 from collections.abc import Iterable
 
 import numpy as np
@@ -11,6 +12,7 @@ from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import (
+    get_engram_dp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -19,11 +21,13 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.deepseek_v41.common.engram import DPSharedEngramStorage
 from vllm.models.hy_v4_flash.common.engram_ops import (
     gated_update,
     lookup_norm,
     ngram_hashes,
 )
+from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -190,7 +194,9 @@ class FlashNgramHashState(nn.Module):
 
 
 class FlashEmbedding(nn.Module):
-    def __init__(self, sizes, dim, dtype, cpu_offload):
+    def __init__(
+        self, sizes, dim, dtype, cpu_offload, share_group=None, *, prefix=""
+    ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.head_start, self.head_end = head_range(
@@ -202,36 +208,95 @@ class FlashEmbedding(nn.Module):
         self.n_hash_cols = len(sizes)
         self.dim = dim
         self.cpu_offload = cpu_offload
+        self.share_group = share_group
+        self.prefix = prefix
+        if share_group is not None and (not cpu_offload or not prefix):
+            raise ValueError("Shared Flash Engram requires CPU offload and a prefix")
+        self._shared_ptrs: set[int] = set()
         if cpu_offload and not is_uva_available():
             raise RuntimeError("Flash Engram CPU offload requires UVA")
         rows = self.vocab_end - self.vocab_start
-        storage = {"device": "cpu", "pin_memory": True} if cpu_offload else {}
         self.embedding = nn.Module()
-        self.embedding.weight = nn.Parameter(
-            torch.empty(
-                (0,) if dtype is None else (rows, dim),
-                dtype=dtype or torch.bfloat16,
-                **storage,
-            ),
-            requires_grad=False,
-        )
+        if dtype is None:
+            # The table dtype is unknown until the checkpoint tensor arrives.
+            self.embedding.weight = nn.Parameter(
+                torch.empty(
+                    (0,),
+                    dtype=torch.bfloat16,
+                    **({"device": "cpu", "pin_memory": True} if cpu_offload else {}),
+                ),
+                requires_grad=False,
+            )
+        else:
+            self.embedding.weight = nn.Parameter(
+                self._allocate_storage((rows, dim), dtype), requires_grad=False
+            )
         self.fp8 = dtype == torch.float8_e4m3fn
         self.embedding.register_parameter("weight_scale_inv", None)
         if self.fp8:
             self.embedding.weight_scale_inv = nn.Parameter(
-                torch.empty(rows, dtype=torch.bfloat16, **storage), requires_grad=False
+                self._allocate_storage((rows,), torch.bfloat16), requires_grad=False
             )
         for parameter in self.embedding.parameters():
             set_weight_attrs(parameter, {"weight_loader": self._load_shard})
         self._uva_weight = None
         self._uva_scale = None
         logger.info(
-            "Flash Engram TP table: %d rows x %d, dtype=%s, cpu_offload=%s",
+            "Flash Engram TP table: %d rows x %d, dtype=%s, "
+            "cpu_offload=%s, sharing_requested=%s",
             rows,
             dim,
             dtype,
             cpu_offload,
+            share_group is not None,
         )
+
+    def _allocate_storage(self, shape, dtype, device=None):
+        """Device-local, private pinned, or DP-shared host storage."""
+        if self.share_group is not None:
+            numel = math.prod(shape)
+            try:
+                table, _ = DPSharedEngramStorage.share_shm_table(
+                    numel * dtype.itemsize, self.share_group
+                )
+            except RuntimeError as exc:
+                # share_shm_table raises on every rank of the group, so all
+                # of them fall back together.
+                logger.warning_once(
+                    "Keeping one Flash Engram table per DP replica: %s", exc
+                )
+            else:
+                tensor = table.view(dtype).view(shape)
+                self._shared_ptrs.add(tensor.data_ptr())
+                return tensor
+        if self.cpu_offload:
+            return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+        return torch.empty(shape, dtype=dtype, device=device)
+
+    def _check_shared_load_order(self, parameter, value, is_weight):
+        # Lazy allocation is itself collective, not just the subsequent write
+        # fence. Match the logical tensor before mapping anything, including
+        # after a previous allocation fell back to private storage.
+        group = self.share_group
+        signature = (
+            self.prefix,
+            "weight" if is_weight else "weight_scale_inv",
+            tuple(value.shape),
+            str(value.dtype),
+            tuple(parameter.shape),
+            str(parameter.dtype),
+            parameter.data_ptr() in self._shared_ptrs,
+        )
+        signatures: list[object] = [None] * group.world_size
+        torch.distributed.all_gather_object(
+            signatures, signature, group=group.cpu_group
+        )
+        if any(other != signature for other in signatures):
+            raise RuntimeError(
+                "Flash Engram DP sharing requires identical tensor load order "
+                f"across replicas; got {signatures}. Disable dp_shared_memory "
+                "or use a loader with consistent ordering."
+            )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded = set()
@@ -253,6 +318,8 @@ class FlashEmbedding(nn.Module):
 
     def _load_shard(self, parameter, value):
         is_weight = parameter is self.embedding.weight
+        if self.share_group is not None:
+            self._check_shared_load_order(parameter, value, is_weight)
         expected = (
             (self.num_embeddings, self.dim) if is_weight else (self.num_embeddings,)
         )
@@ -274,13 +341,18 @@ class FlashEmbedding(nn.Module):
         elif self.embedding.weight.numel() and not self.fp8:
             raise ValueError("BF16 Engram table must not have FP8 row scales")
         if parameter.numel() == 0:
-            parameter.data = torch.empty(
+            parameter.data = self._allocate_storage(
                 (self.vocab_end - self.vocab_start, *expected[1:]),
-                dtype=value.dtype,
+                value.dtype,
                 device=parameter.device,
-                pin_memory=self.cpu_offload,
             )
-        default_weight_loader(parameter, value[self.vocab_start : self.vocab_end])
+        shared = parameter.data_ptr() in self._shared_ptrs
+        if not shared or self.share_group.rank_in_group == 0:
+            default_weight_loader(parameter, value[self.vocab_start : self.vocab_end])
+        if shared:
+            # The identity check above pairs the same tensor on every rank.
+            # Only the group leader writes; fence before peers use the table.
+            torch.distributed.barrier(group=self.share_group.cpu_group)
         if is_weight:
             self.fp8 = value.dtype == torch.float8_e4m3fn
         if is_weight and self.fp8 and self.embedding.weight_scale_inv is None:
@@ -328,22 +400,37 @@ class FlashEngram(nn.Module):
         index = layout.layer_ids.index(layer_id)
         sizes = [p for order in layout.primes[index] for p in order]
         storage = vllm_config.engram_config
-        if (
-            storage.disk_offload
-            or storage.embedding_across_dp
-            or storage.dp_shared_memory
-        ):
+        if storage.disk_offload or storage.embedding_across_dp:
             raise ValueError(
-                "Flash Engram requires private DP replicas with TP-local tables; "
-                "DP sharing, cross-DP sharding and disk offload are unsupported"
+                "Flash Engram requires TP-local tables; cross-DP sharding "
+                "and disk offload are unsupported"
             )
+        share_group = None
+        if storage.dp_shared_memory:
+            if not current_platform.is_cuda():
+                logger.warning_once(
+                    "Flash Engram DP sharing is currently supported on CUDA only; "
+                    "keeping private offloaded tables."
+                )
+            else:
+                share_group = get_engram_dp_group()
+                if share_group is None:
+                    logger.warning_once(
+                        "Flash Engram DP replicas are not co-located on one node; "
+                        "keeping private offloaded tables."
+                    )
         dtype = None
         if vllm_config.load_config.load_format == "dummy":
             dtype = (
                 torch.float8_e4m3fn if config.engram_fp8_embedding else torch.bfloat16
             )
         self.multi_head_embedding = FlashEmbedding(
-            sizes, layout.head_dim, dtype, storage.cpu_offload
+            sizes,
+            layout.head_dim,
+            dtype,
+            storage.cpu_offload,
+            share_group,
+            prefix=prefix,
         )
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
         local = self.multi_head_embedding

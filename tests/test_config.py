@@ -2313,6 +2313,33 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+@pytest.mark.parametrize(
+    ("options", "error"),
+    [
+        ({"cpu_offload": True, "dp_shared_memory": True}, None),
+        ({}, None),
+        ({"embedding_across_dp": True}, "embedding_across_dp"),
+        ({"disk_offload": True}, "disk_offload"),
+    ],
+)
+def test_engram_flash_shares_tables_only_when_asked(options, error):
+    """HY4-Flash accepts shared Engram tables opt-in; the default stays
+    private and the other DP options stay rejected."""
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture="HYV4FlashForCausalLM",
+            hf_text_config=SimpleNamespace(engram_layer_ids=[2]),
+        ),
+    )
+    config = EngramConfig(**options)
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
+        config.verify_model_config(model)
+    parallel = ParallelConfig(data_parallel_size=2)
+    config.resolve_dp_shared_memory(parallel, model)
+    assert config.dp_shared_memory is bool(options.get("dp_shared_memory"))
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",
