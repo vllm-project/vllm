@@ -2524,3 +2524,36 @@ def test_dsv4_rope_quant_is_off_with_lora():
     vllm_config.lora_config = LoRAConfig(max_lora_rank=8)
     reason = rope_quant_unsupported_reason(torch.nn.Module(), vllm_config)
     assert reason is not None and "LoRA" in reason
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_muse_spark_qkv_gate_adapter_shards(default_vllm_config, dist_init, tp_rank):
+    """Match HF's per-head Q/K row order and retain zeroes for omitted slices."""
+    from vllm.models.muse_spark.common.layers import MuseSparkQKVOGateParallelLinear
+
+    base = MuseSparkQKVOGateParallelLinear(
+        hidden_size=16,
+        head_size=4,
+        total_num_heads=4,
+        total_num_kv_heads=2,
+        tp_size=2,
+        tp_rank=tp_rank,
+    )
+    config = LoRAConfig(max_lora_rank=8, lora_dtype=torch.float32)
+    layer = from_layer(base, 1, config, [])
+    a = torch.ones(8, 16)
+    q = torch.arange(16 * 8).reshape(16, 8)
+    k = torch.arange(8 * 8).reshape(8, 8)
+    gate = q + 1000
+    layer.set_lora(0, [a, a, None, a], [q, k, None, gate])
+    perm = [0, 2, 1, 3]
+    for stacked, global_b in zip(
+        layer.lora_b_stacked,
+        [
+            q.reshape(4, 4, 8)[:, perm].reshape_as(q),
+            k.reshape(2, 4, 8)[:, perm].reshape_as(k),
+            torch.zeros_like(k),
+            gate,
+        ],
+    ):
+        assert torch.equal(stacked[0, 0], global_b.chunk(2)[tp_rank])

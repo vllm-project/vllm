@@ -481,3 +481,9 @@ vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
 When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+
+For Muse Spark text attention, use `--lora-target-modules qkv_proj` to keep
+LoRA on the attention projection. The routed experts do not support LoRA.
+The packed module targets the fused query, key, value,
+and output-gate projection. PEFT adapters can also target the individual
+Hugging Face modules `q_proj`, `k_proj`, `v_proj`, and `gate_proj`.

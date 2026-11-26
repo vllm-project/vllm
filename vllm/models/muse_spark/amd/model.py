@@ -1228,7 +1228,7 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             _reject_online_quantized_linears(self)
         self.vllm_config = vllm_config
 
-        # qkv_proj fuses Q+K+V+OG, so LoRA must treat it as one module.
+        # The text QKV+O-gate layer declares its four adapter projections locally.
         self.packed_modules_mapping = {  # type: ignore[misc]
             k: v for k, v in self.packed_modules_mapping.items() if k != "qkv_proj"
         }

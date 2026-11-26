@@ -344,6 +344,8 @@ class MuseSparkQKVOGateParallelLinear(ColumnParallelLinear):
     head group. KV-head padding is not supported.
     """
 
+    lora_packed_modules = ["q_proj", "k_proj", "v_proj", "gate_proj"]
+
     def __init__(
         self,
         hidden_size: int,
@@ -372,6 +374,8 @@ class MuseSparkQKVOGateParallelLinear(ColumnParallelLinear):
             f"projection: {total_num_kv_heads=}, tp_size={self.tp_size}."
         )
         self.num_heads = total_num_heads // self.tp_size
+        q, kv = total_num_heads * head_size, total_num_kv_heads * head_size
+        self.output_sizes = [q, kv, kv, q]
         self.num_kv_heads = total_num_kv_heads // self.tp_size
 
     def weight_loader(

@@ -115,7 +115,10 @@ class WorkerLoRAManager:
                     expected_lora_lst.append(module)
                 if module == "experts":
                     expected_lora_lst.append(module)
-            expected_lora_modules = set(expected_lora_lst)
+            expected_lora_modules = (
+                set(expected_lora_lst)
+                | self._adapter_manager.layer_specific_lora_targets
+            )
             if isinstance(lora_request, _TensorLoRARequest):
                 logger.warning_once(
                     "Loading LoRA from tensors is a private, worker-local interface "

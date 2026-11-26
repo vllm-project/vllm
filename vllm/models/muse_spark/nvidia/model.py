@@ -1269,7 +1269,10 @@ class MuseSparkAttention(nn.Module):
     def can_fuse_sp_gather(self, x: torch.Tensor) -> bool:
         """Whether the sequence all-gather can be fused into the QKV GEMM."""
         return (
-            isinstance(self.qkv_proj.quant_method, UnquantizedLinearMethod)
+            isinstance(
+                self.qkv_proj, (QKVParallelLinear, MuseSparkQKVOGateParallelLinear)
+            )
+            and isinstance(self.qkv_proj.quant_method, UnquantizedLinearMethod)
             and self.qkv_proj.bias is None
             and can_sp_all_gather_matmul(x, self.qkv_proj.weight)
         )
@@ -2014,7 +2017,7 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
-        # qkv_proj fuses Q+K+V+OG, so LoRA must treat it as one module.
+        # The text QKV+O-gate layer declares its four adapter projections locally.
         self.packed_modules_mapping = {  # type: ignore[misc]
             k: v for k, v in self.packed_modules_mapping.items() if k != "qkv_proj"
         }

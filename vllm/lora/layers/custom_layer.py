@@ -20,6 +20,7 @@ from .column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithLoRA,
+    MergedColumnParallelLinearWithShardedLoRA,
 )
 
 if TYPE_CHECKING:
@@ -332,3 +333,49 @@ class Glm5NextIndexerWkWeightsWithLoRA(MergedColumnParallelLinearWithLoRA):
             type(source_layer).__name__ == "Glm5NextIndexerWkWeightsLinear"
             and len(packed_modules_list) == 2
         )
+
+
+class MuseSparkQKVOGateWithLoRA(MergedColumnParallelLinearWithLoRA):
+    """LoRA on Muse Spark's packed Q, K, V and O-gate projection."""
+
+    @classmethod
+    def can_replace_layer(
+        cls, source_layer, lora_config, packed_modules_list, model_config=None
+    ) -> bool:
+        return (
+            type(source_layer).__name__ == "MuseSparkQKVOGateParallelLinear"
+            and issubclass(cls, MergedColumnParallelLinearWithShardedLoRA)
+            == lora_config.fully_sharded_loras
+        )
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor | None],
+        lora_b: torch.Tensor | list[torch.Tensor | None],
+    ) -> None:
+        if isinstance(lora_b, torch.Tensor):
+            # A checkpoint targeting the packed runtime layer already uses its
+            # row order; split each part before TP takes its local heads.
+            lora_a = [lora_a] * self.n_slices
+            lora_b = list(lora_b.split(self.output_sizes))
+        else:
+            # Separate HF Q/K projections store even then odd rows per head.
+            # The base loader interleaves them before executing attention.
+            head_dim = self.base_layer.head_size
+            lora_b = list(lora_b)
+            for idx in (0, 1):
+                b = lora_b[idx]
+                if b is not None:
+                    lora_b[idx] = (
+                        b.reshape(-1, 2, head_dim // 2, b.shape[1])
+                        .transpose(1, 2)
+                        .reshape_as(b)
+                    )
+        super().set_lora(index, lora_a, lora_b)
+
+
+class MuseSparkQKVOGateWithShardedLoRA(
+    MuseSparkQKVOGateWithLoRA, MergedColumnParallelLinearWithShardedLoRA
+):
+    """Fully sharded variant, with LoRA-A partitioned across TP ranks."""
