@@ -183,10 +183,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     @cached_property
     def _prompt_prefix_ids(self) -> list[int]:
         """Tokens the HF processor puts before a prompt on top of what its tokenizer
-        adds, such as the BOS that Emu3 prepends itself.
-
-        Processors that reject a prompt without multi-modal data (e.g. PaliGemma) or
-        add anything other than a prefix get none."""
+        adds, such as the BOS that the Emu3 and Molmo2 processors prepend."""
         # Non-empty, so that tokens added after the text don't pass for a prefix
         text = "a"
         hf_processor = self.get_hf_processor()
