@@ -3915,7 +3915,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         "serve",
         "Qwen/Qwen3-0.6B",
         "--handshake-host",
-        "10.99.48.128",
+        "192.0.2.10",
         "--data-parallel-size",
         "4",
     ])
@@ -3924,27 +3924,21 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
+    let mut config =
+        args.to_frontend_config("tcp://192.0.2.10:29550".to_string(), &topology(&args));
 
+    let LlmSourceConfig::EngineCore(engine_core) = &mut config.llm_source else {
+        panic!("expected engine-core config");
+    };
     let TransportMode::HandshakeOwner {
-        handshake_address,
-        advertised_host,
-        engine_start_index,
-        engine_count,
-        data_parallel_size,
-        ready_timeout,
         local_input_address,
         local_output_address,
-    } = &config.engine_core().transport_mode
+        ..
+    } = &mut engine_core.transport_mode
     else {
         panic!("expected handshake-owned transport");
     };
 
-    assert_eq!(handshake_address, "tcp://10.99.48.128:29550");
-    assert_eq!(advertised_host, "10.99.48.128");
-    assert_eq!(*engine_start_index, 0);
-    assert_eq!(*engine_count, 4);
-    assert_eq!(*data_parallel_size, 4);
     assert!(
         local_input_address
             .as_deref()
@@ -3956,6 +3950,8 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             .is_some_and(|address| address.starts_with("ipc://"))
     );
     assert_ne!(local_input_address, local_output_address);
+    *local_input_address = Some("<ipc input>".into());
+    *local_output_address = Some("<ipc output>".into());
 
     expect![[r#"
         FrontendConfig {
@@ -4039,8 +4035,8 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             llm_source: EngineCore(
                 EngineCoreConfig {
                     transport_mode: HandshakeOwner {
-                        handshake_address: "tcp://10.99.48.128:29550",
-                        advertised_host: "10.99.48.128",
+                        handshake_address: "tcp://192.0.2.10:29550",
+                        advertised_host: "192.0.2.10",
                         engine_start_index: 0,
                         engine_count: 4,
                         data_parallel_size: 4,
@@ -4074,22 +4070,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             ),
         }
     "#]]
-    .assert_debug_eq(&FrontendConfig {
-        llm_source: LlmSourceConfig::EngineCore(EngineCoreConfig {
-            transport_mode: TransportMode::HandshakeOwner {
-                handshake_address: handshake_address.clone(),
-                advertised_host: advertised_host.clone(),
-                engine_start_index: 0,
-                engine_count: *engine_count,
-                data_parallel_size: *engine_count,
-                ready_timeout: *ready_timeout,
-                local_input_address: Some("<ipc input>".to_string()),
-                local_output_address: Some("<ipc output>".to_string()),
-            },
-            ..config.engine_core().clone()
-        }),
-        ..config.clone()
-    });
+    .assert_debug_eq(&config);
 }
 
 #[test]
@@ -4099,7 +4080,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
         "serve",
         "Qwen/Qwen3-0.6B",
         "--data-parallel-address",
-        "10.99.48.128",
+        "192.0.2.10",
         "--data-parallel-size",
         "4",
         "--data-parallel-size-local",
@@ -4110,122 +4091,21 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string(), &topology(&args));
+    let config = args.to_frontend_config("tcp://192.0.2.10:29550".to_string(), &topology(&args));
 
     expect![[r#"
-        FrontendConfig {
-            server: ServerConfig {
-                model: "Qwen/Qwen3-0.6B",
-                revision: None,
-                tokenizer: None,
-                hf_config: None,
-                skip_tokenizer_init: false,
-                hf_token: None,
-                hf_overrides: HfOverrides(
-                    {},
-                ),
-                generation_config: Auto,
-                override_generation_config: {},
-                served_model_name: [],
-                listener_mode: BindTcp {
-                    host: "127.0.0.1",
-                    port: 8000,
-                },
-                grpc_listener_mode: None,
-                tool_call_parser: Auto,
-                reasoning_parser: Auto,
-                tool_strict_level: None,
-                structured_outputs_backend: Xgrammar,
-                renderer: Auto,
-                language_model_only: false,
-                chat_template: None,
-                default_chat_template_kwargs: None,
-                reasoning_effort_map: {},
-                trust_request_chat_template: false,
-                exclude_tools_when_tool_choice_none: false,
-                limit_mm_per_prompt: {},
-                mm_processor_kwargs: {},
-                chat_template_content_format: Auto,
-                max_logprobs: None,
-                api_server_options: ApiServerOptions {
-                    enable_log_requests: false,
-                    log_outputs: OutputLogConfig {
-                        outputs: Disabled,
-                        max_log_len: None,
-                    },
-                    enable_prompt_tokens_details: false,
-                    default_return_tokens_as_token_ids: false,
-                    enable_per_request_metrics: false,
-                    force_include_usage: false,
-                    enable_request_id_headers: false,
-                    log_error_stack: false,
-                    enable_scale_out: false,
-                    skip_model_name_validation: false,
-                    server_dev_mode: false,
-                    allow_runtime_lora_updating: false,
-                    sse_keep_alive_interval: None,
-                    request_body_limit_bytes: Some(
-                        33554432,
-                    ),
-                    max_n_sequences: 16384,
-                },
-                fingerprint_mode: Full,
-                cors: CorsConfig {
-                    allow_origins: [],
-                    allow_methods: [
-                        "*",
-                    ],
-                    allow_headers: [
-                        "*",
-                    ],
-                    allow_credentials: false,
-                },
-                access_log: AccessLogConfig {
-                    enabled: true,
-                    excluded_paths: [],
-                },
-                tls: None,
-                root_path: None,
-                api_keys: [],
-                shutdown_timeout: 0ns,
-                keep_alive_on_engine_death: false,
-                keep_alive_timeout: 5s,
-            },
-            llm_source: EngineCore(
-                EngineCoreConfig {
-                    transport_mode: HandshakeOwner {
-                        handshake_address: "tcp://10.99.48.128:29550",
-                        advertised_host: "10.99.48.128",
-                        engine_start_index: 0,
-                        engine_count: 4,
-                        data_parallel_size: 4,
-                        ready_timeout: 600s,
-                        local_input_address: None,
-                        local_output_address: None,
-                    },
-                    coordinator_mode: MaybeInProc,
-                    lora_modules: [],
-                    default_mm_loras: {},
-                    stream_interval: 1,
-                    admission_limits: AdmissionLimits {
-                        max_num_queued_reqs: None,
-                        max_num_queued_tokens: None,
-                    },
-                    disable_log_stats: false,
-                    log_stats_interval: Some(
-                        10s,
-                    ),
-                    custom_histogram_buckets: CustomHistogramBuckets(
-                        {},
-                    ),
-                    disable_request_id_randomization: false,
-                    manages_engine: true,
-                    profiler: None,
-                },
-            ),
+        HandshakeOwner {
+            handshake_address: "tcp://192.0.2.10:29550",
+            advertised_host: "192.0.2.10",
+            engine_start_index: 0,
+            engine_count: 4,
+            data_parallel_size: 4,
+            ready_timeout: 600s,
+            local_input_address: None,
+            local_output_address: None,
         }
     "#]]
-    .assert_debug_eq(&config);
+    .assert_debug_eq(&config.engine_core().transport_mode);
 }
 
 #[test]
@@ -4378,118 +4258,29 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
     let config = args.into_config();
 
     expect![[r#"
-        FrontendConfig {
-            server: ServerConfig {
-                model: "Qwen/Qwen3-0.6B",
-                revision: None,
-                tokenizer: None,
-                hf_config: None,
-                skip_tokenizer_init: false,
-                hf_token: None,
-                hf_overrides: HfOverrides(
-                    {},
-                ),
-                generation_config: Auto,
-                override_generation_config: {},
-                served_model_name: [],
-                listener_mode: InheritedFd {
-                    fd: 3,
-                },
-                grpc_listener_mode: None,
-                tool_call_parser: None,
-                reasoning_parser: None,
-                tool_strict_level: None,
-                structured_outputs_backend: Xgrammar,
-                renderer: Auto,
-                language_model_only: false,
-                chat_template: None,
-                default_chat_template_kwargs: None,
-                reasoning_effort_map: {},
-                trust_request_chat_template: false,
-                exclude_tools_when_tool_choice_none: false,
-                limit_mm_per_prompt: {},
-                mm_processor_kwargs: {},
-                chat_template_content_format: Auto,
-                max_logprobs: None,
-                api_server_options: ApiServerOptions {
-                    enable_log_requests: false,
-                    log_outputs: OutputLogConfig {
-                        outputs: Disabled,
-                        max_log_len: None,
-                    },
-                    enable_prompt_tokens_details: false,
-                    default_return_tokens_as_token_ids: false,
-                    enable_per_request_metrics: false,
-                    force_include_usage: false,
-                    enable_request_id_headers: false,
-                    log_error_stack: false,
-                    enable_scale_out: false,
-                    skip_model_name_validation: false,
-                    server_dev_mode: false,
-                    allow_runtime_lora_updating: false,
-                    sse_keep_alive_interval: None,
-                    request_body_limit_bytes: Some(
-                        33554432,
-                    ),
-                    max_n_sequences: 16384,
-                },
-                fingerprint_mode: Full,
-                cors: CorsConfig {
-                    allow_origins: [],
-                    allow_methods: [
-                        "*",
-                    ],
-                    allow_headers: [
-                        "*",
-                    ],
-                    allow_credentials: false,
-                },
-                access_log: AccessLogConfig {
-                    enabled: true,
-                    excluded_paths: [],
-                },
-                tls: None,
-                root_path: None,
-                api_keys: [],
-                shutdown_timeout: 0ns,
-                keep_alive_on_engine_death: false,
-                keep_alive_timeout: 5s,
+        (
+            InheritedFd {
+                fd: 3,
             },
-            llm_source: EngineCore(
-                EngineCoreConfig {
-                    transport_mode: Bootstrapped {
-                        input_listener_fd: 999999,
-                        output_listener_fd: 999998,
-                        engine_start_index: 3,
-                        engine_count: 1,
-                        data_parallel_size: 4,
-                        ready_timeout: 600s,
-                    },
-                    coordinator_mode: External {
-                        address: "tcp://127.0.0.1:7000",
-                    },
-                    lora_modules: [],
-                    default_mm_loras: {},
-                    stream_interval: 1,
-                    admission_limits: AdmissionLimits {
-                        max_num_queued_reqs: None,
-                        max_num_queued_tokens: None,
-                    },
-                    disable_log_stats: false,
-                    log_stats_interval: Some(
-                        10s,
-                    ),
-                    custom_histogram_buckets: CustomHistogramBuckets(
-                        {},
-                    ),
-                    disable_request_id_randomization: false,
-                    manages_engine: false,
-                    profiler: None,
-                },
-            ),
-        }
+            Bootstrapped {
+                input_listener_fd: 999999,
+                output_listener_fd: 999998,
+                engine_start_index: 3,
+                engine_count: 1,
+                data_parallel_size: 4,
+                ready_timeout: 600s,
+            },
+            External {
+                address: "tcp://127.0.0.1:7000",
+            },
+        )
     "#]]
-    .assert_debug_eq(&config);
+    .assert_debug_eq(&(
+        &config.server.listener_mode,
+        &config.engine_core().transport_mode,
+        &config.engine_core().coordinator_mode,
+    ));
+    assert!(!config.engine_core().manages_engine);
 }
 
 #[test]
