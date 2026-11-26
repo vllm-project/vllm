@@ -92,6 +92,7 @@ from .ops.router_bf16x3 import (
     split_fp32_to_bf16x3,
     supports_router_bf16x3,
 )
+from .ops.skinny_gemm import project_columns
 
 logger = init_logger(__name__)
 
@@ -249,6 +250,27 @@ class MuseSparkMoE(nn.Module):
         self.num_experts = config.num_local_experts
         self.is_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
+        )
+        from vllm.platforms.rocm import on_gfx950
+
+        pc = vllm_config.parallel_config
+        column_shard = (
+            on_gfx950()
+            and self.tp_size > 1
+            and not self.is_sequence_parallel
+            and pc.data_parallel_size == 1
+            and pc.prefill_context_parallel_size == 1
+            and pc.decode_context_parallel_size == 1
+            and not envs.VLLM_BATCH_INVARIANT
+            and not vllm_config.kernel_config.monokernel
+            and vllm_config.kernel_config.linear_backend == "auto"
+            and vllm_config.lora_config is None
+        )
+        self.shard_pooler = column_shard and getattr(
+            config, "muse_spark_tep_shard_pooler", True
+        )
+        self.shard_unpooler = column_shard and getattr(
+            config, "muse_spark_tep_shard_unpooler", True
         )
         self.defer_reduce = (
             token_sharded_stream_supported(vllm_config)
@@ -408,7 +430,9 @@ class MuseSparkMoE(nn.Module):
         self, hidden_states: torch.Tensor, shard: TokenShard | None = None
     ) -> torch.Tensor:
         if self.pooler is not None:
-            hidden_states, _ = self.pooler(hidden_states)
+            hidden_states = project_columns(
+                self.pooler, hidden_states, self.shard_pooler, shard
+            )
         if shard is not None:
             hidden_states = shard.gather(hidden_states)
         norm = self.pre_expert_norm
@@ -461,7 +485,9 @@ class MuseSparkMoE(nn.Module):
                 experts_out = tensor_model_parallel_all_reduce(experts_out)
 
         if self.unpooler is not None:
-            experts_out, _ = self.unpooler(experts_out)
+            experts_out = project_columns(
+                self.unpooler, experts_out, self.shard_unpooler, shard
+            )
 
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)

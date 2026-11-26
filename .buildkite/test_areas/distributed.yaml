@@ -644,6 +644,7 @@ steps:
       - tests/distributed/test_quick_all_reduce.py
       - tests/distributed/test_aiter_rms_fallback.py
       - tests/distributed/test_muse_spark_token_shard.py
+      - tests/distributed/test_muse_spark_rocm_shard_pooler.py
       - tests/distributed/test_muse_spark_decode_moe.py
       - vllm/models/muse_spark/amd/model.py
       - vllm/models/muse_spark/amd/
@@ -669,6 +670,7 @@ steps:
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
       - pytest -v -s tests/distributed/test_muse_spark_token_shard.py
+      - pytest -v -s tests/distributed/test_muse_spark_rocm_shard_pooler.py
       - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
 
 - label: ":nvidia: (B200) [Nightly] Distributed"
