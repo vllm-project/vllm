@@ -42,9 +42,9 @@ use vllm_server::{
     AccessLogConfig, AdmissionLimits, ApiServerOptions, ChatTemplateContentFormatOption,
     CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode, LlmSource, LoraModulePath,
-    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection, Server, ServerConfig,
+    DecisionsReadStrategy, DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode,
+    LlmSource, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
+    RenderConfig, RendererSelection, Server, ServerConfig,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -790,6 +790,14 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub max_n_sequences: Option<i64>,
 
+    /// How `/v1/decisions` reads the model: the class name of the read
+    /// strategy Python's `select_read_strategy` picks, set by the Python
+    /// launcher. Without one, the endpoint answers 501. A strategy the Rust
+    /// frontend does not implement fails startup.
+    #[arg(long, hide = true, value_enum)]
+    #[serde(default)]
+    pub decisions_read_strategy: Option<DecisionsReadStrategyArg>,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -1071,6 +1079,7 @@ impl SharedRuntimeArgs {
                 renderer: self.renderer,
                 language_model_only: self.language_model_only,
                 chat_template: self.chat_template,
+                decisions_read_strategy: self.decisions_read_strategy.map(Into::into),
                 default_chat_template_kwargs: self.default_chat_template_kwargs,
                 reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
                 trust_request_chat_template: self.trust_request_chat_template,
@@ -1172,6 +1181,7 @@ impl SharedRuntimeArgs {
                 renderer: self.renderer,
                 language_model_only: self.language_model_only,
                 chat_template: self.chat_template,
+                decisions_read_strategy: self.decisions_read_strategy.map(Into::into),
                 default_chat_template_kwargs: self.default_chat_template_kwargs,
                 reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
                 trust_request_chat_template: self.trust_request_chat_template,
@@ -1295,6 +1305,23 @@ impl SharedRuntimeArgs {
             allow_methods: self.allowed_methods.0.clone(),
             allow_headers: self.allowed_headers.0.clone(),
             allow_credentials: self.allow_credentials,
+        }
+    }
+}
+
+/// `--decisions-read-strategy` values: the Python read strategies the Rust
+/// frontend implements, by class name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+pub enum DecisionsReadStrategyArg {
+    #[serde(rename = "NextTokenStrategy")]
+    #[value(name = "NextTokenStrategy")]
+    NextToken,
+}
+
+impl From<DecisionsReadStrategyArg> for DecisionsReadStrategy {
+    fn from(strategy: DecisionsReadStrategyArg) -> Self {
+        match strategy {
+            DecisionsReadStrategyArg::NextToken => Self::NextToken,
         }
     }
 }
