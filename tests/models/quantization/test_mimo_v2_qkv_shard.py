@@ -590,3 +590,119 @@ def test_load_weights_modelopt_nvfp4_qkv_and_mimo_fp8_mlp(dist_init, monkeypatch
         torch.cat([gate, up]),
     )
     assert torch.equal(mlp.down_proj.weight_scale.data.squeeze(-1).squeeze(1), down)
+
+
+def test_mtp_load_weights_modelopt_fp8_pb_wo(dist_init):
+    """Through `MiMoV2MTP.load_weights`: the ModelOpt export keeps the MTP
+    layer in MiMo's own block FP8 (fused `qkv_proj` pre-sharded at
+    `num_key_value_heads` chunks, 2-D `weight_scale_inv`), and ModelOpt's
+    FP8_PB_WO layers hold the scale as a 4-D `weight_scale`.
+    """
+    from vllm.model_executor.layers.linear import (
+        MergedColumnParallelLinear,
+        QKVParallelLinear,
+        RowParallelLinear,
+    )
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptMixedPrecisionConfig,
+    )
+    from vllm.model_executor.models import mimo_v2_mtp
+
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["swa"]
+    intermediate = 256
+    layer_prefix = "model.mtp.layers.0"
+    fp8 = {"quant_algo": "FP8_PB_WO", "group_size": 128, "source_format": "mimo_fp8"}
+    quant_config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": None,
+                "quantized_layers": {
+                    f"{layer_prefix}.self_attn.qkv_proj": fp8,
+                    f"{layer_prefix}.mlp.gate_up_proj": fp8,
+                    f"{layer_prefix}.mlp.down_proj": fp8,
+                },
+            }
+        }
+    )
+
+    attn = torch.nn.Module()
+    attn.total_num_heads, attn.total_num_kv_heads = num_heads, num_kv_heads
+    attn.head_dim, attn.v_head_dim = head_dim, v_head_dim
+    attn.qkv_proj = QKVParallelLinear(
+        COLS,
+        head_dim,
+        num_heads,
+        num_kv_heads,
+        bias=False,
+        quant_config=quant_config,
+        prefix=f"{layer_prefix}.self_attn.qkv_proj",
+        v_head_size=v_head_dim,
+    )
+    mlp = torch.nn.Module()
+    mlp.gate_up_proj = MergedColumnParallelLinear(
+        COLS,
+        [intermediate] * 2,
+        bias=False,
+        quant_config=quant_config,
+        prefix=f"{layer_prefix}.mlp.gate_up_proj",
+    )
+    mlp.down_proj = RowParallelLinear(
+        intermediate,
+        COLS,
+        bias=False,
+        quant_config=quant_config,
+        prefix=f"{layer_prefix}.mlp.down_proj",
+    )
+    layer = torch.nn.Module()
+    layer.self_attn, layer.mlp = attn, mlp
+    predictor = torch.nn.Module()
+    predictor.mtp = torch.nn.Module()
+    predictor.mtp.layers = torch.nn.ModuleDict({"0": layer})
+
+    model = mimo_v2_mtp.MiMoV2MTP.__new__(mimo_v2_mtp.MiMoV2MTP)
+    torch.nn.Module.__init__(model)
+    model.model = predictor
+    model.config = SimpleNamespace(num_key_value_heads=ckpt_tp)
+
+    rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
+    truth = torch.randn(ckpt_tp * rows_per_chunk, COLS)
+    weight, scale = _quantize_chunks(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp
+    )
+    gen = torch.Generator().manual_seed(0)
+    gate, up, down = (
+        torch.rand(n // BLOCK, k // BLOCK, generator=gen) + 0.5
+        for n, k in ((intermediate, COLS),) * 2 + ((COLS, intermediate),)
+    )
+    fp8_weight = torch.zeros(intermediate, COLS, dtype=FP8_DTYPE)
+    loaded = mimo_v2_mtp.MiMoV2MTP.load_weights(
+        model,
+        [
+            (f"{layer_prefix}.self_attn.qkv_proj.weight", weight),
+            (f"{layer_prefix}.self_attn.qkv_proj.weight_scale_inv", scale),
+            (f"{layer_prefix}.mlp.gate_proj.weight", fp8_weight),
+            (f"{layer_prefix}.mlp.gate_proj.weight_scale_inv", gate),
+            (f"{layer_prefix}.mlp.up_proj.weight", fp8_weight),
+            (f"{layer_prefix}.mlp.up_proj.weight_scale_inv", up),
+            (f"{layer_prefix}.mlp.down_proj.weight", fp8_weight.T.contiguous()),
+            (f"{layer_prefix}.mlp.down_proj.weight_scale_inv", down),
+        ],
+    )
+
+    assert loaded >= {
+        f"{layer_prefix}.self_attn.qkv_proj.weight_scale",
+        f"{layer_prefix}.mlp.gate_up_proj.weight_scale",
+        f"{layer_prefix}.mlp.down_proj.weight_scale",
+    }
+    expected = _owned_rows(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, 0, 1
+    )
+    qkv_scale = attn.qkv_proj.weight_scale.data.squeeze(-1).squeeze(1)
+    got = _dequantize(attn.qkv_proj.weight.data, qkv_scale)
+    assert _relative_l2(got, expected) <= TOL
+    assert torch.equal(
+        mlp.gate_up_proj.weight_scale.data.squeeze(-1).squeeze(1),
+        torch.cat([gate, up]),
+    )
+    assert torch.equal(mlp.down_proj.weight_scale.data.squeeze(-1).squeeze(1), down)
