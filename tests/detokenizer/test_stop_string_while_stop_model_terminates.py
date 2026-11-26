@@ -166,7 +166,7 @@ def test_stop_string_trims_speculative_overflow(
     req.sampling_params.logprobs = 0
     detok = _DummyDetokenizer(req)
     monkeypatch.setattr(detok, "decode_next", decoded_tokens.__getitem__)
-    processor = OutputProcessor(tokenizer=None, log_stats=False)
+    processor = OutputProcessor(tokenizer=None, collect_stats=False)
     processor.add_request(req, prompt=None)
     processor.request_states[req.request_id].detokenizer = detok
 
