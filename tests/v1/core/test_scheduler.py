@@ -9893,7 +9893,6 @@ def test_priority_scheduling_preemption_victim_least_preempted():
     # Decode step: both generate a token -> both now have 33 tokens (needs 3rd block)
     model_output = ModelRunnerOutput(
         req_ids=["r1", "r2"],
-        req_id_to_index={"r1": 0, "r2": 1},
         sampled_token_ids=[[100], [100]],
         logprobs=None,
         prompt_logprobs_dict={},
