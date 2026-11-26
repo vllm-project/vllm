@@ -11,6 +11,7 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - rust/src/bench/tests/python_serve_flags.txt
+  - benchmarks/multi_turn/replay_prefix_cache.py
   - tests/benchmarks/
   commands:
   - pytest -v -s benchmarks/

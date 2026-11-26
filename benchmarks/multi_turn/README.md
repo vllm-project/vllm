@@ -176,3 +176,39 @@ The script will convert the ShareGPT dataset to a dataset with the standard user
 The flag `--max-items=128` is used to sample 128 conversations from the original dataset (change as needed).
 
 Use the output JSON file `sharegpt_conv_128.json` as the `--input-file` for `benchmark_serving_multi_turn.py`.
+
+## Replay prefix-cache alignment on CPU
+
+`replay_prefix_cache.py` compares current main's block-aligned attention
+layouts with the hash-unit proposal in [RFC #69082](https://github.com/vllm-project/vllm/issues/69082).
+Supply one JSON object per completed request, in arrival order. Include the
+full chat-templated prompt for each turn, including previous replies:
+
+```jsonl
+{"prompt_token_ids":[1,2,3,4],"output_token_ids":[5,6,7]}
+{"prompt_token_ids":[1,2,3,4,5,6,7,8],"output_token_ids":[9]}
+```
+
+For a full-attention control, pass one block size. For a mixed full-attention
+and sliding-window layout, pass one physical block size per group:
+
+```bash
+python benchmarks/multi_turn/replay_prefix_cache.py trace.jsonl --block-sizes 16 --hash-units 4 8 16
+python benchmarks/multi_turn/replay_prefix_cache.py trace.jsonl --block-sizes 16 64 --hash-units 4 8 16
+```
+
+The replay starts cold and assumes serial requests, one cache namespace, dense
+publication and unlimited retention. With every earlier attention unit resident,
+a shared prefix supplies the whole sliding window. Main can resume at a
+multiple of the group block sizes' LCM in these layouts. The RFC can resume
+at a multiple of the selected hash unit. The model excludes recurrent state
+groups, which require an actual checkpoint, and configurations with eviction,
+sparse publication, or skipped sliding-window blocks.
+
+Both policies leave the final prompt token for logits. The replay publishes
+the prompt and all but the final sampled output token, whose KV has yet to be
+computed. Omit `output_token_ids` to model prompt-only publication.
+The CSV reports requests with any hit divided by all requests, reused prompt
+tokens divided by all prompt tokens, and the absolute prefill tokens saved.
+These counts isolate the opportunity from alignment. They do not measure
+latency, memory costs, or the cost of copying a partial block.
