@@ -562,3 +562,37 @@ def test_a_mixed_step_in_place_matches_the_gathered_one(forward_context):
         assert not a[BATCH * TOKENS + prompt :].any()
     for a, b in zip(in_place_cache, gathered_cache):
         assert torch.equal(a, b)
+
+
+def _compiled_variants(kernel) -> int | None:
+    """Triton's compiled variants of `kernel` on every device, or None where
+    this Triton does not expose them."""
+    caches = getattr(kernel, "device_caches", None)
+    if not caches:
+        return None
+    return sum(len(entry[0]) for entry in caches.values())
+
+
+def test_commit_step_kernel_compiles_once_for_every_batch():
+    """The row counts are not specialized: an eager step whose batch warmup's
+    captured sizes did not cover must not compile mid-serving."""
+    from vllm.models.nemotron_shortcut.nvidia.gdp_replay import _commit_step_kernel
+
+    trackers = GdpReplayTrackers()
+    trackers.bind(torch.zeros(40, 12, 1, device="cuda"))
+
+    def step(batch: int, padded: int) -> None:
+        slots = torch.arange(1, batch + 1, dtype=torch.int32, device="cuda")
+        loc = torch.arange(batch + 1, dtype=torch.int32, device="cuda") * TOKENS
+        accepted = torch.ones(batch, dtype=torch.int32, device="cuda")
+        trackers.commit_step(
+            SimpleNamespace(), slots, loc, accepted, TOKENS, padded, batch * TOKENS
+        )
+
+    step(16, 16)
+    before = _compiled_variants(_commit_step_kernel)
+    if before is None:
+        pytest.skip("this Triton does not expose its compile cache")
+    for batch, padded in ((1, 1), (3, 5), (17, 32), (2, 2)):
+        step(batch, padded)
+    assert _compiled_variants(_commit_step_kernel) == before

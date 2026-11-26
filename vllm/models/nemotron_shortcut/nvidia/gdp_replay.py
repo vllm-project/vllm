@@ -60,7 +60,10 @@ class GdpReplayStep:
     rectangle; None when every window is full."""
 
 
-@triton.jit
+# One compile for every batch size: Triton would otherwise specialize the row
+# counts on == 1 and on divisibility by 16, and an eager step whose counts fall
+# in a class warmup's captured sizes missed would compile mid-serving.
+@triton.jit(do_not_specialize=["batch", "padded"])
 def _commit_step_kernel(
     slots_ptr,
     loc_ptr,
