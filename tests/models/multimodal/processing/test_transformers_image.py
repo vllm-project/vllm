@@ -342,3 +342,38 @@ def test_per_image_and_per_token_rows_split_per_image():
         assert isinstance(image_grids, torch.Tensor)
         assert tuple(image_grids.shape) == (4,)
         assert len(item["image_token_pooling"].data) == int(placeholder.is_embed.sum())
+
+
+@pytest.mark.parametrize(
+    ("model", "image_sizes", "key", "rows"),
+    [
+        # One merge size per image
+        (
+            "vllm-project/VideoLLaMA3-2B-Image-HF",
+            [(640, 480), (64, 64)],
+            "image_merge_sizes",
+            [1, 1],
+        ),
+        # One target size per slice of a lone image
+        (
+            "hf-internal-testing/tiny-processor-minicpmv4_6",
+            [(640, 480)],
+            "target_sizes",
+            [3],
+        ),
+    ],
+)
+def test_per_image_rows_stay_with_their_image(model, image_sizes, key, rows):
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model, model_impl="transformers")
+    )
+    image = ImageAsset("cherry_blossom").pil_image
+    images = [image.resize(size) for size in image_sizes]
+    result = mm_processor(
+        prompt=mm_processor.dummy_inputs.get_dummy_text({"image": len(images)}),
+        mm_items=mm_processor.info.parse_mm_data({"image": images}),
+        hf_processor_mm_kwargs={},
+    )
+
+    items = result["mm_kwargs"]["image"]
+    assert [len(torch.atleast_1d(item[key].data)) for item in items] == rows

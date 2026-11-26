@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
+import inspect
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -1112,11 +1113,19 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        if vllm_config.model_config.hf_config.model_type == "molmo2":
-            # Earlier Molmo2 processors offset pooling indices across a call's items
-            self.check_version("5.25.0.dev0", "Molmo2")
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
+        if self.config.model_type == "molmo2":
+            # Earlier Molmo2 processors offset pooling indices across a call's items
+            # (huggingface/transformers#51309)
+            params = inspect.signature(self.model.get_image_features).parameters
+            if "image_num_crops" not in params:
+                raise ImportError(
+                    "Transformers modeling backend requires a Transformers version "
+                    "with per-image pooling indices for Molmo2 "
+                    "(huggingface/transformers#51309), but got "
+                    f"{transformers.__version__}"
+                )
         self._init_deepstack(vllm_config)
         self._init_per_layer_inputs(vllm_config)
 
