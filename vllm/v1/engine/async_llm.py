@@ -54,10 +54,20 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
+from vllm.v1.engine import (
+    CheckpointState,
+    EngineCoreRequest,
+    EngineHealthState,
+    PauseMode,
+)
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import (
+    EngineDeadError,
+    EngineGenerateError,
+    EngineSleepingError,
+    EngineUnhealthyError,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
@@ -123,7 +133,7 @@ class AsyncLLM(EngineClient):
             client_addresses: ZMQ addresses of an externally launched engine,
                 when not launching one in-process.
             client_count: Number of API-server clients sharing the engine.
-            client_index: Index of this client within ``client_count``.
+            client_index: Index of this client within `client_count`.
             aggregate_engine_logging: Whether to aggregate per-engine logs
                 into a single stat logger.
             stat_loggers: customized stat loggers for the engine.
@@ -158,6 +168,8 @@ class AsyncLLM(EngineClient):
 
         has_custom_loggers = bool(custom_stat_loggers)
         self.log_stats = log_stats or has_custom_loggers
+        # Tracing reads the collected stats without enabling stat logging.
+        self.collect_stats = self.log_stats or tracing_endpoint is not None
         if not log_stats and has_custom_loggers:
             logger.info(
                 "AsyncLLM created with log_stats=False, "
@@ -180,7 +192,7 @@ class AsyncLLM(EngineClient):
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
             admission_stats=self.admission_stats,
@@ -194,12 +206,13 @@ class AsyncLLM(EngineClient):
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
             renderer=renderer,
         )
+        self._health_probe_tasks: dict[int, asyncio.Task[EngineHealthState]] = {}
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
@@ -329,15 +342,15 @@ class AsyncLLM(EngineClient):
         Both limits return HTTP 503 (Service Unavailable) so that load
         balancers and client SDKs retry on a different instance.
 
-        - ``max_num_queued_reqs``: approximate global cap on the number of
-          unfinished requests (waiting + running). A request with ``n > 1``
-          counts as ``n`` slots.
-        - ``max_num_queued_tokens``: TTFT QoS — cap on the total prompt
+        - `max_num_queued_reqs`: approximate global cap on the number of
+          unfinished requests (waiting + running). A request with `n > 1`
+          counts as `n` slots.
+        - `max_num_queued_tokens`: TTFT QoS — cap on the total prompt
           tokens of requests still in prefill.
 
-        Note: ``get_num_queued_tokens`` uses ``prompt_len`` for all prefilling requests.
+        Note: `get_num_queued_tokens` uses `prompt_len` for all prefilling requests.
         Chunked prefill progress and prefix-cache hits are not subtracted because the
-        scheduler's ``num_computed_tokens`` and ``num_cached_tokens`` are only
+        scheduler's `num_computed_tokens` and `num_cached_tokens` are only
         propagated to the API server after prefill completes. The overestimation is
         conservative — earlier rejection, preserving TTFT targets.
 
@@ -348,8 +361,8 @@ class AsyncLLM(EngineClient):
         Raises:
             EngineFaultedError: If the engine has faulted and is awaiting
                 FT recovery.
-            QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
-            MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
+            QueueOverflowError: If `max_num_queued_reqs` would be exceeded.
+            MaxQueuedTokensError: If `max_num_queued_tokens` would be exceeded.
 
         """
         if (
@@ -876,7 +889,7 @@ class AsyncLLM(EngineClient):
         # object, or else it won't be garbage collected and cleaned up properly.
         engine_core = self.engine_core
         output_processor = self.output_processor
-        log_stats = self.log_stats
+        collect_stats = self.collect_stats
         # We use a mutable list for logger_manager so that it can be updated
         # during elastic EP scaling (see scale_elastic_ep) without creating
         # a circular reference via self.
@@ -895,7 +908,7 @@ class AsyncLLM(EngineClient):
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = (
-                        IterationStats() if (log_stats and num_outputs) else None
+                        IterationStats() if (collect_stats and num_outputs) else None
                     )
 
                     # Split outputs into chunks of at most
@@ -948,13 +961,18 @@ class AsyncLLM(EngineClient):
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
             except Exception as e:
-                if get_elastic_ep_rank_retired() and isinstance(e, EngineDeadError):
+                if not isinstance(e, EngineDeadError):
+                    logger.exception("AsyncLLM output_handler failed.")
+                elif get_elastic_ep_rank_retired():
                     logger.info(
                         "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
                     )
-                    output_processor.propagate_error(e)
-                    return
-                logger.exception("AsyncLLM output_handler failed.")
+                elif engine_core.resources.stop_requested:
+                    logger.info(
+                        "Engine core gone during shutdown; output handler exiting"
+                    )
+                else:
+                    logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
 
         self.output_handler = asyncio.create_task(output_handler())
@@ -1009,19 +1027,19 @@ class AsyncLLM(EngineClient):
         """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. In ``abort`` and ``wait`` mode, new requests are rejected
-        with ``RetryableRequestError`` from when the pause starts until
-        :meth:`resume_generation`; ``keep`` accepts and queues them.
+        in the engine. In `abort` and `wait` mode, new requests are rejected
+        with `RetryableRequestError` from when the pause starts until
+        `resume_generation`; `keep` accepts and queues them.
 
         Args:
             mode: How to handle in-flight requests:
-                - ``"abort"``: Abort all in-flight requests immediately
+                - `"abort"`: Abort all in-flight requests immediately
                   (default).
-                - ``"wait"``: Wait for in-flight requests to complete.
-                - ``"keep"``: Freeze requests in queue; they resume on
-                  :meth:`resume_generation`.
+                - `"wait"`: Wait for in-flight requests to complete.
+                - `"keep"`: Freeze requests in queue; they resume on
+                  `resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
-                draining. Set to ``False`` to preserve cache for faster resume.
+                draining. Set to `False` to preserve cache for faster resume.
 
         """
         if clear_cache:
@@ -1038,7 +1056,7 @@ class AsyncLLM(EngineClient):
         await asyncio.sleep(0.02)
 
     async def resume_generation(self) -> None:
-        """Resume generation after :meth:`pause_generation`."""
+        """Resume generation after `pause_generation`."""
         await self.engine_core.resume_scheduler_async()
 
     async def is_paused(self) -> bool:
@@ -1147,6 +1165,90 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
+    async def check_health_generate(self, timeout_s: float) -> None:
+        """Check that every EngineCore can run the model.
+
+        Each EngineCore reports whether it is sleeping or busy; an idle one
+        runs a forward probe.
+
+        Args:
+            timeout_s: How long to wait for each EngineCore before reporting
+                `probe_timeout`.
+
+        Raises:
+            EngineDeadError: If the EngineCore is dead.
+            EngineUnhealthyError: If the engine is not ready. `reason` and
+                `details` describe why.
+
+        """
+        await self.check_health()
+        engine_ranks = self.engine_core.get_engine_ranks()
+        tasks = {rank: self._health_probe_task(rank) for rank in engine_ranks}
+        # asyncio.wait never cancels the probes, so a caller timing out or
+        # disconnecting leaves them running for the next caller.
+        await asyncio.wait(tasks.values(), timeout=timeout_s)
+        self._raise_if_unhealthy(tasks, timeout_s)
+
+    def _health_probe_task(self, engine_rank: int) -> asyncio.Task[EngineHealthState]:
+        """Concurrent `/health_generate` callers share one in-flight probe per
+        engine."""
+        task = self._health_probe_tasks.get(engine_rank)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self.engine_core.check_health_generate_async(engine_rank)
+            )
+            task.add_done_callback(
+                lambda done: None if done.cancelled() else done.exception()
+            )
+            self._health_probe_tasks[engine_rank] = task
+        return task
+
+    def _raise_if_unhealthy(
+        self,
+        tasks: dict[int, asyncio.Task[EngineHealthState]],
+        timeout: float,
+    ) -> None:
+        states: dict[int, EngineHealthState] = {}
+        timed_out: list[int] = []
+        failed: dict[int, BaseException] = {}
+        for rank, task in tasks.items():
+            if not task.done():
+                timed_out.append(rank)
+                continue
+            if self._health_probe_tasks.get(rank) is task:
+                del self._health_probe_tasks[rank]
+            exc = asyncio.CancelledError() if task.cancelled() else task.exception()
+            if isinstance(exc, EngineDeadError):
+                raise exc
+            if exc is not None:
+                failed[rank] = exc
+            else:
+                states[rank] = task.result()
+
+        def ranks_in(state: EngineHealthState) -> list[int]:
+            return [rank for rank, s in states.items() if s == state]
+
+        if sleeping := ranks_in(EngineHealthState.SLEEPING):
+            raise EngineSleepingError(
+                f"Engine is sleeping or paused (engine ranks: {sleeping})",
+                engine_ranks=sleeping,
+            )
+        if timed_out:
+            raise EngineUnhealthyError(
+                f"Health check timed out after {timeout:g}s "
+                f"(engine ranks: {timed_out})",
+                reason="probe_timeout",
+                engine_ranks=timed_out,
+                timeout_s=timeout,
+            )
+        if failed:
+            raise EngineUnhealthyError(
+                f"Health check failed (engine ranks: {list(failed)})",
+                reason="probe_failed",
+                engine_ranks=list(failed),
+                error=repr(next(iter(failed.values()))),
+            )
+
     async def start_profile(
         self,
         profile_prefix: str | None = None,
@@ -1209,17 +1311,19 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
-    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    async def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.sleep_async(level, mode)
+        await self.engine_core.sleep_async(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    async def release_kv_cache_memory(self) -> None:
+    async def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         await self.renderer.clear_mm_cache_async()
-        await self.engine_core.release_kv_cache_memory_async()
+        await self.engine_core.release_kv_cache_memory_async(reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
@@ -1330,9 +1434,8 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
-
-        # recreate stat loggers
+        # recreate stat loggers before the new engines start: they send
+        # scheduler stats as soon as they come up.
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
             # TODO(rob): fix this after talking with Ray team.
             # This resets all the prometheus metrics since we
@@ -1348,6 +1451,8 @@ class AsyncLLM(EngineClient):
             if hasattr(self, "_logger_ref"):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
+
+        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
 
         set_scaling_elastic_ep(True)
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:

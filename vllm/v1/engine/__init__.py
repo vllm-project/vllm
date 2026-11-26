@@ -5,7 +5,7 @@ import enum
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 import numpy as np
@@ -66,6 +66,14 @@ class EEPNotificationType(enum.Enum):
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
+class EngineHealthState(enum.StrEnum):
+    """EngineCore answer to a `check_health_generate` utility call."""
+
+    OK = "ok"
+    BUSY = "busy"
+    SLEEPING = "sleeping"
+
+
 class FinishReason(enum.IntEnum):
     """Reason a request finished - stop, length, abort, error, or repetition.
 
@@ -90,7 +98,7 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixHashConfig:
     """What a frontend needs to compute a request's prompt block hashes itself
     (see `EngineCoreRequest.block_hashes`)."""
@@ -106,7 +114,7 @@ class PrefixHashConfig:
     num_lookahead_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -151,6 +159,25 @@ class EngineCoreReadyResponse:
     # Set when the engine hashes request blocks (prefix caching or a KV
     # connector), so that a frontend can send prompt block hashes.
     prefix_hash_config: PrefixHashConfig | None = None
+    # `CacheConfig.metrics_info()` after initialization, the labels of the
+    # frontend's `vllm:cache_config_info`.
+    cache_config_info: dict[str, str] | None = None
+    # `system_fingerprint` inputs for frontends without a VllmConfig (the Rust
+    # frontend): `hash_config()` of the engine's initialized config (None if
+    # hashing failed) and whether expert parallelism is enabled.
+    config_hash: str | None = None
+    enable_expert_parallel: bool = False
+    # Whether the engine computes prompt logprobs, for frontends without a
+    # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
+    # which skips prompt tokens in some layers.
+    supports_prompt_logprobs: bool = True
+    # Whether a disaggregated consumer accepts placeholder metadata without
+    # embedding tensors.
+    allow_missing_mm_embeddings: bool = False
+    # Encoder cache tokens a request's distinct multimodal items may need in
+    # total, for frontends without a VllmConfig (the Rust frontend). Set
+    # without chunked prefill, when they are all encoded in one step.
+    max_mm_embeds_per_request: int | None = None
 
 
 class EngineCoreRequest(
@@ -160,7 +187,13 @@ class EngineCoreRequest(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    prompt_token_ids: list[int] | None
+    if TYPE_CHECKING:
+        prompt_token_ids: list[int] | None
+    else:
+        # Both frontends send a 32-bit int ndarray, out of band when long, which
+        # decodes as a view of the received frame; Request copies it into a
+        # TokenBuffer. In-process clients pass the list.
+        prompt_token_ids: np.ndarray | None
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None

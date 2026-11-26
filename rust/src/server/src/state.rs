@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -11,13 +12,16 @@ use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
+use vllm_llm::{EngineCoreLlm, Llm};
 
 use crate::config::{AccessLogConfig, ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{
     LoadLoraError, LoadedLora, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
 use crate::model_names::ServedModelNames;
+use crate::routes::decisions::NextTokenReads;
 use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -38,6 +42,9 @@ pub struct AppState {
     pub chat: ChatLlm,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
+    /// `system_fingerprint` of chat and completion responses, fixed at
+    /// startup.
+    pub system_fingerprint: Option<String>,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
     /// HTTP access log settings.
@@ -57,6 +64,11 @@ pub struct AppState {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// Whether the `Llm` is an [`EngineCoreLlm`] the server connected itself,
+    /// so routes and services that drive its engine-core client are served.
+    has_engine_core_client: bool,
+    /// How `/v1/decisions` reads the model, when it serves the endpoint.
+    decisions: Option<NextTokenReads>,
 }
 
 impl AppState {
@@ -77,6 +89,7 @@ impl AppState {
             served_model_names,
             chat,
             api_server_options: ApiServerOptions::default(),
+            system_fingerprint: None,
             cors: CorsConfig::default(),
             access_log: AccessLogConfig::default(),
             server_info: None,
@@ -86,12 +99,38 @@ impl AppState {
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
+            has_engine_core_client: false,
+            decisions: None,
         }
     }
 
     /// Set HTTP/API-server behavior switches.
     pub fn with_api_server_options(mut self, options: ApiServerOptions) -> Self {
         self.api_server_options = options;
+        self
+    }
+
+    /// Serve `/v1/decisions` with these reads.
+    pub(crate) fn with_decisions(mut self, decisions: Option<NextTokenReads>) -> Self {
+        self.decisions = decisions;
+        self
+    }
+
+    /// How `/v1/decisions` reads the model, when it serves the endpoint.
+    pub(crate) fn decisions(&self) -> Option<&NextTokenReads> {
+        self.decisions.as_ref()
+    }
+
+    /// Set the `system_fingerprint` of chat and completion responses.
+    pub fn with_system_fingerprint(mut self, system_fingerprint: Option<String>) -> Self {
+        self.system_fingerprint = system_fingerprint;
+        self
+    }
+
+    /// Set the modalities whose `--default-mm-loras` adapter serves chat
+    /// requests that name no adapter. Call before loading any adapter.
+    pub fn with_default_mm_lora_modalities(mut self, modalities: Vec<MmModality>) -> Self {
+        self.lora_manager = self.lora_manager.with_default_mm_modalities(modalities);
         self
     }
 
@@ -110,6 +149,21 @@ impl AppState {
     /// Set the backend model path reported as `root` for base-model cards.
     pub fn with_model_path(mut self, model_path: String) -> Self {
         self.model_path = Some(model_path);
+        self
+    }
+
+    /// Mark the `Llm` as an [`EngineCoreLlm`] the server connected itself, so
+    /// routes and services that drive its engine-core client are served.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `Llm` is not an [`EngineCoreLlm`].
+    pub(crate) fn with_engine_core_client(mut self) -> Self {
+        assert!(
+            self.engine_core_llm().is_some(),
+            "the server's `Llm` is not an `EngineCoreLlm`"
+        );
+        self.has_engine_core_client = true;
         self
     }
 
@@ -188,7 +242,20 @@ impl AppState {
 
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
     pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
-        self.lora_manager.resolve_model(self.base_model_names(), model_name).await
+        self.resolve_model_with_default_mm_loras(model_name, []).await
+    }
+
+    /// Like [`Self::resolve_model_with_loras`], but a request that names no
+    /// adapter takes the `--default-mm-loras` adapter of the media modality
+    /// it carries. Python applies these defaults on chat completions only.
+    pub async fn resolve_model_with_default_mm_loras(
+        &self,
+        model_name: Option<&str>,
+        media_modalities: impl IntoIterator<Item = MmModality>,
+    ) -> LoraModelResolution {
+        self.lora_manager
+            .resolve_model(self.base_model_names(), model_name, media_modalities)
+            .await
     }
 
     /// Load one dynamic LoRA adapter and register it as a public model name.
@@ -240,17 +307,36 @@ impl AppState {
     }
 
     fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {
-        self.engine_core_client()
-            .ready_response()
-            .supports_lora
-            .then_some(())
-            .ok_or(LoraDisabledError)
+        self.llm().info().supports_lora.then_some(()).ok_or(LoraDisabledError)
+    }
+
+    /// The [`Llm`] under the chat facade.
+    pub(crate) fn llm(&self) -> &dyn Llm {
+        self.chat.text().llm()
+    }
+
+    /// The [`EngineCoreLlm`] under the chat facade, if that is what it runs.
+    fn engine_core_llm(&self) -> Option<&EngineCoreLlm> {
+        (self.llm() as &dyn Any).downcast_ref()
+    }
+
+    /// Whether the `Llm` is an [`EngineCoreLlm`] the server connected itself,
+    /// so routes and services that need its engine-core client can be served.
+    /// A provided `Llm` is opaque even when it is an `EngineCoreLlm`.
+    pub(crate) fn has_engine_core_client(&self) -> bool {
+        self.has_engine_core_client
     }
 
     /// Return a reference to the underlying engine core client for utility
     /// calls.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server does not run an [`EngineCoreLlm`]. Routes and
+    /// services that call this are only built when
+    /// [`Self::has_engine_core_client`] holds.
     pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
-        self.chat.engine_core_client()
+        (self.engine_core_llm().expect("route requires an `EngineCoreLlm`")).engine_core_client()
     }
 
     /// Runtime used by middleware to isolate heavyweight request handlers from

@@ -3,7 +3,7 @@
 
 """Online MXFP4 (microscaling FP4, block-32) quantization methods."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn import Module
@@ -15,17 +15,22 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
         RoutedExperts,
     )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    _backend_activation_key,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
+)
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardFusable,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
     OnlineLinearBase,
@@ -74,16 +79,20 @@ def _quantize_mxfp4_moe_weight(
     return w_quant, w_scales
 
 
-class Mxfp4OnlineLinearMethod(OnlineLinearBase):
+class Mxfp4OnlineLinearMethod(OnlineLinearBase, InputHadamardFusable):
     """Online MXFP4 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP4 (microscaling
     FP4 with block-32 scales) during weight loading.
     """
 
-    activation_quant_key = kMxfp4Dynamic
+    activation_quant_key: "QuantKey | None" = kMxfp4Dynamic
+    accepts_activation_override = True
 
-    def __init__(self):
+    def __init__(self, activation_quant_key: "QuantKey | None" = kMxfp4Dynamic):
         super().__init__()
+        self.activation_quant_key = self.resolve_activation_quant_key(
+            activation_quant_key, explicit=True
+        )
         self.kernel = init_mxfp4_linear_kernel(
             activation_quant_key=self.activation_quant_key
         )
@@ -139,22 +148,53 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)
 
+    def fuse_input_hadamard(self, layer: Module, size: int) -> bool:
+        return self.kernel.fuse_input_hadamard(size)
+
 
 class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     """MoE method for online MXFP4 (block) quantization."""
 
     mxfp4_backend: Mxfp4MoeBackend
     experts_cls: "type[mk.FusedMoEExperts] | None"
-    activation_quant_key = kMxfp4Dynamic
+    activation_quant_key: "QuantKey | None" = kMxfp4Dynamic
+    accepts_activation_override = True
 
-    def __init__(self, *, moe: FusedMoEConfig):
+    def __init__(
+        self,
+        *,
+        moe: FusedMoEConfig,
+        activation_quant_key: "QuantKey | None" = kMxfp4Dynamic,
+    ):
         super().__init__(moe)
+        self.activation_quant_key = self.resolve_activation_quant_key(
+            activation_quant_key, explicit=True
+        )
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
+        # Set in `_setup_kernel` for Triton backends.
+        self.w13_precision_config: Any = None
+        self.w2_precision_config: Any = None
 
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
             config=self.moe, activation_key=self.activation_quant_key
         )
+        # The oracle may fall back to a backend computing another activation
+        # format (EMULATION computes MXFP4): reject an override it cannot honour.
+        backend_key = (
+            kMxfp4Dynamic
+            if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION
+            else _backend_activation_key(self.mxfp4_backend)
+        )
+        if (
+            self.activation_quant_key != kMxfp4Dynamic
+            and self.activation_quant_key != backend_key
+        ):
+            raise NotImplementedError(
+                f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
+                f"activation={self.activation_quant_key}; it computes "
+                f"activation={backend_key}."
+            )
 
     def maybe_roundup_sizes(
         self,
@@ -265,19 +305,14 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> "FusedMoEQuantConfig | None":
-        # NOTE: unlike `QuarkOCP_MX_MoEMethod.get_fused_moe_quant_config`, this
-        # does not branch on `self.mxfp4_backend in TRITON_BACKENDS or
-        # AITER_MXFP4_FP8` to read `self.w13_precision_config`/
-        # `self.w2_precision_config` instead of `layer.w13_weight_scale`/
-        # `layer.w2_weight_scale`. For those backends,
-        # `convert_weight_to_mxfp4_moe_kernel_format` empties the latter, so
-        # the scales read below would be empty. This is currently
-        # unreachable because `activation_quant_key` is hardcoded to
-        # `kMxfp4Dynamic`
-        # TODO: When supporting online activation quant key override,
-        # fix this convert_weight_to_mxfp4_moe_kernel_format issue.
-        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
-        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        # AITER_MXFP4_FP8 needs static activation scales, which online cannot
+        # provide, so only the Triton backends store a PrecisionConfig here.
+        if self.mxfp4_backend in TRITON_BACKENDS:
+            w1_scale = self.w13_precision_config
+            w2_scale = self.w2_precision_config
+        else:
+            w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+            w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
 
         return make_mxfp4_moe_quant_config(
             mxfp4_backend=self.mxfp4_backend,

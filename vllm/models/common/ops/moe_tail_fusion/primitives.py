@@ -113,6 +113,22 @@ def load_global_u32x2(pointer: cute.Pointer, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def load_global_u64(address: Int64, *, loc=None, ip=None) -> Int64:
+    """Load one 64-bit word, such as a device address stored in global memory."""
+    return Int64(
+        _asm(
+            T.i64(),
+            [address.ir_value(loc=loc, ip=ip)],
+            "ld.global.u64 $0, [$1];",
+            "=l,l",
+            side_effects=False,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
 def load_global_bf16_as_f32(address: Int64, *, loc=None, ip=None) -> Float32:
     return Float32(
         _asm(
@@ -547,7 +563,7 @@ def group_leader_block_sum(
     warps: cutlass.Constexpr[int],
     leader_stride: cutlass.Constexpr[int],
 ) -> Float32:
-    """Block sum of the values held by every ``leader_stride``-th lane."""
+    """Block sum of the values held by every `leader_stride`-th lane."""
     lane = cute.arch.lane_idx()
     warp = cute.arch.warp_idx()
     for offset in cutlass.range_constexpr(1, WARP_SIZE):
@@ -641,7 +657,7 @@ def to_cute(tensor: torch.Tensor, assumed_align: int = 16) -> cute.Tensor:
 def to_cute_dynamic(
     tensor: torch.Tensor, alignment: int, *, divisibility: int
 ) -> cute.Tensor:
-    """A 1-D view whose length is a runtime shape divisible by ``divisibility``."""
+    """A 1-D view whose length is a runtime shape divisible by `divisibility`."""
     return to_cute(tensor, alignment).mark_compact_shape_dynamic(
         mode=0, divisibility=divisibility
     )

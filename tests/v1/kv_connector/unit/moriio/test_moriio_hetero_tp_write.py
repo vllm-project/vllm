@@ -1,0 +1,667 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Mock end-to-end MoRIIO WRITE between prefill and decode of any TP sizes.
+
+Every prefill rank runs the real writer and connector offset code on real
+cache views; a fake MoRI transport copies the planned bytes into the decode
+ranks' caches, and each decode rank counts write_done with the real wrapper.
+Checks that every decode rank ends up with exactly its shard of every block
+and recurrent-state slot, nothing else is touched, every prefill rank frees
+its blocks, and a decode rank completes only after all its writers did.
+"""
+
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
+from typing import Any
+
+import msgspec
+import pytest
+import torch
+
+from vllm.distributed.kv_transfer.kv_connector.v1 import ssm_conv_transfer_utils
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    ROLE,
+    MoRIIOAgentMetadata,
+    MoRIIOError,
+    RemoteAllocInfo,
+    WriteTask,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnectorWorker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWrapper,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
+    kda_conv_ssm,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+    _rank_heads,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    derive_mamba_conv_split,
+)
+from vllm.models.minimax_m3.amd.sparse_attention_nvfp4 import (
+    MiniMaxM3SparseRocmNvfp4Backend,
+)
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVQuantMode,
+    MambaSpec,
+    MLAAttentionSpec,
+    compute_layout_strides,
+)
+from vllm.v1.kv_cache_layout import KVCacheLayout
+
+from ..utils import make_moriio_writer
+
+pytestmark = pytest.mark.cpu_test
+
+NUM_BLOCKS = 6
+BLOCK_SIZE = 4
+NOTIFY_PORT = 20000
+# Prefill blocks and the decode blocks they land in, per transfer group.
+PREFILL_BLOCKS = {"full": [1, 4], "swa": [3], "mamba": [2]}
+DECODE_BLOCKS = {"full": [5, 2], "swa": [0], "mamba": [3]}
+# GDN state: Q and K are KEY_DIM channels, V is V_HEADS * V_DIM channels.
+KEY_DIM, V_HEADS, V_DIM, K_DIM, CONV_ROWS = 4, 4, 2, 2, 2
+# NVFP4 head size: 16 bytes of FP4 data and 2 scale bytes per token and side.
+NVFP4_HEAD_SIZE = 32
+
+
+@dataclass(frozen=True, slots=True)
+class Layer:
+    name: str
+    kind: str  # "full", "swa", "mla", "nvfp4", "nvfp4_by_head" or "mamba"
+    group: str  # transfer group the layer's blocks come from
+    # KV heads of this layer when they differ from the model-wide count.
+    heads: int | None = None
+    draft: bool = False
+
+
+MODELS = {
+    "gqa": (4, [Layer("attn0", "full", "full"), Layer("attn1", "full", "full")]),
+    "gqa_replicated": (2, [Layer("attn0", "full", "full")]),
+    "mla": (1, [Layer("mla0", "mla", "full"), Layer("mla1", "mla", "full")]),
+    "sliding": (4, [Layer("attn0", "full", "full"), Layer("swa0", "swa", "swa")]),
+    "gdn_hybrid": (
+        4,
+        [Layer("attn0", "full", "full"), Layer("gdn0", "mamba", "mamba")],
+    ),
+    "mla_hybrid": (1, [Layer("mla0", "mla", "full"), Layer("kda0", "mamba", "mamba")]),
+    # Gemma4-like: 4 KV heads in sliding layers, 8 in full attention, and a
+    # model-wide count of 8 (the maximum).
+    "mixed_heads": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+        ],
+    ),
+    # Draft layers with their own KV cache: EAGLE-style drafters number them
+    # after the target's layers, Gemma4's DSpark drafter from 0.
+    "mixed_heads_draft": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+            Layer("model.layers.2.self_attn.attn", "full", "full", heads=4, draft=True),
+        ],
+    ),
+    "draft_from_zero": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+            Layer(
+                "draft_model.model.layers.0.self_attn.attn", "full", "full", draft=True
+            ),
+        ],
+    ),
+    # MiniMax-M3: GQA attention next to a lightning-indexer key cache, which
+    # is MLA-like (one vector per token) and identical on every TP rank.
+    "gqa_indexer": (
+        4,
+        [Layer("attn0", "full", "full"), Layer("indexer0", "mla", "full")],
+    ),
+    # MiniMax-M3 on ROCm with --kv-cache-dtype nvfp4.
+    "nvfp4": (4, [Layer("attn0", "nvfp4", "full")]),
+    # The same page laid out by KV head, as MiniMax-M3's MSA backend does.
+    "nvfp4_by_head": (4, [Layer("attn0", "nvfp4_by_head", "full")]),
+}
+
+
+def _layer_heads(layer: Layer, heads: int) -> int:
+    return heads if layer.heads is None else layer.heads
+
+
+class _ArchConfig:
+    """Per-layer KV-head counts, as ModelArchitectureConfig exposes them."""
+
+    def __init__(self, layers: list[Layer], heads: int):
+        counts = [_layer_heads(layer, heads) for layer in layers]
+        self.per_layer_overrides: list[dict[str, Any]] | None = (
+            None if len(set(counts)) == 1 else [{} for _ in counts]
+        )
+        self._counts = counts
+
+    def __getitem__(self, layer_idx: int) -> SimpleNamespace:
+        return SimpleNamespace(total_num_kv_heads=self._counts[layer_idx])
+
+
+def _model_config(layers: list[Layer], heads: int) -> SimpleNamespace:
+    """The KV-head counts a model config gives for `layers`."""
+    total = max(_layer_heads(layer, heads) for layer in layers)
+    return SimpleNamespace(
+        get_total_num_kv_heads=lambda: total,
+        model_arch_config=_ArchConfig(layers, heads),
+    )
+
+
+def _groups(model: str, hma: bool) -> list[str]:
+    _, layers = MODELS[model]
+    groups = sorted({layer.group for layer in layers}, key=list(DECODE_BLOCKS).index)
+    return groups if hma else ["full"]
+
+
+def _spec(layer: Layer, num_heads: int, tp_size: int):
+    if layer.kind in ("full", "swa"):
+        return AttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=num_heads,
+            head_size=2,
+            dtype=torch.bfloat16,
+        )
+    if layer.kind == "mla":
+        return MLAAttentionSpec(
+            block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+        )
+    if layer.kind.startswith("nvfp4"):
+        spec = MiniMaxM3SparseRocmNvfp4Backend.customize_spec(
+            AttentionSpec(
+                block_size=BLOCK_SIZE,
+                num_kv_heads=num_heads,
+                head_size=NVFP4_HEAD_SIZE,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.NVFP4,
+            )
+        )
+        return replace(spec, kv_head_major_slots=layer.kind == "nvfp4_by_head")
+    return MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=(
+            ((2 * KEY_DIM + V_HEADS * V_DIM) // tp_size, CONV_ROWS),
+            (V_HEADS // tp_size, V_DIM, K_DIM),
+        ),
+        dtypes=(torch.uint8, torch.uint8),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+
+
+def _global_state(layers: list[Layer], heads: int) -> dict[str, torch.Tensor]:
+    """The unsharded content of every layer, per block / state slot."""
+    gen = torch.Generator().manual_seed(0)
+    state = {}
+    for layer in layers:
+        if layer.kind == "mamba":
+            n = (2 * KEY_DIM + V_HEADS * V_DIM) * CONV_ROWS + V_HEADS * V_DIM * K_DIM
+            shape: tuple[int, ...] = (NUM_BLOCKS, n)
+        else:
+            spec = _spec(
+                layer, 1 if layer.kind == "mla" else _layer_heads(layer, heads), 1
+            )
+            shape = (
+                NUM_BLOCKS,
+                spec.num_heads,
+                spec.num_states,
+                spec.state_content_size_bytes,
+            )
+        state[layer.name] = torch.randint(
+            1, 255, shape, dtype=torch.uint8, generator=gen
+        )
+    return state
+
+
+def _shard(layer: Layer, content: torch.Tensor, held: range | slice) -> torch.Tensor:
+    """What a rank holding KV heads `held` stores of the `[..., H, N, C]`
+    unsharded `content` of one block or all blocks.
+
+    NVFP4 content holds two slots (K and V side) per head, each token a row of
+    FP4 data and its scales. A page laid out by KV head keeps a head's two
+    slots adjacent; the ROCm page stores the K and then the V side, each as
+    every held head's data followed by every held head's scales.
+    """
+    if layer.kind == "nvfp4_by_head":
+        return content.unflatten(-3, (-1, 2))[..., held, :, :, :].flatten(-4, -3)
+    if layer.kind != "nvfp4":
+        return content[..., held, :, :]
+    data_bytes = NVFP4_HEAD_SIZE // 2
+    sides = content.unflatten(-3, (2, -1))[..., held, :, :]
+    data, scales = sides.split([data_bytes, sides.shape[-1] - data_bytes], dim=-1)
+    page = torch.cat([data.flatten(-3), scales.flatten(-3)], dim=-1)
+    return page.view(*sides.shape[:-4], -1, *sides.shape[-2:])
+
+
+def _mamba_shard(slot: torch.Tensor, tp_rank: int, tp_size: int) -> tuple:
+    """(conv, ssm) bytes of `tp_rank` for one unsharded GDN state slot."""
+    parts, offset = [], 0
+    for channels in (KEY_DIM, KEY_DIM, V_HEADS * V_DIM):
+        size = channels * CONV_ROWS
+        shard = size // tp_size
+        parts.append(slot[offset + tp_rank * shard : offset + (tp_rank + 1) * shard])
+        offset += size
+    ssm = slot[offset:].view(V_HEADS, -1)
+    heads = V_HEADS // tp_size
+    return torch.cat(parts), ssm[tp_rank * heads : (tp_rank + 1) * heads].reshape(-1)
+
+
+@dataclass(slots=True)
+class Rank:
+    tp_rank: int
+    tp_size: int
+    caches: dict[str, torch.Tensor]  # registered tensor per layer
+    regions: list[torch.Tensor]  # registered byte regions, in session order
+    worker: MoRIIOConnectorWorker
+    wrapper: Any = None
+    sent: list = field(default_factory=list)
+
+
+def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Rank:
+    heads, layers = MODELS[model]
+    groups = _groups(model, hma)
+    caches, regions, specs, meta_counts = {}, [], {}, {}
+    for layer in layers:
+        layer_heads = len(_rank_heads(tp_rank, tp_size, _layer_heads(layer, heads)))
+        spec = _spec(layer, layer_heads, tp_size)
+        specs[layer.name] = spec
+        buffer = torch.zeros(spec.page_size_bytes * NUM_BLOCKS, dtype=torch.uint8)
+        if layer.kind == "mamba":
+            cache = buffer.view(NUM_BLOCKS, 1, 1, spec.page_size_bytes)
+            conv, ssm = kda_conv_ssm(cache, spec)
+            if is_producer:
+                for slot in range(NUM_BLOCKS):
+                    c, s = _mamba_shard(state[layer.name][slot], tp_rank, tp_size)
+                    conv[slot].view(-1).copy_(c)
+                    ssm[slot].view(-1).copy_(s)
+            regions += [
+                MoRIIOConnectorWorker._contiguous_byte_alias(conv),
+                MoRIIOConnectorWorker._contiguous_byte_alias(ssm),
+            ]
+            meta_counts[layer.name] = 2
+        else:
+            strides = compute_layout_strides(spec, NUM_BLOCKS, 1, layout)[1:]
+            shape = (
+                NUM_BLOCKS,
+                spec.num_heads,
+                spec.num_states,
+                spec.state_content_size_bytes,
+            )
+            cache = torch.as_strided(buffer, shape, strides)
+            if is_producer:
+                held = (
+                    slice(None)
+                    if layer.kind == "mla"
+                    else _rank_heads(tp_rank, tp_size, _layer_heads(layer, heads))
+                )
+                cache.copy_(_shard(layer, state[layer.name], held))
+            regions.append(buffer)
+            meta_counts[layer.name] = 1
+        caches[layer.name] = cache
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.tp_rank = tp_rank
+    worker.pp_rank, worker.pp_size = 0, 1
+    worker.world_size = tp_size
+    worker.use_mla = layers[0].kind == "mla"
+    worker._has_mamba = any(layer.kind == "mamba" for layer in layers)
+    worker.model_config = _model_config(
+        [layer for layer in layers if not layer.draft], heads
+    )
+    drafter = [layer for layer in layers if layer.draft]
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                layer.name: SimpleNamespace(is_draft_layer=layer.draft)
+                for layer in layers
+            }
+        ),
+        speculative_config=(
+            SimpleNamespace(draft_model_config=_model_config(drafter, heads))
+            if drafter
+            else None
+        ),
+    )
+    worker.kv_caches = caches
+    worker.num_blocks = NUM_BLOCKS
+    worker.layer_to_spec = specs
+    worker.layer_to_group = {
+        layer.name: groups.index(layer.group if hma else "full") for layer in layers
+    }
+    worker._hybrid_payload_index_by_layer = {
+        layer.name: groups.index("mamba") for layer in layers if layer.kind == "mamba"
+    }
+    worker._conv_decomp = next(
+        (
+            derive_mamba_conv_split(spec, tp_size)
+            for spec in specs.values()
+            if isinstance(spec, MambaSpec)
+        ),
+        None,
+    )
+    worker.kv_layer_mr_offset = {}
+    worker.kv_region_mr_offsets = {}
+    worker._mamba_offset_templates = {}
+    worker._region_session_index = None
+    worker.layer_name_to_local_kv_cache_metadata = {
+        layer.name: [b""] * meta_counts[layer.name] for layer in layers
+    }
+    worker._record_slice_layouts(caches)
+    # Built without __init__: there is no engine to shut down.
+    # Keep this stub through __del__; a scoped patch would restore real cleanup.
+    worker.shutdown = lambda: None  # type: ignore[method-assign]
+    return Rank(tp_rank, tp_size, caches, regions, worker)
+
+
+class _Session:
+    def __init__(self, src: torch.Tensor, dst: torch.Tensor):
+        self.src, self.dst = src, dst
+
+
+def _connect(
+    producer: Rank,
+    consumers: list[Rank],
+    dp_engine: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route the producer's sessions and notifications to the decode ranks."""
+    consumer = consumers[0].worker
+    metadata = MoRIIOAgentMetadata(
+        engine_id="decode",
+        agent_metadata=b"",
+        kv_caches_base_addr=[],
+        num_blocks=NUM_BLOCKS,
+        block_len=0,
+        attn_backend_name="test",
+        kv_head_layouts={
+            name: layout.to_wire() for name, layout in consumer.kv_head_layouts.items()
+        },
+        mamba_state_layouts={
+            name: layout.to_wire()
+            for name, layout in consumer.mamba_state_layouts.items()
+        },
+        attention_block_sizes=consumer.attention_block_sizes,
+    )
+    # The handshake carries the metadata as msgpack.
+    metadata = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(metadata), type=MoRIIOAgentMetadata
+    )
+
+    def get_built_session(engine_id: str):
+        if engine_id == f"{dp_engine}_dp0":
+            (target,) = producer.worker._write_tp_mapping(len(consumers)).targets
+            tp_rank = target.tp_rank
+        else:
+            tp_rank = int(engine_id.rsplit("_tp", 1)[1])
+        remote = consumers[tp_rank]
+        sessions = [
+            _Session(src, dst)
+            for src, dst in zip(producer.regions, remote.regions, strict=True)
+        ]
+        return sessions, metadata
+
+    def write_remote_data(sizes, local_offsets, remote_offsets, session):
+        for size, local, remote in zip(sizes, local_offsets, remote_offsets):
+            session.dst[remote : remote + size] = session.src[local : local + size]
+        return "status"
+
+    def send_notify(transfer_id, ip, port, message_type, message_fields=None):
+        producer.sent.append((port - NOTIFY_PORT, message_type))
+        consumers[port - NOTIFY_PORT].wrapper._handle_structured_message(
+            {"type": message_type, "transfer_id": transfer_id, **(message_fields or {})}
+        )
+
+    monkeypatch.setattr(producer.worker, "_get_built_session", get_built_session)
+    producer.wrapper = SimpleNamespace(
+        done_remote_allocate_req_dict={},
+        lock=threading.Lock(),
+        done_req_ids=[],
+        write_remote_data=write_remote_data,
+        send_notify=send_notify,
+        waiting_for_transfer_complete=lambda statuses: None,
+        _mark_transfer_terminal_locked=lambda transfer_id: None,
+        _is_transfer_terminal_locked=lambda transfer_id: False,
+    )
+    producer.worker.moriio_wrapper = producer.wrapper
+
+
+def _consumer_wrapper() -> MoRIIOWrapper:
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper.lock = threading.Lock()
+    wrapper.done_write_cache_req_ids = []
+    wrapper.failed_write_cache_req_ids = []
+    wrapper._write_done_senders = {}
+    wrapper._terminal_transfer_ids = OrderedDict()
+    return wrapper
+
+
+def _expected(
+    layer: Layer, group: str, state, heads, tp_rank, tp_size, cache
+) -> torch.Tensor:
+    """What the decode cache must hold after the transfer."""
+    expected = torch.zeros_like(cache)
+    pairs = zip(PREFILL_BLOCKS[group], DECODE_BLOCKS[group])
+    if layer.kind == "mamba":
+        expected = torch.zeros(NUM_BLOCKS, cache.shape[-1], dtype=torch.uint8)
+        for src, dst in pairs:
+            conv, ssm = _mamba_shard(state[layer.name][src], tp_rank, tp_size)
+            expected[dst, : conv.numel() + ssm.numel()] = torch.cat([conv, ssm])
+        return expected
+    held = (
+        slice(None)
+        if layer.kind == "mla"
+        else _rank_heads(tp_rank, tp_size, _layer_heads(layer, heads))
+    )
+    for src, dst in pairs:
+        expected[dst] = _shard(layer, state[layer.name][src], held)
+    return expected
+
+
+SCENARIOS = [
+    (model, producer_tp, consumer_tp, hma)
+    for model in MODELS
+    # The NVFP4 kernels take head-major pages only, see the NVFP4 tests.
+    if not model.startswith("nvfp4")
+    for producer_tp, consumer_tp in [(1, 2), (2, 4), (2, 1), (4, 2), (2, 2), (1, 4)]
+    for hma in (True, False)
+    # Recurrent state needs the hybrid KV cache manager.
+    if hma or "hybrid" not in model
+] + [
+    # More ranks than some layers have heads: those layers replicate.
+    (model, producer_tp, consumer_tp, hma)
+    for model in ("mixed_heads", "mixed_heads_draft", "draft_from_zero", "gqa_indexer")
+    for producer_tp, consumer_tp in [(4, 8), (8, 4)]
+    for hma in (True, False)
+]
+
+
+@pytest.mark.parametrize(
+    ("layouts"),
+    [
+        (KVCacheLayout.LBNHC, KVCacheLayout.LBNHC),
+        (KVCacheLayout.LBHNC, KVCacheLayout.LBHNC),
+        (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC),
+    ],
+    ids=["token-major", "head-major", "mixed"],
+)
+@pytest.mark.parametrize(("model", "producer_tp", "consumer_tp", "hma"), SCENARIOS)
+def test_write_lands_every_shard_byte_exact(
+    monkeypatch, model, producer_tp, consumer_tp, hma, layouts
+):
+    _check_write(monkeypatch, model, producer_tp, consumer_tp, hma, layouts)
+
+
+@pytest.mark.parametrize(
+    ("producer_tp", "consumer_tp"), [(4, 1), (2, 1), (4, 2), (1, 2), (1, 4), (2, 2)]
+)
+def test_nvfp4_write_lands_every_shard_byte_exact(
+    monkeypatch, producer_tp, consumer_tp
+):
+    """An NVFP4 page keeps all heads' data before all heads' scales on each
+    K/V side, so its 2 * H head slots are not per-head rows; a head is one
+    data run and one scale run per side."""
+    layouts = (KVCacheLayout.LBHNC, KVCacheLayout.LBHNC)
+    _check_write(monkeypatch, "nvfp4", producer_tp, consumer_tp, False, layouts)
+
+
+def test_nvfp4_page_laid_out_by_kv_head_is_not_sliced(monkeypatch):
+    """MoRIIO only slices the split NVFP4 page by KV head; any other packed
+    NVFP4 page must fail loudly instead of landing in the wrong head slots."""
+    layouts = (KVCacheLayout.LBHNC, KVCacheLayout.LBHNC)
+    with pytest.raises(ValueError, match="cannot slice KV heads"):
+        _check_write(monkeypatch, "nvfp4_by_head", 2, 1, False, layouts)
+
+
+@pytest.mark.parametrize(("producer_tp", "consumer_tp"), [(4, 2), (8, 4), (2, 4)])
+def test_replicated_indexer_cache_is_copied_whole(producer_tp, consumer_tp):
+    """An MLA-like cache in a GQA model (MiniMax-M3's indexer keys) is the
+    same on every rank: one producer per decode rank copies the whole block
+    (fan-in), or every decode rank gets the whole block (fan-out)."""
+    heads, layers = MODELS["gqa_indexer"]
+    state = _global_state(layers, heads)
+    ratio = max(producer_tp // consumer_tp, 1)
+    for p in range(producer_tp):
+        worker = _build_rank(
+            "gqa_indexer", p, producer_tp, KVCacheLayout.LBHNC, True, state, True
+        ).worker
+        mapping = worker._write_tp_mapping(consumer_tp, "indexer0")
+        writing = [t for t in mapping.targets if t.num_heads]
+        if p % ratio:
+            assert not writing
+            continue
+        assert writing and all(mapping.copies_whole_block(t) for t in writing)
+        assert {t.tp_rank for t in writing} == set(
+            worker._write_tp_mapping(consumer_tp).target_tp_ranks
+        )
+
+
+def _check_write(monkeypatch, model, producer_tp, consumer_tp, hma, layouts):
+    """Write every layer from all prefill ranks and check every decode rank."""
+    monkeypatch.setattr(
+        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
+    )
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    heads, layers = MODELS[model]
+    state = _global_state(layers, heads)
+    groups = _groups(model, hma)
+    consumers = [
+        _build_rank(model, d, consumer_tp, layouts[1], hma, state, False)
+        for d in range(consumer_tp)
+    ]
+    for consumer in consumers:
+        consumer.wrapper = _consumer_wrapper()
+    producers = [
+        _build_rank(model, p, producer_tp, layouts[0], hma, state, True)
+        for p in range(producer_tp)
+    ]
+
+    writers: dict[int, set[int]] = {d: set() for d in range(consumer_tp)}
+    pending = []
+    for producer in producers:
+        _connect(producer, consumers, "decode", monkeypatch=monkeypatch)
+        mapping = producer.worker._write_tp_mapping(consumer_tp)
+        for target in mapping.targets:
+            writers[target.tp_rank].add(producer.tp_rank)
+        info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS[g] for g in groups])
+        producer.wrapper.done_remote_allocate_req_dict["t"] = info
+        writer = make_moriio_writer(producer.worker)
+        for layer in layers:
+            writer._execute_write_task(
+                WriteTask(
+                    request_id="req",
+                    transfer_id="t",
+                    dst_engine_id="decode",
+                    local_block_ids=[PREFILL_BLOCKS[g] for g in groups],
+                    remote_block_ids_hint=None,
+                    layer_name=layer.name,
+                    event=SimpleNamespace(synchronize=lambda: None),
+                    remote_notify_port=NOTIFY_PORT,
+                    remote_ip="decode",
+                    remote_tp_size=consumer_tp,
+                    tp_mapping=mapping,
+                )
+            )
+        info.writes_expected = len(layers)
+        pending.append((producer, writer, info))
+
+    finished: set[int] = set()
+    for producer, writer, info in pending:
+        writer._finalize_if_complete("t", info)
+        finished.add(producer.tp_rank)
+        # Prefill frees its blocks whether or not it had anything to write.
+        assert [ack.transfer_id for ack in producer.wrapper.done_req_ids] == ["t"]
+        for d, consumer in enumerate(consumers):
+            done = consumer.wrapper.pop_finished_write_req_ids()
+            assert done == (
+                {"t"}
+                if writers[d] <= finished and (producer.tp_rank in writers[d])
+                else set()
+            ), (d, finished)
+
+    for consumer in consumers:
+        for layer in layers:
+            cache = consumer.caches[layer.name]
+            received = cache.view(NUM_BLOCKS, -1) if layer.kind == "mamba" else cache
+            expected = _expected(
+                layer,
+                layer.group if hma else "full",
+                state,
+                heads,
+                consumer.tp_rank,
+                consumer_tp,
+                received,
+            )
+            mismatched = int((received != expected).sum())
+            assert mismatched == 0, (
+                f"{mismatched} of {received.numel()} bytes of {layer.name} wrong "
+                f"on decode rank {consumer.tp_rank}"
+            )
+
+
+def test_write_refuses_peer_with_different_block_size(monkeypatch):
+    """Hybrid MLA models get TP-dependent attention block sizes; copying blocks
+    between them would misplace tokens, so the write must refuse."""
+    monkeypatch.setattr(
+        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
+    )
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    consumers = [_build_rank("mla", 0, 1, KVCacheLayout.LBNHC, True, state, False)]
+    consumers[0].wrapper = _consumer_wrapper()
+    for layer in layers:
+        consumers[0].worker.attention_block_sizes[layer.name] = 2 * BLOCK_SIZE
+    producer = _build_rank("mla", 0, 2, KVCacheLayout.LBNHC, True, state, True)
+    _connect(producer, consumers, "decode", monkeypatch=monkeypatch)
+    info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS["full"]])
+    producer.wrapper.done_remote_allocate_req_dict["t"] = info
+    writer = make_moriio_writer(producer.worker)
+    with pytest.raises(MoRIIOError, match="same --block-size"):
+        writer._execute_write_task(
+            WriteTask(
+                request_id="req",
+                transfer_id="t",
+                dst_engine_id="decode",
+                local_block_ids=[PREFILL_BLOCKS["full"]],
+                remote_block_ids_hint=None,
+                layer_name=layers[0].name,
+                event=SimpleNamespace(synchronize=lambda: None),
+                remote_notify_port=NOTIFY_PORT,
+                remote_ip="decode",
+                remote_tp_size=1,
+                tp_mapping=producer.worker._write_tp_mapping(1),
+            )
+        )

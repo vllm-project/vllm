@@ -118,7 +118,7 @@ def _shard_all_ranks(
 ):
     """Simulate every TP rank by faking get_tp_group() per BatchSharder.
 
-    ``owners_np`` is a sharded DraftLogitsCache owner table indexed by request
+    `owners_np` is a sharded DraftLogitsCache owner table indexed by request
     slot. Without it, requests are owned by batch position.
     """
     draft_logits = None
@@ -514,7 +514,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
         run(rank)
     # Zero the uninitialized padding rows so the comparison is deterministic;
     # the real path never reads them (gathered_src_indices skips padding).
-    for rank, (local, _, metadata) in enumerate(results):
+    for rank, (_, _, metadata) in enumerate(results):
         packed_blocks[rank][metadata.num_local_reqs :] = 0
     gathered_full.append(torch.cat([packed_blocks[r] for r in range(tp_size)]))
 

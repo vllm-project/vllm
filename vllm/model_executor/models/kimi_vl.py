@@ -368,20 +368,6 @@ class KimiVLForConditionalGeneration(
             out_hidden_size=self.hidden_size,
         )
 
-    def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config,
-    ) -> tuple[int, int]:
-        # Min: estimated smallest possible encoder input.
-        # 224x224 image with patch_size=14 -> 16x16 patches, then merge
-        # kernel (2,2) -> 8x8 = 64 output tokens.
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
-
     def _get_grid_hws(
         self,
         mm_kwargs: dict[str, Any],
@@ -488,7 +474,7 @@ class KimiVLForConditionalGeneration(
         buffers = self.vision_tower.prepare_encoder_metadata(
             grid_hws_list,
             max_batch_size=max_batch_size,
-            max_seqlen_override=token_budget,
+            max_seqlen_override=token_budget * kh * kw,
             device=device,
         )
         values = buffers | {"pixel_values": dummy_pixel_values}

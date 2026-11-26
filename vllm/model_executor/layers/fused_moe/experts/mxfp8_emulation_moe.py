@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MXFP8 (1x32 block, E8M0 scale) MoE experts on Triton.
 
-``Mxfp8TritonExpertsBase`` stashes E8M0 weight scales for checkpoint layout.
-``Mxfp8EmulationTritonExperts`` dequantizes to BF16 and runs ``TritonExperts``
+`Mxfp8TritonExpertsBase` stashes E8M0 weight scales for checkpoint layout.
+`Mxfp8EmulationTritonExperts` dequantizes to BF16 and runs `TritonExperts`
 for devices without a native MXFP8 MoE kernel (e.g. ROCm gfx942 / MI300).
 """
 
@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 
 
 class Mxfp8TritonExpertsBase(TritonExperts):
-    """Shared MXFP8 MoE setup: stash E8M0 scales, clear scales on ``quant_config``."""
+    """Shared MXFP8 MoE setup: stash E8M0 scales, clear scales on `quant_config`."""
 
     def __init__(
         self,
@@ -59,7 +59,7 @@ class Mxfp8TritonExpertsBase(TritonExperts):
 
 
 class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
-    """Dequantize MXFP8 weights to BF16 on the fly and run ``TritonExperts``."""
+    """Dequantize MXFP8 weights to BF16 on the fly and run `TritonExperts`."""
 
     def __init__(
         self,

@@ -21,13 +21,14 @@ from tests.v1.attention.utils import (
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplaySSMBuildCase:
     seq_lens: list[int]
     query_lens: list[int]
@@ -39,28 +40,24 @@ def _make_mamba_spec(
     mamba_backend: MambaBackendEnum,
     num_speculative_tokens: int = 0,
 ) -> MambaSpec:
-    ring_buffer_len = buffer_len + (
-        1 + num_speculative_tokens
-        if mamba_backend == MambaBackendEnum.FLASHINFER
-        else 0
-    )
-    shapes = (
-        (1, 1),
-        (1, 1, 1),
-        (1, ring_buffer_len, 1),
-        (1, ring_buffer_len),
-        (1, ring_buffer_len, 1),
+    shapes = MambaStateShapeCalculator.append_replayssm_ring(
+        ((1, 1), (1, 1, 1)),
+        n_groups=1,
+        tp_world_size=1,
+        logical_window=buffer_len,
+        backend=mamba_backend,
+        num_speculative_tokens=num_speculative_tokens,
     )
     return MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=shapes,
-        dtypes=(torch.float32,),
+        dtypes=(torch.float32,) * 5,
     )
 
 
 def _create_replayssm_builder(
     buffer_len: int,
-    mamba_cache_mode: str = "none",
+    enable_prefix_caching: bool = False,
     *,
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON,
     num_speculative_tokens: int = 0,
@@ -72,7 +69,7 @@ def _create_replayssm_builder(
     # (it requires a real SupportsReplaySSM model) on the mock model.
     vllm_config.cache_config.use_replayssm = True
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     vllm_config.mamba_config.backend = mamba_backend
     if num_speculative_tokens > 0:
         vllm_config.scheduler_config.async_scheduling = False
@@ -100,9 +97,11 @@ def _build(
     return builder.build(0, common, num_accepted_tokens=num_accepted_tokens)
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
-def test_triton_replayssm_planning_buffers(mamba_cache_mode):
-    builder = _create_replayssm_builder(16, mamba_cache_mode)
+@pytest.mark.parametrize(
+    "enable_prefix_caching", [False, True], ids=["no_prefix_caching", "prefix_caching"]
+)
+def test_triton_replayssm_planning_buffers(enable_prefix_caching):
+    builder = _create_replayssm_builder(16, enable_prefix_caching)
     case = ReplaySSMBuildCase(
         seq_lens=[106, 113, 140],
         query_lens=[1, 1, 34],
@@ -120,7 +119,7 @@ def test_triton_replayssm_planning_buffers(mamba_cache_mode):
     assert second.write_pos_d.data_ptr() == first.write_pos_d.data_ptr()
     assert second.is_flush_d.data_ptr() == first.is_flush_d.data_ptr()
 
-    if mamba_cache_mode == "align":
+    if enable_prefix_caching:
         assert first.replayssm_align_block_size == BLOCK_SIZE
         assert first.replayssm_seq_lens_d is not None
         assert first.replayssm_seq_lens_d.tolist() == case.seq_lens
@@ -142,14 +141,20 @@ def test_spec_decode_single_token_chunk_synthesizes_acceptance_metadata():
     assert meta.num_accepted_tokens.tolist() == [1]
 
 
-def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
-    checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
-    if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
-        pytest.skip("requires FlashInfer ReplaySSM autotuning support")
+@pytest.mark.parametrize(
+    "mamba_backend", [MambaBackendEnum.TRITON, MambaBackendEnum.FLASHINFER]
+)
+def test_replayssm_tracker_state_indices_are_stable_for_full_cudagraph(
+    mamba_backend,
+):
+    if mamba_backend == MambaBackendEnum.FLASHINFER:
+        checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
+        if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
+            pytest.skip("requires FlashInfer ReplaySSM autotuning support")
 
     builder = _create_replayssm_builder(
         16,
-        mamba_backend=MambaBackendEnum.FLASHINFER,
+        mamba_backend=mamba_backend,
         num_speculative_tokens=3,
     )
     builder.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
@@ -179,3 +184,4 @@ def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     assert second_indices is not None
     assert second_indices.data_ptr() == first_ptr
     assert torch.equal(second_indices, second.state_indices_tensor_d[:, 0])
+    assert second.write_pos_d is None and second.bc_pre_scratch is None

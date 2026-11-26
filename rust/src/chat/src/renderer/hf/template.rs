@@ -19,14 +19,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{self};
 use thiserror::Error as ThisError;
 use vllm_text::backend::hf::HfSpecialTokens;
+use vllm_tokenizer::parse_checkpoint_json;
 
+use super::developer::DeveloperRole;
 use super::error::TemplateError;
 use super::format::{
-    ChatTemplateContentFormat, ChatTemplateContentFormatOption, detect_chat_template_content_format,
+    ChatTemplateContentFormat, ChatTemplateContentFormatOption, ContentCapabilities, ProbeContext,
 };
 use super::generation::{render_generation, rewrite_generation_blocks};
 use super::tojson::hf_tojson_filter;
 use crate::renderer::hf::{TemplateMessage, TemplateTool};
+use crate::request::ChatMessage;
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
@@ -49,8 +52,13 @@ pub(super) fn request_template_fuel(value: Option<&OsStr>) -> Result<Option<u64>
     Ok((fuel > 0).then_some(fuel))
 }
 
-fn supports_developer_role(template: &str) -> bool {
-    template.contains("\"developer\"") || template.contains("'developer'")
+/// Render the `chat` template of `env` with `ctx`.
+fn render(env: &Environment<'_>, ctx: TemplateContext<'_>) -> Result<String> {
+    let tmpl = env.get_template("chat")?;
+    tmpl.render(ctx).map_err(|error| match error.kind() {
+        ErrorKind::OutOfFuel => TemplateError::OutOfFuel(error),
+        _ => TemplateError::Jinja(error),
+    })
 }
 
 /// Build a pre-configured environment with the given template string.
@@ -64,6 +72,8 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
 
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
+    env.add_filter("length", length);
+    env.add_filter("count", length);
     env.add_function("__hf_generation", render_generation);
     env.add_function("strftime_now", |format: String| {
         chrono::Local::now().format(&format).to_string()
@@ -71,6 +81,16 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.add_function("raise_exception", raise_exception);
 
     Ok(env)
+}
+
+/// Jinja2's `length` filter (alias `count`), which is Python's `len`: an
+/// undefined value has length 0, so templates may guard an absent `tools` with
+/// `tools | length > 0`. Other values keep MiniJinja's behavior.
+fn length(value: &Value) -> std::result::Result<usize, MinijinjaError> {
+    if value.is_undefined() {
+        return Ok(0);
+    }
+    minijinja::filters::length(value)
 }
 
 /// Error source attached by [`raise_exception`], so that an exception thrown
@@ -133,7 +153,7 @@ pub fn load_chat_template(template_path: &Path) -> Result<Option<String>> {
         }
 
         let json_value =
-            serde_json::from_str(&content).map_err(TemplateError::ParseTemplateJson)?;
+            parse_checkpoint_json(&content).map_err(TemplateError::ParseTemplateJson)?;
         let json_template =
             serde_json::from_value(json_value).map_err(|_| TemplateError::InvalidTemplateJson)?;
 
@@ -162,56 +182,79 @@ pub fn resolve_chat_template(chat_template: &str) -> Result<String> {
     Err(TemplateError::MissingTemplatePath)
 }
 
-/// One compiled chat template with its Jinja environment and detected content
-/// format.
+/// One compiled chat template with its Jinja environment and content format
+/// selection.
 pub(super) struct CompiledChatTemplate {
     /// Cached, fully-configured environment for one compiled template.
     env: Environment<'static>,
-    content_format: ChatTemplateContentFormat,
-    supports_developer_role: bool,
+    content_format: ContentFormatSelection,
+    developer_role: DeveloperRole,
+}
+
+/// How a template's content format is chosen.
+enum ContentFormatSelection {
+    /// Configured with `--chat-template-content-format`.
+    Configured(ChatTemplateContentFormat),
+    /// Chosen per request from the template's capabilities, probed when the
+    /// template is compiled.
+    Auto(ContentCapabilities),
 }
 
 impl CompiledChatTemplate {
     /// Compile the given chat template string into a [`CompiledChatTemplate`].
-    pub fn new(template: String, content_format: ChatTemplateContentFormatOption) -> Result<Self> {
+    ///
+    /// Each render is limited to `fuel` template instructions; `None` removes
+    /// the limit. With [`ChatTemplateContentFormatOption::Auto`], the template
+    /// is probed here, rendering with `probe` and under the same fuel limit.
+    pub fn new(
+        template: String,
+        content_format: ChatTemplateContentFormatOption,
+        fuel: Option<u64>,
+        probe: &ProbeContext<'_>,
+    ) -> Result<Self> {
         let template = rewrite_generation_blocks(template)?;
-        let supports_developer_role = supports_developer_role(&template);
+        let mut env = build_environment(template)?;
+        env.set_fuel(fuel);
         let content_format = match content_format {
-            ChatTemplateContentFormatOption::Auto => detect_chat_template_content_format(&template),
-            ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,
-            ChatTemplateContentFormatOption::OpenAi => ChatTemplateContentFormat::OpenAi,
+            ChatTemplateContentFormatOption::Auto => ContentFormatSelection::Auto(
+                ContentCapabilities::probe(&|ctx| render(&env, ctx), probe),
+            ),
+            ChatTemplateContentFormatOption::String => {
+                ContentFormatSelection::Configured(ChatTemplateContentFormat::String)
+            }
+            ChatTemplateContentFormatOption::OpenAi => {
+                ContentFormatSelection::Configured(ChatTemplateContentFormat::OpenAi)
+            }
         };
-        let env = build_environment(template)?;
+        let developer_role = DeveloperRole::probe(
+            env.get_template("chat")?.source(),
+            &|ctx| render(&env, ctx),
+            probe,
+        );
         Ok(Self {
             env,
             content_format,
-            supports_developer_role,
+            developer_role,
         })
-    }
-
-    /// Limit each render to `fuel` template instructions; `None` removes the
-    /// limit.
-    pub fn with_fuel(mut self, fuel: Option<u64>) -> Self {
-        self.env.set_fuel(fuel);
-        self
     }
 
     /// Apply the compiled template to the given context and return the rendered
     /// prompt.
     pub fn apply(&self, ctx: TemplateContext<'_>) -> Result<String> {
-        let tmpl = self.env.get_template("chat")?;
-        tmpl.render(ctx).map_err(|error| match error.kind() {
-            ErrorKind::OutOfFuel => TemplateError::OutOfFuel(error),
-            _ => TemplateError::Jinja(error),
-        })
+        render(&self.env, ctx)
     }
 
-    pub fn content_format(&self) -> ChatTemplateContentFormat {
-        self.content_format
+    /// The content format to render `messages` with.
+    pub fn content_format_for(&self, messages: &[ChatMessage]) -> ChatTemplateContentFormat {
+        match &self.content_format {
+            ContentFormatSelection::Configured(content_format) => *content_format,
+            ContentFormatSelection::Auto(capabilities) => capabilities.content_format_for(messages),
+        }
     }
 
-    pub fn supports_developer_role(&self) -> bool {
-        self.supports_developer_role
+    /// How developer messages reach this template.
+    pub fn developer_role(&self) -> DeveloperRole {
+        self.developer_role
     }
 }
 
@@ -226,21 +269,37 @@ mod tests {
 
     use super::*;
 
+    fn compile(
+        template: String,
+        content_format: ChatTemplateContentFormatOption,
+    ) -> Result<CompiledChatTemplate> {
+        CompiledChatTemplate::new(template, content_format, None, &ProbeContext::default())
+    }
+
+    fn content_format_for_user_message(
+        template: &CompiledChatTemplate,
+    ) -> ChatTemplateContentFormat {
+        template.content_format_for(&[ChatMessage::user("hello")])
+    }
+
     #[test]
     fn test_chat_template_state_valid_template() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ messages }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
         .unwrap();
-        assert_eq!(template.content_format(), ChatTemplateContentFormat::String);
+        assert_eq!(
+            content_format_for_user_message(&template),
+            ChatTemplateContentFormat::String
+        );
         let result = template.apply(TemplateContext::default()).unwrap();
         assert_eq!(result, "[]");
     }
 
     #[test]
     fn test_midchain_dotted_integer_lookup() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ values.0.name }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -260,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_invalid_template() {
-        let result = CompiledChatTemplate::new(
+        let result = compile(
             "{% invalid".to_string(),
             ChatTemplateContentFormatOption::Auto,
         );
@@ -276,7 +335,7 @@ mod tests {
     fn test_strftime_now_matches_transformers_contract() {
         // `strftime_now` renders local wall-clock time with strftime-style
         // formats, like the transformers Jinja environment.
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ strftime_now('literal') }}|{{ strftime_now('%Y-%m-%d') }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -296,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_raise_exception_returns_template_message() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '.') }}"
                 .to_string(),
             ChatTemplateContentFormatOption::Auto,
@@ -321,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_raise_exception_in_untaken_branch_renders() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{% if messages %}{{ raise_exception('unreachable') }}{% endif %}ok".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -332,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_unknown_function_is_not_reported_as_thrown() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ undefined_helper('not registered') }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -347,6 +406,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_length_of_undefined_is_zero() {
+        // The tools guard of `examples/tool_chat_template_hermes.jinja`.
+        let template = compile(
+            "{% if tools is iterable and tools | length > 0 %}tools{% else %}none{% endif %} \
+             {{ missing | count }} {{ [1, 2] | length }}"
+                .to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        assert_eq!(
+            template.apply(TemplateContext::default()).unwrap(),
+            "none 0 2"
+        );
+
+        // Like Python's `len(None)`, `none` still has no length.
+        let template = compile(
+            "{{ none | length }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        let error = template.apply(TemplateContext::default()).unwrap_err();
+        expect!["failed to render jinja template: invalid operation: cannot calculate length of value of type none (in chat:1)"].assert_eq(&error.to_report_string());
+    }
+
     /// Each turn costs a fixed number of instructions, like a chat template's message loop.
     fn render_turns(turns: usize, fuel: Option<u64>) -> Result<String> {
         let template =
@@ -354,8 +438,9 @@ mod tests {
         let template = CompiledChatTemplate::new(
             template.to_string(),
             ChatTemplateContentFormatOption::String,
-        )?
-        .with_fuel(fuel);
+            fuel,
+            &ProbeContext::default(),
+        )?;
         let mut kwargs = HashMap::new();
         kwargs.insert("turns".to_string(), serde_json::json!(vec![0; turns]));
         template.apply(TemplateContext {
@@ -396,8 +481,7 @@ mod tests {
     fn test_special_tokens_injected_into_context() {
         let template = "{{ bos_token }}hello{{ eos_token }}";
         let template =
-            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
-                .unwrap();
+            compile(template.to_string(), ChatTemplateContentFormatOption::Auto).unwrap();
 
         let special_tokens = HfSpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
@@ -419,8 +503,7 @@ mod tests {
     fn test_special_tokens_undefined_when_not_provided() {
         let template = "{% if bos_token is defined %}{{ bos_token }}{% endif %}hello";
         let template =
-            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
-                .unwrap();
+            compile(template.to_string(), ChatTemplateContentFormatOption::Auto).unwrap();
 
         let result = template.apply(TemplateContext::default()).unwrap();
         assert_eq!(result, "hello");
@@ -431,8 +514,7 @@ mod tests {
         let template =
             "{{ bos_token }}hello{% if eos_token is defined %}{{ eos_token }}{% endif %}";
         let template =
-            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
-                .unwrap();
+            compile(template.to_string(), ChatTemplateContentFormatOption::Auto).unwrap();
 
         let special_tokens = HfSpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
@@ -452,7 +534,7 @@ mod tests {
 
     #[test]
     fn test_tojson_filter_supports_indent_and_sort_keys() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ payload | tojson(indent=2, sort_keys=true) }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -508,13 +590,16 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_respects_explicit_content_format_override() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{% for item in messages[0].content %}{{ item.text }}{% endfor %}".to_string(),
             ChatTemplateContentFormatOption::String,
         )
         .unwrap();
 
-        assert_eq!(template.content_format(), ChatTemplateContentFormat::String);
+        assert_eq!(
+            content_format_for_user_message(&template),
+            ChatTemplateContentFormat::String
+        );
     }
 
     #[test]
