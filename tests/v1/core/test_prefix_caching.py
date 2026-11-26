@@ -4185,6 +4185,28 @@ def test_maybe_evict_cached_block():
     assert cache._cache == {}
 
 
+def test_take_reused_cached_blocks():
+    """Tracking records the hashes of reused cached blocks before eviction."""
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+    primary = make_block_hash_with_group_id(BlockHash(b"10"), 0)
+    secondary = make_block_hash_with_group_id(BlockHash(b"20"), 0)
+    cached = pool.blocks[3]
+    pool._insert_block_hash(primary, cached, num_tokens=16)
+    pool._insert_block_hash(secondary, cached, num_tokens=None)
+
+    assert pool.take_reused_cached_blocks() == []
+    pool.track_reused_cached_blocks()
+    # Uncached blocks 1 and 2 come first in the free queue.
+    pool.get_new_blocks(2)
+    assert pool.take_reused_cached_blocks() == []
+    pool.get_new_blocks(1)
+    assert cached.block_hash is None
+    assert pool.take_reused_cached_blocks() == [
+        (cached.block_id, (primary, secondary), 16)
+    ]
+    assert pool.take_reused_cached_blocks() == []
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events(blocks_to_cache: int):
     block_size = 16

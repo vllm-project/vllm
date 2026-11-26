@@ -45,6 +45,7 @@ class SimpleCPUOffloadWorker:
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
         cpu_hugepage_size: int | None = None,
+        lazy_offload: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -56,6 +57,7 @@ class SimpleCPUOffloadWorker:
         self.use_page_cache = use_page_cache
         self.disk_mode = kv_offload_backend == "disk"
         self.cpu_hugepage_size = cpu_hugepage_size
+        self.lazy_offload = lazy_offload
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -83,6 +85,8 @@ class SimpleCPUOffloadWorker:
         # Compute-done event recorded before each store; reused across steps
         # (get_finished runs once per step, copy queue is FIFO).
         self._store_compute_done: torch.Event | None = None
+        # Lazy mode: completion of the latest store, which loads wait for.
+        self._store_done: torch.Event | None = None
 
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
@@ -320,14 +324,28 @@ class SimpleCPUOffloadWorker:
         if metadata.store_event >= 0:
             self._pending_store_event_indices.add(metadata.store_event)
 
+    def _store_reused_blocks(self, metadata: SimpleCPUOffloadMetadata) -> None:
+        """Lazy mode: save the old content of blocks this step reuses.
+
+        The copy follows earlier steps' writes, and every later write on the
+        compute stream (zeroing, copy-on-write copies, the forward) and every
+        later load waits for it.
+        """
+        backend = self._backend
+        assert isinstance(backend, DmaCopyBackend)
+        done = backend.store_now(metadata.store_gpu_blocks, metadata.store_cpu_blocks)
+        torch.cuda.current_stream().wait_event(done)
+        self._store_events.append((metadata.store_event, done))
+        self._store_done = done
+
     def clear_connector_metadata(self) -> None:
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
         # Invoked after the forward launch on steps without sync loads
         # (SchedulerOutput.has_sync_kv_loads), so the CPU-side block copy
-        # op overhead (~5ms) stays hidden behind GPU compute. Stores are
-        # issued in wait_for_save().
+        # op overhead (~5ms) stays hidden behind GPU compute. Eager stores
+        # are issued in wait_for_save(), lazy ones in handle_preemptions().
         metadata = self._connector_metadata
         if metadata is not None and metadata.load_cpu_blocks:
             backend = self._backend
@@ -338,6 +356,7 @@ class SimpleCPUOffloadWorker:
                 is_store=False,
                 event_idx=metadata.load_event,
                 events_list=self._load_events,
+                wait_event=self._store_done,
             )
 
     def wait_for_save(self) -> None:
@@ -349,7 +368,7 @@ class SimpleCPUOffloadWorker:
         #45704 for the bug and #39306 for the srcAccessOrder rationale.
         """
         metadata = self._connector_metadata
-        if metadata is not None and metadata.store_gpu_blocks:
+        if metadata is not None and metadata.store_gpu_blocks and not self.lazy_offload:
             backend = self._backend
             assert backend is not None
             if self._store_compute_done is None:
@@ -369,7 +388,8 @@ class SimpleCPUOffloadWorker:
     ) -> tuple[set[str] | None, set[str] | None]:
         """Report completed transfer events to the scheduler.
 
-        Loads are submitted in start_load_kv() and stores in wait_for_save().
+        Loads are submitted in start_load_kv(), eager stores in wait_for_save()
+        and lazy stores in handle_preemptions().
 
         Returns:
             tuple of (finished_sending, finished_recving).
@@ -411,10 +431,15 @@ class SimpleCPUOffloadWorker:
     def handle_preemptions(
         self, kv_connector_metadata: SimpleCPUOffloadMetadata
     ) -> None:
-        """Sync all in-flight transfers before preempted blocks are reused."""
-        if not kv_connector_metadata.need_flush:
-            return
-        self._flush_and_sync_all()
+        """Runs before this step writes any KV cache block.
+
+        Syncs in-flight transfers before preempted blocks are reused, and in
+        lazy mode saves the blocks this step reuses.
+        """
+        if kv_connector_metadata.need_flush:
+            self._flush_and_sync_all()
+        if self.lazy_offload and kv_connector_metadata.store_gpu_blocks:
+            self._store_reused_blocks(kv_connector_metadata)
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""

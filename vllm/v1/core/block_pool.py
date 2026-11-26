@@ -171,6 +171,32 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # Cached blocks `get_new_blocks` reused, while tracking is enabled.
+        self._reused_cached_blocks: (
+            list[tuple[int, tuple[BlockHashWithGroupId, ...], int | None]] | None
+        ) = None
+
+    def track_reused_cached_blocks(self) -> None:
+        """Record the cached blocks `get_new_blocks` reuses, with their hashes.
+
+        The caller must drain them every step with `take_reused_cached_blocks`.
+        """
+        self._reused_cached_blocks = []
+
+    def take_reused_cached_blocks(
+        self,
+    ) -> list[tuple[int, tuple[BlockHashWithGroupId, ...], int | None]]:
+        """Drain the cached blocks reused since the last call.
+
+        Entries are `(block_id, block_hashes, block_hash_num_tokens)`, with the
+        primary hash first, captured before the reuse dropped them. The new
+        owners may overwrite the blocks from this step on.
+        """
+        reused = self._reused_cached_blocks
+        if not reused:
+            return []
+        self._reused_cached_blocks = []
+        return reused
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -697,6 +723,21 @@ class BlockPool:
 
         if self._reuse_watchers:
             self._notify_reuse(ret)
+
+        if self._reused_cached_blocks is not None:
+            for block in ret:
+                if block.block_hash is None:
+                    continue
+                secondary_hashes = self.cached_block_hashes_by_block.get(
+                    block.block_id, ()
+                )
+                self._reused_cached_blocks.append(
+                    (
+                        block.block_id,
+                        (block.block_hash, *secondary_hashes),
+                        block.block_hash_num_tokens,
+                    )
+                )
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:

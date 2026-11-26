@@ -91,6 +91,19 @@ class DmaCopyBackend:
             )
         )
 
+    def store_now(self, src_blocks: list[int], dst_blocks: list[int]) -> torch.Event:
+        """Store on the calling thread after the current stream's queued work.
+
+        Returns the copy's completion event, so other streams can wait on it
+        before they overwrite the source blocks.
+        """
+        assert self._store_params is not None and self._store_stream is not None
+        self._store_stream.wait_stream(torch.cuda.current_stream())
+        copy_blocks(src_blocks, dst_blocks, self._store_params)
+        event = torch.Event()
+        event.record(self._store_stream)
+        return event
+
     def shutdown(self) -> None:
         if self._shutdown:
             return

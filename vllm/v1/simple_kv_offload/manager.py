@@ -29,18 +29,15 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     get_block_hash,
     get_group_id,
-    is_mamba_group,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
-    resolve_dcp_kv_block_size,
     to_event_extra_keys,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     FullAttentionManager,
-    SlidingWindowManager,
     get_kv_cache_kind,
 )
 from vllm.v1.kv_cache_interface import get_reusable_prefix_length
@@ -63,6 +60,10 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# (block_id, block_hashes, block_hash_num_tokens) of a reused GPU block, from
+# BlockPool.take_reused_cached_blocks().
+ReusedBlock = tuple[int, tuple[BlockHashWithGroupId, ...], int | None]
 
 
 @dataclass(slots=True)
@@ -87,6 +88,9 @@ class TransferMeta:
     gpu_block_ids: list[int]
     cpu_block_ids: list[int]
     block_meta: list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None = None
+    # Lazy mode: cache identity of the stored GPU blocks, which the allocator
+    # has reused. Their new owners hold them, so the transfer takes no refs.
+    reused_blocks: list[ReusedBlock] | None = None
 
 
 @dataclass(slots=True)
@@ -245,14 +249,6 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
-        if self._lazy_mode:
-            self._target_free = self._estimate_lazy_target_blocks(
-                kv_cache_config,
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                self.cp_world_size,
-            )
-        else:
-            self._target_free = 0
         self._store_event_to_blocks: dict[int, TransferMeta] = {}
         self._abandoned_store_event_to_blocks: dict[int, TransferMeta] = {}
         # Eager mode only
@@ -325,34 +321,13 @@ class SimpleCPUOffloadScheduler:
             kv_cache_tensors=cpu_tensors,
         )
 
-    @staticmethod
-    def _estimate_lazy_target_blocks(
-        kv_cache_config: "KVCacheConfig",
-        max_num_batched_tokens: int,
-        cp_world_size: int = 1,
-    ) -> int:
-        """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
-        WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
-        target = 0
-        for g in kv_cache_config.kv_cache_groups:
-            block_size = resolve_dcp_kv_block_size(g, cp_world_size)
-            if not g.prefix_cacheable:
-                # Bounded-replay SWA (DSV4.1) is never offloaded, but its blocks for
-                # each scheduled token come from the same free queue.
-                if isinstance(g.manager_config.params, SlidingWindowManager.Params):
-                    target += cdiv(max_num_batched_tokens, block_size)
-            elif is_mamba_group(g):
-                target += 2
-            elif isinstance(p := g.manager_config.params, SlidingWindowManager.Params):
-                target += cdiv(p.sliding_window, block_size) + 1
-            else:
-                target += cdiv(max_num_batched_tokens, block_size)
-        return int(target * (1 + WATERMARK_RATIO))
-
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         """Bind GPU block pool so that we can touch blocks during stores.
         Called by Scheduler after kv_cache_manager is ready."""
         self._gpu_block_pool = gpu_block_pool
+        if self._lazy_mode:
+            # Drained by every build_connector_meta().
+            gpu_block_pool.track_reused_cached_blocks()
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -555,9 +530,15 @@ class SimpleCPUOffloadScheduler:
     ) -> SimpleCPUOffloadMetadata:
         # --- Stores ---
         store_event = -1
-        store_gpu, store_cpu, store_req_ids, store_meta = self.prepare_store_specs(
-            scheduler_output
-        )
+        reused_blocks: list[ReusedBlock] | None = None
+        if self._lazy_mode:
+            store_gpu, store_cpu, reused_blocks = self._prepare_lazy_store_specs()
+            store_req_ids: list[str] = []
+            store_meta = None
+        else:
+            store_gpu, store_cpu, store_req_ids, store_meta = (
+                self._prepare_eager_store_specs(scheduler_output)
+            )
         for transfer in self._pending_finished_stores:
             store_gpu.extend(transfer.gpu_block_ids)
             store_cpu.extend(transfer.cpu_block_ids)
@@ -570,7 +551,7 @@ class SimpleCPUOffloadScheduler:
             store_event = self._store_event_counter
             self._store_event_counter += 1
             self._store_event_to_blocks[store_event] = TransferMeta(
-                store_gpu, store_cpu, store_meta
+                store_gpu, store_cpu, store_meta, reused_blocks
             )
             if store_req_ids:  # For eager mode only, track req->blocks mapping
                 self._store_event_to_reqs[store_event] = store_req_ids
@@ -613,67 +594,36 @@ class SimpleCPUOffloadScheduler:
         )
         return result
 
-    def prepare_store_specs(
-        self, scheduler_output: SchedulerOutput
-    ) -> tuple[
-        list[int],
-        list[int],
-        list[str],
-        list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None,
-    ]:
-        """Prepare store specs for the store event."""
-        if self._lazy_mode:
-            return self._prepare_lazy_store_specs()
-        else:
-            return self._prepare_eager_store_specs(scheduler_output)
-
     def _prepare_lazy_store_specs(
         self,
-    ) -> tuple[
-        list[int],
-        list[int],
-        list[str],
-        list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None,
-    ]:
-        """Offload cached GPU blocks near eviction.
+    ) -> tuple[list[int], list[int], list[ReusedBlock]]:
+        """Offload the reused GPU blocks of offloaded groups with no CPU copy.
 
-        Walks the GPU free queue from its head, counting blocks that are
-        free-or-offloaded (safe for the allocator to evict). Stops when
-        target_free blocks are covered or CPU capacity is reached.
+        The worker copies them out before this step writes any KV cache block.
+        Blocks beyond free CPU capacity are not offloaded.
         """
-        gpu_pool = self._gpu_block_pool
-        if gpu_pool is None or self._target_free <= 0:
-            return [], [], [], None
-
-        free_queue = gpu_pool.free_block_queue
-        cpu_pool = self.cpu_block_pool
-        num_cpu_free = cpu_pool.get_num_free_blocks()
-
-        gpu_ids: list[int] = []
-
-        for covered, node in enumerate(free_queue.iter_blocks_after(None)):
-            if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
-                break
-
-            bhash = node.block_hash
-
+        assert self._gpu_block_pool is not None
+        cpu_cache = self.cpu_block_pool.cached_block_hash_to_block
+        num_cpu_free = self.cpu_block_pool.get_num_free_blocks()
+        reused_blocks: list[ReusedBlock] = []
+        for reused in self._gpu_block_pool.take_reused_cached_blocks():
+            _, block_hashes, _ = reused
             if (
-                bhash is not None
-                and not node.is_null
-                and cpu_pool.cached_block_hash_to_block.get_one_block(bhash) is None
+                get_group_id(block_hashes[0]) not in self.prefix_cacheable_group_ids
+                or cpu_cache.get_one_block(block_hashes[0]) is not None
             ):
-                gpu_ids.append(node.block_id)
-
-        # Batch-allocate CPU blocks.
-        if gpu_ids:
-            cpu_blocks = cpu_pool.get_new_blocks(len(gpu_ids))
-            cpu_ids = [blk.block_id for blk in cpu_blocks]
-            # Touch GPU blocks to prevent eviction during async copy.
-            gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
-        else:
-            cpu_ids = []
-
-        return gpu_ids, cpu_ids, [], None
+                continue
+            if len(reused_blocks) == num_cpu_free:
+                break
+            reused_blocks.append(reused)
+        if not reused_blocks:
+            return [], [], []
+        cpu_blocks = self.cpu_block_pool.get_new_blocks(len(reused_blocks))
+        return (
+            [block_id for block_id, _, _ in reused_blocks],
+            [block.block_id for block in cpu_blocks],
+            reused_blocks,
+        )
 
     def _prepare_eager_store_specs(
         self, scheduler_output: SchedulerOutput
@@ -1101,6 +1051,7 @@ class SimpleCPUOffloadScheduler:
             transfer.gpu_block_ids,
             transfer.cpu_block_ids,
             transfer.block_meta,
+            transfer.reused_blocks,
         )
         logger.debug(
             "Store event %d completed: cached %d blocks to CPU",
@@ -1123,8 +1074,13 @@ class SimpleCPUOffloadScheduler:
         gpu_block_ids: list[int],
         cpu_block_ids: list[int],
         block_meta: list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None = None,
+        reused_blocks: list[ReusedBlock] | None = None,
     ) -> None:
-        """Register copied blocks in the CPU prefix cache and release refs."""
+        """Register copied blocks in the CPU prefix cache and release refs.
+
+        Lazy stores pass `reused_blocks`: their GPU blocks no longer hold the
+        copied content's hashes, and belong to their new owners.
+        """
         assert len(cpu_block_ids) == len(gpu_block_ids)
         assert block_meta is None or len(block_meta) == len(gpu_block_ids)
 
@@ -1132,16 +1088,21 @@ class SimpleCPUOffloadScheduler:
 
         assert self._gpu_block_pool is not None
         for i, (gpu_block_id, cpu_block) in enumerate(zip(gpu_block_ids, cpu_blocks)):
-            gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
-            primary_hash = gpu_block.block_hash
-            assert primary_hash is not None
+            if reused_blocks is not None:
+                _, block_hashes, num_tokens = reused_blocks[i]
+            else:
+                gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
+                assert gpu_block.block_hash is not None
+                block_hashes = (
+                    gpu_block.block_hash,
+                    *self._gpu_block_pool.cached_block_hashes_by_block.get(
+                        gpu_block_id, ()
+                    ),
+                )
+                num_tokens = gpu_block.block_hash_num_tokens
+            primary_hash, *secondary_hashes = block_hashes
             self.cpu_block_pool._insert_block_hash(
-                primary_hash,
-                cpu_block,
-                num_tokens=gpu_block.block_hash_num_tokens,
-            )
-            secondary_hashes = self._gpu_block_pool.cached_block_hashes_by_block.get(
-                gpu_block_id, ()
+                primary_hash, cpu_block, num_tokens=num_tokens
             )
             for block_hash in secondary_hashes:
                 self.cpu_block_pool._insert_block_hash(
@@ -1219,17 +1180,18 @@ class SimpleCPUOffloadScheduler:
                     )
 
         # Free CPU and GPU blocks' ref counts to turn them into prefix cache.
-        # Lazy stores come from the GPU eviction end; return them there.
         self.cpu_block_pool.free_blocks(cpu_blocks)
-        self._gpu_block_pool.free_blocks(
-            (self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids),
-            evict_first=self._lazy_mode,
-        )
+        if reused_blocks is None:
+            self._gpu_block_pool.free_blocks(
+                self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
+            )
 
     def _release_transfer_refs(self, transfer: TransferMeta) -> None:
         """Release transfer refs without making copied data cacheable."""
         cpu_blocks = [self.cpu_block_pool.blocks[bid] for bid in transfer.cpu_block_ids]
         self.cpu_block_pool.free_blocks(cpu_blocks)
+        if transfer.reused_blocks is not None:
+            return
         assert self._gpu_block_pool is not None
         self._gpu_block_pool.free_blocks(
             self._gpu_block_pool.blocks[bid] for bid in transfer.gpu_block_ids
@@ -1475,6 +1437,10 @@ class SimpleCPUOffloadScheduler:
 
         self._store_event_to_blocks.clear()
         self._in_flight_store_gpu_blocks.clear()
+        if self._lazy_mode:
+            # Content reused before the reset is not offloaded.
+            assert self._gpu_block_pool is not None
+            self._gpu_block_pool.take_reused_cached_blocks()
 
         # Loads that have not been sent to the worker cannot have running DMA.
         # In-flight loads stay pinned and are cleaned up on completion.

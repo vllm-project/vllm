@@ -121,6 +121,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
         disk_mode = kv_offload_backend == "disk"
+        if lazy_offload and disk_mode:
+            # Lazy stores run on the forward's critical path; disk writes
+            # are too slow for that.
+            raise ValueError('lazy_offload supports only kv_offload_backend="cpu".')
         self._cache_hit_source = (
             CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
         )
@@ -215,6 +219,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 use_page_cache=use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
                 cpu_hugepage_size=cpu_hugepage_size,
+                lazy_offload=lazy_offload,
             )
 
     # --- Worker-side methods ---
