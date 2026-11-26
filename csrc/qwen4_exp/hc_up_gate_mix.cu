@@ -11,14 +11,14 @@
 // pair, 256) rows x BC hidden columns; its GEMM tile has N = HC * BC columns,
 // gathered from the HC streams of w_up by TMA loads per stage, so all streams
 // of an output column sit in one TMEM accumulator row.
-//   warp 0: TMA producer (lowrank 128 x 64 and w_up HC x (BC x 64) per stage)
-//   warp 1: tcgen05.mma issuer, fp32 accumulators in TMEM (the leader CTA's
-//           warp 1 for a CTA pair)
-//   warp 2: TMEM allocator
+//   warp 0: TMA producer for w_up (HC x (BC x 64) per stage), no PDL wait
+//   warp 1: TMA producer for lowrank (128 x 64 per stage)
+//   warp 2: tcgen05.mma issuer, fp32 accumulators in TMEM (the leader CTA's
+//           warp 2 for a CTA pair)
 //   warp 3: TMA producer for the xn tile (HC x 128 x BC)
 //   warps 4..: epilogue warpgroups of one 16-column chunk each, storing the
 //              output through shared memory with one TMA store per
-//              warpgroup.
+//              warpgroup; warp 4 allocates and frees TMEM.
 
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
@@ -28,7 +28,6 @@
 #include "../torch_utils.h"
 
 #include <cuda.h>
-#include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
@@ -111,11 +110,10 @@ __device__ __forceinline__ uint64_t make_sw128_desc(const void* smem,
   desc.lbo_mode_ = 0;
   desc.layout_type_ =
       static_cast<uint8_t>(cute::UMMA::LayoutType::SWIZZLE_128B);
-  desc.start_address_ = static_cast<uint16_t>(
-      (cute::cast_smem_ptr_to_uint(smem) + k * sizeof(cutlass::bfloat16_t)) >>
-      4);
+  desc.start_address_ =
+      static_cast<uint16_t>((cute::cast_smem_ptr_to_uint(smem) + k * 2) >> 4);
   desc.base_offset_ = 0;
-  desc.stride_byte_offset_ = (8 * BLOCK_K * sizeof(cutlass::bfloat16_t)) >> 4;
+  desc.stride_byte_offset_ = (8 * BLOCK_K * 2) >> 4;
   desc.leading_byte_offset_ = 0;
   return desc.desc_;
 }
@@ -152,6 +150,54 @@ __device__ __forceinline__ void st_shared_v4(uint32_t addr, uint4 v) {
                : "memory");
 }
 
+// The whole producer warp runs its loop and only the elected lane issues,
+// through a PTX predicate: no divergent loop, so loop state stays uniform.
+__device__ __forceinline__ uint32_t elect_lane() {
+  uint32_t pred;
+  asm("{\n"
+      ".reg .pred p;\n"
+      "elect.sync _|p, 0xffffffff;\n"
+      "selp.u32 %0, 1, 0, p;\n"
+      "}\n"
+      : "=r"(pred));
+  return pred;
+}
+
+__device__ __forceinline__ void arrive_expect_tx(Barrier& bar, uint32_t bytes,
+                                                 uint32_t issue) {
+  asm volatile(
+      "{\n"
+      ".reg .pred q;\n"
+      "setp.ne.b32 q, %2, 0;\n"
+      "@q mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
+      "}\n"
+      :
+      : "r"(cute::cast_smem_ptr_to_uint(&bar)), "r"(bytes), "r"(issue)
+      : "memory");
+}
+
+// With kCtas == 2 the load completes on the leader CTA's barrier.
+template <uint32_t kCtas>
+__device__ __forceinline__ void tma_load_2d(void* dst, const CUtensorMap* tm,
+                                            int32_t c0, int32_t c1,
+                                            Barrier& bar, uint64_t hint,
+                                            uint32_t issue) {
+  uint32_t bar_addr = cute::cast_smem_ptr_to_uint(&bar);
+  if constexpr (kCtas == 2) bar_addr &= ~(1u << 24);
+  asm volatile(
+      "{\n"
+      ".reg .pred q;\n"
+      "setp.ne.b32 q, %7, 0;\n"
+      "@q cp.async.bulk.tensor.2d.cta_group::%6.shared::cluster.global"
+      ".mbarrier::complete_tx::bytes.L2::cache_hint"
+      " [%0], [%1, {%2, %3}], [%4], %5;\n"
+      "}\n"
+      :
+      : "r"(cute::cast_smem_ptr_to_uint(dst)), "l"(tm), "r"(c0), "r"(c1),
+        "r"(bar_addr), "l"(hint), "n"(kCtas), "r"(issue)
+      : "memory");
+}
+
 // sigmoid(x) = 0.5 * tanh(0.5 * x) + 0.5.
 __device__ __forceinline__ float sigmoid(float x) {
   float t;
@@ -179,17 +225,18 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
   // A tile spans kCtas * 128 rows; CTA `rank` of the pair owns 128 of them.
   const uint32_t rank = kCtas == 2 ? cute::block_rank_in_cluster() : 0;
   const uint32_t first_tile = blockIdx.x / kCtas, tile_step = gridDim.x / kCtas;
+  const uint32_t leader = elect_lane();
   const uint32_t num_m_blocks = (M + BLOCK_M * kCtas - 1) / (BLOCK_M * kCtas);
   const uint32_t num_tiles = num_m_blocks * Cfg::NUM_N_BLOCKS;
 
-  if (warp == 0 && cute::elect_one_sync()) {
+  if (warp == 0 && leader) {
     cute::prefetch_tma_descriptor(&tm_lowrank);
     cute::prefetch_tma_descriptor(&tm_w_up);
     cute::prefetch_tma_descriptor(&tm_xn);
     cute::prefetch_tma_descriptor(&tm_out);
-  } else if (warp == 1 && cute::elect_one_sync()) {
+  } else if (warp == 1 && leader) {
     for (uint32_t i = 0; i < kStages; ++i) {
-      sm.full[i].init(1);
+      sm.full[i].init(2);  // the w_up (warp 0) and lowrank (warp 1) producers
       sm.empty[i].init(1);
     }
     for (uint32_t i = 0; i < kXStages; ++i) {
@@ -198,10 +245,7 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
     }
     for (uint32_t i = 0; i < kAccStages; ++i) {
       sm.tmem_full[i].init(1);
-      // With a CTA pair, the leader's barrier gets one arrival per epilogue
-      // warp of both CTAs.
-      sm.tmem_empty[i].init(kCtas == 1 ? kEpiThreads
-                                       : kCtas * kEpiThreads / 32);
+      sm.tmem_empty[i].init(kCtas * kEpiThreads);
     }
     cutlass::arch::fence_barrier_init();
   }
@@ -209,64 +253,74 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
     // The peer arrives on the leader's barriers: both must be initialized.
     cute::cluster_arrive_relaxed();
     cute::cluster_wait();
+  } else {
+    __syncthreads();  // barriers initialized before warp 0 starts loading
   }
-  // lowrank and xn are produced by the preceding kernels. Allocate TMEM only
-  // after they finish: a preceding kernel that triggers its dependents before
-  // allocating TMEM itself would otherwise wait on us while we wait on it.
-  cudaGridDependencySynchronize();
   using TmemAllocator = std::conditional_t<kCtas == 2, cute::TMEM::Allocator2Sm,
                                            cute::TMEM::Allocator1Sm>;
-  if (warp == 2) {
-    TmemAllocator().allocate(Cfg::kTmemCols, &sm.tmem_base);
-    TmemAllocator().release_allocation_lock();
-  }
-  tcgen05_before_thread_sync();
-  __syncthreads();
-  tcgen05_after_thread_sync();
-  const uint32_t tmem_base = sm.tmem_base;
+  // The first epilogue warp allocates TMEM (after the PDL wait: a preceding
+  // kernel that triggers its dependents before allocating TMEM itself would
+  // otherwise wait on us while we wait on it) and hands the address to the
+  // MMA warp and the other epilogue warps.
+  constexpr uint32_t kBarTmemAlloc = 15;  // ids 1.. are the epilogue's
+  auto tmem_handoff = [&](uint32_t users) {
+    tcgen05_before_thread_sync();
+    asm volatile("bar.sync %0, %1;" ::"r"(kBarTmemAlloc), "r"(users)
+                 : "memory");
+    tcgen05_after_thread_sync();
+    return sm.tmem_base;
+  };
 
   // Tiles are N-fastest so that concurrent tiles read whole rows of xn; w_up
   // stays in L2 either way. xn is read once.
+  constexpr uint64_t kEvictNormal =
+      static_cast<uint64_t>(cute::TMA::CacheHintSm90::EVICT_NORMAL);
+  constexpr uint64_t kEvictFirst =
+      static_cast<uint64_t>(cute::TMA::CacheHintSm90::EVICT_FIRST);
   if (warp == 0) {
-    if (cute::elect_one_sync()) {
-      uint32_t stage = 0, phase = 0;
-      for (uint32_t t = first_tile; t < num_tiles; t += tile_step) {
-        const int32_t m0 =
-            (t / Cfg::NUM_N_BLOCKS) * BLOCK_M * kCtas + rank * BLOCK_M;
-        const int32_t c0 = (t % Cfg::NUM_N_BLOCKS) * BC;
-        for (uint32_t kb = 0; kb < NUM_K_BLOCKS; ++kb) {
-          sm.empty[stage].wait(phase ^ 1);
-          auto* full = reinterpret_cast<uint64_t*>(&sm.full[stage]);
-          const int32_t k0 = kb * BLOCK_K;
-          // With a CTA pair, both CTAs' loads complete on the leader's barrier.
-          using TmaLoad =
-              std::conditional_t<kCtas == 2, cute::SM100_TMA_2SM_LOAD_2D,
-                                 cute::SM90_TMA_LOAD_2D>;
-          if (rank == 0) {
-            sm.full[stage].arrive_and_expect_tx(
-                kCtas * (sizeof(sm.a[0]) + sizeof(sm.b[0])));
-          }
-          TmaLoad::copy(
-              &tm_lowrank, full,
-              static_cast<uint64_t>(cute::TMA::CacheHintSm90::EVICT_NORMAL),
-              sm.a[stage], k0, m0);
+    uint32_t stage = 0, phase = 0;
+    for (uint32_t t = first_tile; t < num_tiles; t += tile_step) {
+      const int32_t c0 = (t % Cfg::NUM_N_BLOCKS) * BC;
+      for (uint32_t kb = 0; kb < NUM_K_BLOCKS; ++kb) {
+        sm.empty[stage].wait(phase ^ 1);
+        __syncwarp();  // lanes leave the wait together (the elect is hoisted)
+        arrive_expect_tx(sm.full[stage],
+                         kCtas * static_cast<uint32_t>(sizeof(sm.b[0])),
+                         leader && rank == 0);
   #pragma unroll
-          for (uint32_t i = 0; i < HC / kCtas; ++i) {
-            const uint32_t s = rank * (HC / kCtas) + i;
-            TmaLoad::copy(
-                &tm_w_up, full,
-                static_cast<uint64_t>(cute::TMA::CacheHintSm90::EVICT_NORMAL),
-                sm.b[stage] + i * BC * BLOCK_K, k0, int32_t(s * H) + c0);
-          }
-          stage = (stage + 1) % kStages;
-          phase ^= stage == 0;
+        for (uint32_t i = 0; i < HC / kCtas; ++i) {
+          const uint32_t s = rank * (HC / kCtas) + i;
+          tma_load_2d<kCtas>(sm.b[stage] + i * BC * BLOCK_K, &tm_w_up,
+                             int32_t(kb * BLOCK_K), int32_t(s * H) + c0,
+                             sm.full[stage], kEvictNormal, leader);
         }
+        stage = (stage + 1) % kStages;
+        phase ^= stage == 0;
       }
     }
-    __syncwarp();
-  } else if (warp == 1 && rank == 0) {
+  } else if (warp == 1) {
+    // lowrank producer, on the same stages as warp 0's w_up loads.
+    cudaGridDependencySynchronize();
+    uint32_t stage = 0, phase = 0;
+    for (uint32_t t = first_tile; t < num_tiles; t += tile_step) {
+      const int32_t m0 =
+          (t / Cfg::NUM_N_BLOCKS) * BLOCK_M * kCtas + rank * BLOCK_M;
+      for (uint32_t kb = 0; kb < NUM_K_BLOCKS; ++kb) {
+        sm.empty[stage].wait(phase ^ 1);
+        __syncwarp();
+        arrive_expect_tx(sm.full[stage],
+                         kCtas * static_cast<uint32_t>(sizeof(sm.a[0])),
+                         leader && rank == 0);
+        tma_load_2d<kCtas>(sm.a[stage], &tm_lowrank, int32_t(kb * BLOCK_K), m0,
+                           sm.full[stage], kEvictNormal, leader);
+        stage = (stage + 1) % kStages;
+        phase ^= stage == 0;
+      }
+    }
+  } else if (warp == 2 && rank == 0) {
     // With a CTA pair, the leader issues the MMAs for both CTAs and its
     // commits arrive on the barriers of both.
+    const uint32_t tmem_base = tmem_handoff(32 + kEpiThreads);
     constexpr uint32_t MMA_M = BLOCK_M * kCtas;
     using Mma = std::conditional_t<
         kCtas == 2,
@@ -306,41 +360,43 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
                    tmem_base + acc * BLOCK_N, (kb | k) > 0, idesc);
         }
         commit(sm.empty[stage]);
-        __syncwarp();
         stage = (stage + 1) % kStages;
         phase ^= stage == 0;
       }
       commit(sm.tmem_full[acc]);
-      __syncwarp();
     }
   } else if (warp == 3) {
-    if (cute::elect_one_sync()) {
-      uint32_t iter = 0;
-      for (uint32_t t = first_tile; t < num_tiles; t += tile_step, ++iter) {
-        const uint32_t xs = iter % kXStages;
-        sm.x_empty[xs].wait(((iter / kXStages) & 1) ^ 1);
-        const int32_t m0 =
-            (t / Cfg::NUM_N_BLOCKS) * BLOCK_M * kCtas + rank * BLOCK_M;
-        const int32_t c0 = (t % Cfg::NUM_N_BLOCKS) * BC;
-        auto* full = reinterpret_cast<uint64_t*>(&sm.x_full[xs]);
+    cudaGridDependencySynchronize();
+    uint32_t iter = 0;
+    for (uint32_t t = first_tile; t < num_tiles; t += tile_step, ++iter) {
+      const uint32_t xs = iter % kXStages;
+      sm.x_empty[xs].wait(((iter / kXStages) & 1) ^ 1);
+      __syncwarp();
+      const int32_t m0 =
+          (t / Cfg::NUM_N_BLOCKS) * BLOCK_M * kCtas + rank * BLOCK_M;
+      const int32_t c0 = (t % Cfg::NUM_N_BLOCKS) * BC;
   #pragma unroll
-        for (uint32_t s = 0; s < HC; ++s) {
-          cute::SM90_TMA_LOAD_2D::copy(
-              &tm_xn, full,
-              static_cast<uint64_t>(cute::TMA::CacheHintSm90::EVICT_FIRST),
-              sm.x[xs] + s * BLOCK_M * BC, int32_t(s * H) + c0, m0);
-        }
-        sm.x_full[xs].arrive_and_expect_tx(sizeof(sm.x[0]));
+      for (uint32_t s = 0; s < HC; ++s) {
+        tma_load_2d<1>(sm.x[xs] + s * BLOCK_M * BC, &tm_xn, int32_t(s * H) + c0,
+                       m0, sm.x_full[xs], kEvictFirst, leader);
       }
+      arrive_expect_tx(sm.x_full[xs], static_cast<uint32_t>(sizeof(sm.x[0])),
+                       leader);
     }
-    __syncwarp();
   } else if (warp >= kEpiWarp0) {
+    if (warp == kEpiWarp0) {
+      cudaGridDependencySynchronize();
+      TmemAllocator().allocate(Cfg::kTmemCols, &sm.tmem_base);
+      TmemAllocator().release_allocation_lock();
+    }
+    // The MMA warp is a user only in the leader CTA.
+    const uint32_t tmem_base = tmem_handoff((rank == 0 ? 32 : 0) + kEpiThreads);
     // Each warpgroup mixes one kChunk-column chunk of every tile, one row per
     // thread. A warp may only access its own 32-lane quarter of TMEM.
     const uint32_t quarter = warp % 4;
     const uint32_t wg = (warp - kEpiWarp0) / 4, j = wg * kChunk;
     const uint32_t row = quarter * 32 + lane;
-    const bool store_thread = quarter == 0 && lane == 0;
+    const bool store_thread = quarter == 0 && leader;
     uint32_t iter = 0;
     for (uint32_t t = first_tile; t < num_tiles; t += tile_step, ++iter) {
       const uint32_t acc = iter % kAccStages, xs = iter % kXStages;
@@ -426,8 +482,7 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
       // Releasing the accumulator before the math above measured 2-4% slower.
       tcgen05_before_thread_sync();
       if constexpr (kCtas == 2) {
-        __syncwarp();
-        if (lane == 0) sm.tmem_empty[acc].arrive(0u, 1u);  // leader CTA
+        sm.tmem_empty[acc].arrive(0u, 1u);  // leader CTA
       } else {
         sm.tmem_empty[acc].arrive();
       }
@@ -443,21 +498,8 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
     __syncthreads();
   }
   tcgen05_after_thread_sync();
-  if (warp == 2) TmemAllocator().free(tmem_base, Cfg::kTmemCols);
+  if (warp == kEpiWarp0) TmemAllocator().free(sm.tmem_base, Cfg::kTmemCols);
 #endif
-}
-
-PFN_cuTensorMapEncodeTiled_v12000 get_encode_fn() {
-  static PFN_cuTensorMapEncodeTiled_v12000 fn = [] {
-    void* ptr = nullptr;
-    cudaDriverEntryPointQueryResult status;
-    const cudaError_t err = cudaGetDriverEntryPointByVersion(
-        "cuTensorMapEncodeTiled", &ptr, 12000, cudaEnableDefault, &status);
-    STD_TORCH_CHECK(err == cudaSuccess && status == cudaDriverEntryPointSuccess,
-                    "cuTensorMapEncodeTiled is unavailable");
-    return reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(ptr);
-  }();
-  return fn;
 }
 
 // Row-major [rows, cols] bf16 tensor with row stride `ld` elements.
@@ -469,7 +511,7 @@ CUtensorMap make_tensor_map(const void* ptr, uint64_t rows, uint64_t cols,
   const cuuint64_t strides[1] = {ld * sizeof(__nv_bfloat16)};
   const cuuint32_t box[2] = {box_cols, box_rows};
   const cuuint32_t elem_strides[2] = {1, 1};
-  const CUresult res = get_encode_fn()(
+  const CUresult res = cuTensorMapEncodeTiled(
       &map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, const_cast<void*>(ptr), dims,
       strides, box, elem_strides, CU_TENSOR_MAP_INTERLEAVE_NONE, swizzle,
       CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
