@@ -1487,8 +1487,10 @@ mod tests {
             config: hy4_config(),
             tokenizer: TokenizerResolver(Arc::new(WireTestTokenizer::new())),
         };
+        let model_spec = context.resolve_model_spec().expect("hy_v4_vl spec should resolve");
         let info = MultimodalModelInfo::from_loaded(
             context,
+            model_spec,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
