@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import json
-from collections.abc import Awaitable
+from collections.abc import AsyncGenerator, Awaitable, Iterable
 from http import HTTPStatus
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 
 from fastapi import Request
 
@@ -27,6 +28,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
+from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.metrics.stats import RequestStateStats
@@ -169,6 +171,44 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
         self.engine_client.check_admission(n)
+
+    async def _start_generate(
+        self,
+        stream: bool | None,
+        prompt: Any,
+        sampling_params: SamplingParams,
+        request_id: str,
+        **kwargs: Any,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        """Return the engine output stream for a generation request.
+
+        `_preflight()` only checks admission before the prompt is rendered;
+        the engine re-checks when the request is actually added. For streaming
+        responses that second check would otherwise run after the HTTP status
+        is sent, so admit eagerly to keep overload rejections out-of-band.
+        """
+        if stream:
+            # The admitted stream is not an async generator, but it offers the
+            # `anext()` / `aclose()` that `merge_async_iterators()` relies on.
+            return cast(
+                AsyncGenerator[RequestOutput, None],
+                await self.engine_client.generate_admitted(
+                    prompt, sampling_params, request_id, **kwargs
+                ),
+            )
+        return self.engine_client.generate(
+            prompt, sampling_params, request_id, **kwargs
+        )
+
+    @staticmethod
+    async def _close_generators(generators: Iterable[object]) -> None:
+        """Best-effort close of output streams that will never be consumed."""
+        for generator in generators:
+            aclose = getattr(generator, "aclose", None)
+            if aclose is None:
+                continue
+            with contextlib.suppress(BaseException):
+                await aclose()
 
     def create_streaming_error_response(
         self,

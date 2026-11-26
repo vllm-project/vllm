@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -113,6 +113,45 @@ class EngineClient(ABC):
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
+
+    async def generate_admitted(
+        self,
+        prompt: EngineCoreRequest | PromptType | EngineInput,
+        sampling_params: SamplingParams,
+        request_id: str,
+        *,
+        prompt_text: str | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        data_parallel_rank: int | None = None,
+        session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
+        reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
+    ) -> AsyncIterator[RequestOutput]:
+        """Admit a request before returning its output stream.
+
+        Streaming endpoints call this so that admission rejections surface
+        before the HTTP response starts. Engines that admit lazily fall back
+        to `generate`, whose first iteration performs admission.
+        """
+        return self.generate(
+            prompt,
+            sampling_params,
+            request_id,
+            prompt_text=prompt_text,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            trace_headers=trace_headers,
+            priority=priority,
+            data_parallel_rank=data_parallel_rank,
+            session_id=session_id,
+            kv_hints=kv_hints,
+            reasoning_ended=reasoning_ended,
+            reasoning_parser_kwargs=reasoning_parser_kwargs,
+        )
 
     @abstractmethod
     def encode(

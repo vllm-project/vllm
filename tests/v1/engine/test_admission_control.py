@@ -37,12 +37,14 @@ from vllm.exceptions import (
     QueueOverflowError,
     VLLMError,
 )
+from vllm.outputs import STREAM_FINISHED
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineGenerateError
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.metrics.loggers import StatLoggerManager
 
@@ -587,3 +589,252 @@ def test_human_readable_int_parses_notation(input_str: str, expected: int):
 def test_human_readable_int_rejects_invalid(invalid: str):
     with pytest.raises((argparse.ArgumentTypeError, ValueError)):
         human_readable_int(invalid)
+
+
+# ---------------------------------------------------------------------------
+# Eager admission for streaming responses (generate_admitted)
+# ---------------------------------------------------------------------------
+
+
+async def _noop_add_request_async(_request):
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_generate_admitted_cancellation_releases_admission_slot():
+    """Cancelling eager submission must roll back local request registration."""
+    submission_started = asyncio.Event()
+
+    async def add_request_async(_request):
+        submission_started.set()
+        await asyncio.Event().wait()
+
+    llm = _make_request_test_llm(1, add_request_async)
+    request = _make_engine_request("single", 1)
+    submission = asyncio.create_task(
+        llm.generate_admitted(request, request.params, request.request_id)
+    )
+
+    await submission_started.wait()
+    submission.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submission
+
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    llm.engine_core.abort_requests_async.assert_awaited_once_with(["single"])
+    llm.check_admission(request_id="next")
+
+
+@pytest.mark.asyncio
+async def test_generate_admitted_rollback_failure_preserves_submission_error():
+    """Rollback cleanup must not replace the original submission failure."""
+
+    async def add_request_async(_request):
+        raise RuntimeError("submission failed")
+
+    llm = _make_request_test_llm(1, add_request_async)
+    llm.engine_core.abort_requests_async = AsyncMock(
+        side_effect=RuntimeError("abort failed")
+    )
+    request = _make_engine_request("single", 1)
+
+    with pytest.raises(EngineGenerateError) as exc_info:
+        await llm.generate_admitted(request, request.params, request.request_id)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "submission failed"
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    llm.engine_core.abort_requests_async.assert_awaited_once_with(["single"])
+
+
+@pytest.mark.asyncio
+async def test_generate_admitted_parallel_rollback_preserves_submission_error():
+    """Parallel-sampling rollback must also preserve the original failure."""
+
+    async def add_request_async(_request):
+        raise RuntimeError("parallel submission failed")
+
+    llm = _make_request_test_llm(2, add_request_async)
+    llm.engine_core.abort_requests_async = AsyncMock(
+        side_effect=RuntimeError("parallel abort failed")
+    )
+    request = _make_engine_request("parallel", 2)
+
+    with pytest.raises(EngineGenerateError) as exc_info:
+        await llm.generate_admitted(request, request.params, request.request_id)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "parallel submission failed"
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
+    assert set(aborted_ids) == {"0_parallel", "1_parallel"}
+
+
+@pytest.mark.asyncio
+async def test_generate_admitted_wraps_unexpected_submission_error():
+    """Unexpected submission failures keep generate()'s server-error class."""
+
+    async def add_request_async(_request):
+        raise TypeError("request serialization failed")
+
+    llm = _make_request_test_llm(1, add_request_async)
+    request = _make_engine_request("single", 1)
+
+    with pytest.raises(EngineGenerateError) as exc_info:
+        await llm.generate_admitted(request, request.params, request.request_id)
+    assert isinstance(exc_info.value.__cause__, TypeError)
+
+
+@pytest.mark.asyncio
+async def test_admitted_stream_close_cancellation_preserves_abort():
+    """Response teardown must not cancel the engine-side abort send."""
+    llm = _make_request_test_llm(1, _noop_add_request_async)
+    request = _make_engine_request("interrupted-close", 1)
+    stream = await llm.generate_admitted(request, request.params, request.request_id)
+    abort_started = asyncio.Event()
+    abort_release = asyncio.Event()
+
+    async def abort_requests(_request_ids):
+        abort_started.set()
+        await abort_release.wait()
+
+    llm.engine_core.abort_requests_async = AsyncMock(side_effect=abort_requests)
+    close_task = asyncio.create_task(stream.aclose())
+    await abort_started.wait()
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert not stream._finished
+    second_close = asyncio.create_task(stream.aclose())
+    await asyncio.sleep(0)
+    llm.engine_core.abort_requests_async.assert_awaited_once()
+
+    abort_release.set()
+    await second_close
+    assert stream._finished
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    llm.engine_core.abort_requests_async.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_admitted_rejects_before_stream_unlike_lazy_generate():
+    """Overload must surface when awaiting admission, not on first iteration."""
+    llm = _make_request_test_llm(1, _noop_add_request_async)
+    first = _make_engine_request("first", 1)
+    stream = await llm.generate_admitted(first, first.params, first.request_id)
+    assert llm.output_processor.get_num_unfinished_requests() == 1
+
+    # Lazy generate() defers admission until iteration (after HTTP 200).
+    second = _make_engine_request("second", 1)
+    lazy = llm.generate(second, second.params, second.request_id)
+    with pytest.raises(QueueOverflowError):
+        await anext(lazy)
+
+    # generate_admitted() raises before any stream object is returned.
+    third = _make_engine_request("third", 1)
+    with pytest.raises(QueueOverflowError):
+        await llm.generate_admitted(third, third.params, third.request_id)
+    assert llm.output_processor.get_num_unfinished_requests() == 1
+
+    await stream.aclose()
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
+    assert list(aborted_ids) == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_generate_admitted_unconsumed_stream_is_aborted_on_gc():
+    """An admitted stream dropped before iteration must not leak the request."""
+    import gc
+
+    llm = _make_request_test_llm(1, _noop_add_request_async)
+    request = _make_engine_request("dropped", 1)
+    stream = await llm.generate_admitted(request, request.params, request.request_id)
+    assert llm.output_processor.get_num_unfinished_requests() == 1
+
+    del stream
+    gc.collect()
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
+    assert list(aborted_ids) == ["dropped"]
+
+
+@pytest.mark.asyncio
+async def test_generate_admitted_stream_finishes_without_abort():
+    llm = _make_request_test_llm(1, _noop_add_request_async)
+    request = _make_engine_request("done", 1)
+    stream = await llm.generate_admitted(request, request.params, request.request_id)
+    stream._queue.put(STREAM_FINISHED)
+    assert [out async for out in stream] == []
+    # Natural completion detaches the GC finalizer and does not abort.
+    await stream.aclose()
+    llm.engine_core.abort_requests_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generate_admitted_reclaims_request_rejected_after_admission():
+    """An engine rejection delivered via the queue aborts like generate()."""
+    llm = _make_request_test_llm(1, _noop_add_request_async)
+    request = _make_engine_request("rejected", 1)
+    stream = await llm.generate_admitted(request, request.params, request.request_id)
+
+    # E.g. a paused engine rejects the request on arrival; nothing was run.
+    stream._queue.put(QueueOverflowError())
+    with pytest.raises(QueueOverflowError):
+        await anext(stream)
+
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
+    assert list(aborted_ids) == ["rejected"]
+    # The abort already released the request; a later close is a no-op.
+    await stream.aclose()
+    llm.engine_core.abort_requests_async.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_serving_start_generate_admits_only_streaming_requests(stream: bool):
+    from vllm.entrypoints.generate.base.serving import GenerateBaseServing
+
+    engine = MagicMock()
+    engine.generate_admitted = AsyncMock(return_value="admitted-stream")
+    engine.generate = MagicMock(return_value="lazy-generator")
+    serving = SimpleNamespace(engine_client=engine)
+
+    result = await GenerateBaseServing._start_generate(
+        serving, stream, "prompt", SamplingParams(), "req-1", priority=3
+    )
+
+    if stream:
+        assert result == "admitted-stream"
+        engine.generate_admitted.assert_awaited_once()
+        engine.generate.assert_not_called()
+    else:
+        assert result == "lazy-generator"
+        engine.generate.assert_called_once()
+        engine.generate_admitted.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_serving_close_generators_releases_admitted_streams():
+    from vllm.entrypoints.generate.base.serving import GenerateBaseServing
+
+    closed: list[str] = []
+
+    class Closable:
+        def __init__(self, name):
+            self.name = name
+
+        async def aclose(self):
+            closed.append(self.name)
+
+    class Broken:
+        async def aclose(self):
+            raise RuntimeError("boom")
+
+    await GenerateBaseServing._close_generators(
+        [Closable("a"), Broken(), object(), Closable("b")]
+    )
+    assert closed == ["a", "b"]

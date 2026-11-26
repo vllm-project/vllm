@@ -408,7 +408,8 @@ class OpenAIServingChat(GenerateBaseServing):
                     data_parallel_rank=data_parallel_rank,
                 )
             else:
-                generator = self.engine_client.generate(
+                generator = await self._start_generate(
+                    request.stream,
                     engine_input,
                     sampling_params,
                     sub_request_id,
