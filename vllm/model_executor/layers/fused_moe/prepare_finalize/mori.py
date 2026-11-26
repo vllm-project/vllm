@@ -7,6 +7,9 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_common import (
+    mori_recv_rows_bound,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -117,6 +120,26 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dispatch_ids,
             dispatch_recv_token_num,
         ) = self.mori_op.dispatch(a1, topk_weights, scale, topk_ids)
+
+        # MORI reuses capacity-sized receive buffers without clearing unused
+        # rows. Hand the experts only the rows that can hold received tokens
+        # (combine reads received rows through the same base pointer), and
+        # invalidate the stale tail so no expert computes it.
+        rows = mori_recv_rows_bound(
+            a1.shape[0], dispatch_a1.shape[0], self.num_dispatchers_
+        )
+        if rows < dispatch_a1.shape[0]:
+            dispatch_a1 = dispatch_a1[:rows]
+            dispatch_weights = dispatch_weights[:rows]
+            dispatch_ids = dispatch_ids[:rows]
+            if dispatch_scale is not None:
+                dispatch_scale = dispatch_scale[:rows]
+        unused = (
+            torch.arange(dispatch_ids.shape[0], device=dispatch_ids.device)
+            >= dispatch_recv_token_num
+        ).unsqueeze(1)
+        dispatch_weights.masked_fill_(unused, 0)
+        dispatch_ids.masked_fill_(unused, -1)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=dispatch_recv_token_num, expert_num_tokens_cpu=None

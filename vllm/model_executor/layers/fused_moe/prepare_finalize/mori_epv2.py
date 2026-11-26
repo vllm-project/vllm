@@ -6,18 +6,16 @@ from typing import Any
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.distributed import get_dp_group
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_common import (
+    mori_recv_rows_bound,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 
 logger = init_logger(__name__)
-
-# Receive-row bounds are rounded up to this many rows (as SGLang's MORI path does).
-_RECV_ROW_ALIGN = 32
 
 
 class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -124,41 +122,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         return torch.where(topk_ids < 0, self._padding_expert_ids, topk_ids)
 
     def _recv_rows_bound(self, a1: torch.Tensor, capacity: int) -> int:
-        """Host-side upper bound on the rows this rank can receive this step.
-
-        MORI receives each source token at most once per rank, so the receive
-        count is at most the tokens all dispatchers send: the sum of the DP
-        batches, times the dispatchers per DP rank (each TP rank may send the
-        same batch). Slicing the capacity-sized buffers (world_size *
-        max_num_tokens rows) to this bound keeps the row masking, the experts
-        and combine's copy-in off the unused tail. The bound is rounded up to a
-        multiple of _RECV_ROW_ALIGN to limit the distinct expert shapes.
-        """
-        dp_meta = (
-            get_forward_context().dp_metadata
-            if is_forward_context_available()
-            else None
-        )
-        if dp_meta is None:
-            return capacity
-        tokens = dp_meta.num_tokens_across_dp_cpu
-        n_dp = tokens.numel()
-        dp_rank = get_dp_group().rank_in_group
-        if dp_rank >= n_dp or a1.shape[0] > int(tokens[dp_rank]):
-            # Metadata that does not cover this rank's own batch is stale; a
-            # bound derived from it could cut off received rows.
-            logger.debug_once(
-                "MORI EPv2: DP token counts do not cover this rank's batch; "
-                "using the full receive buffer."
-            )
-            return capacity
-        if n_dp > 0 and self.num_dispatchers_ % n_dp == 0:
-            bound = self.num_dispatchers_ // n_dp * int(tokens.sum())
-        else:
-            bound = self.num_dispatchers_ * int(tokens.max())
-        bound = max(bound, 1)
-        bound = -(-bound // _RECV_ROW_ALIGN) * _RECV_ROW_ALIGN
-        return min(capacity, bound)
+        return mori_recv_rows_bound(a1.shape[0], capacity, self.num_dispatchers_)
 
     def prepare(
         self,
