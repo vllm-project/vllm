@@ -360,7 +360,7 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                 ),
                 ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
                     image_url: image_url.url,
-                    detail: image_url.detail,
+                    detail: image_url.detail.map(Into::into),
                     uuid,
                 }),
                 ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
@@ -497,7 +497,6 @@ mod tests {
 
     use axum::http::{HeaderMap, StatusCode};
     use expect_test::expect;
-    use llm_multimodal::ImageDetail;
     use serde_json::json;
     use thiserror_ext::AsReport as _;
     use vllm_chat::{
@@ -519,8 +518,8 @@ mod tests {
     };
     use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
-        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
-        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceObject,
+        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageDetail, ImageUrl,
+        InputAudio, MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceObject,
         ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
@@ -894,7 +893,7 @@ mod tests {
                     function: Function {
                         name: "tool".to_string(),
                         description: None,
-                        parameters: json!({}),
+                        parameters: Some(serde_json::Map::new()),
                         strict: None,
                         defer_loading: None,
                     },
@@ -1214,7 +1213,9 @@ mod tests {
                         parameters: json!({
                             "type": "object",
                             "properties": {"city": {"type": "string"}},
-                        }),
+                        })
+                        .as_object()
+                        .cloned(),
                         strict: Some(true),
                         defer_loading: None,
                     },
@@ -1298,7 +1299,7 @@ mod tests {
                     ContentPart::ImageUrl {
                         image_url: ImageUrl {
                             url: "https://example.com/image.png".to_string(),
-                            detail: Some(ImageDetail::Low),
+                            detail: Some(ImageDetail::Original),
                         },
                         uuid: Some("image-1".to_string()),
                     },
@@ -1324,7 +1325,7 @@ mod tests {
                 ChatContentPart::text("describe "),
                 ChatContentPart::ImageUrl {
                     image_url: "https://example.com/image.png".to_string(),
-                    detail: Some(ImageDetail::Low),
+                    detail: Some(llm_multimodal::ImageDetail::High),
                     uuid: Some("image-1".to_string()),
                 },
                 ChatContentPart::text(" briefly"),
@@ -1679,7 +1680,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -1775,7 +1778,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -1813,7 +1818,7 @@ mod tests {
                             function: Function {
                                 name: "lookup".to_string(),
                                 description: None,
-                                parameters: json!({"type": "object"}),
+                                parameters: json!({"type": "object"}).as_object().cloned(),
                                 strict: None,
                                 defer_loading: None,
                             },
@@ -1888,7 +1893,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },
