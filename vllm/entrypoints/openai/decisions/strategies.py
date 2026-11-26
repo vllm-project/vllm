@@ -836,7 +836,7 @@ class LiquidStrategy(NextTokenStrategy):
             ask = f"{q.instructions}{sides}\n\nReply with yes or no only."
         elif q.type.name == "score":
             legend = "\n".join(
-                f"{label} {o.name}" for label, o in zip(q.labels, q.options)
+                f"{label} {o.text}" for label, o in zip(q.labels, q.options)
             )
             ask = (
                 f"{q.instructions}\n\n{legend}\n\n"
@@ -1549,15 +1549,16 @@ class SlotLMStrategy(NextTokenStrategy):
         if q.raw is not None:
             instructions, criteria = q.raw
         else:
-            # Decisions API questions have no raw criteria; options key them
-            # by name.
             names = [o.name for o in q.options]
             if len(set(names)) != len(names):
                 raise StructuredDecisionError(
                     f"question {q.id!r}: option labels must be distinct for this model"
                 )
             instructions = q.instructions
-            criteria = {o.name: o.description for o in q.options}
+            if q.type.name == "score":
+                criteria = [o.text for o in q.options]
+            else:
+                criteria = {o.name: o.description for o in q.options}
         return slot_prompt.render_suffix(q.type.name, instructions, criteria)
 
     async def read(

@@ -128,7 +128,11 @@ def test_score_levels_with_the_same_label_keep_their_positions():
         ]
     ).questions[0]
     read = make_read_question(0, question)
-    assert read.labels == ("A", "B")
+    assert read.labels == ("0", "1")
+    assert [option.text for option in read.options] == [
+        "damage - cosmetic",
+        "damage - unusable",
+    ]
     answer = make_answer(question, [0.1, 0.9], 0.8).model_dump()
     assert answer["score"] == pytest.approx(0.9)
     assert [p["value"] for p in answer["probabilities"]] == [0, 1]

@@ -138,6 +138,43 @@ def test_openai_decisions_predicate_matches_systemone_noul(server):
     )
 
 
+def test_openai_decisions_score_matches_systemone_score(server):
+    text = "The data copy finished. Validation and cutover are still outstanding."
+    question = {"type": "score", "instructions": "Rate migration progress."}
+    levels = [
+        {"label": "not started"},
+        {"label": "in progress", "description": "work remains"},
+        {"label": "complete"},
+    ]
+    criteria = ["not started", "in progress - work remains", "complete"]
+    decision = requests.post(
+        server.url_for("v1/decisions"),
+        json={
+            "model": MODEL_NAME,
+            "cache_salt": "decisions-score",
+            "input": text,
+            "questions": [{**question, "levels": levels}],
+        },
+    )
+    native = requests.post(
+        server.url_for("v1/systemone"),
+        json={
+            "model": MODEL_NAME,
+            "cache_salt": "systemone-score",
+            "state": text,
+            "questions": {"0": {**question, "criteria": criteria}},
+        },
+    )
+    assert decision.status_code == 200, decision.text
+    assert native.status_code == 200, native.text
+    answer = decision.json()["answers"][0]
+    reference = native.json()["answers"]["0"]
+    assert [p["label"] for p in answer["probabilities"]] == [v["label"] for v in levels]
+    assert [p["probability"] for p in answer["probabilities"]] == pytest.approx(
+        [reference["probabilities"][str(i)] for i in range(len(levels))], abs=1e-3
+    )
+
+
 @pytest.mark.parametrize(
     ("backend", "endpoint"),
     [("vllm-systemone", "/v1/systemone"), ("openai-decisions", "/v1/decisions")],
