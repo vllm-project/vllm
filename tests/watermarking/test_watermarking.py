@@ -518,7 +518,7 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
     monkeypatch.setattr(
         sampler,
         "_get_repeated_contexts",
-        lambda expanded_idx_mapping, contexts: (torch.tensor([True, False])),
+        lambda expanded_idx_mapping, contexts: torch.tensor([True, False]),
     )
     monkeypatch.setattr(
         "vllm.v1.watermarking.watermarker.gumbel_sample",
