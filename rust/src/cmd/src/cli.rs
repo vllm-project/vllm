@@ -420,7 +420,7 @@ pub struct SharedRuntimeArgs {
     #[serde(default, rename = "tokenizer_mode")]
     pub renderer: RendererSelection,
     /// Disable multimodal inputs and treat the model as language-only.
-    #[arg(long)]
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     #[serde(default)]
     pub language_model_only: bool,
     /// Maximum number of log probabilities to return when `logprobs` is
@@ -558,7 +558,7 @@ pub struct SharedRuntimeArgs {
 
     /// Log a summary line for each completed request, including prompt/output
     /// token counts and finish reason.
-    #[arg(long)]
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     #[serde(default)]
     pub enable_log_requests: bool,
 
