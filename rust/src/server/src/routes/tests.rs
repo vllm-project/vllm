@@ -935,6 +935,65 @@ async fn chat_completions_with_tools_returns_400_without_tool_parser() {
     }
 }
 
+/// Like Python and OpenAI, a function tool's `parameters` must be a JSON
+/// object (or `null`) on chat and Responses, for every model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_and_responses_reject_non_object_tool_parameters() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-tool-parameters-object",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        RouteGates::default(),
+    );
+
+    let mut errors = Vec::new();
+    for parameters in [json!("object"), json!([]), json!(1), json!(true)] {
+        for (route, body) in [
+            (
+                "/v1/chat/completions",
+                json!({
+                    "model": "model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": parameters}}],
+                    "tool_choice": "none",
+                }),
+            ),
+            (
+                "/v1/responses",
+                json!({
+                    "model": "model",
+                    "input": "hi",
+                    "tools": [{"type": "function", "name": "f", "parameters": parameters}],
+                    "tool_choice": "none",
+                }),
+            ),
+        ] {
+            let (status, json) = post_json(&mut app, route, body).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{route} {parameters}: {json}"
+            );
+            errors.push(format!("{route} {parameters}: {}", json["error"]["param"]));
+        }
+    }
+    expect_test::expect![[r#"
+        /v1/chat/completions "object": "body.tools.0.function.parameters"
+        /v1/responses "object": "body.tools.0"
+        /v1/chat/completions []: "body.tools.0.function.parameters"
+        /v1/responses []: "body.tools.0"
+        /v1/chat/completions 1: "body.tools.0.function.parameters"
+        /v1/responses 1: "body.tools.0"
+        /v1/chat/completions true: "body.tools.0.function.parameters"
+        /v1/responses true: "body.tools.0""#]]
+    .assert_eq(&errors.join("\n"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn scale_out_generate_route_follows_api_server_options() {

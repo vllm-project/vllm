@@ -893,7 +893,7 @@ mod tests {
                     function: Function {
                         name: "tool".to_string(),
                         description: None,
-                        parameters: json!({}),
+                        parameters: Some(serde_json::Map::new()),
                         strict: None,
                         defer_loading: None,
                     },
@@ -1213,7 +1213,9 @@ mod tests {
                         parameters: json!({
                             "type": "object",
                             "properties": {"city": {"type": "string"}},
-                        }),
+                        })
+                        .as_object()
+                        .cloned(),
                         strict: Some(true),
                         defer_loading: None,
                     },
@@ -1678,7 +1680,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -1774,7 +1778,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -1812,7 +1818,7 @@ mod tests {
                             function: Function {
                                 name: "lookup".to_string(),
                                 description: None,
-                                parameters: json!({"type": "object"}),
+                                parameters: json!({"type": "object"}).as_object().cloned(),
                                 strict: None,
                                 defer_loading: None,
                             },
@@ -1887,7 +1893,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },
