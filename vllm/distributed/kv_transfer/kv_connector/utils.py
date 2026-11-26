@@ -548,8 +548,8 @@ def pair_shards(
         TP 4   | rank 0 | rank 1 | rank 2 | rank 3 |   one shard to a rank
 
     A receiving shard takes the sending shard at the same position. A side
-    with more shards holds copies (heads replicated across ranks, a state
-    every rank holds whole), one single-entry shard to a rank: a receiver
+    with more shards holds copies (heads replicated across ranks, Mamba2
+    groups or a state every rank holds whole), one shard to a rank: a receiver
     takes one copy, and a sender gives to every copy.
     """
     pairs: dict[int, list[tuple[torch.Tensor, torch.Tensor]]] = defaultdict(list)
@@ -567,7 +567,7 @@ def pair_shards(
         other_num_shards = other_tp_size * len(other_shards)
         copies = shards if num_shards > other_num_shards else other_shards
         if shards[0].shape != other_shards[0].shape or (
-            num_shards != other_num_shards and (length, len(copies)) != (1, 1)
+            num_shards != other_num_shards and len(copies) != 1
         ):
             raise NotImplementedError(
                 f"{name!r} is {num_shards} shards of {tuple(shards[0].shape)} here "
