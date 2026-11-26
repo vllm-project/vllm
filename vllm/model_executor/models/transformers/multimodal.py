@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 import transformers
+from packaging.version import Version
 from torch.nn.utils.rnn import pad_sequence
 
 import vllm.envs as envs
@@ -88,6 +89,9 @@ _MAX_FRAMES_PER_VIDEO = 16
 _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
 _MIN_DUMMY_SIDE = 224
+# Earlier versions write the kwargs of `_get_num_multimodal_tokens` into the processor
+# class's defaults, where a request's kwargs would stay for every later request
+_COUNT_TAKES_REQUEST_KWARGS = Version(transformers.__version__) >= Version("5.23.0")
 
 
 def _get_embed_token_id(
@@ -939,6 +943,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         images = mm_data.get("images")
         if not isinstance(images, Iterable) or not images:
             return None
+        if not _COUNT_TAKES_REQUEST_KWARGS:
+            mm_kwargs = {}
         try:
             sizes = [(image.height, image.width) for image in images]
             mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
