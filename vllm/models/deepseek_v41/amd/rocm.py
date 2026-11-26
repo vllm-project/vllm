@@ -721,10 +721,10 @@ def _wo_b_gather_min_rows(tp_size: int) -> int:
     """The row count from which a step all-gathers wo_b's MXFP8 input and runs
     the whole wo_b on every rank, instead of all-reducing its bf16 output.
 
-    A row is 33 / 32 * (K / TP) bytes on the wire against 2 * hidden_size and
-    costs TP - 1 more slices of GEMM, and a step pays a second collective for
-    the scales, which a small step does not earn back. These are where that
-    crosses over on gfx950.
+    Per row, each rank contributes (K / TP) * 33 / 32 bytes to the gather,
+    including scales. The all-reduce input is 2 * hidden_size bytes per row.
+    The gather also needs a second collective for scales and a full GEMM on
+    each rank. These thresholds are the measured crossovers on gfx950.
     """
     return 256 if tp_size == 2 else 1024
 
