@@ -39,6 +39,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     ScheduleEndContext,
+    StepResult,
     StoreTrigger,
     TierFilter,
     TierMatcher,
@@ -358,11 +359,12 @@ class TestTieringOffloadingManager:
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
         )
 
-    def _simulate_on_schedule_end(self, new_req_ids: list[str] | None = None):
+    def _simulate_on_schedule_end(
+        self, new_req_ids: list[str] | None = None
+    ) -> StepResult:
         """Simulate end of scheduler step: lifecycle flush + drain events."""
         ctx = ScheduleEndContext(new_req_ids=new_req_ids or [], preempted_req_ids=())
-        self.manager.on_schedule_end(ctx)
-        list(self.manager.take_events())
+        return self.manager.on_schedule_end(ctx)
 
     def _start_request(self, req_context: ReqContext = _CTX):
         if req_context.req_id not in self.manager._req_state:
@@ -639,9 +641,7 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         # End of step 2: processes the completed promotion jobs
-        self._simulate_on_schedule_end()
-
-        stats = self.manager.get_stats()
+        stats = self._simulate_on_schedule_end().stats
         assert stats is not None
         reduced = stats.reduce()
         assert (
@@ -935,8 +935,7 @@ class TestTieringOffloadingManager:
         assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
 
         # Promotion is not treated as unresolved secondary lookup time.
-        self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
-        stats = self.manager.get_stats()
+        stats = self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id]).stats
         assert stats is not None
         reduced = stats.reduce()
         assert (
