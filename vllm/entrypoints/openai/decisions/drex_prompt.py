@@ -109,6 +109,20 @@ def model_options(
     raise ValueError(f"Drex does not answer {question_type!r} questions")
 
 
+def apply_order(probs: Sequence[float], order: Sequence[int]) -> list[float]:
+    """Return ``probs`` in the caller's option order.
+
+    ``model_options`` returns probabilities in the order the model reads them
+    and the position of each one in the caller's order, so a noul question's
+    ``(no, yes)`` read becomes ``(yes, no)`` here.
+    """
+    if len(probs) != len(order):
+        raise ValueError(
+            f"got {len(probs)} options but {len(order)} positions to place them"
+        )
+    return [probs[i] for i in order]
+
+
 def pack(
     tokenizer: Tokenizer,
     state: str,

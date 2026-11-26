@@ -148,6 +148,20 @@ def test_unknown_question_type_is_rejected():
         drex_prompt.model_options("weird", [("a", None)])
 
 
+def test_apply_order_keeps_identity_order():
+    assert drex_prompt.apply_order([0.25, 0.75], [0, 1]) == [0.25, 0.75]
+
+
+def test_apply_order_reads_a_noul_answer_as_yes_then_no():
+    # The model reads (no, yes); the caller reads (yes, no).
+    assert drex_prompt.apply_order([0.25, 0.75], [1, 0]) == [0.75, 0.25]
+
+
+def test_apply_order_rejects_a_length_mismatch():
+    with pytest.raises(ValueError, match="2 options but 3 positions"):
+        drex_prompt.apply_order([0.5, 0.5], [0, 1, 2])
+
+
 def test_render_keeps_a_string_as_is():
     assert drex_prompt.render("hello\nworld") == "hello\nworld"
 
