@@ -55,7 +55,8 @@ def _quantize_both_layouts(
 
 
 @pytest.mark.parametrize("num_tokens", [1, 5, 37, 128, 300, 511])
-@pytest.mark.parametrize("hidden_size", [2048, 7168])
+# 2880 (gpt-oss): 90 scale columns, padded to 92 in the swizzled layout.
+@pytest.mark.parametrize("hidden_size", [2048, 2880, 7168])
 @torch.inference_mode()
 def test_swizzle_dispatched_mxfp8_scales(num_tokens: int, hidden_size: int):
     want, linear = _quantize_both_layouts(num_tokens, hidden_size)
