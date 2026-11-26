@@ -289,6 +289,7 @@ class FakeParent:
         self.retry: set[OffloadKey] = set(retry or ())
         self._next_job_id: int = 1000
         self.calls: list[tuple] = []
+        self.demands: list[list[OffloadKey]] = []
 
     def on_new_request(self, ctx: ReqContext) -> RequestOffloadingContext:
         self.calls.append(("on_new_request", ctx.req_id))
@@ -324,6 +325,9 @@ class FakeParent:
 
     def on_request_finished(self, ctx: ReqContext) -> None:
         self.calls.append(("on_request_finished", ctx.req_id))
+
+    def on_demand(self, keys: Sequence[OffloadKey], at: float) -> None:
+        self.demands.append(list(keys))
 
 
 def _released(result: LoadResult) -> bool:
@@ -2965,6 +2969,38 @@ class TestFinishRequestServerSide:
         done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is True
+
+        # Every round's keys are reported as demand, once.
+        parent = FakeParent()
+        session.report_demand(parent)
+        session.report_demand(parent)
+        assert parent.demands == [
+            [OffloadKey(b"k1")],
+            [OffloadKey(b"k2"), OffloadKey(b"k3")],
+        ]
+
+    def test_only_fetched_keys_are_reported_as_demand(self):
+        """A job stores [k1, k2] and the peer fetches k1 alone. The demand is
+        reported when it is matched, before the transfer finishes."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        k1, k2 = OffloadKey(b"k1"), OffloadKey(b"k2")
+        session.add_stored_blocks("req-1", [k1, k2], [0, 1], job_id=100)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [10],
+            }
+        )
+        session.poll()
+        assert len(session._server._inflight) == 1
+
+        parent = FakeParent()
+        session.report_demand(parent)
+        assert parent.demands == [[k1]]
 
     def test_write_blocks_failure_finalizes_after_last_inflight_completes(
         self, monkeypatch

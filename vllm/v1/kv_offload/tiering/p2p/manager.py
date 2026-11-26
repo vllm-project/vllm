@@ -431,6 +431,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # at the top of the next ``serve_external_requests`` where the
         # handle is valid.
         self._failed_serve_ctxs: list[ReqContext] = []
+        # Reaped sessions whose queued demands are not reported yet.
+        self._reaped_sessions: list[P2PSession] = []
         # transfer_id → (peer_id, store job_ids, retained_at) for transfers
         # of reaped sessions that may still be writing; see _poll_retained.
         self._retained: dict[int, tuple[str, frozenset[int], float]] = {}
@@ -787,6 +789,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.serve_external_requests(parent)
 
     @override
+    def report_demand(self, parent: ParentManager) -> None:
+        for session in (*self._reaped_sessions, *self._sessions.values()):
+            session.report_demand(parent)
+        self._reaped_sessions.clear()
+
+    @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         # Flush any p2p lookups aggregated during this step.
         # One LookupMsg per (peer, kv_request_id) with unsent entries;
@@ -940,6 +948,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return
         for pid in dead:
             session = self._sessions.pop(pid)
+            self._reaped_sessions.append(session)
             # Purge any kv_request_id → session entries pointing at this
             # session so subsequent submit_stores fall back to the unbound
             # path (which will time out into failure if no peer rebinds).
@@ -1145,6 +1154,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return
         for pid in idle:
             session = self._sessions.pop(pid)
+            self._reaped_sessions.append(session)
             stale_kv_ids = [
                 kid for kid, s in self._kv_to_session.items() if s is session
             ]

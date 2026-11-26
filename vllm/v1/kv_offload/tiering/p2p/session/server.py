@@ -72,6 +72,7 @@ class _MatchResult(NamedTuple):
     remote_idxs: list[int]
     # The set of store job IDs that contributed blocks
     job_ids: set[int]
+    keys: list[OffloadKey]
 
 
 @dataclass(slots=True)
@@ -120,17 +121,20 @@ class _OutboundRequestState:
         self.pending_job_ids.add(job_id)
         local_idxs: list[int] = []
         remote_idxs: list[int] = []
+        matched_keys: list[OffloadKey] = []
         for key, local_idx in zip(keys, block_ids):
             remote_idx = self.demanded.pop(key, None)
             if remote_idx is not None:
                 local_idxs.append(local_idx)
                 remote_idxs.append(remote_idx)
+                matched_keys.append(key)
             else:
                 self.available[key] = (job_id, local_idx)
         return _MatchResult(
             local_idxs=local_idxs,
             remote_idxs=remote_idxs,
             job_ids={job_id} if local_idxs else set(),
+            keys=matched_keys,
         )
 
     def add_fetch_demand(
@@ -145,6 +149,7 @@ class _OutboundRequestState:
         local_idxs: list[int] = []
         remote_idxs: list[int] = []
         job_ids: set[int] = set()
+        matched_keys: list[OffloadKey] = []
         for key, remote_idx in zip(keys, block_indexes):
             stored_entry = self.available.pop(key, None)
             if stored_entry is not None:
@@ -152,12 +157,14 @@ class _OutboundRequestState:
                 local_idxs.append(local_idx)
                 remote_idxs.append(remote_idx)
                 job_ids.add(stored_job_id)
+                matched_keys.append(key)
             else:
                 self.demanded[key] = remote_idx
         return _MatchResult(
             local_idxs=local_idxs,
             remote_idxs=remote_idxs,
             job_ids=job_ids,
+            keys=matched_keys,
         )
 
 
@@ -288,6 +295,8 @@ class ServerRole:
         # finish popped their parked lookup). Drained via
         # ``parent.on_request_finished`` in ``serve_external_requests``.
         self._finished_lookup_ctxs: list[ReqContext] = []
+        # Keys a peer demanded and when, until report_demand().
+        self._demands: list[tuple[list[OffloadKey], float]] = []
         self._lookup_id_counter: int = 0
         # Parked aborts awaiting drain, keyed by (kv_request_id, round)
         # with the abort start time.
@@ -357,6 +366,8 @@ class ServerRole:
         if from_lookup:
             rnd.lookup_supplied = True
         result = rnd.add_stored_blocks(keys, block_ids, job_id)
+        if result.keys:
+            self._demands.append((result.keys, time.monotonic()))
         if result.local_idxs and rnd.demand_received:
             self._submit_transfer(kv_request_id, result, rnd, round_seq)
 
@@ -394,6 +405,8 @@ class ServerRole:
         if req is None:
             req = st.outbound[round_seq] = _OutboundRequestState()
         result = req.add_fetch_demand(keys, block_indexes)
+        if result.keys:
+            self._demands.append((result.keys, time.monotonic()))
         if not keys:
             # Terminal empty fetch: close the lookup phase and drain
             # every round with no TransferDoneMsg (nothing waits on it).
@@ -511,6 +524,11 @@ class ServerRole:
             for ctx in self._finished_lookup_ctxs:
                 parent.on_request_finished(ctx)
             self._finished_lookup_ctxs = []
+
+    def report_demand(self, parent: ParentManager) -> None:
+        for keys, at in self._demands:
+            parent.on_demand(keys, at)
+        self._demands.clear()
 
     def _poll_lookup_keys(
         self,

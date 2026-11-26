@@ -15,6 +15,12 @@ class CPUOffloadingMetrics:
     CPU_ALLOCATION_SIZE = "vllm:kv_offload_cpu_allocation_size"
     CPU_CACHE_WRITE_USAGE_PERC = "vllm:kv_offload_cpu_cache_write_usage_perc"
     CPU_CACHE_READ_USAGE_PERC = "vllm:kv_offload_cpu_cache_read_usage_perc"
+    CPU_CHUNK_IDLE_BEFORE_EVICT = "vllm:kv_offload_cpu_chunk_idle_before_evict_seconds"
+    CPU_CHUNK_LIFETIME = "vllm:kv_offload_cpu_chunk_lifetime_seconds"
+    CPU_CHUNK_EVICTIONS = "vllm:kv_offload_cpu_chunk_evictions"
+    CPU_CHUNK_TIME_TO_FIRST_DEMAND = (
+        "vllm:kv_offload_cpu_chunk_time_to_first_demand_seconds"
+    )
 
 
 class CPULoadStoreSpec(BlockIDsLoadStoreSpec):

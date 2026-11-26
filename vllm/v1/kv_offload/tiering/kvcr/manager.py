@@ -215,6 +215,8 @@ class _FrameworkPinAdapter:
                 descriptors[BlockKey(key)] = [make_descriptor(chunk_id)]
             pin_handle = f"kvcr-job-{job.job_id}"
             self._pin_jobs[pin_handle] = job.job_id
+            # A pin request is the demand; the read itself happens remotely.
+            parent.on_demand(job_keys, time.monotonic())
             return pin_handle, descriptors
         except Exception:
             logger.warning("KVCR source acquisition failed", exc_info=True)

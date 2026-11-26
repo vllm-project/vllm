@@ -189,6 +189,21 @@ The spec declares the label names in the API server process, and the manager fil
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
+## CPU chunk eviction metrics
+
+A chunk residency runs from the completion of a store or promotion to the capacity eviction of the chunk. Storing the key again starts a new residency.
+
+A demand is a consumer asking for the chunk: a scheduled CPU-to-GPU load, a peer fetch, or a KVCR pin request. It counts when it is requested, whether or not the transfer later completes. Offering a chunk that is already cached, a cascade, a promotion, and a peer lookup with no fetch are not demands.
+
+| Prometheus metric | Observed | What it measures |
+| --- | --- | --- |
+| `vllm:kv_offload_cpu_chunk_evictions_total` | Capacity eviction | Evicted chunks, split by `ever_used`: whether the residency was demanded at least once. |
+| `vllm:kv_offload_cpu_chunk_lifetime_seconds` | Capacity eviction | Seconds the residency lasted. |
+| `vllm:kv_offload_cpu_chunk_idle_before_evict_seconds` | Capacity eviction of a used chunk | Seconds since the last demand. For an unused chunk this equals the lifetime, so it is not observed. |
+| `vllm:kv_offload_cpu_chunk_time_to_first_demand_seconds` | First demand of a residency | Seconds from readiness to the first demand. |
+
+A failed or partial store and a cache reset record nothing. All times use the monotonic clock of this engine, never the peer's.
+
 ## Custom Eviction Policies
 
 `eviction_policy` resolves through `CachePolicyFactory` (`vllm/v1/kv_offload/cpu/policies/factory.py`), which pre-registers the built-in `lru` and `arc` policies.

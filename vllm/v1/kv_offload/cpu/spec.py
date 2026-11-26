@@ -29,6 +29,8 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
 
 logger = init_logger(__name__)
 
+_CHUNK_AGE_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 14400, 86400)
+
 
 def _all_workers_barrier() -> None:
     """Block until every worker rank has reached this point (gloo cpu group).
@@ -84,6 +86,34 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "KV offload prepare_store call."
                 ),
                 buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
+            ),
+            CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT: (
+                OffloadingHistogramMetadata(
+                    documentation=(
+                        "Seconds from the last demand of a CPU chunk to its "
+                        "capacity eviction. Not observed for unused chunks."
+                    ),
+                    buckets=_CHUNK_AGE_BUCKETS,
+                )
+            ),
+            CPUOffloadingMetrics.CPU_CHUNK_LIFETIME: OffloadingHistogramMetadata(
+                documentation="Seconds from CPU chunk readiness to capacity eviction.",
+                buckets=_CHUNK_AGE_BUCKETS,
+            ),
+            CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS: OffloadingCounterMetadata(
+                documentation=(
+                    "Capacity evictions by whether a GPU load or a peer ever "
+                    "demanded the chunk."
+                ),
+                labelnames=("ever_used",),
+            ),
+            CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND: (
+                OffloadingHistogramMetadata(
+                    documentation=(
+                        "Seconds from CPU chunk readiness to its first demand."
+                    ),
+                    buckets=(0.1, 0.5, 1, 5, 15, 60, 300, 1800, 3600, 14400),
+                )
             ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))

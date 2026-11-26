@@ -4,6 +4,7 @@ import math
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
+from time import monotonic
 
 from typing_extensions import override
 
@@ -96,6 +97,7 @@ class CPUOffloadingManager(OffloadingManager):
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
+        self._chunk_stats = OffloadingConnectorStats()
         self._cache_generation = 0
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
@@ -203,6 +205,25 @@ class CPUOffloadingManager(OffloadingManager):
             key for key in reused_keys if key not in state.inserted_keys
         )
 
+    def _mark_demand(self, chunk: ChunkStatus, at: float) -> None:
+        if not chunk.ever_used:
+            chunk.ever_used = True
+            self._chunk_stats.observe_histogram(
+                CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND,
+                at - chunk.ready_time,
+            )
+        chunk.last_demand_time = max(chunk.last_demand_time, at)
+
+    def on_demand(self, keys: Iterable[OffloadKey], at: float) -> None:
+        """Record that a consumer demanded these keys at monotonic time `at`.
+
+        Keys that are no longer cached, or were stored again since, are skipped.
+        """
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is not None and chunk.is_ready and at >= chunk.ready_time:
+                self._mark_demand(chunk, at)
+
     # --- OffloadingManager interface ---
 
     @override
@@ -245,6 +266,8 @@ class CPUOffloadingManager(OffloadingManager):
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found in cache"
             assert chunk.is_ready, f"Chunk {key!r} is not ready for reading"
+            if record_access:
+                self._mark_demand(chunk, monotonic())
             if chunk.ref_cnt == 0:
                 self._policy.mark_non_evictable(key)
                 self._num_evictable_cache_chunks -= 1  # ref_cnt 0 -> 1
@@ -405,7 +428,20 @@ class CPUOffloadingManager(OffloadingManager):
             self._num_evictable_cache_chunks -= len(evicted)
             assert self._num_evictable_cache_chunks >= 0
 
+            now = monotonic()
             for key, chunk in evicted:
+                self._chunk_stats.observe_histogram(
+                    CPUOffloadingMetrics.CPU_CHUNK_LIFETIME, now - chunk.ready_time
+                )
+                if chunk.ever_used:
+                    self._chunk_stats.observe_histogram(
+                        CPUOffloadingMetrics.CPU_CHUNK_IDLE_BEFORE_EVICT,
+                        now - chunk.last_demand_time,
+                    )
+                self._chunk_stats.increase_counter(
+                    CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS,
+                    labelvalues=("true" if chunk.ever_used else "false",),
+                )
                 self._free_chunk(chunk)
                 to_evict.append(key)
 
@@ -459,10 +495,12 @@ class CPUOffloadingManager(OffloadingManager):
         removed_keys: list[OffloadKey] = []
 
         if success:
+            now = monotonic()
             for key in keys:
                 chunk = self._policy.get(key)
                 if chunk is not None and not chunk.is_ready:
                     chunk.ref_cnt = 0
+                    chunk.ready_time = chunk.last_demand_time = now
                     self._num_write_pending_chunks -= 1
                     self._num_evictable_cache_chunks += 1
                     self._policy.mark_evictable(key)
@@ -570,7 +608,7 @@ class CPUOffloadingManager(OffloadingManager):
         return [self._config_info]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
-        stats = OffloadingConnectorStats()
+        stats, self._chunk_stats = self._chunk_stats, OffloadingConnectorStats()
 
         # Compute cache usage.
         num_used = (

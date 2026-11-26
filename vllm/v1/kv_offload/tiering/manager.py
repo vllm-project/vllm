@@ -275,6 +275,9 @@ class _SecondaryTierFacingParent(ParentManager):
             req_context, exclude_tier_idx=self._origin_idx
         )
 
+    def on_demand(self, keys: Collection[OffloadKey], at: float) -> None:
+        self._m.primary_tier.on_demand(keys, at)
+
 
 class TieringOffloadingManager(OffloadingManager):
     """Orchestrates multi-tier KV cache offloading.
@@ -628,7 +631,9 @@ class TieringOffloadingManager(OffloadingManager):
             tiers = self.secondary_tiers
         for tier in tiers:
             i = self._tier_index[tier]
-            for completed_job in tier.get_finished_jobs():
+            finished_jobs = list(tier.get_finished_jobs())
+            tier.report_demand(self._tier_parents[tier])
+            for completed_job in finished_jobs:
                 job_id = completed_job.job_id
                 job_metadata = self._pop_job(job_id)
                 assert job_metadata is not None, (
