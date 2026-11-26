@@ -230,6 +230,15 @@ vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
 
 adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where only MOE experts are quantized.
 
+Online quantization targets can also select specific layers left unquantized in an otherwise quantized checkpoint. For example, the Muse Spark Open ModelOpt NVFP4 checkpoint retains BF16 routed experts in layers 0 and 61. The following command quantizes those experts to NVFP4 at load time using per-token activation scales:
+
+```bash
+vllm serve meta-models/Muse-Spark-Open-816B-A42B-NVFP4 \
+  --quantization-config '{"targets":{"*layers.0.feed_forward.experts*":"nvfp4_per_token","*layers.61.feed_forward.experts*":"nvfp4_per_token"}}'
+```
+
+This example requires a supported Blackwell GPU and the FlashInfer TRT-LLM backend. Targets must match only the BF16 experts; re-quantizing Muse Spark's existing NVFP4 experts is not supported.
+
 Similarly, the Quark MXFP4 checkpoint of Muse Spark Open keeps the routed experts of layers 0 and 61 in BF16. On ROCm, this rounds them to OCP MXFP4 at load, so every MoE layer runs the same AITER W4A4 experts (an opt-in numerics change):
 
 ```bash

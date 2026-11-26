@@ -67,7 +67,7 @@ async fn prepares_engine_inputs_like_python_processor() {
     let info = test_info(MODEL_TYPE, json!({"model_type": MODEL_TYPE}), tokenizer);
     // 41x2 RGBA PNG.
     let image = MediaContentPart::ImageUrl {
-        url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACkAAAACCAYAAADFC/UDAAAAF0lEQVR4nGM8wcDAwMDAwDaYMRPDEAAA6bUBvJDJE7sAAAAASUVORK5CYII=".to_string(),
+        url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACkAAAACCAYAAADFC/UDAAAAF0lEQVR4nGM8wcDAwMDAwDaYMRPDEAAA6bUBvJDJE7sAAAAASUVORK5CYII=".to_string().into(),
         detail: None,
         uuid: None,
         max_long_side_pixel: None,
