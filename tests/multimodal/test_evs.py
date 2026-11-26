@@ -25,9 +25,7 @@ def test_mrope_chunk_starts_after_vision_start_without_timestamps(prefix):
     input_ids = torch.tensor(prefix + [888, 888, 778, 12], dtype=torch.long)
     mrope_positions = torch.arange(input_ids.numel()).repeat(3, 1)
     # Qwen2.5-VL uses four channels: t, h, w, max_width.
-    mm_positions = [
-        torch.tensor([[0, 0], [0, 0], [0, 1], [2, 2]], dtype=torch.long)
-    ]
+    mm_positions = [torch.tensor([[0, 0], [0, 0], [0, 1], [2, 2]], dtype=torch.long)]
 
     positions, delta = recompute_mrope_positions(
         input_ids=input_ids,

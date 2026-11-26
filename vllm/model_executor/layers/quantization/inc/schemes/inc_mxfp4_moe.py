@@ -35,21 +35,25 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 
 class INCMxfp4MoEMethod(FusedMoEMethodBase):
-    """W4A4 MXFP4 group MoE for AutoRound ``auto_round:llm_compressor`` exports.
+    """W4A4 MXFP4 group MoE for AutoRound `auto_round:llm_compressor` exports.
 
-    Registers the packed MXFP4 layout (uint8 ``weight_packed`` + uint8 E8M0
-    ``weight_scale``, ``group_size=32``) and dispatches the fused MoE to b12x
+    Registers the packed MXFP4 layout (uint8 `weight_packed` + uint8 E8M0
+    `weight_scale`, `group_size=32`) and dispatches the fused MoE to b12x
     when requested; otherwise it uses CUTLASS W4A4, XPU W4A4, or Marlin W4A16.
-    The per-expert ``gate_proj`` / ``up_proj`` / ``down_proj`` tensors are
-    folded into the stacked ``w13`` / ``w2`` parameters by
-    ``make_expert_params_mapping``.
+    The per-expert `gate_proj` / `up_proj` / `down_proj` tensors are
+    folded into the stacked `w13` / `w2` parameters by
+    `make_expert_params_mapping`.
     """
 
     def __init__(self, moe) -> None:
@@ -165,14 +169,8 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        layer.w13_weight = torch.nn.Parameter(
-            layer.w13_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w13_weight_packed")
-        layer.w2_weight = torch.nn.Parameter(
-            layer.w2_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w2_weight_packed")
+        move_parameter(layer, "w13_weight_packed", "w13_weight")
+        move_parameter(layer, "w2_weight_packed", "w2_weight")
 
         if self.use_cutlass_mxfp4:
             # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
@@ -221,6 +219,7 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
                 mxfp4_backend=self.mxfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def apply(

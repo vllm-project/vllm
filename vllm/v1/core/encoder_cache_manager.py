@@ -6,7 +6,13 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.distributed.ec_transfer.ec_events import (
+    AllECCleared,
+    ECCacheEvent,
+    ECRemoved,
+    ECStored,
+)
+from vllm.distributed.kv_events import MEDIUM_GPU
 from vllm.logger import init_logger
 from vllm.v1.request import Request
 
@@ -66,6 +72,8 @@ class EncoderCacheManager:
             make space when needed.
         freed: List of mm_hash strings that were actually evicted since the
             last call to get_freed_mm_hashes(). This list is cleared on return.
+        events: Encoder cache events collected since the last call to
+            take_events(). Empty unless EC cache events are enabled.
 
     """
 
@@ -73,12 +81,20 @@ class EncoderCacheManager:
     def create_manager(
         cls, *, cache_size: int, vllm_config: "VllmConfig"
     ) -> "EncoderCacheManager":
-        return cls(cache_size=cache_size)
+        # Custom managers may only accept `cache_size`, so the event flag is set
+        # after construction instead of being passed to the constructor.
+        manager = cls(cache_size=cache_size)
+        ec_events_config = vllm_config.ec_events_config
+        manager.enable_events = (
+            ec_events_config is not None and ec_events_config.enable_ec_cache_events
+        )
+        return manager
 
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, enable_events: bool = False):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         self.num_freeable_slots = cache_size
+        self.enable_events = enable_events
 
         # mm_hash of mm_data => ids of requests that reference the mm_data
         self.cached: dict[str, set[str]] = {}
@@ -86,10 +102,59 @@ class EncoderCacheManager:
         self.num_embeds_by_hash: dict[str, int] = {}
         # request_id => set of input_ids cached for that request
         self.request_cached_ids: dict[str, set[int]] = {}
+        # request_id => mm_hash => number of that request's cached input_ids
+        # with the mm_hash
+        self.request_hash_refs: dict[str, dict[str, int]] = {}
 
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
+        self.events: list[ECCacheEvent] = []
+
+    def _record_event(self, event: ECCacheEvent) -> None:
+        if self.enable_events:
+            self.events.append(event)
+
+    def try_rollback_allocations(self, request: Request, input_ids: list[int]) -> bool:
+        """Undo unexecuted allocations if no other request depends on them."""
+        cancelled = dict.fromkeys(request.mm_features[i].identifier for i in input_ids)
+        if any(len(self.cached[mm_hash]) > 1 for mm_hash in cancelled):
+            return False
+
+        for input_id in list(self.get_cached_input_ids(request)):
+            if request.mm_features[input_id].identifier in cancelled:
+                self.free_encoder_input(request, input_id)
+        for mm_hash in cancelled:
+            self.num_free_slots += self.freeable.pop(mm_hash)
+            del self.cached[mm_hash]
+            del self.num_embeds_by_hash[mm_hash]
+            # Also invalidate any connector state created by the allocation.
+            if mm_hash not in self.freed:
+                self.freed.append(mm_hash)
+
+        if self.enable_events:
+            cancelled_stores = {(mm_hash,) for mm_hash in cancelled}
+            self.events = [
+                event
+                for event in self.events
+                if not (
+                    isinstance(event, ECStored)
+                    and event.medium == MEDIUM_GPU
+                    and tuple(event.mm_hashes) in cancelled_stores
+                )
+            ]
+        return True
+
+    def take_events(self) -> list[ECCacheEvent]:
+        """Take the encoder cache events collected since the last call.
+
+        Returns:
+            A list of encoder cache events.
+
+        """
+        events = self.events
+        self.events = []
+        return events
 
     def reset(self) -> None:
         """Reset the encoder cache to its initial state.
@@ -100,10 +165,13 @@ class EncoderCacheManager:
         self.cached.clear()
         self.num_embeds_by_hash.clear()
         self.request_cached_ids.clear()
+        self.request_hash_refs.clear()
         self.freeable.clear()
         self.freed.clear()
+        self.events.clear()
         self.num_free_slots = self.cache_size
         self.num_freeable_slots = self.cache_size
+        self._record_event(AllECCleared())
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
@@ -132,7 +200,7 @@ class EncoderCacheManager:
             self.num_freeable_slots -= num_encoder_embeds
 
         self.cached[mm_hash].add(request.request_id)
-        self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
+        self._add_cached_input_id(request.request_id, input_id, mm_hash)
         return True
 
     def get_cached_num_encoder_embeds(
@@ -205,6 +273,7 @@ class EncoderCacheManager:
             del self.cached[mm_hash]
             del self.num_embeds_by_hash[mm_hash]
             self.freed.append(mm_hash)
+            self._record_event(ECRemoved([mm_hash], MEDIUM_GPU))
             self.num_free_slots += num_free_embeds
         return True
 
@@ -238,9 +307,20 @@ class EncoderCacheManager:
         assert self.num_freeable_slots >= num_encoder_embeds
 
         self.cached[mm_hash].add(request_id)
-        self.request_cached_ids.setdefault(request_id, set()).add(input_id)
+        self._add_cached_input_id(request_id, input_id, mm_hash)
         self.num_free_slots -= num_encoder_embeds
         self.num_freeable_slots -= num_encoder_embeds
+        self._record_event(ECStored([mm_hash], MEDIUM_GPU))
+
+    def _add_cached_input_id(
+        self, request_id: str, input_id: int, mm_hash: str
+    ) -> None:
+        cached_ids = self.request_cached_ids.setdefault(request_id, set())
+        if input_id in cached_ids:
+            return
+        cached_ids.add(input_id)
+        hash_refs = self.request_hash_refs.setdefault(request_id, {})
+        hash_refs[mm_hash] = hash_refs.get(mm_hash, 0) + 1
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request."""
@@ -260,10 +340,16 @@ class EncoderCacheManager:
         mm_hash = request.mm_features[input_id].identifier
         # Always clean up request_cached_ids, even if the mm_hash was
         # already evicted from cache (e.g. by can_allocate).
-        if req_id in self.request_cached_ids:
-            self.request_cached_ids[req_id].discard(input_id)
-            if not self.request_cached_ids[req_id]:
+        cached_ids = self.request_cached_ids.get(req_id)
+        if cached_ids is not None and input_id in cached_ids:
+            cached_ids.remove(input_id)
+            hash_refs = self.request_hash_refs[req_id]
+            hash_refs[mm_hash] -= 1
+            if not hash_refs[mm_hash]:
+                del hash_refs[mm_hash]
+            if not cached_ids:
                 del self.request_cached_ids[req_id]
+                del self.request_hash_refs[req_id]
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
@@ -273,10 +359,7 @@ class EncoderCacheManager:
         # occurrence is freed: dropping it at the first makes the entry
         # evictable while the request still needs it, and the encoder then
         # recomputes an item it already has.
-        if any(
-            request.mm_features[other_id].identifier == mm_hash
-            for other_id in self.request_cached_ids.get(req_id, ())
-        ):
+        if mm_hash in self.request_hash_refs.get(req_id, ()):
             return
         self.cached[mm_hash].discard(req_id)
         if not self.cached[mm_hash]:
@@ -309,11 +392,19 @@ class EncoderCacheManager:
         # An entry evicted early in the scheduling pass can be allocated again
         # later in the same pass. Keep its worker-side tensor in that case.
         freed = [mm_hash for mm_hash in self.freed if mm_hash not in self.cached]
+        if self.enable_events and len(freed) != len(self.freed):
+            retained = {(mm_hash,) for mm_hash in self.freed if mm_hash in self.cached}
+            self.events = [
+                event
+                for event in self.events
+                if not (
+                    isinstance(event, ECRemoved)
+                    and event.medium == MEDIUM_GPU
+                    and tuple(event.mm_hashes) in retained
+                )
+            ]
         self.freed = []
         return freed
-
-    def get_manager_metadata(self) -> EncoderCacheManagerMetadata | None:
-        return None
 
 
 def compute_mm_encoder_budget(
@@ -359,9 +450,18 @@ def compute_mm_encoder_budget(
     encoder_compute_budget = max(
         scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
     )
-    encoder_cache_size = max(
-        scheduler_config.encoder_cache_size, max_tokens_per_mm_item
+    # None when a config was built without `__post_init__` resolution.
+    requested_cache_size = (
+        scheduler_config.encoder_cache_size or scheduler_config.max_num_batched_tokens
     )
+    encoder_cache_size = max(requested_cache_size, max_tokens_per_mm_item)
+    if encoder_cache_size > requested_cache_size:
+        logger.warning(
+            "Raising encoder_cache_size from %d to %d tokens so one %s item fits.",
+            requested_cache_size,
+            encoder_cache_size,
+            max(mm_max_toks_per_item, key=lambda m: mm_max_toks_per_item[m]),
+        )
 
     return encoder_compute_budget, encoder_cache_size
 
@@ -371,9 +471,11 @@ def compute_mm_encoder_budget(
 # utilize the cache and this class will fold into EncoderCacheManager, as
 # differences with MM models shrink.
 class EncoderDecoderCacheManager(EncoderCacheManager):
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, enable_events: bool = False):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
+        self.enable_events = enable_events
+        self.events: list[ECCacheEvent] = []
         self.allocated: list[str] = []
         self.to_free: list[str] = []
 

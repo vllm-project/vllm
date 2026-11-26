@@ -51,7 +51,9 @@ def generate_hf_logprobs_from_logits(
                 }
             )
         token_ids = generated.sequences[0, -len(logprobs) :].tolist()
-        outputs.append((token_ids, hf_model.tokenizer.decode(token_ids), logprobs))
+        decoded = hf_model.tokenizer.decode(token_ids)
+        assert isinstance(decoded, str)
+        outputs.append((token_ids, decoded, logprobs))
     return outputs
 
 
@@ -89,7 +91,9 @@ def test_model(
         )
         tokenizer = vllm_model.llm.get_tokenizer()
 
-    with hf_runner(MODEL, dtype=dtype, auto_cls=AutoModel) as hf_model:
+    with hf_runner(
+        MODEL, dtype=dtype, auto_cls=AutoModel, trust_remote_code=True
+    ) as hf_model:
         hf_outputs = generate_hf_logprobs_from_logits(
             hf_model, prompts, images, max_tokens, num_logprobs
         )

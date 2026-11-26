@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -24,12 +25,13 @@ from vllm.models.deepseek_v41.sparse_mla import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionCGSupport, max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -39,7 +41,17 @@ if TYPE_CHECKING:
 class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
     """SWA metadata for the FlashMLA decode path, which allows varlen decode."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
 
 class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
@@ -162,11 +174,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         swa_kv_cache = self.swa_cache_layer.kv_cache
 
         # Split prefill and decode
-        num_decodes = swa_metadata.num_decodes
-        num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
 
-        if num_prefills > 0:
+        if swa_metadata.num_prefill_tokens > 0:
             self._forward_prefill(
                 q=q[num_decode_tokens:],
                 positions=positions[num_decode_tokens:],
@@ -176,7 +186,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 attn_metadata=flashmla_metadata,
                 swa_metadata=swa_metadata,
             )
-        if num_decodes > 0:
+        # Trimming can leave request entries with no query tokens.
+        if num_decode_tokens > 0:
             self._forward_decode(
                 q=q[:num_decode_tokens],
                 kv_cache=self_kv_cache,

@@ -93,7 +93,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         self.block_size = block_size
 
-        # Initialize attn MetadataBuilder (match Attention.get_kv_cache_spec)
+        # Initialize attn MetadataBuilder (match Attention.get_kv_cache_config)
         self.builder = self.attn.attn_backend.get_builder_cls()(
             kv_cache_spec=AttentionSpec(
                 block_size=self.block_size,

@@ -43,7 +43,7 @@ def _aiter_w4a16_silu_via_a8w4(
     unpadded_N_w2,
     unpadded_K_w2,
 ) -> torch.Tensor:
-    """MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation."""
+    """MXFP4 w4a16 MoE with a SILU (concatenated `[gate | up]`) activation."""
     from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
     from aiter.ops.triton.quant import dynamic_mxfp8_quant
 
@@ -202,6 +202,17 @@ def aiter_triton_kernel_w4a16_moe_forward(
         hidden_states = hidden_states[gather_src]
         gather_idx = None
 
+    # Expert parallelism: mark gates whose expert is not on this rank so the
+    # scatter combine skips them, instead of zero-filling the skipped experts'
+    # output rows.
+    gate_valid = None
+    if expert_map is not None:
+        topk_ids = routing_data.topk_ids
+        assert topk_ids is not None, (
+            "expert-parallel W4A16 requires aiter routing to expose topk_ids"
+        )
+        gate_valid = (expert_map[topk_ids.long()] >= 0).to(torch.int32).contiguous()
+
     assert quant_config.w1_precision is not None
     assert quant_config.w2_precision is not None
 
@@ -230,6 +241,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     # SILU on gfx1250: use the verified a8w4 kernel (dynamic MXFP8); a16w4 faults.
     if activation == MoEActivation.SILU and on_gfx1250():
+        if expert_map is not None:
+            raise NotImplementedError(
+                "Expert parallelism is not supported for SILU on gfx1250 "
+                "(the a8w4 fallback kernel has no expert_map support)."
+            )
         return _aiter_w4a16_silu_via_a8w4(
             hidden_states,
             w1_data,
@@ -284,6 +300,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
         unpadded_N=unpadded_N_w1,
         unpadded_K=unpadded_K_w1,
         backend=a16w4_backend,
+        expert_map=expert_map,
+        gate_valid=gate_valid,
     )
 
     out = moe_gemm_a16w4(
@@ -301,6 +319,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
         backend=a16w4_backend,
+        expert_map=expert_map,
+        gate_valid=gate_valid,
     )
 
     return out
@@ -324,6 +344,38 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not supported:
+            return supported, reason
+
+        from vllm.platforms.rocm import on_gfx1250
+
+        parallel_config = moe_config.moe_parallel_config
+        if moe_config.has_hash_routing and parallel_config.dp_size > 1:
+            return False, (
+                "kernel does not support hash routing with data parallelism: "
+                "the naive DP prepare/finalize all-gathers router logits across "
+                "DP ranks but not input_ids, so hash routing would index "
+                "out of range"
+            )
+        if (
+            parallel_config.use_ep
+            and moe_config.activation == MoEActivation.SILU
+            and on_gfx1250()
+        ):
+            return False, (
+                "kernel does not support expert parallelism with SILU on "
+                "gfx1250: SILU falls back to the a8w4 kernel there, which "
+                "takes no expert_map"
+            )
+        return True, None
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -352,11 +404,11 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
+        # DP+EP unsupported unless using the naive all-gather/reduce-scatter all2all
         return (
-            not moe_parallel_config.use_ep
-            and not moe_parallel_config.enable_eplb
-            and moe_parallel_config.dp_size <= 1
-        )
+            not moe_parallel_config.use_all2all_kernels
+            or moe_parallel_config.use_ag_rs_all2all_kernels
+        ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
     def _supports_routing_method(

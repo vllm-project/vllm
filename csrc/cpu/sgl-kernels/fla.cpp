@@ -88,6 +88,28 @@ inline void store_state_vec2(
   }
 }
 
+// Like store_state_vec2, but bypasses the cache when possible: for state that
+// will not be read again until a later step, this saves the RFO read.
+template <typename state_t>
+inline void stream_state_vec2(
+    state_t* __restrict__ dst,
+    const at::vec::Vectorized<float>& src0,
+    const at::vec::Vectorized<float>& src1) {
+#if defined(CPU_CAPABILITY_AVX512)
+  if ((reinterpret_cast<std::uintptr_t>(dst) & 63) == 0) {
+    if constexpr (std::is_same_v<state_t, float>) {
+      _mm512_stream_ps(dst, __m512(src0));
+      _mm512_stream_ps(dst + 16, __m512(src1));
+    } else {
+      auto state_vec = convert_from_float_ext<state_t>(src0, src1);
+      _mm512_stream_si512(reinterpret_cast<__m512i*>(dst), __m512i(state_vec));
+    }
+    return;
+  }
+#endif
+  store_state_vec2<state_t>(dst, src0, src1);
+}
+
 template <typename scalar_t, int SIZE>
 inline void fill_stub(scalar_t* __restrict__ out, float val) {
   using Vec = at::vec::Vectorized<scalar_t>;
@@ -1794,8 +1816,8 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
 // (inside the kernel, so one dispatch handles the whole draft block), reads the
 // initial state from cache slot ``num_accepted-1`` and stores the state *after*
 // token ``t`` into cache slot ``t`` (multi-slot rollback, matching the GPU
-// kernel). Parallelized over (sequence, v_head); the per-sequence token loop is
-// sequential as required by the recurrence.
+// kernel). Parallelized over (sequence, v_head, value-column block); the
+// per-sequence token loop is sequential as required by the recurrence.
 template <typename scalar_t, typename param_t, typename state_t>
 void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
     const scalar_t* __restrict__ q_ptr,  // [T, HK, EK]
@@ -1830,9 +1852,10 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
   constexpr int64_t VecSize = bVec::size();
+  constexpr int64_t fVecSize = fVec::size();
+  static_assert(VecSize == 2 * fVecSize);
   int64_t group_size = v_num_heads / num_heads;
-  double scale = 1 / std::sqrt((double)head_dim);
-  fVec scale_vec = fVec((float)scale);
+  const float scale = 1.f / std::sqrt((float)head_dim);
 
   if (use_qk_l2norm_in_kernel) {
     float eps = 1e-5f;
@@ -1855,99 +1878,120 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
     });
   }
 
-  at::parallel_for(0, batch_size * v_num_heads, 0, [&](int64_t begin, int64_t end) {
+  // Columns of the state are independent, so each work item owns one
+  // [head_dim, block_v] column block of one head and carries it in fp32
+  // across the draft tokens: the cache slot is read once per step and each
+  // intermediate state is only written. Two vectors per item (64 columns on
+  // AVX-512) measured fastest on Xeon, vs. one vector or a whole head.
+  constexpr int64_t block_v = 2 * VecSize;
+  const int64_t num_v_blocks = div_up(v_head_dim, block_v);
+  at::parallel_for(0, batch_size * v_num_heads * num_v_blocks, 0, [&](int64_t begin, int64_t end) {
+    std::vector<float> scratch(head_dim * (block_v + 2));
+    float* __restrict__ h = scratch.data();
+    float* __restrict__ q_f = h + head_dim * block_v;
+    float* __restrict__ k_f = q_f + head_dim;
     for (int64_t idx = begin; idx < end; ++idx) {
-      int64_t bi = idx / v_num_heads;
-      int64_t ni = idx % v_num_heads;
-      int64_t kh = ni / group_size;
-      int64_t q_start = cu_seqlens_ptr[bi];
-      int64_t q_len = cu_seqlens_ptr[bi + 1] - q_start;
+      const int64_t bi = idx / (v_num_heads * num_v_blocks);
+      const int64_t ni = (idx / num_v_blocks) % v_num_heads;
+      const int64_t dv_begin = (idx % num_v_blocks) * block_v;
+      const int64_t dv_size = std::min(block_v, v_head_dim - dv_begin);
+      const int64_t kh = ni / group_size;
+      const int64_t q_start = cu_seqlens_ptr[bi];
+      const int64_t q_len = cu_seqlens_ptr[bi + 1] - q_start;
       if (q_len <= 0) {
         continue;
       }
-      int64_t acc = (int64_t)num_accepted_ptr[bi];
+      const int64_t acc = (int64_t)num_accepted_ptr[bi];
       // Clamp acc-1 to >=0: when num_accepted is 0 the unclamped index reads
       // out of bounds and yields an arbitrary prev_slot used to index the SSM
       // state. Mirrors the GPU guard tl.maximum(num_accepted - 1, 0).
-      int64_t prev_slot =
+      const int64_t prev_slot =
           (int64_t)spec_indices_ptr[bi * spec_stride + (acc > 0 ? acc - 1 : 0)];
+      const int64_t block_offset = ni * head_dim * v_head_dim + dv_begin;
+      const state_t* src = state_ptr + prev_slot * state_slot_stride + block_offset;
+      for (int64_t di = 0; di < head_dim; ++di) {
+        int64_t c = 0;
+        for (; c + VecSize <= dv_size; c += VecSize) {
+          auto [s0, s1] = load_float_vec2(src + di * v_head_dim + c);
+          s0.store(h + di * block_v + c);
+          s1.store(h + di * block_v + c + fVecSize);
+        }
+        for (; c < dv_size; ++c) {
+          h[di * block_v + c] = static_cast<float>(src[di * v_head_dim + c]);
+        }
+      }
+
       for (int64_t t = 0; t < q_len; ++t) {
-        int64_t cur_slot = (int64_t)spec_indices_ptr[bi * spec_stride + t];
-        int64_t token = q_start + t;
-        const state_t* src =
-            state_ptr + prev_slot * state_slot_stride + ni * head_dim * v_head_dim;
-        state_t* dst =
-            state_ptr + cur_slot * state_slot_stride + ni * head_dim * v_head_dim;
-        float g_val = -std::exp((float)A_log_ptr[ni]) *
+        const int64_t token = q_start + t;
+        const int64_t cur_slot = (int64_t)spec_indices_ptr[bi * spec_stride + t];
+        state_t* dst = state_ptr + cur_slot * state_slot_stride + block_offset;
+        const float g_val = -std::exp((float)A_log_ptr[ni]) *
             softplus((float)a_ptr[token * v_num_heads + ni] + (float)dt_bias_ptr[ni], softplus_threshold);
-        float g_val_exp = std::exp(g_val);
-        fVec g_val_exp_vec = fVec(g_val_exp);
-        float beta_val = 1.f / (1.f + std::exp(-(float)b_ptr[token * v_num_heads + ni]));
-        fVec beta_vec = fVec(beta_val);
-        int64_t q_offset = token * q_strideT + kh * q_strideH;
-        int64_t k_offset = token * k_strideT + kh * k_strideH;
-        float q_scale = use_qk_l2norm_in_kernel ? qk_scale_buf[token * num_heads + kh] : 1.f;
-        float k_scale =
+        const float g_val_exp = std::exp(g_val);
+        const float beta_val = 1.f / (1.f + std::exp(-(float)b_ptr[token * v_num_heads + ni]));
+        const float q_scale =
+            (use_qk_l2norm_in_kernel ? qk_scale_buf[token * num_heads + kh] : 1.f) * scale;
+        const float k_scale =
             use_qk_l2norm_in_kernel ? qk_scale_buf[total_tokens * num_heads + token * num_heads + kh] : 1.f;
-        int64_t v_offset = token * v_strideT + ni * v_strideH;
-        int64_t o_offset = (token * v_num_heads + ni) * v_head_dim;
-        int64_t dvi = 0;
-        for (; dvi <= v_head_dim - VecSize; dvi += VecSize) {
-          fVec kv_mem_vec0 = fVec(0.f);
-          fVec kv_mem_vec1 = fVec(0.f);
-          for (int di = 0; di < head_dim; ++di) {
-            fVec k_val_vec = fVec((float)k_ptr[k_offset + di] * k_scale);
-            auto [sv0, sv1] =
-                load_float_vec2(src + di * v_head_dim + dvi);
-            kv_mem_vec0 = kv_mem_vec0 + sv0 * g_val_exp_vec * k_val_vec;
-            kv_mem_vec1 = kv_mem_vec1 + sv1 * g_val_exp_vec * k_val_vec;
-          }
-          bVec v_bvec = bVec::loadu(v_ptr + v_offset + dvi);
-          fVec v_vec0, v_vec1;
-          std::tie(v_vec0, v_vec1) = at::vec::convert_to_float(v_bvec);
-          fVec dt_vec0 = (v_vec0 - kv_mem_vec0) * beta_vec;
-          fVec dt_vec1 = (v_vec1 - kv_mem_vec1) * beta_vec;
-          fVec o_vec0 = fVec(0.f);
-          fVec o_vec1 = fVec(0.f);
-          for (int di = 0; di < head_dim; ++di) {
-            fVec q_vec = fVec((float)q_ptr[q_offset + di] * q_scale);
-            fVec k_vec = fVec((float)k_ptr[k_offset + di] * k_scale);
-            auto [sv0, sv1] =
-                load_float_vec2(src + di * v_head_dim + dvi);
-            sv0 = sv0 * g_val_exp_vec + k_vec * dt_vec0;
-            sv1 = sv1 * g_val_exp_vec + k_vec * dt_vec1;
-            o_vec0 = o_vec0 + sv0 * q_vec * scale_vec;
-            o_vec1 = o_vec1 + sv1 * q_vec * scale_vec;
-            store_state_vec2<state_t>(
-                dst + di * v_head_dim + dvi, sv0, sv1);
-          }
-          bVec o_vec = at::vec::convert_from_float<scalar_t>(o_vec0, o_vec1);
-          o_vec.store(o_ptr + o_offset + dvi);
+        const scalar_t* q_tok = q_ptr + token * q_strideT + kh * q_strideH;
+        const scalar_t* k_tok = k_ptr + token * k_strideT + kh * k_strideH;
+        for (int64_t di = 0; di < head_dim; ++di) {
+          q_f[di] = (float)q_tok[di] * q_scale;
+          k_f[di] = (float)k_tok[di] * k_scale;
         }
-        for (; dvi < v_head_dim; ++dvi) {
-          float kv_mem_val = 0.f;
-          for (int di = 0; di < head_dim; ++di) {
-            float k_val = (float)k_ptr[k_offset + di] * k_scale;
-            kv_mem_val += static_cast<float>(src[di * v_head_dim + dvi]) *
-                g_val_exp * k_val;
+        const scalar_t* v_tok = v_ptr + token * v_strideT + ni * v_strideH + dv_begin;
+        scalar_t* o_tok = o_ptr + (token * v_num_heads + ni) * v_head_dim + dv_begin;
+        const fVec g_vec(g_val_exp);
+        const fVec beta_vec(beta_val);
+
+        int64_t c0 = 0;
+        for (; c0 + VecSize <= dv_size; c0 += VecSize) {
+          fVec kv0(0.f), kv1(0.f);
+          for (int64_t di = 0; di < head_dim; ++di) {
+            const fVec k_vec(k_f[di]);
+            const float* hp = h + di * block_v + c0;
+            kv0 = at::vec::fmadd(fVec::loadu(hp), k_vec, kv0);
+            kv1 = at::vec::fmadd(fVec::loadu(hp + fVecSize), k_vec, kv1);
           }
-          float v_val = (float)v_ptr[v_offset + dvi];
-          float dt_val = (v_val - kv_mem_val) * beta_val;
+          auto [v0, v1] = load_float_vec2(v_tok + c0);
+          const fVec dt0 = (v0 - kv0 * g_vec) * beta_vec;
+          const fVec dt1 = (v1 - kv1 * g_vec) * beta_vec;
+          fVec o0(0.f), o1(0.f);
+          for (int64_t di = 0; di < head_dim; ++di) {
+            const fVec k_vec(k_f[di]);
+            const fVec q_vec(q_f[di]);
+            float* hp = h + di * block_v + c0;
+            const fVec s0 = at::vec::fmadd(fVec::loadu(hp), g_vec, k_vec * dt0);
+            const fVec s1 = at::vec::fmadd(fVec::loadu(hp + fVecSize), g_vec, k_vec * dt1);
+            s0.store(hp);
+            s1.store(hp + fVecSize);
+            o0 = at::vec::fmadd(s0, q_vec, o0);
+            o1 = at::vec::fmadd(s1, q_vec, o1);
+            stream_state_vec2<state_t>(dst + di * v_head_dim + c0, s0, s1);
+          }
+          at::vec::convert_from_float<scalar_t>(o0, o1).store(o_tok + c0);
+        }
+        for (int64_t c = c0; c < dv_size; ++c) {
+          float kv_mem = 0.f;
+          for (int64_t di = 0; di < head_dim; ++di) {
+            kv_mem += h[di * block_v + c] * k_f[di];
+          }
+          const float dt = ((float)v_tok[c] - kv_mem * g_val_exp) * beta_val;
           float o_val = 0.f;
-          for (int di = 0; di < head_dim; ++di) {
-            float q_val = (float)q_ptr[q_offset + di] * q_scale;
-            float k_val = (float)k_ptr[k_offset + di] * k_scale;
-            float ns = static_cast<float>(src[di * v_head_dim + dvi]) *
-                    g_val_exp +
-                k_val * dt_val;
-            dst[di * v_head_dim + dvi] = static_cast<state_t>(ns);
-            o_val += ns * q_val * scale;
+          for (int64_t di = 0; di < head_dim; ++di) {
+            const float s = h[di * block_v + c] * g_val_exp + k_f[di] * dt;
+            h[di * block_v + c] = s;
+            dst[di * v_head_dim + c] = static_cast<state_t>(s);
+            o_val += s * q_f[di];
           }
-          o_ptr[o_offset + dvi] = (scalar_t)o_val;
+          o_tok[c] = static_cast<scalar_t>(o_val);
         }
-        prev_slot = cur_slot;
       }
     }
+#if defined(CPU_CAPABILITY_AVX512)
+    // Streaming stores are weakly ordered; drain them before the join.
+    _mm_sfence();
+#endif
   });
 }
 

@@ -1,13 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from vllm.config import ECEventsConfig
+from vllm.distributed.ec_transfer.ec_events import (
+    AllECCleared,
+    ECRemoved,
+    ECStored,
+)
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
+    compute_mm_encoder_budget,
 )
 from vllm.v1.request import Request
 
@@ -477,6 +486,31 @@ def test_duplicate_mm_hash_is_not_evicted_before_last_use():
     assert manager.get_freed_mm_hashes() == []
 
 
+def test_many_inputs_release_each_hash_at_its_last_occurrence():
+    """A request with many items, one repeated, releases every entry exactly
+    once its last cached occurrence is freed."""
+    num_items = 64
+    hashes = [f"img{i}" for i in range(num_items)] + ["img0"]
+    manager = EncoderCacheManager(cache_size=num_items)
+    req = MockRequest("r1", hashes, [1] * len(hashes))
+
+    for i in range(num_items):
+        manager.allocate(req, i)
+    assert manager.check_and_update_cache(req, num_items)
+
+    manager.free_encoder_input(req, 0)
+    assert "img0" not in manager.freeable
+    for i in range(1, num_items):
+        manager.free_encoder_input(req, i)
+        assert manager.freeable[f"img{i}"] == 1
+
+    manager.free_encoder_input(req, num_items)
+    assert manager.freeable["img0"] == 1
+    assert manager.num_freeable_slots == num_items
+    assert "r1" not in manager.request_cached_ids
+    assert "r1" not in manager.request_hash_refs
+
+
 def test_encoder_decoder_cache_manager_reset():
     manager = EncoderDecoderCacheManager(cache_size=20)
 
@@ -512,3 +546,133 @@ def test_encoder_decoder_cache_manager_reset_allows_fresh_allocations():
 
     assert manager.num_free_slots == 2
     assert "img2" in manager.allocated
+
+
+# ------------------ encoder_cache_size configuration ------------------ #
+def _scheduler_config(**kwargs):
+    from vllm.config.scheduler import SchedulerConfig
+
+    return SchedulerConfig(max_model_len=16384, is_encoder_decoder=False, **kwargs)
+
+
+def test_encoder_cache_size_defaults_to_max_num_batched_tokens():
+    config = _scheduler_config(max_num_batched_tokens=16384)
+    assert config.encoder_cache_size == 16384
+
+    compute_budget, cache_size = compute_mm_encoder_budget(config, {"image": 2048})
+    assert (compute_budget, cache_size) == (16384, 16384)
+
+
+def test_encoder_cache_size_is_independent_of_the_compute_budget():
+    config = _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size=65536)
+
+    compute_budget, cache_size = compute_mm_encoder_budget(config, {"image": 2048})
+    # The per-step compute budget must not move with the cache capacity.
+    assert compute_budget == 16384
+    assert cache_size == 65536
+
+
+def test_encoder_cache_size_is_floored_to_the_largest_item():
+    config = _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size=100)
+
+    _, cache_size = compute_mm_encoder_budget(config, {"image": 2048, "video": 512})
+    # Otherwise a single item could never be admitted.
+    assert cache_size == 2048
+
+
+def test_encoder_cache_size_rejects_non_positive_values():
+    with pytest.raises(ValueError):
+        _scheduler_config(max_num_batched_tokens=16384, encoder_cache_size=0)
+
+
+def test_capacity_decides_whether_reuse_survives_another_request():
+    """One item's encoder output is reusable by a later request only while it fits."""
+    req_a = MockRequest("r1", ["imgA"], [4])
+    req_b = MockRequest("r2", ["imgB"], [4])
+    req_a_again = MockRequest("r3", ["imgA"], [4])
+
+    # Room for both items: imgA survives imgB and the third request reuses it.
+    roomy = EncoderCacheManager(cache_size=8)
+    for req in (req_a, req_b):
+        assert roomy.can_allocate(req, 0, int(1e9), 0)
+        roomy.allocate(req, 0)
+        roomy.free_encoder_input(req, 0)
+    assert roomy.check_and_update_cache(req_a_again, 0)
+
+    # Room for one: admitting imgB evicts imgA, so the third request must re-encode.
+    tight = EncoderCacheManager(cache_size=4)
+    tight.allocate(req_a, 0)
+    tight.free_encoder_input(req_a, 0)
+    assert tight.can_allocate(req_b, 0, int(1e9), 0)
+    tight.allocate(req_b, 0)
+    tight.free_encoder_input(req_b, 0)
+    assert not tight.check_and_update_cache(req_a_again, 0)
+
+
+def test_events_disabled_by_default():
+    manager = EncoderCacheManager(cache_size=10)
+    req = MockRequest("req1", ["img1"], [4])
+
+    assert manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    assert manager.take_events() == []
+
+
+def test_events_report_gpu_store_and_eviction():
+    manager = EncoderCacheManager(cache_size=4, enable_events=True)
+    req = MockRequest("req1", ["img1"], [4])
+
+    assert manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    assert manager.take_events() == [ECStored(mm_hashes=["img1"], medium="GPU")]
+    assert manager.take_events() == []
+
+    # Drop the only reference so the entry becomes reclaimable.
+    manager.free_encoder_input(req, 0)
+    assert not manager.cached["img1"]
+
+    # No free slot is left, so allocating evicts "img1" first.
+    req2 = MockRequest("req2", ["img2"], [4])
+    assert manager.can_allocate(req2, 0, int(1e9), 0)
+    manager.allocate(req2, 0)
+
+    assert manager.take_events() == [
+        ECRemoved(mm_hashes=["img1"], medium="GPU"),
+        ECStored(mm_hashes=["img2"], medium="GPU"),
+    ]
+
+
+def test_events_report_full_clear():
+    manager = EncoderCacheManager(cache_size=10, enable_events=True)
+    req = MockRequest("req1", ["img1"], [4])
+
+    assert manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    manager.reset()
+
+    assert manager.take_events() == [AllECCleared()]
+
+
+class LegacyCacheManager(EncoderCacheManager):
+    """A custom manager whose constructor only accepts `cache_size`."""
+
+    def __init__(self, cache_size: int):
+        super().__init__(cache_size=cache_size)
+
+
+@pytest.mark.parametrize("enable_events", [True, False])
+def test_create_manager_keeps_custom_constructor_compatible(enable_events):
+    vllm_config = SimpleNamespace(
+        ec_events_config=ECEventsConfig(enable_ec_cache_events=enable_events)
+    )
+
+    manager = LegacyCacheManager.create_manager(cache_size=4, vllm_config=vllm_config)
+    req = MockRequest("req1", ["img1"], [4])
+    assert manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    expected = [ECStored(mm_hashes=["img1"], medium="GPU")] if enable_events else []
+    assert manager.take_events() == expected

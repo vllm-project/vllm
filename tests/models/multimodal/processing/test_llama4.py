@@ -3,7 +3,9 @@
 """Tests for Llama4's multimodal preprocessing kwargs."""
 
 import pytest
+import torch
 
+from vllm.model_executor.models.mllama4 import Mllama4ProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ....conftest import ImageTestAssets
@@ -31,6 +33,7 @@ def test_processor_override(
         mm_processor_cache_gb=mm_processor_cache_gb,
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Mllama4ProcessingInfo)
     config = processor.info.get_hf_config()
     tokenizer = processor.info.get_tokenizer()
     hf_processor = processor.info.get_hf_processor()
@@ -62,6 +65,7 @@ def test_processor_override(
     assert prompt_token_ids.count(config.eoi_token_index) == num_imgs
     assert prompt_token_ids.count(vocab[hf_processor.image_token]) == num_imgs
     aspect_ratios = mm_data["aspect_ratios"]
+    assert isinstance(aspect_ratios, torch.Tensor)
     num_x_separators = num_y_separators = 0
     for tiles_y, tiles_x in aspect_ratios:
         if tiles_x * tiles_y > 1:

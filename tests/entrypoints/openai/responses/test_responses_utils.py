@@ -29,6 +29,8 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.exceptions import VLLMValidationError
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 def _single_chat_message(item):
     message = _construct_message_from_response_item(item)
@@ -252,6 +254,35 @@ class TestResponsesUtils:
         formatted_item = _single_chat_message(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
+
+        # Assistant messages with empty content (e.g. tool-only turns) should
+        # not crash; they map to empty string content.
+        empty_output_item = ResponseOutputMessage(
+            id="msg_empty_content",
+            content=[],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        formatted_item = _single_chat_message(empty_output_item)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["content"] == ""
+
+    def test_build_output_items_keeps_empty_reasoning(self):
+        """An empty reasoning block ("") is kept as a reasoning item so clients
+        can replay it; None still means the model produced no reasoning."""
+        items = build_response_output_items(
+            reasoning="", content="Hello", tool_calls=None
+        )
+        assert isinstance(items[0], ResponseReasoningItem)
+        assert items[0].content[0].text == ""
+        assert isinstance(items[1], ResponseOutputMessage)
+
+        items = build_response_output_items(
+            reasoning=None, content="Hello", tool_calls=None
+        )
+        assert len(items) == 1
+        assert isinstance(items[0], ResponseOutputMessage)
 
 
 class TestCustomTools:
@@ -996,8 +1027,8 @@ class TestConstructInputMessagesInstructionsLeak:
 
 
 class TestBuildResponseOutputItemsStatus:
-    """Item ``status`` must follow the finish reason of the generation
-    (#57998): a ``length`` cut marks the item that was cut ``incomplete``."""
+    """Item `status` must follow the finish reason of the generation
+    (#57998): a `length` cut marks the item that was cut `incomplete`."""
 
     _CALLS = [
         FunctionCall(name="get_weather", arguments='{"city": "Paris"}'),

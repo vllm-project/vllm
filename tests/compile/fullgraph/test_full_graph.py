@@ -18,7 +18,6 @@ from vllm.config import (
     PassConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import create_new_process_for_each_test, wait_for_memory_to_settle
 
@@ -43,7 +42,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
         if not current_platform.is_rocm() and is_quant_method_supported("awq"):
             TEST_MODELS.append(
-                ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
+                ("vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
             )
 
     if keywords is None:
@@ -59,7 +58,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.VLLM_COMPILE],
 )
 @pytest.mark.parametrize("model, model_kwargs", models_list(all=True))
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
@@ -98,17 +97,6 @@ def test_full_graph(
         for model_info in models_list(keywords=["FP8-dynamic"])
     ]
     + [
-        # Test depyf integration works
-        (
-            CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-                debug_dump_path=Path(tempfile.gettempdir()),
-            ),
-            "facebook/opt-125m",
-            {},
-        ),
-    ]
-    + [
         # graph inductor partition
         (
             CompilationConfig(
@@ -122,16 +110,13 @@ def test_full_graph(
             *model_info,
         )
         for model_info in models_list(all=False)
-        if is_torch_equal_or_newer("2.9.0.dev")
     ]
     + [
-        # Test get_raw_stream patch with compile_sizes
-        # This tests that TorchInductor autotune works correctly with get_raw_stream
-        # patch in torch 2.9 and without patch in torch 2.10+
+        # compile_sizes triggers TorchInductor autotune
         (
             CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                compile_sizes=[1, 2],  # Triggers autotune which uses get_raw_stream
+                compile_sizes=[1, 2],
                 cudagraph_mode=CUDAGraphMode.NONE,
             ),
             "facebook/opt-125m",
@@ -140,19 +125,31 @@ def test_full_graph(
     ],
 )
 # only test some of the models
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_custom_compile_config(
     compilation_config: CompilationConfig,
     model: str,
     model_kwargs: dict[str, Any],
 ):
-    if compilation_config.use_inductor_graph_partition and not is_torch_equal_or_newer(
-        "2.9.0.dev"
-    ):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
-
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
+
+
+@create_new_process_for_each_test("spawn")
+def test_depyf_integration(disable_vllm_compile_cache):
+    """Compile with depyf's debugging hooks installed.
+
+    `disable_vllm_compile_cache` is what makes this a test rather than a
+    formality: depyf only ever sees a compilation that actually runs, so served
+    from a warm cache this exercises none of its hooks.
+    """
+    run_model(
+        CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            debug_dump_path=Path(tempfile.gettempdir()),
+        ),
+        "facebook/opt-125m",
+    )
 
 
 def run_model(
@@ -184,7 +181,10 @@ def run_model(
     # VllmRunner guards this; building LLM directly does not. No-op off ROCm.
     wait_for_memory_to_settle(
         threshold_ratio=1.0
-        - model_kwargs.get("gpu_memory_utilization", CacheConfig.gpu_memory_utilization)
+        - (
+            model_kwargs.get("gpu_memory_utilization")
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+        )
     )
 
     llm = LLM(

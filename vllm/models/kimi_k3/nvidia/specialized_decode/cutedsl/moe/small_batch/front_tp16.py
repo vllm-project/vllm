@@ -12,13 +12,13 @@ import torch
 from cutlass import BFloat16, Float32, Int32, Uint8, Uint32, Uint64
 from cutlass.cute.runtime import make_fake_stream, make_fake_tensor
 
-from .....ops.cute_dsl.latent_moe_tail.primitives import to_cute
+from vllm.models.common.ops.moe_tail_fusion.primitives import to_cute
+
 from ...common.primitives import (
     alloc,
     asm,
     bf16,
     copy_bulk,
-    div_rn,
     early_weights,
     fma,
     gate_bf16_bits,
@@ -31,8 +31,10 @@ from ...common.primitives import (
     multicast_words,
     named_barrier,
     prefetch_bytes,
-    shared_situ,
-    sigmoid,
+    routing_add,
+    routing_sigmoid,
+    routing_weight,
+    situ_and_mul,
     sleep_ns,
     smem_words,
     split,
@@ -390,7 +392,7 @@ class MoeFrontTP16:
     def kernel(self, args):
         router, bias, xmoe, epoch, scores, ids, weights, down, latent = args[0:9]
         gate_up, hg, shared_down, output, designated, par, par3, rank = args[9:17]
-        multicast_base, scale, situ = args[17], args[18], args[19:23]
+        multicast_base, scale, situ = args[17], args[18], args[19:21]
         tid, warp, lane, cta = thread()
         router_first, router_rows = split(896, cta, self.grid)
         pair_first, pairs = split(112, cta, self.grid)
@@ -530,8 +532,8 @@ class MoeFrontTP16:
             logit = Float32(0)
             for w in cutlass.range_constexpr(16):
                 logit += partials[(w * 16 + row) * self.batch + token]
-            score = sigmoid(logit)
-            record = score_record(score, score + my_bias)
+            score = routing_sigmoid(logit)
+            record = score_record(score, routing_add(score, my_bias))
             index = (par * self.batch + token) * 896 + router_first + row
             mailbox_store(scores.iterator + index * 2, record)
         if (gate_rows > 0) & (~consumer):
@@ -544,11 +546,8 @@ class MoeFrontTP16:
                 score = selected[lane] if lane < 16 else Float32(0)
                 total = warp_sum(score, 16)
                 if lane < 16:
-                    normalized = score
-                    if cutlass.const_expr(self.renorm):
-                        # Like the TP8 front and vLLM's grouped_topk kernels.
-                        normalized = div_rn(score, total + Float32(1e-20))
-                    bits = Uint32(gate_bf16_bits(normalized * scale))
+                    normalized = routing_weight(score, total, scale, renorm=self.renorm)
+                    bits = Uint32(gate_bf16_bits(normalized))
                     if bits == 0x8000:
                         bits = Uint32(0)
                     high = cute.arch.shuffle_sync_down(bits, 1, mask=0xFFFF)
@@ -567,7 +566,7 @@ class MoeFrontTP16:
                 token, column = element // 384, element % 384
                 gp = hg.iterator + (par * self.batch + token) * 768 + column
                 gate, up = self.poll_flag(gp), self.poll_flag(gp + 384)
-                result = shared_situ(bf16(gate, True), bf16(up, True), *situ)
+                result = situ_and_mul(bf16(gate, True), bf16(up, True), *situ)
                 hsm[element] = Float32(BFloat16(result))
             cute.arch.sync_threads()
             self.shared_outputs(

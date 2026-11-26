@@ -13,6 +13,7 @@ Note: tests generated with Claude.
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
@@ -23,7 +24,8 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 
 @pytest.fixture
-def zero_expert_moe(dist_init, default_vllm_config):
+@override_parallel_groups(SingleRankGroup())
+def zero_expert_moe(default_vllm_config):
     """Create a FusedMoEFactory layer with zero experts."""
     num_experts = 4
     top_k = 2

@@ -16,6 +16,9 @@ from transformers.models.embedding_gemma2.configuration_embedding_gemma2 import 
 from transformers.models.embedding_gemma2.processing_embedding_gemma2 import (
     EmbeddingGemma2Processor,
 )
+from transformers.models.embedding_gemma2.video_processing_embedding_gemma2 import (
+    EmbeddingGemma2VideoProcessor,
+)
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
@@ -23,7 +26,8 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import EncoderOnlyAttention
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -46,6 +50,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
     _get_max_soft_tokens,
+    _video_patch_bytes,
 )
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.interfaces_base import (
@@ -76,8 +81,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.context import validate_video_preprocessing_budget
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
 
 logger = init_logger(__name__)
 
@@ -145,7 +150,7 @@ class EmbeddingGemma2Attention(nn.Module):
         )
 
         window = config.sliding_window if self.is_sliding else None
-        self.attn = Attention(
+        self.attn = EncoderOnlyAttention(
             self.num_heads,
             self.head_dim,
             scale=1.0,
@@ -155,7 +160,6 @@ class EmbeddingGemma2Attention(nn.Module):
             per_layer_sliding_window=(window + _WINDOW_OFFSET)
             if window is not None
             else None,
-            attn_type=AttentionType.ENCODER_ONLY,
             prefix=f"{prefix}.attn",
         )
 
@@ -632,6 +636,41 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
 
     info: EmbeddingGemma2ProcessingInfo
 
+    @staticmethod
+    def _get_video_frame_count(
+        decoded_frames: int,
+        metadata: VideoMetadata,
+        processor: EmbeddingGemma2VideoProcessor,
+        video_kwargs: Mapping[str, Any],
+    ) -> int:
+        if not video_kwargs.get("do_sample_frames", processor.do_sample_frames):
+            return decoded_frames
+
+        # Match HF's FPS sampling and overflow cap without allocating indices.
+        frame_count = metadata.total_num_frames
+        fps = video_kwargs.get("fps", processor.fps)
+        if (
+            fps is not None
+            and metadata.fps is not None
+            and metadata.duration is not None
+        ):
+            try:
+                frame_count = max(1, int(metadata.duration * fps))
+            except OverflowError as exc:
+                raise ValueError("Invalid video sampling duration or FPS.") from exc
+
+        if (
+            video_kwargs.get("overflow_strategy", processor.overflow_strategy)
+            is not None
+        ):
+            max_frames = video_kwargs.get("max_frames", processor.max_frames)
+            if max_frames is None or max_frames <= 0:
+                raise ValueError(
+                    "Video overflow handling requires positive max_frames."
+                )
+            frame_count = min(frame_count, max_frames)
+        return frame_count
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
@@ -657,6 +696,7 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
 
             all_video_pixel_values: list[torch.Tensor] = []
             all_video_position_ids: list[torch.Tensor] = []
+            video_tensor_bytes = 0
             video_num_soft_tokens_per_video: list[list[int]] = []
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
@@ -711,8 +751,26 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
                 elif hasattr(metadata, "do_sample_frames"):
                     video_mm_kwargs["do_sample_frames"] = metadata.do_sample_frames
 
+                hf_processor = self.info.get_hf_processor(**video_mm_kwargs)
+                video_kwargs = self.info.ctx.get_hf_processor_kwargs(
+                    hf_processor, video_mm_kwargs, scope="videos_kwargs"
+                )
+                video_processor = hf_processor.video_processor
+                frame_count = self._get_video_frame_count(
+                    len(video_array), metadata_obj, video_processor, video_kwargs
+                )
+                estimated_bytes = _video_patch_bytes(
+                    video_array,
+                    frame_count,
+                    video_processor,
+                    video_kwargs,
+                )
+                validate_video_preprocessing_budget(
+                    video_tensor_bytes + 2 * estimated_bytes
+                )
+
                 single_video_out = self.info.ctx.call_hf_processor(
-                    self.info.get_hf_processor(**video_mm_kwargs),
+                    hf_processor,
                     dict(
                         text=processor.video_token,
                         videos=[video_array],
@@ -721,7 +779,12 @@ class EmbeddingGemma2MultiModalProcessor(Gemma4MultiModalProcessor):
                     video_mm_kwargs,
                 )
 
-                all_video_pixel_values.append(single_video_out["pixel_values_videos"])
+                video_pixels = single_video_out["pixel_values_videos"]
+                video_tensor_bytes += (
+                    video_pixels.untyped_storage().nbytes() + video_pixels.nbytes
+                )
+                validate_video_preprocessing_budget(video_tensor_bytes)
+                all_video_pixel_values.append(video_pixels)
                 all_video_position_ids.append(single_video_out["video_position_ids"])
 
                 num_frames = int(single_video_out["num_frames_per_video"][0])
@@ -1012,8 +1075,17 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     _parse_and_validate_multimodal_inputs = (
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
-    _process_image_input = Gemma4ForConditionalGeneration._process_image_input
-    _process_video_input = Gemma4ForConditionalGeneration._process_video_input
+    _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
+    _embed_patches = Gemma4ForConditionalGeneration._embed_patches
+    _normalize_pixel_values = Gemma4ForConditionalGeneration._normalize_pixel_values
+    _process_image_input = Gemma4ForConditionalGeneration._process_image_input_local
+    _process_video_input = Gemma4ForConditionalGeneration._process_video_input_local
+    _process_image_input_local = (
+        Gemma4ForConditionalGeneration._process_image_input_local
+    )
+    _process_video_input_local = (
+        Gemma4ForConditionalGeneration._process_video_input_local
+    )
     _process_audio_input = Gemma4ForConditionalGeneration._process_audio_input
     embed_multimodal = Gemma4ForConditionalGeneration.embed_multimodal
     _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
@@ -1055,6 +1127,7 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
         if getattr(config, "vision_config", None) is not None:
             with self._mark_tower_model(vllm_config, {"image", "video"}):
                 self.vision_tower = AutoModel.from_config(config=config.vision_config)
+                self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
                 self.embed_vision = Gemma4MultimodalEmbedder(
                     config.vision_config,
                     config.text_config,

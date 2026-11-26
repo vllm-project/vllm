@@ -9,6 +9,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    kv_lease_extension,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -158,9 +161,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     # Each count fixes where that group's DCP slice starts, which the
                     # worker needs to line up with the remote's slice.
                     local_num_computed_blocks = tuple(
-                        sum(
-                            block.block_hash is not None and not block.is_null
-                            for block in group
+                        len(
+                            [
+                                block
+                                for block in group
+                                if block.block_hash is not None and not block.is_null
+                            ]
                         )
                         for group in blocks.blocks
                     )
@@ -261,12 +267,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                 request.request_id,
                 request_kv_blocks_ttl,
             )
-            self._reqs_need_send[request.request_id] = (
-                time.perf_counter() + request_kv_blocks_ttl
-            )
-            if is_d_node:
-                # D blocks expiry time exported for the turn-2 readback.
-                blocks_expiry_time = self._reqs_need_send[request.request_id]
+            # Lets the consumer decline reads of recycled blocks. P blocks: the
+            # initial lease, extended by heartbeats; D blocks: the turn-2 TTL.
+            blocks_expiry_time = time.perf_counter() + request_kv_blocks_ttl
+            self._reqs_need_send[request.request_id] = blocks_expiry_time
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
@@ -288,6 +292,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
+            # Heartbeat renewal amount; turn-2 D blocks have a fixed TTL.
+            remote_lease_extension=(
+                kv_lease_extension(self._kv_lease_duration) if is_p_node else None
+            ),
             remote_registration_generation=self._registration_generation,
             transfer_mode=self._TRANSFER_MODE,
         )

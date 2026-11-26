@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the ``ops.swap_blocks_batch`` C++ (cuMemcpyBatchAsync) path."""
+"""Unit tests for the `ops.swap_blocks_batch` C++ (cuMemcpyBatchAsync) path."""
 
 import pytest
 import torch
@@ -25,7 +25,8 @@ def _run_batch(sizes: list[int]) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="swap_blocks_batch requires CUDA"
+    not current_platform.is_cuda_alike(),
+    reason="swap_blocks_batch requires CUDA or ROCm",
 )
 def test_swap_blocks_batch_default_stream():
     # cuMemcpyBatchAsync rejects the legacy default stream; the op must fall
@@ -34,7 +35,8 @@ def test_swap_blocks_batch_default_stream():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="swap_blocks_batch requires CUDA"
+    not current_platform.is_cuda_alike(),
+    reason="swap_blocks_batch requires CUDA or ROCm",
 )
 def test_swap_blocks_batch_dedicated_stream():
     # A dedicated non-default stream exercises the cuMemcpyBatchAsync fast path.

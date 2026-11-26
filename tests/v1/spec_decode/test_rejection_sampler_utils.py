@@ -4,17 +4,21 @@
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
-from vllm.v1.spec_decode.fly import compute_fly_entropy
+from vllm.platforms import current_platform
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.fly import compute_fly_entropy
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     gather_draft_sampled,
+    unconditional_to_conditional_rates,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
@@ -22,10 +26,49 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 
 VOCAB_SIZE = 4096
 
-# Skip if no CUDA - Triton kernel requires GPU
+# Triton kernel requires a GPU.
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
-    pytest.skip("CUDA required for rejection sampler tests", allow_module_level=True)
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip(
+        "CUDA, ROCm or XPU required for rejection sampler tests",
+        allow_module_level=True,
+    )
+
+DEVICE = torch.device(current_platform.device_type)
+
+
+def _draft_logits(
+    values: torch.Tensor | None, row_mapping: torch.Tensor | None = None
+) -> DraftLogitsCache | None:
+    """Wrap the draft logits tensor a test builds in a DraftLogitsCache."""
+    if values is None:
+        return None
+    draft_logits = DraftLogitsCache(
+        1, 1, 1, dtype=values.dtype, fill=0.0, device=values.device
+    )
+    draft_logits.values = values
+    draft_logits.row_mapping = row_mapping
+    return draft_logits
+
+
+def _rejection_sample(
+    *,
+    draft_logits: torch.Tensor | None,
+    draft_logits_row_mapping: torch.Tensor | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return rejection_sample(
+        draft_logits_cache=_draft_logits(draft_logits, draft_logits_row_mapping),
+        **kwargs,
+    )
+
+
+def _watermarked_rejection_sample(
+    *, draft_logits: torch.Tensor | None, **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return watermarked_rejection_sample(
+        draft_logits_cache=_draft_logits(draft_logits), **kwargs
+    )
 
 
 def _build_rejection_sample_inputs(
@@ -99,7 +142,7 @@ def test_fly_requires_entropy_and_native_lookahead(
     temperature: float, has_draft_logits: bool, top_k: int
 ):
     """Defer only supported rejections with a full, natively accepted window."""
-    device = "cuda"
+    device = DEVICE
     inputs = _build_rejection_sample_inputs(
         torch.zeros(10, device=device),
         torch.zeros(10, device=device),
@@ -138,7 +181,7 @@ def test_fly_requires_entropy_and_native_lookahead(
         [0, *torch.tensor(counts).cumsum(0).tolist()], dtype=torch.int32, device=device
     )
 
-    sampled, num_sampled = rejection_sample(
+    sampled, num_sampled = _rejection_sample(
         **inputs,
         num_speculative_steps=4,
         fly_window_size=2,
@@ -159,7 +202,7 @@ def test_fly_pending_window_preserves_recovery_position(
     temperature: float, failing_step: int | None
 ):
     """A failed window recovers at its first rejection using that position's p/q."""
-    device = "cuda"
+    device = DEVICE
     num_steps, vocab_size, num_trials = 7, 16, 32
     draft_ids = torch.arange(1, num_steps + 1, device=device)
     steps = torch.arange(num_steps, device=device)
@@ -196,10 +239,10 @@ def test_fly_pending_window_preserves_recovery_position(
         if step < rejected_step:
             reference_logits[:, step] = native_logits[step]
     reference_inputs["target_logits"] = reference_logits.flatten(0, 1)
-    expected, expected_counts = rejection_sample(
+    expected, expected_counts = _rejection_sample(
         **reference_inputs, num_speculative_steps=num_steps
     )
-    sampled, counts = rejection_sample(
+    sampled, counts = _rejection_sample(
         **inputs, num_speculative_steps=num_steps, fly_window_size=2
     )
     assert counts.tolist() == [rejected_step + 1] * num_trials
@@ -217,7 +260,7 @@ def test_fly_entropy_from_logits_matches_probabilities(
 ):
     """Logits match probability-based entropy with masking and top-k clipping."""
     torch.manual_seed(7)
-    logits = torch.randn(2, 20, dtype=dtype, device="cuda")[:, :17]
+    logits = torch.randn(2, 20, dtype=dtype, device=DEVICE)[:, :17]
     logits[0, 0] = -30
     logits[0, 3] = -float("inf")
     logits[1] = -float("inf")
@@ -289,7 +332,7 @@ def _assert_distribution_match(
 
 
 def test_watermarked_bonus_uses_target_key():
-    target_logits = torch.randn(16, device="cuda")
+    target_logits = torch.randn(16, device=DEVICE)
     inputs = _build_rejection_sample_inputs(
         target_logits,
         target_logits,
@@ -299,14 +342,14 @@ def test_watermarked_bonus_uses_target_key():
     )
     draft_token = inputs["draft_sampled"][1]
     contexts = torch.tensor(
-        [[10, 11], [11, draft_token.item()]], dtype=torch.int64, device="cuda"
+        [[10, 11], [11, draft_token.item()]], dtype=torch.int64, device=DEVICE
     )
 
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=1,
         contexts=contexts,
-        watermarking=torch.tensor([True], device="cuda"),
+        watermarking=torch.tensor([True], device=DEVICE),
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
     expected = GumbelWatermarker(key=42, context_width=2).sample(
@@ -318,8 +361,8 @@ def test_watermarked_bonus_uses_target_key():
 
 
 def test_watermarked_recovery_uses_target_key():
-    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device="cuda")
-    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device=DEVICE)
+    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device=DEVICE)
     inputs = _build_rejection_sample_inputs(
         target_logits,
         draft_logits,
@@ -328,13 +371,13 @@ def test_watermarked_recovery_uses_target_key():
         num_trials=1,
     )
     inputs["draft_sampled"][1] = 0
-    contexts = torch.tensor([[10, 11], [11, 0]], dtype=torch.int64, device="cuda")
+    contexts = torch.tensor([[10, 11], [11, 0]], dtype=torch.int64, device=DEVICE)
 
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=1,
         contexts=contexts,
-        watermarking=torch.tensor([True], device="cuda"),
+        watermarking=torch.tensor([True], device=DEVICE),
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
     expected = GumbelWatermarker(key=42, context_width=2).sample(
@@ -349,8 +392,8 @@ def test_repeated_draft_context_does_not_change_acceptance():
     torch.manual_seed(0)
     num_trials = 8
     # A draft distribution of its own, so the drafts are not accepted outright.
-    target_logits = torch.randn(64, device="cuda")
-    draft_logits = torch.randn(64, device="cuda")
+    target_logits = torch.randn(64, device=DEVICE)
+    draft_logits = torch.randn(64, device=DEVICE)
     inputs = _build_rejection_sample_inputs(
         target_logits,
         draft_logits,
@@ -358,16 +401,18 @@ def test_repeated_draft_context_does_not_change_acceptance():
         temperature=1.0,
         num_trials=num_trials,
     )
-    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+    expected, expected_num_sampled = _rejection_sample(
+        **inputs, num_speculative_steps=1
+    )
 
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=1,
-        contexts=torch.tensor([[10, 11], [11, 12]], device="cuda").repeat(
+        contexts=torch.tensor([[10, 11], [11, 12]], device=DEVICE).repeat(
             num_trials, 1
         ),
-        watermarking=torch.ones(num_trials, dtype=torch.bool, device="cuda"),
-        watermarking_skip_mask=torch.tensor([True, False], device="cuda").repeat(
+        watermarking=torch.ones(num_trials, dtype=torch.bool, device=DEVICE),
+        watermarking_skip_mask=torch.tensor([True, False], device=DEVICE).repeat(
             num_trials
         ),
         watermarker=GumbelWatermarker(key=42, context_width=2),
@@ -387,8 +432,8 @@ def test_repeated_context_skip_mask_is_read_per_row_in_a_block():
     at decides which key draws the recovery token.
     """
     num_speculative_steps = 3
-    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device="cuda")
-    draft_logits = torch.tensor([30.0, -30.0, -30.0, -30.0], device="cuda")
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device=DEVICE)
+    draft_logits = torch.tensor([30.0, -30.0, -30.0, -30.0], device=DEVICE)
     inputs = _build_rejection_sample_inputs(
         target_logits,
         draft_logits,
@@ -401,34 +446,34 @@ def test_repeated_context_skip_mask_is_read_per_row_in_a_block():
     inputs["draft_sampled"][1] = 3
     inputs["draft_sampled"][2] = 0
     contexts = torch.tensor(
-        [[10, 11], [11, 3], [3, 0], [0, 1]], dtype=torch.int64, device="cuda"
+        [[10, 11], [11, 3], [3, 0], [0, 1]], dtype=torch.int64, device=DEVICE
     )
-    expected, expected_num_sampled = rejection_sample(
+    expected, expected_num_sampled = _rejection_sample(
         **inputs, num_speculative_steps=num_speculative_steps
     )
     assert expected_num_sampled.item() == 2
     assert expected[0, 0].item() == 3
 
     watermarker = GumbelWatermarker(key=42, context_width=2)
-    skipped, skipped_num_sampled = watermarked_rejection_sample(
+    skipped, skipped_num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=num_speculative_steps,
         contexts=contexts,
-        watermarking=torch.tensor([True], device="cuda"),
-        watermarking_skip_mask=torch.tensor([False, True, False, False], device="cuda"),
+        watermarking=torch.tensor([True], device=DEVICE),
+        watermarking_skip_mask=torch.tensor([False, True, False, False], device=DEVICE),
         watermarker=watermarker,
     )
 
     assert skipped_num_sampled.item() == 2
     torch.testing.assert_close(skipped[:, :2], expected[:, :2], rtol=0, atol=0)
 
-    watermarked, watermarked_num_sampled = watermarked_rejection_sample(
+    watermarked, watermarked_num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=num_speculative_steps,
         contexts=contexts,
-        watermarking=torch.tensor([True], device="cuda"),
+        watermarking=torch.tensor([True], device=DEVICE),
         watermarking_skip_mask=torch.zeros(
-            num_speculative_steps + 1, dtype=torch.bool, device="cuda"
+            num_speculative_steps + 1, dtype=torch.bool, device=DEVICE
         ),
         watermarker=watermarker,
     )
@@ -444,8 +489,8 @@ def test_repeated_context_skip_mask_is_read_per_row_in_a_block():
 
 
 def test_repeated_recovery_context_uses_ordinary_residual_sample():
-    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device="cuda")
-    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device=DEVICE)
+    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device=DEVICE)
     inputs = _build_rejection_sample_inputs(
         target_logits,
         draft_logits,
@@ -454,14 +499,16 @@ def test_repeated_recovery_context_uses_ordinary_residual_sample():
         num_trials=1,
     )
     inputs["draft_sampled"][1] = 0
-    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+    expected, expected_num_sampled = _rejection_sample(
+        **inputs, num_speculative_steps=1
+    )
 
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=1,
-        contexts=torch.tensor([[10, 11], [11, 0]], device="cuda"),
-        watermarking=torch.tensor([True], device="cuda"),
-        watermarking_skip_mask=torch.tensor([True, False], device="cuda"),
+        contexts=torch.tensor([[10, 11], [11, 0]], device=DEVICE),
+        watermarking=torch.tensor([True], device=DEVICE),
+        watermarking_skip_mask=torch.tensor([True, False], device=DEVICE),
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
 
@@ -470,7 +517,7 @@ def test_repeated_recovery_context_uses_ordinary_residual_sample():
 
 
 def test_repeated_bonus_context_uses_ordinary_target_sample():
-    target_logits = torch.randn(64, device="cuda")
+    target_logits = torch.randn(64, device=DEVICE)
     inputs = _build_rejection_sample_inputs(
         target_logits,
         target_logits,
@@ -478,14 +525,16 @@ def test_repeated_bonus_context_uses_ordinary_target_sample():
         temperature=1.0,
         num_trials=1,
     )
-    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+    expected, expected_num_sampled = _rejection_sample(
+        **inputs, num_speculative_steps=1
+    )
 
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=1,
-        contexts=torch.tensor([[10, 11], [11, 12]], device="cuda"),
-        watermarking=torch.tensor([True], device="cuda"),
-        watermarking_skip_mask=torch.tensor([False, True], device="cuda"),
+        contexts=torch.tensor([[10, 11], [11, 12]], device=DEVICE),
+        watermarking=torch.tensor([True], device=DEVICE),
+        watermarking_skip_mask=torch.tensor([False, True], device=DEVICE),
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
 
@@ -494,7 +543,7 @@ def test_repeated_bonus_context_uses_ordinary_target_sample():
 
 
 def test_repeated_context_does_not_change_unwatermarked_or_greedy_rows():
-    target_logits = torch.randn(64, device="cuda")
+    target_logits = torch.randn(64, device=DEVICE)
     inputs = _build_rejection_sample_inputs(
         target_logits,
         target_logits,
@@ -503,14 +552,16 @@ def test_repeated_context_does_not_change_unwatermarked_or_greedy_rows():
         num_trials=2,
     )
     inputs["temperature"][1] = 0
-    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+    expected, expected_num_sampled = _rejection_sample(
+        **inputs, num_speculative_steps=1
+    )
 
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=1,
-        contexts=torch.tensor([[10, 11], [11, 12], [20, 21], [21, 22]], device="cuda"),
-        watermarking=torch.tensor([False, True], device="cuda"),
-        watermarking_skip_mask=torch.ones(4, dtype=torch.bool, device="cuda"),
+        contexts=torch.tensor([[10, 11], [11, 12], [20, 21], [21, 22]], device=DEVICE),
+        watermarking=torch.tensor([False, True], device=DEVICE),
+        watermarking_skip_mask=torch.ones(4, dtype=torch.bool, device=DEVICE),
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
 
@@ -522,8 +573,8 @@ def test_repeated_context_does_not_change_unwatermarked_or_greedy_rows():
 
 
 def test_watermarked_recovery_supports_smaller_draft_vocabulary():
-    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0, 100.0], device="cuda")
-    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0, 100.0], device=DEVICE)
+    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device=DEVICE)
     inputs = _build_rejection_sample_inputs(
         target_logits[:4],
         draft_logits,
@@ -533,14 +584,14 @@ def test_watermarked_recovery_supports_smaller_draft_vocabulary():
     )
     inputs["target_logits"] = target_logits.unsqueeze(0).expand(2, -1).contiguous()
     inputs["draft_sampled"][1] = 0
-    contexts = torch.tensor([[10, 11], [11, 0]], dtype=torch.int64, device="cuda")
+    contexts = torch.tensor([[10, 11], [11, 0]], dtype=torch.int64, device=DEVICE)
     watermarker = GumbelWatermarker(key=42, context_width=2)
 
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=1,
         contexts=contexts,
-        watermarking=torch.tensor([True], device="cuda"),
+        watermarking=torch.tensor([True], device=DEVICE),
         watermarker=watermarker,
     )
     expected = watermarker.sample(target_logits[:4].unsqueeze(0), contexts[:1])
@@ -573,7 +624,7 @@ def test_stochastic_rejection_sample(
     dtype must not bias the output distribution.
     """
     torch.manual_seed(42)
-    device = "cuda"
+    device = DEVICE
     num_trials = 10 * VOCAB_SIZE
 
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
@@ -592,7 +643,7 @@ def test_stochastic_rejection_sample(
         num_trials=num_trials,
     )
 
-    sampled, num_sampled = rejection_sample(
+    sampled, num_sampled = _rejection_sample(
         **inputs, num_speculative_steps=num_speculative_steps
     )
 
@@ -660,7 +711,7 @@ def test_gumbel_drafted_rejection_sample_is_unbiased(num_speculative_steps: int)
     ~1500 against a threshold of ~70 here, while leaving that test passing.
     """
     torch.manual_seed(42)
-    device = "cuda"
+    device = DEVICE
 
     # A draft that ranks tokens in exactly the opposite order rejects ~73% of
     # proposals, so most trials reach the residual resample where the bias
@@ -684,7 +735,7 @@ def test_gumbel_drafted_rejection_sample_is_unbiased(num_speculative_steps: int)
         inputs, draft_logits_1d, NARROW_NUM_TRIALS, num_speculative_steps
     )
 
-    sampled, num_sampled = rejection_sample(
+    sampled, num_sampled = _rejection_sample(
         **inputs, num_speculative_steps=num_speculative_steps
     )
 
@@ -707,7 +758,7 @@ def test_multiround_rejection_sample_is_unbiased(
     """Uncommitted positions must receive fresh noise on later verification rounds."""
     torch.manual_seed(42)
     num_trials, num_tokens, k = 32768, 6, 2
-    device = "cuda"
+    device = DEVICE
     target_probs = torch.tensor(
         [0.3, 0.7] if probabilistic_draft else [0.5, 0.5], device=device
     )
@@ -744,7 +795,7 @@ def test_multiround_rejection_sample_is_unbiased(
                     logits_cache=logits_cache,
                     logits_cache_col=torch.tensor(step, device=device),
                 )
-        sampled, counts = rejection_sample(
+        sampled, counts = _rejection_sample(
             target_logits=target_probs.log().expand(n * (k + 1), -1).contiguous(),
             draft_logits=logits_cache,
             draft_sampled=draft_sampled.flatten(),
@@ -778,7 +829,7 @@ def test_greedy_rejection_sample(num_speculative_steps: int):
     at every accepted position.
     """
     torch.manual_seed(42)
-    device = "cuda"
+    device = DEVICE
     num_trials = 10 * VOCAB_SIZE
 
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
@@ -792,7 +843,7 @@ def test_greedy_rejection_sample(num_speculative_steps: int):
         num_trials=num_trials,
     )
 
-    sampled, num_sampled = rejection_sample(
+    sampled, num_sampled = _rejection_sample(
         **inputs, num_speculative_steps=num_speculative_steps
     )
 
@@ -829,10 +880,8 @@ def test_synthetic_rejection_sample(
     is P(all draft steps 0..i accepted) = product(conditional_rates[0:i+1]).
     This is approximately mean(num accepted >= i + 1) over many trials.
     """
-    from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
-
     torch.manual_seed(42)
-    device = "cuda"
+    device = DEVICE
     num_trials = 10 * VOCAB_SIZE
     deviation_tol = 1e-2
 
@@ -855,7 +904,7 @@ def test_synthetic_rejection_sample(
         conditional_rates, dtype=torch.float32, device=device
     )
 
-    _, num_sampled = rejection_sample(
+    _, num_sampled = _rejection_sample(
         **inputs,
         num_speculative_steps=num_speculative_steps,
         synthetic_conditional_rates=synthetic_conditional_rates,
@@ -885,7 +934,7 @@ def test_all_nan_target_logits_in_range(temperature: float):
     emit in-range token ids.
     """
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     num_trials = 4
     K = 1
     vocab_size = 20000  # 3 vocab blocks of 8192, padded to 4
@@ -903,7 +952,7 @@ def test_all_nan_target_logits_in_range(temperature: float):
         num_trials=num_trials,
     )
 
-    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=K)
+    sampled, num_sampled = _rejection_sample(**inputs, num_speculative_steps=K)
 
     assert ((num_sampled >= 1) & (num_sampled <= K + 1)).all()
     steps = torch.arange(K + 1, device=device).unsqueeze(0)
@@ -912,12 +961,51 @@ def test_all_nan_target_logits_in_range(temperature: float):
     assert (sampled[valid] < vocab_size).all()
 
 
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_skip_masked_vocab_blocks_is_bitwise_identical(
+    has_draft_logits: bool, use_fp64: bool
+):
+    """skip_masked_vocab_blocks lets the resample kernel skip vocab blocks whose
+    target logits are all -inf (e.g. masked by top-k/top-p). The sampled tokens
+    must match the unskipped path exactly.
+    """
+    torch.manual_seed(0)
+    device = DEVICE
+    K = 3
+    vocab_size = 4 * 8192
+    target_logits_1d = torch.randn(vocab_size, device=device)
+    target_logits_1d[8192 : 3 * 8192] = float("-inf")  # two whole blocks
+    target_logits_1d[3 * 8192 + 100 :] = float("-inf")  # most of the last one
+    draft_logits_1d = torch.randn(vocab_size, device=device)
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d, draft_logits_1d, K, temperature=1.0, num_trials=256
+    )
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+
+    def run(skip: bool) -> tuple[torch.Tensor, torch.Tensor]:
+        return _rejection_sample(
+            **inputs,
+            num_speculative_steps=K,
+            use_fp64=use_fp64,
+            skip_masked_vocab_blocks=skip,
+        )
+
+    ref_sampled, ref_num_sampled = run(False)
+    sampled, num_sampled = run(True)
+
+    torch.testing.assert_close(num_sampled, ref_num_sampled, rtol=0, atol=0)
+    valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
+    torch.testing.assert_close(sampled[valid], ref_sampled[valid], rtol=0, atol=0)
+
+
 def test_placeholder_draft_token_rejected():
     """A placeholder draft id (-1) must be rejected without reading the logit
     tensors out of bounds, for any sampling method.
     """
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     num_trials = 64
     K = 1
     temperature = 0.6
@@ -934,7 +1022,7 @@ def test_placeholder_draft_token_rejected():
     )
     inputs["draft_sampled"].view(num_trials, K + 1)[:, 1:] = -1
 
-    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=K)
+    sampled, num_sampled = _rejection_sample(**inputs, num_speculative_steps=K)
 
     assert torch.equal(num_sampled, torch.ones_like(num_sampled))
     recovered = sampled[:, 0]
@@ -952,7 +1040,7 @@ def test_block_verification_placeholder_truncates_block(
     describe a token that was never drafted.
     """
     torch.manual_seed(42)
-    device = "cuda"
+    device = DEVICE
     num_trials = 20 * VOCAB_SIZE
     K = 3
     temperature = 1.0
@@ -971,7 +1059,7 @@ def test_block_verification_placeholder_truncates_block(
         inputs["draft_logits"] = None
     inputs["draft_sampled"].view(num_trials, K + 1)[:, K + 1 - num_placeholders :] = -1
 
-    sampled, num_sampled = rejection_sample(
+    sampled, num_sampled = _rejection_sample(
         **inputs, num_speculative_steps=K, use_block_verification=True
     )
 
@@ -993,7 +1081,7 @@ def test_greedy_placeholder_emits_target_argmax():
     bypass that store, or the output slot is returned uninitialized.
     """
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     num_trials = 512
     K = 3
 
@@ -1013,7 +1101,7 @@ def test_greedy_placeholder_emits_target_argmax():
     draft_sampled[:, 1] = target_argmax
     draft_sampled[:, 2:] = -1
 
-    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=K)
+    sampled, num_sampled = _rejection_sample(**inputs, num_speculative_steps=K)
 
     assert torch.equal(num_sampled, torch.full_like(num_sampled, 2))
     steps = torch.arange(K + 1, device=device).unsqueeze(0)
@@ -1029,7 +1117,7 @@ def test_placeholder_blocks_later_draft_tokens(use_block_verification: bool):
     one may be accepted, even when a valid draft follows it.
     """
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     num_trials = 4 * VOCAB_SIZE
     K = 3
     temperature = 1.0
@@ -1049,7 +1137,7 @@ def test_placeholder_blocks_later_draft_tokens(use_block_verification: bool):
     )
     inputs["draft_sampled"].view(num_trials, K + 1)[:, 2] = -1
 
-    _, num_sampled = rejection_sample(
+    _, num_sampled = _rejection_sample(
         **inputs,
         num_speculative_steps=K,
         use_block_verification=use_block_verification,
@@ -1066,7 +1154,7 @@ def test_placeholder_blocks_later_draft_tokens(use_block_verification: bool):
 def test_verify_rejects_unproposed_drafts():
     """Zero drafts padded onto a step starting in the prefill must be rejected."""
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     num_trials = 256
     K = 8
 
@@ -1098,6 +1186,8 @@ def test_verify_rejects_unproposed_drafts():
             seeds=SimpleNamespace(gpu=inputs["seed"]),
         ),
         use_fp64_gumbel=False,
+        trace_replay_state=None,
+        may_mask_logits=np.zeros(num_trials, dtype=bool),
     )
     rejection_sampler.num_speculative_steps = K
     rejection_sampler.synthetic_conditional_rates = None
@@ -1106,6 +1196,13 @@ def test_verify_rejects_unproposed_drafts():
     rejection_sampler.fly_entropy_threshold = 0.3
     rejection_sampler.fly_entropy_top_k = 3
     rejection_sampler.watermark_key = None
+    draft_logits = DraftLogitsCache(
+        *inputs["draft_logits"].shape,
+        dtype=inputs["draft_logits"].dtype,
+        fill=0.0,
+        device=device,
+    )
+    draft_logits.values.copy_(inputs["draft_logits"])
 
     def verify() -> tuple[torch.Tensor, torch.Tensor]:
         draft_sampled, pos = gather_draft_sampled(
@@ -1118,7 +1215,7 @@ def test_verify_rejects_unproposed_drafts():
         )
         _, sampled, num_sampled = rejection_sampler._verify(
             inputs["target_logits"],
-            inputs["draft_logits"],
+            draft_logits,
             draft_sampled,
             pos,
             inputs["cu_num_logits"],
@@ -1127,7 +1224,6 @@ def test_verify_rejects_unproposed_drafts():
             inputs["expanded_idx_mapping"],
             inputs["expanded_local_pos"],
             None,
-            draft_sampled,
         )
         return sampled, num_sampled
 
@@ -1163,7 +1259,7 @@ def test_block_verification_rejection_sample(
     still match the target distribution p(x).
     """
     torch.manual_seed(42)
-    device = "cuda"
+    device = DEVICE
     num_trials = 10 * VOCAB_SIZE
 
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
@@ -1182,7 +1278,7 @@ def test_block_verification_rejection_sample(
     if not has_draft_logits:
         inputs["draft_logits"] = None
 
-    sampled, num_sampled = rejection_sample(
+    sampled, num_sampled = _rejection_sample(
         **inputs,
         num_speculative_steps=num_speculative_steps,
         use_block_verification=True,
@@ -1203,7 +1299,7 @@ def test_block_verification_accepts_at_least_as_many(num_speculative_steps: int)
     worse than the standard method on the same inputs.
     """
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     num_trials = 20 * VOCAB_SIZE
     temperature = 1.0
 
@@ -1222,10 +1318,10 @@ def test_block_verification_accepts_at_least_as_many(num_speculative_steps: int)
         num_trials=num_trials,
     )
 
-    _, num_sampled_standard = rejection_sample(
+    _, num_sampled_standard = _rejection_sample(
         **inputs, num_speculative_steps=num_speculative_steps
     )
-    _, num_sampled_block = rejection_sample(
+    _, num_sampled_block = _rejection_sample(
         **inputs,
         num_speculative_steps=num_speculative_steps,
         use_block_verification=True,
@@ -1246,7 +1342,7 @@ def test_chunked_requests_match_full_batch(
     has_draft_logits: bool, fly_window_size: int
 ):
     torch.manual_seed(7)
-    device = "cuda"
+    device = DEVICE
     num_reqs = 5
     num_speculative_steps = 3
     vocab_size = 257
@@ -1271,10 +1367,10 @@ def test_chunked_requests_match_full_batch(
         inputs["draft_logits"] = None
 
     if fly_window_size:
-        native, native_counts = rejection_sample(
+        native, native_counts = _rejection_sample(
             **inputs, num_speculative_steps=num_speculative_steps
         )
-        gated, gated_counts = rejection_sample(
+        gated, gated_counts = _rejection_sample(
             **inputs,
             num_speculative_steps=num_speculative_steps,
             fly_window_size=fly_window_size,
@@ -1287,7 +1383,7 @@ def test_chunked_requests_match_full_batch(
         )
         assert torch.equal(gated[valid], native[valid])
 
-    sampled, num_sampled = rejection_sample(
+    sampled, num_sampled = _rejection_sample(
         **inputs,
         num_speculative_steps=num_speculative_steps,
         fly_window_size=fly_window_size,
@@ -1311,7 +1407,7 @@ def test_chunked_requests_match_full_batch(
         chunk_inputs["cu_num_logits"] = inputs["cu_num_logits"][start : end + 1] - lo
         chunk_inputs["idx_mapping"] = inputs["idx_mapping"][start:end]
 
-        chunk_sampled, chunk_num_sampled = rejection_sample(
+        chunk_sampled, chunk_num_sampled = _rejection_sample(
             **chunk_inputs,
             num_speculative_steps=num_speculative_steps,
             fly_window_size=fly_window_size,
@@ -1334,7 +1430,7 @@ def test_adaptive_draft_lengths_match_and_bonus_oracle(
     use_block_verification: bool, has_draft_logits: bool
 ):
     torch.manual_seed(7)
-    device = "cuda"
+    device = DEVICE
     K = 3
     num_drafts = [3, 1, 0, 2, 3, 2]
     temperatures = [1.0, 0.0, 0.0, 0.6, 0.0, 1.0]
@@ -1379,7 +1475,7 @@ def test_adaptive_draft_lengths_match_and_bonus_oracle(
         num_speculative_steps=K,
         use_block_verification=use_block_verification,
     )
-    sampled, num_sampled = rejection_sample(**inputs)
+    sampled, num_sampled = _rejection_sample(**inputs)
 
     for req_idx, num_matches in greedy_num_matches.items():
         lo = int(cu_num_logits[req_idx])
@@ -1403,7 +1499,7 @@ def test_adaptive_draft_lengths_match_and_bonus_oracle(
         req_inputs["cu_num_logits"] = cu_num_logits[req_idx : req_idx + 2] - lo
         req_inputs["idx_mapping"] = idx_mapping[req_idx : req_idx + 1]
 
-        req_sampled, req_num_sampled = rejection_sample(**req_inputs)
+        req_sampled, req_num_sampled = _rejection_sample(**req_inputs)
 
         n = int(req_num_sampled[0])
         assert n <= num_drafts[req_idx] + 1
@@ -1466,7 +1562,7 @@ def _watermark_inputs(
     one_hot_draft: bool,
     temperature: float = 1.0,
 ) -> tuple[dict, torch.Tensor]:
-    device = "cuda"
+    device = DEVICE
     target_logits_1d = torch.randn(vocab_size, device=device) / temperature
     draft_logits_1d = torch.randn(vocab_size, device=device)
     inputs = _build_rejection_sample_inputs(
@@ -1505,17 +1601,17 @@ def test_watermarked_recovery_matches_philox_gumbel_sample(
     )
     watermarker = GumbelWatermarker(key=key, context_width=context_width)
 
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=2,
         contexts=contexts,
-        watermarking=torch.ones(128, dtype=torch.bool, device="cuda"),
+        watermarking=torch.ones(128, dtype=torch.bool, device=DEVICE),
         watermarker=watermarker,
     )
 
     recovery, resample_rows = _residual_recovery_logits(inputs, num_sampled, vocab_size)
     expected = philox_gumbel_sample(recovery, contexts[resample_rows], key)
-    recovered = sampled[torch.arange(128, device="cuda"), num_sampled.long() - 1]
+    recovered = sampled[torch.arange(128, device=DEVICE), num_sampled.long() - 1]
     torch.testing.assert_close(recovered, expected, rtol=0, atol=0)
 
     is_bonus = resample_rows == inputs["cu_num_logits"][1:] - 1
@@ -1539,14 +1635,14 @@ def test_watermarked_recovery_leaves_disabled_rows_on_the_stock_draw():
         vocab_size=vocab_size,
         one_hot_draft=False,
     )
-    watermarking = torch.zeros(num_trials, dtype=torch.bool, device="cuda")
+    watermarking = torch.zeros(num_trials, dtype=torch.bool, device=DEVICE)
     watermarking[::2] = True
     inputs["temperature"][:8] = 0.0
 
-    stock_sampled, stock_num_sampled = rejection_sample(
+    stock_sampled, stock_num_sampled = _rejection_sample(
         **inputs, num_speculative_steps=3
     )
-    sampled, num_sampled = watermarked_rejection_sample(
+    sampled, num_sampled = _watermarked_rejection_sample(
         **inputs,
         num_speculative_steps=3,
         contexts=contexts,
@@ -1555,7 +1651,7 @@ def test_watermarked_recovery_leaves_disabled_rows_on_the_stock_draw():
     )
 
     torch.testing.assert_close(num_sampled, stock_num_sampled, rtol=0, atol=0)
-    rows = torch.arange(num_trials, device="cuda")
+    rows = torch.arange(num_trials, device=DEVICE)
     positions = num_sampled.long() - 1
     disabled = ~watermarking | (inputs["temperature"] == 0)
     torch.testing.assert_close(
@@ -1585,14 +1681,14 @@ def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
     kwargs = dict(
         num_speculative_steps=2,
         contexts=contexts,
-        watermarking=torch.ones(64, dtype=torch.bool, device="cuda"),
+        watermarking=torch.ones(64, dtype=torch.bool, device=DEVICE),
         watermarker=watermarker,
     )
-    sampled32, num_sampled32 = watermarked_rejection_sample(**inputs, **kwargs)
-    sampled64, num_sampled64 = watermarked_rejection_sample(
+    sampled32, num_sampled32 = _watermarked_rejection_sample(**inputs, **kwargs)
+    sampled64, num_sampled64 = _watermarked_rejection_sample(
         **inputs, **kwargs, use_fp64=True
     )
-    rows = torch.arange(64, device="cuda")
+    rows = torch.arange(64, device=DEVICE)
     torch.testing.assert_close(num_sampled64, num_sampled32, rtol=0, atol=0)
     torch.testing.assert_close(
         sampled64[rows, num_sampled64.long() - 1],
@@ -1600,3 +1696,140 @@ def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
         rtol=0,
         atol=0,
     )
+
+
+def _position_owned_rows(
+    slots: torch.Tensor, num_shards: int, shard_idx: int, max_num_reqs: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The batch positions a shard owns and its DraftLogitsCache.row_mapping table:
+    the request at batch position i is cached by shard i % num_shards at row
+    i // num_shards."""
+    owned = torch.arange(shard_idx, slots.shape[0], num_shards, device=slots.device)
+    rows = torch.full((max_num_reqs,), -1, dtype=torch.int32, device=slots.device)
+    rows[slots[owned].long()] = torch.arange(
+        owned.shape[0], dtype=torch.int32, device=slots.device
+    )
+    return owned, rows
+
+
+@pytest.mark.parametrize("num_shards", [2, 4])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_sharded_draft_logits_verify_like_replicated(
+    num_shards: int, use_block_verification: bool
+):
+    """A TP rank that caches only its owned requests' draft logits, at the
+    rows of draft_logits_row_mapping, verifies those requests exactly like the
+    replicated cache does."""
+    torch.manual_seed(0)
+    device = DEVICE
+    num_reqs = 12
+    num_speculative_steps = 3
+    vocab_size = 1000
+    num_rows = num_speculative_steps + 1
+    inputs = _build_rejection_sample_inputs(
+        torch.zeros(vocab_size, device=device),
+        torch.zeros(vocab_size, device=device),
+        num_speculative_steps,
+        temperature=1.0,
+        num_trials=num_reqs,
+    )
+    # Per-request distributions, close enough that some drafts are accepted.
+    draft_logits = torch.randn(
+        num_reqs, num_speculative_steps, vocab_size, device=device
+    )
+    target_logits = torch.randn(num_reqs, num_rows, vocab_size, device=device)
+    target_logits[:, :num_speculative_steps] = draft_logits + 0.5 * torch.randn_like(
+        draft_logits
+    )
+    inputs["target_logits"] = target_logits.view(-1, vocab_size)
+    draft_tokens = torch.multinomial(
+        torch.softmax(draft_logits.view(-1, vocab_size), dim=-1), 1
+    ).view(num_reqs, num_speculative_steps)
+    inputs["draft_sampled"].view(num_reqs, num_rows)[:, 1:] = draft_tokens
+    # Shuffle request slots so cache rows aren't request slots.
+    slots = torch.randperm(num_reqs, device=device).to(torch.int32)
+    inputs["idx_mapping"] = slots
+    inputs["expanded_idx_mapping"] = slots.repeat_interleave(num_rows)
+    inputs["draft_logits"] = torch.empty_like(draft_logits)
+    inputs["draft_logits"][slots.long()] = draft_logits
+
+    sampled, num_sampled = _rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+    )
+    assert 1 < num_sampled.float().mean() < num_rows
+
+    for shard_idx in range(num_shards):
+        owned, draft_logits_row_mapping = _position_owned_rows(
+            slots, num_shards, shard_idx, num_reqs
+        )
+        rows = owned.view(-1, 1) * num_rows + torch.arange(num_rows, device=device)
+        rows = rows.view(-1)
+        local_inputs = dict(inputs)
+        for name in (
+            "target_logits",
+            "draft_sampled",
+            "pos",
+            "expanded_idx_mapping",
+            "expanded_local_pos",
+        ):
+            local_inputs[name] = inputs[name][rows]
+        local_inputs["idx_mapping"] = slots[owned]
+        local_inputs["cu_num_logits"] = inputs["cu_num_logits"][: len(owned) + 1]
+        local_inputs["draft_logits"] = draft_logits[owned]
+
+        local_sampled, local_num_sampled = _rejection_sample(
+            **local_inputs,
+            num_speculative_steps=num_speculative_steps,
+            use_block_verification=use_block_verification,
+            draft_logits_row_mapping=draft_logits_row_mapping,
+        )
+        assert torch.equal(local_num_sampled, num_sampled[owned])
+        valid = torch.arange(num_rows, device=device) < local_num_sampled[:, None]
+        assert torch.equal(local_sampled[valid], sampled[owned][valid])
+
+
+@pytest.mark.parametrize("num_shards", [2, 4])
+def test_sharded_draft_logits_cache_writes(num_shards: int):
+    """gumbel_sample caches only the owned rows, at the rows of
+    logits_cache_row_mapping, without changing what it samples."""
+    torch.manual_seed(0)
+    device = DEVICE
+    max_num_reqs = 16
+    num_cols = 3
+    num_tokens = max_num_reqs * num_cols
+    slots = torch.randperm(max_num_reqs, device=device).to(torch.int32)
+    idx_mapping = slots.repeat_interleave(num_cols)
+    # A CUDA graph padding row.
+    idx_mapping[-num_cols:] = -1
+    cols = torch.arange(num_cols, device=device, dtype=torch.int32).repeat(max_num_reqs)
+    logits = torch.randn(num_tokens, VOCAB_SIZE, device=device)
+    kwargs = dict(
+        expanded_idx_mapping=idx_mapping,
+        temperature=torch.ones(max_num_reqs, device=device),
+        seed=torch.arange(max_num_reqs, device=device),
+        pos=torch.arange(num_tokens, device=device),
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache_col=cols,
+    )
+    cache = torch.zeros(max_num_reqs, num_cols, VOCAB_SIZE, device=device)
+    sampled = gumbel_sample(logits, logits_cache=cache, **kwargs)
+
+    for shard_idx in range(num_shards):
+        owned, logits_cache_row_mapping = _position_owned_rows(
+            slots, num_shards, shard_idx, max_num_reqs
+        )
+        local_cache = torch.zeros(len(owned), num_cols, VOCAB_SIZE, device=device)
+        local_sampled = gumbel_sample(
+            logits,
+            logits_cache=local_cache,
+            logits_cache_row_mapping=logits_cache_row_mapping,
+            **kwargs,
+        )
+        assert torch.equal(local_sampled, sampled)
+        # The padding request caches nothing.
+        is_real = owned < max_num_reqs - 1
+        expected = cache[slots[owned].long()] * is_real.view(-1, 1, 1)
+        assert torch.equal(local_cache, expected)

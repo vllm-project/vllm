@@ -102,7 +102,7 @@ def assert_close(a, b):
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
-@dataclass
+@dataclass(slots=True)
 class PunicaTensors:
     inputs_tensor: torch.Tensor
     lora_weights: torch.Tensor | list[torch.Tensor]

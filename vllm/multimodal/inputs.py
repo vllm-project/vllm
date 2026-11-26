@@ -251,8 +251,8 @@ def nested_tensors_equal(
 
     If `check_dtype` is `True`, the tensors must have the same dtype.
     """
-    check_dtype_func = (
-        lambda a, b, check_dtype: a.dtype == b.dtype if check_dtype else True
+    check_dtype_func = lambda a, b, check_dtype: (
+        a.dtype == b.dtype if check_dtype else True
     )
     if isinstance(a, torch.Tensor):
         return (
@@ -353,7 +353,7 @@ def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> boo
     return all(k in b and nested_tensors_equal(a[k], b[k]) for k in a)
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModalFeatureSpec:
     """Represents a single multimodal input with its processed data and metadata.
 
@@ -399,7 +399,7 @@ class MultiModalFeatureSpec:
         return dict(kwargs)
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModalFieldElem:
     """Represents a processed keyword argument to pass to a model for a
     [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem].
@@ -664,7 +664,7 @@ class MultiModalSharedField(BaseMultiModalField):
         return batch[0]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MultiModalFieldConfig:
     @staticmethod
     def batched(modality: str, *, keep_on_cpu: bool = False):

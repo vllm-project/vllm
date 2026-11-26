@@ -267,10 +267,7 @@ async def test_multiple_lora_adapters(
     for i in range(10):
         lora_tasks.append(asyncio.create_task(load_and_run_adapter(f"adapter_{i}")))
 
-    results, _ = await asyncio.wait(lora_tasks)
-
-    for r in results:
-        assert not isinstance(r, Exception), f"Got exception {r}"
+    await asyncio.gather(*lora_tasks)
 
 
 @pytest.mark.asyncio
@@ -363,9 +360,8 @@ async def test_beam_search_with_lora_adapters(
 
     lora_tasks = []
     for i in range(3):
-        lora_tasks.append(asyncio.create_task(load_and_run_adapter(f"adapter_{i}")))
+        lora_tasks.append(
+            asyncio.create_task(load_and_run_adapter(f"beam_adapter_{i}"))
+        )
 
-    results, _ = await asyncio.wait(lora_tasks)
-
-    for r in results:
-        assert not isinstance(r, Exception), f"Got exception {r}"
+    await asyncio.gather(*lora_tasks)

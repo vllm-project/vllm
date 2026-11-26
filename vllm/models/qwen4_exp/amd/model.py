@@ -12,9 +12,6 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -35,12 +32,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsHCSP,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsReplaySSM,
     _require_is_multimodal,
 )
 from vllm.model_executor.models.qwen3_5 import (
@@ -59,10 +58,12 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
@@ -91,7 +92,7 @@ _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
 def without_modelopt_fp4(
     quant_config: QuantizationConfig | None,
 ) -> QuantizationConfig | None:
-    """Return ``None`` for weights excluded from Qwen4Exp ModelOpt-FP4."""
+    """Return `None` for weights excluded from Qwen4Exp ModelOpt-FP4."""
     if quant_config is not None and quant_config.get_name() == "modelopt_fp4":
         return None
     return quant_config
@@ -103,9 +104,9 @@ def _remap_qsa_cache_scale_name(
 ) -> str:
     """Map serialized main-cache scales onto the merged QSA owner.
 
-    Regular attention keeps cache scales below its ``attn`` child. QSA owns
+    Regular attention keeps cache scales below its `attn` child. QSA owns
     that cache directly, so only QSA layers need the final path component
-    moved to the owner's persistent ``_k_scale``/``_v_scale`` buffers.
+    moved to the owner's persistent `_k_scale`/`_v_scale` buffers.
     """
     scale_suffixes = {
         "k_proj.k_scale": "_k_scale",
@@ -426,7 +427,13 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
-        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
+        self.embed_tokens: VocabParallelEmbedding | PPMissingLayer
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size, config.hidden_size
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str) -> Qwen4ExpDecoderLayer:
             layer_idx = extract_layer_index(prefix)
@@ -439,10 +446,10 @@ class Qwen4ExpModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Qwen4ExpSparseMoeBlock,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         intermediate_size = config.hidden_size * config.hc_count
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -486,6 +493,13 @@ class Qwen4ExpModel(nn.Module):
             )
         else:
             self._mtp_hidden_buffer = None
+
+    def process_weights_after_loading(self) -> None:
+        buffer = self._mtp_hidden_buffer
+        if buffer is not None and buffer.is_meta:
+            assert self.hyper_connection_mixer is not None
+            device = self.hyper_connection_mixer.hc_norm.weight.device
+            torch.utils.swap_tensors(buffer, torch.empty_like(buffer, device=device))
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -613,7 +627,7 @@ class Qwen4ExpModel(nn.Module):
         )
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=getattr(self.config, "num_experts", 0) or 0,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -656,6 +670,7 @@ class Qwen4ExpForCausalLM(
     SupportsPP,
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
+    SupportsReplaySSM,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -685,11 +700,15 @@ class Qwen4ExpForCausalLM(
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        self.lm_head: ParallelLMHead | PPMissingLayer
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -757,17 +776,18 @@ class Qwen4ExpForCausalLM(
     @classmethod
     def get_gdn_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
+            vllm_config.cache_config.use_replayssm,
         )
 
     @classmethod
     def get_gdn_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -776,6 +796,7 @@ class Qwen4ExpForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
+        cache_config = vllm_config.cache_config
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
@@ -784,19 +805,20 @@ class Qwen4ExpForCausalLM(
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            cache_config.replayssm_buffer_len if cache_config.use_replayssm else None,
         )
 
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return cls.get_gdn_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> MambaStateShapes:
         return cls.get_gdn_mamba_state_shape_from_config(vllm_config)
 
     @classmethod
@@ -885,6 +907,7 @@ class Qwen4ExpForConditionalGeneration(
     HasInnerState,
     SupportsHCSP,
     Qwen4ExpMixtureOfExperts,
+    SupportsReplaySSM,
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
 
@@ -926,7 +949,7 @@ class Qwen4ExpForConditionalGeneration(
             self.video_pruning_rate = 0.0
             self._tokenizer = None
             self.visual = StageMissingLayer("vision_tower")
-            self._tower_model_names = []
+            self._tower_model_names = ()
         else:
             self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
             self._init_video_pruning(multimodal_config)
@@ -983,6 +1006,13 @@ class Qwen4ExpForConditionalGeneration(
                 "len(deepstack_visual_indexes)"
             )
         self.set_moe_parameters(self.language_model.model.layers)
+
+    def process_weights_after_loading(self) -> None:
+        if self.use_deepstack and self.deepstack_input_embeds[0].is_meta:
+            self.deepstack_input_embeds = [
+                torch.zeros_like(embed, device=self.visual.device)
+                for embed in self.deepstack_input_embeds
+            ]
 
     def embed_input_ids(
         self,
@@ -1072,14 +1102,14 @@ class Qwen4ExpForConditionalGeneration(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return Qwen4ExpForCausalLM.get_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> MambaStateShapes:
         return Qwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
 
     @classmethod

@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class bench_params_t:
     num_tokens: int
     hidden_size: int

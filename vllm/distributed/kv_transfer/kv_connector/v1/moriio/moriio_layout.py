@@ -11,12 +11,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
 )
 
 
@@ -36,9 +33,9 @@ class LayerTransferGeometry(NamedTuple):
 class MambaTransferGeometry(NamedTuple):
     """Geometry of a hybrid (mamba/KDA) layer's recurrent state.
 
-    A KDA layer's packed page is exposed as ``conv_state`` and ``ssm_state``
+    A KDA layer's packed page is exposed as `conv_state` and `ssm_state`
     views. Each is slot-strided, so a slot's bytes live at
-    ``slot * slot_stride * element_size`` and span ``slot_bytes``. The two
+    `slot * slot_stride * element_size` and span `slot_bytes`. The two
     tensors are registered as two separate MoRIIO regions per layer.
     """
 
@@ -57,10 +54,10 @@ def get_mamba_transfer_geometry(
 ) -> MambaTransferGeometry:
     """Derive the slot-strided geometry of a KDA layer's conv + ssm state.
 
-    ``conv``/``ssm`` are zero-copy views over the layer's packed page. Slot byte
-    offset is ``slot * slot_stride * element_size`` and each
-    slot spans ``subtensor[0].numel() * element_size`` bytes; the whole tensor
-    is registered as one region (``*_region_len`` bytes).
+    `conv`/`ssm` are zero-copy views over the layer's packed page. Slot byte
+    offset is `slot * slot_stride * element_size` and each
+    slot spans `subtensor[0].numel() * element_size` bytes; the whole tensor
+    is registered as one region (`*_region_len` bytes).
     """
     if conv.ndim == 0 or ssm.ndim == 0 or conv.shape[0] == 0 or ssm.shape[0] == 0:
         raise ValueError("KDA conv/ssm caches must contain at least one slot")
@@ -112,24 +109,6 @@ def get_mamba_transfer_geometry(
     )
 
 
-def build_layer_to_spec(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
-    layer_to_spec: dict[str, KVCacheSpec] = {}
-    for group in kv_cache_config.kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        if isinstance(group_spec, UniformTypeKVCacheSpecs):
-            layer_to_spec.update(
-                {
-                    layer_name: group_spec.kv_cache_specs[layer_name]
-                    for layer_name in group.layer_names
-                }
-            )
-        else:
-            layer_to_spec.update(
-                {layer_name: group_spec for layer_name in group.layer_names}
-            )
-    return layer_to_spec
-
-
 def is_mla_cache_layer(
     layer_to_spec: Mapping[str, KVCacheSpec], layer_name: str
 ) -> bool:
@@ -137,7 +116,7 @@ def is_mla_cache_layer(
         spec = layer_to_spec[layer_name]
     except KeyError as e:
         raise ValueError(f"Missing KV cache spec for layer {layer_name}") from e
-    return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+    return isinstance(spec, MLAAttentionSpec)
 
 
 def _spec_dim_matches(value: int, expected: int | None) -> bool:
@@ -300,7 +279,8 @@ def get_layer_transfer_geometry(
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
         num_blocks, num_heads, num_states, content_dim = shape
         slot_size_bytes = num_heads * content_dim * element_size
-        block_len = num_states * slot_size_bytes
+        block_len = 1 + sum((s - 1) * st for s, st in zip(shape[1:], stride[1:]))
+        block_len *= element_size
         return LayerTransferGeometry(
             num_blocks=num_blocks,
             block_size=spec.block_size,
@@ -418,6 +398,31 @@ def merge_contiguous_offsets(
     )
 
 
+def validate_transfer_block_ids(
+    local_block_ids: list[int],
+    remote_block_ids: list[int],
+    local_num_blocks: int,
+    remote_num_blocks: int,
+) -> None:
+    """Check that a block transfer stays inside both sides' caches.
+
+    A shorter or empty local list transfers only what decode allocated (a READ
+    after a partial or full prefix hit); a longer local list is a bug.
+    """
+    if len(local_block_ids) > len(remote_block_ids):
+        raise ValueError(
+            "local_block_ids longer than remote_block_ids: "
+            f"{len(local_block_ids)} > {len(remote_block_ids)}"
+        )
+    for side, block_ids, num_blocks in (
+        ("local", local_block_ids, local_num_blocks),
+        ("remote", remote_block_ids, remote_num_blocks),
+    ):
+        invalid = next((b for b in block_ids if not 0 <= b < num_blocks), None)
+        if invalid is not None:
+            raise ValueError(f"{side} block id {invalid} is outside [0, {num_blocks})")
+
+
 def compute_block_transfer_offsets(
     layer_name: str,
     kv_cache: torch.Tensor,
@@ -429,43 +434,15 @@ def compute_block_transfer_offsets(
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
 ) -> tuple[list[int], list[int], list[int]]:
-    # A shorter/empty local list transfers only what decode allocated (READ-mode
-    # partial or full-prefix-hit); a longer local list is a genuine bug.
-    if len(local_block_ids) > len(remote_block_ids):
-        raise ValueError(
-            "local_block_ids longer than remote_block_ids: "
-            f"{len(local_block_ids)} > {len(remote_block_ids)}"
-        )
     geometry = cast(
         LayerTransferGeometry,
         get_layer_transfer_geometry(
             layer_name, kv_cache, layer_to_spec, remote_num_blocks
         ),
     )
-    invalid_local = next(
-        (
-            block_id
-            for block_id in local_block_ids
-            if not 0 <= block_id < geometry.num_blocks
-        ),
-        None,
+    validate_transfer_block_ids(
+        local_block_ids, remote_block_ids, geometry.num_blocks, remote_num_blocks
     )
-    if invalid_local is not None:
-        raise ValueError(
-            f"local block id {invalid_local} is outside [0, {geometry.num_blocks})"
-        )
-    invalid_remote = next(
-        (
-            block_id
-            for block_id in remote_block_ids
-            if not 0 <= block_id < remote_num_blocks
-        ),
-        None,
-    )
-    if invalid_remote is not None:
-        raise ValueError(
-            f"remote block id {invalid_remote} is outside [0, {remote_num_blocks})"
-        )
     element_size = kv_cache.element_size()
     transfer_size_byte = geometry.block_len
     per_block = geometry.transfers_per_block
@@ -499,7 +476,7 @@ class MambaOffsetTemplate(NamedTuple):
     Homogeneous-TP geometry (conv/ssm slot strides, conv sub-projection
     offsets, ssm per-slot size) is identical across requests and across the
     homogeneous GDN layers, so it is computed once and reused; only the
-    per-request slot bases vary (see ``apply_mamba_offset_template``).
+    per-request slot bases vary (see `apply_mamba_offset_template`).
     """
 
     num_slots: int
@@ -517,9 +494,9 @@ def build_mamba_offset_template(
 ) -> MambaOffsetTemplate:
     """Precompute the slot-independent conv+ssm offset decomposition.
 
-    Only homogeneous TP (``tp_ratio == 1``) is supported; heterogeneous TP is
-    gated with ``NotImplementedError`` (see the design doc). The returned
-    template is a pure function of the layer geometry and ``split_info``, so it
+    Only homogeneous TP (`tp_ratio == 1`) is supported; heterogeneous TP is
+    gated with `NotImplementedError` (see the design doc). The returned
+    template is a pure function of the layer geometry and `split_info`, so it
     can be cached and reused across requests without recomputation.
     """
     if tp_ratio != 1:
@@ -555,7 +532,7 @@ def apply_mamba_offset_template(
     local_slots: list[int],
     remote_slots: list[int],
 ) -> tuple[list[int], list[int], list[int]]:
-    """Apply per-request slot bases to a cached ``MambaOffsetTemplate``.
+    """Apply per-request slot bases to a cached `MambaOffsetTemplate`.
 
     Conv sub-projection entries (all slots) come first, followed by one ssm
     entry per slot.
@@ -609,8 +586,8 @@ def compute_mamba_conv_split_count(
 ) -> int:
     """Number of leading conv entries in a KDA layer transfer plan.
 
-    Entries ``[:count]`` are conv sub-projections (conv region/session);
-    entries ``[count:]`` are the per-slot ssm state (ssm region/session).
+    Entries `[:count]` are conv sub-projections (conv region/session);
+    entries `[count:]` are the per-slot ssm state (ssm region/session).
     """
     return len(local_slots) * len(split_info.local_conv_offsets)
 
@@ -618,9 +595,9 @@ def compute_mamba_conv_split_count(
 class HeadLayout(NamedTuple):
     """Byte addressing of one attention layer's KV heads in its region.
 
-    Offsets are relative to the layer's registered region. ``plane_offsets``
+    Offsets are relative to the layer's registered region. `plane_offsets`
     holds the start of the K and V planes when they are stored apart, or
-    ``(0,)`` when K and V are packed into each head's content.
+    `(0,)` when K and V are packed into each head's content.
     """
 
     num_heads: int
@@ -755,6 +732,72 @@ def _element_runs(
     ]
 
 
+class Nvfp4PageSplit(NamedTuple):
+    """Bytes per token of one KV head in the data and scale parts of a side."""
+
+    data_bytes: int
+    scale_bytes: int
+
+
+def get_nvfp4_page_split(spec: KVCacheSpec | None) -> Nvfp4PageSplit | None:
+    """How a packed NVFP4 page splits its K/V sides, None for other caches.
+
+    The page is `[K side | V side]`, and each side stores every KV head's FP4
+    data (two values a byte) before every KV head's block scales (one byte per
+    16 values). Its `2 * num_kv_heads` head slots of data + scale bytes are
+    therefore not per-head rows: a KV head is one data run and one scale run
+    per side.
+    """
+    if not (
+        isinstance(spec, AttentionSpec)
+        and spec.kv_quant_mode.is_nvfp4
+        and spec.state_content_bytes is not None
+    ):
+        return None
+    split = Nvfp4PageSplit(spec.head_size // 2, spec.head_size // 16)
+    if (
+        spec.kv_head_major_slots
+        or spec.head_size_v != spec.head_size
+        or spec.num_heads != 2 * spec.num_kv_heads
+        or spec.state_content_bytes != sum(split)
+    ):
+        raise ValueError(
+            "MoRIIO cannot slice KV heads of this packed NVFP4 page: "
+            f"num_head_slots={spec.num_head_slots}, "
+            f"state_content_bytes={spec.state_content_bytes}, "
+            f"kv_head_major_slots={spec.kv_head_major_slots}"
+        )
+    return split
+
+
+def _nvfp4_head_runs(
+    layout: HeadLayout, split: Nvfp4PageSplit, first_head: int, num_heads: int
+) -> list[tuple[int, int]]:
+    """(offset in block, size) runs of KV heads of a split NVFP4 page.
+
+    A data run and a scale run per side, K side first. The page must be
+    head-major, as the kernels writing it require.
+    """
+    hb = layout.head_bytes
+    if not (
+        layout.plane_offsets == (0,)
+        and layout.num_heads % 2 == 0
+        and hb == sum(split)
+        and layout.token_stride == hb
+        and layout.head_stride == layout.num_tokens * hb
+    ):
+        raise ValueError(f"Not a head-major NVFP4 page: {layout}")
+    num_kv_heads = layout.num_heads // 2
+    data = layout.num_tokens * split.data_bytes
+    scale = layout.num_tokens * split.scale_bytes
+    runs: list[tuple[int, int]] = []
+    for side in (0, num_kv_heads * layout.head_stride):
+        runs.append((side + first_head * data, num_heads * data))
+        scales = side + num_kv_heads * data
+        runs.append((scales + first_head * scale, num_heads * scale))
+    return runs
+
+
 def compute_head_slice_offsets(
     local: HeadLayout,
     remote: HeadLayout,
@@ -766,12 +809,15 @@ def compute_head_slice_offsets(
     merge_fn: Callable[
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
+    nvfp4_split: Nvfp4PageSplit | None = None,
 ) -> tuple[list[int], list[int], list[int]]:
-    """Offsets copying ``num_heads`` heads of each local block into a remote one.
+    """Offsets copying `num_heads` heads of each local block into a remote one.
 
-    Local heads ``[local_head, local_head + num_heads)`` land on remote heads
-    ``[remote_head, remote_head + num_heads)``; every other remote head is
-    left for the producer rank that holds it.
+    Local heads `[local_head, local_head + num_heads)` land on remote heads
+    `[remote_head, remote_head + num_heads)`; every other remote head is
+    left for the producer rank that holds it. With `nvfp4_split` the heads
+    are the KV heads of a packed NVFP4 page (see `get_nvfp4_page_split`),
+    not its head slots.
     """
     if (
         local.num_tokens != remote.num_tokens
@@ -782,29 +828,37 @@ def compute_head_slice_offsets(
             "MoRIIO head slicing needs the same block size, head size and K/V "
             f"planes on both sides, got local {local} and remote {remote}"
         )
+    slots_per_head = 1 if nvfp4_split is None else 2
+    local_heads = local.num_heads // slots_per_head
+    remote_heads = remote.num_heads // slots_per_head
     if not (
         local_head >= 0
-        and local_head + num_heads <= local.num_heads
+        and local_head + num_heads <= local_heads
         and remote_head >= 0
-        and remote_head + num_heads <= remote.num_heads
+        and remote_head + num_heads <= remote_heads
     ):
         raise ValueError(
             f"Head slice local [{local_head}, {local_head + num_heads}) / remote "
             f"[{remote_head}, {remote_head + num_heads}) is outside "
-            f"{local.num_heads} / {remote.num_heads} heads"
+            f"{local_heads} / {remote_heads} heads"
         )
     if len(local_block_ids) > len(remote_block_ids):
         raise ValueError(
             "local_block_ids longer than remote_block_ids: "
             f"{len(local_block_ids)} > {len(remote_block_ids)}"
         )
-    local_kind, local_runs = _head_runs(local, local_head, num_heads)
-    remote_kind, remote_runs = _head_runs(remote, remote_head, num_heads)
-    if local_kind != remote_kind:
-        # The two sides order heads and tokens differently: pair single
-        # (token, head) runs, which merge_fn coalesces where both are adjacent.
-        local_runs = _element_runs(local, local_head, num_heads)
-        remote_runs = _element_runs(remote, remote_head, num_heads)
+    if nvfp4_split is not None:
+        local_runs = _nvfp4_head_runs(local, nvfp4_split, local_head, num_heads)
+        remote_runs = _nvfp4_head_runs(remote, nvfp4_split, remote_head, num_heads)
+    else:
+        local_kind, local_runs = _head_runs(local, local_head, num_heads)
+        remote_kind, remote_runs = _head_runs(remote, remote_head, num_heads)
+        if local_kind != remote_kind:
+            # The two sides order heads and tokens differently: pair single
+            # (token, head) runs, which merge_fn coalesces where both are
+            # adjacent.
+            local_runs = _element_runs(local, local_head, num_heads)
+            remote_runs = _element_runs(remote, remote_head, num_heads)
 
     offset_local: list[int] = []
     offset_remote: list[int] = []
@@ -885,7 +939,7 @@ def compute_mamba_slice_offsets(
 ) -> tuple[list[int], list[int], list[int], int]:
     """(local, remote, sizes, n_conv) moving one target's share of the state.
 
-    Entries ``[:n_conv]`` address the conv region; the rest the SSM region.
+    Entries `[:n_conv]` address the conv region; the rest the SSM region.
     Each conv sub-projection and the SSM state are sharded across TP ranks
     independently, so each is sliced or gathered on its own.
     """

@@ -6,8 +6,8 @@ set -euo pipefail
 
 readonly BUCKET="vllm-wheels"
 readonly PREFIX="xpu"
-readonly WHEEL_URL="https://github.com/intel/intel-xpu-backend-for-triton/releases/download/v3.8.0/triton-3.8.0+xpu-py3-none-any.whl"
-readonly WHEEL_SHA256="f16b24efcc789e3987ee602b7442e11cac0b9d3bc78f96e3a2ec3cdd5a60b7bb"
+readonly WHEEL_URL="https://github.com/intel/intel-xpu-backend-for-triton/releases/download/v3.9.0/triton-3.9.0+xpu-py3-none-any.whl"
+readonly WHEEL_SHA256="52ac246a9ba8ec94efbbd632e95df9016c97e527ed5a260b37daa4285f9611f0"
 readonly WHEEL_FILENAME="${WHEEL_URL##*/}"
 readonly ENCODED_WHEEL_FILENAME="${WHEEL_FILENAME/+/%2B}"
 readonly S3_PREFIX="s3://${BUCKET}/${PREFIX}/"

@@ -7,11 +7,11 @@ instead of single-vector representations or cross-encoder concatenation.
 
 This module provides:
 
-- :class:`ColBERTMixin` — mixin that adds ColBERT late-interaction support
+- `ColBERTMixin` — mixin that adds ColBERT late-interaction support
   to any embedding model.
-- :class:`ColBERTModel` — ColBERT with BERT backbone (original architecture).
-- :class:`ColBERTModernBertModel` — ColBERT with ModernBERT backbone.
-- :class:`ColBERTJinaRobertaModel` — ColBERT with Jina XLM-RoBERTa backbone.
+- `ColBERTModel` — ColBERT with BERT backbone (original architecture).
+- `ColBERTModernBertModel` — ColBERT with ModernBERT backbone.
+- `ColBERTJinaRobertaModel` — ColBERT with Jina XLM-RoBERTa backbone.
 
 Reference: https://arxiv.org/abs/2004.12832
 """
@@ -44,11 +44,11 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
 
     **Integration:**
 
-    1. Inherit from both ``ColBERTMixin`` and ``nn.Module``.
-    2. In ``__init__``: call ``super().__init__()``, then
-       :meth:`_init_colbert_components`, then create ``self.model``
-       (the backbone) and ``self.pooler`` via :meth:`_build_colbert_pooler`.
-    3. In ``load_weights``: use :meth:`_load_colbert_weights` to separate
+    1. Inherit from both `ColBERTMixin` and `nn.Module`.
+    2. In `__init__`: call `super().__init__()`, then
+       `_init_colbert_components`, then create `self.model`
+       (the backbone) and `self.pooler` via `_build_colbert_pooler`.
+    3. In `load_weights`: use `_load_colbert_weights` to separate
        the ColBERT projection weight, then delegate the rest to the backbone.
     """
 
@@ -71,7 +71,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
         Args:
             hidden_size: Hidden dimension of the encoder backbone.
             colbert_dim: Output dimension for ColBERT embeddings.  If
-                ``None``, will be inferred from weights during loading (or
+                `None`, will be inferred from weights during loading (or
                 auto-loaded from sentence-transformers Dense layers).
             head_dtype: Data type for the projection layer.
 
@@ -101,9 +101,9 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
     def _build_colbert_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         """Build pooler for ColBERT token embeddings.
 
-        When ``colbert_linear`` is set, it is used as the projector.
-        Otherwise ``pooler_for_token_embed`` falls back to auto-loading
-        sentence-transformers Dense layers (``1_Dense/`` etc.).
+        When `colbert_linear` is set, it is used as the projector.
+        Otherwise `pooler_for_token_embed` falls back to auto-loading
+        sentence-transformers Dense layers (`1_Dense/` etc.).
         """
         return pooler_for_token_embed(
             pooler_config,
@@ -116,7 +116,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
     def get_colbert_dim_from_config(cls, hf_config) -> int | None:
         """Extract ColBERT dimension from a HuggingFace config.
 
-        Checks ``colbert_dim``, ``dim`` and ``projection_dim`` in that order.
+        Checks `colbert_dim`, `dim` and `projection_dim` in that order.
         """
         return (
             getattr(hf_config, "colbert_dim", None)
@@ -138,16 +138,16 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
 
         Scans *weights* for entries whose name ends with one of
         *colbert_weight_names*.  The matching weight is loaded into
-        ``self.colbert_linear`` (creating it first if ``colbert_dim`` was
+        `self.colbert_linear` (creating it first if `colbert_dim` was
         not known at init time).
 
         Args:
-            weights: Iterable of ``(name, tensor)`` weight pairs.
+            weights: Iterable of `(name, tensor)` weight pairs.
             colbert_weight_names: Suffixes that identify the ColBERT linear
                 weight.
 
         Returns:
-            ``(remaining_weights, loaded_names)`` — the weights that were
+            `(remaining_weights, loaded_names)` — the weights that were
             **not** consumed and the set of names that were loaded.
 
         """
@@ -195,7 +195,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
 class ColBERTModel(ColBERTMixin, BertEmbeddingModel):
     """ColBERT late interaction model with BERT backbone.
 
-    Supports the ``token_embed`` task (per-token embeddings for late
+    Supports the `token_embed` task (per-token embeddings for late
     interaction).  MaxSim scoring is computed externally.
     """
 
@@ -238,8 +238,8 @@ from .modernbert import ModernBertModel  # noqa: E402
 class ColBERTModernBertModel(ColBERTMixin, nn.Module):
     """ColBERT late interaction model with ModernBERT backbone.
 
-    For ``lightonai/GTE-ModernColBERT-v1`` and similar models.
-    The projection is auto-loaded from sentence-transformers ``1_Dense/``
+    For `lightonai/GTE-ModernColBERT-v1` and similar models.
+    The projection is auto-loaded from sentence-transformers `1_Dense/`
     when not present in the main checkpoint.
     """
 
@@ -314,7 +314,7 @@ from .bert_with_rope import JinaRobertaModel  # noqa: E402
 class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
     """ColBERT late interaction model with Jina XLM-RoBERTa backbone.
 
-    For ``jinaai/jina-colbert-v2`` and similar models.
+    For `jinaai/jina-colbert-v2` and similar models.
     """
 
     is_pooling_model = True
@@ -378,9 +378,9 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
 class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
     """ColBERT late interaction model with LFM2 backbone.
 
-    For ``LiquidAI/LFM2-ColBERT-350M`` and similar models.
+    For `LiquidAI/LFM2-ColBERT-350M` and similar models.
 
-    The projection is auto-loaded from sentence-transformers ``1_Dense/``
+    The projection is auto-loaded from sentence-transformers `1_Dense/`
     when not present in the main checkpoint.
     """
 

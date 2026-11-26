@@ -6,12 +6,12 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputBackend, StructuredOutputConstraint, StructuredOutputsParams,
+    StructuredOutputConstraint, StructuredOutputsParams,
 };
 use vllm_parser::output_grammar::{BuiltOutputGrammar, GrammarCoverage};
 use vllm_text::TextRequest;
 use xgrammar_structural_tag::StructuralTag;
-use xgrammar_structural_tag::format::{Format, GrammarFormat, TagFormat};
+use xgrammar_structural_tag::format::{Format, GrammarSyntax, TagFormat};
 
 use crate::{Error, Result};
 
@@ -22,8 +22,8 @@ use crate::{Error, Result};
 /// options: no backend reads them per request, only from the engine config.
 ///
 /// Returns `None` when the constraint must stay on its own wire field, so the
-/// request keeps today's behavior: a grammar that is not XGrammar EBNF (such
-/// as Lark), or a structural tag that does not parse.
+/// request keeps today's behavior: a JSON schema string or a structural tag
+/// that does not parse.
 pub(crate) fn answer_format(params: &StructuredOutputsParams) -> Option<Format> {
     Some(match &params.constraint {
         StructuredOutputConstraint::Json(Value::String(schema)) => {
@@ -35,15 +35,30 @@ pub(crate) fn answer_format(params: &StructuredOutputsParams) -> Option<Format> 
         StructuredOutputConstraint::Choice(choices) => {
             Format::or(choices.iter().map(Format::const_string).collect())
         }
-        // Lark rules use `:`; XGrammar EBNF rules use `::=`.
-        StructuredOutputConstraint::Grammar(grammar) if grammar.contains("::=") => {
-            Format::Grammar(GrammarFormat {
-                grammar: grammar.clone(),
-            })
+        StructuredOutputConstraint::Grammar(grammar) => {
+            let syntax = if grammar_is_likely_lark(grammar) {
+                GrammarSyntax::Lark
+            } else {
+                GrammarSyntax::Ebnf
+            };
+            Format::grammar(grammar.clone(), syntax)
         }
-        StructuredOutputConstraint::Grammar(_) => return None,
         StructuredOutputConstraint::StructuralTag(tag) => structural_tag_format(tag)?,
     })
+}
+
+/// Check if grammar appears to use Lark syntax: no line outside a `#` or `//`
+/// comment defines an EBNF rule with `::=`.
+///
+/// Port of Python's `grammar_is_likely_lark`, which the engine's xgrammar
+/// backend also uses to pick the syntax of a grammar left on its wire field, so
+/// a grammar has the same syntax whether it is composed here or compiled there.
+fn grammar_is_likely_lark(grammar: &str) -> bool {
+    !grammar.is_empty()
+        && !grammar.split('\n').any(|line| {
+            let code_end = [line.find('#'), line.find("//")].into_iter().flatten().min();
+            line[..code_end.unwrap_or(line.len())].contains("::=")
+        })
 }
 
 /// The legacy structural tag shape: free text with JSON tags behind triggers.
@@ -102,10 +117,8 @@ pub(crate) fn apply_output_grammar(
     })?;
 
     // Overwrite any existing structured output settings with the structural tag constraint.
-    request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
-        backend: StructuredOutputBackend::Xgrammar,
-        ..StructuredOutputsParams::structural_tag(structural_tag)
-    });
+    request.sampling_params.structured_outputs =
+        Some(StructuredOutputsParams::structural_tag(structural_tag));
     request.reasoning_ended = match built.coverage {
         GrammarCoverage::FromTokenZero => Some(true),
         GrammarCoverage::FinalOutputOnly => None,
@@ -150,9 +163,27 @@ mod tests {
             ),
             (
                 StructuredOutputsParams::grammar("root ::= \"a\""),
-                Format::Grammar(GrammarFormat {
-                    grammar: "root ::= \"a\"".to_string(),
-                }),
+                Format::grammar("root ::= \"a\"", GrammarSyntax::Ebnf),
+            ),
+            (
+                StructuredOutputsParams::grammar("# Answer\nroot ::= \"a\" # or \"b\""),
+                Format::grammar("# Answer\nroot ::= \"a\" # or \"b\"", GrammarSyntax::Ebnf),
+            ),
+            (
+                StructuredOutputsParams::grammar("start: \"a\""),
+                Format::grammar("start: \"a\"", GrammarSyntax::Lark),
+            ),
+            // Lark, whose comments mention EBNF.
+            (
+                StructuredOutputsParams::grammar("// Like `root ::= \"a\"` in EBNF.\nstart: \"a\""),
+                Format::grammar(
+                    "// Like `root ::= \"a\"` in EBNF.\nstart: \"a\"",
+                    GrammarSyntax::Lark,
+                ),
+            ),
+            (
+                StructuredOutputsParams::grammar("start: \"a\" # not `root ::= \"a\"`"),
+                Format::grammar("start: \"a\" # not `root ::= \"a\"`", GrammarSyntax::Lark),
             ),
             (
                 StructuredOutputsParams::structural_tag(
@@ -194,7 +225,6 @@ mod tests {
     fn answer_format_leaves_other_constraints_on_their_wire_field() {
         let cases = [
             StructuredOutputsParams::json(Value::String("{".to_string())),
-            StructuredOutputsParams::grammar("start: \"a\""),
             StructuredOutputsParams::structural_tag(r#"{"structures": [{"begin": "<a>"}]}"#),
             StructuredOutputsParams::structural_tag(r#"{"format": {"type": "unknown"}}"#),
         ];
@@ -214,7 +244,6 @@ mod tests {
 
         assert_eq!(request.reasoning_ended, Some(true));
         let params = request.sampling_params.structured_outputs.unwrap();
-        assert_eq!(params.backend, StructuredOutputBackend::Xgrammar);
         let serialized = params.constraint.as_structural_tag().unwrap();
         let value: serde_json::Value = serde_json::from_str(serialized).unwrap();
         assert_eq!(value["type"], "structural_tag");
