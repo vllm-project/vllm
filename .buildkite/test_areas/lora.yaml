@@ -9,6 +9,8 @@ steps:
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/lora
+  - vllm/model_executor/layers/fused_moe/experts/triton_moe.py
+  - vllm/models/muse_spark/nvidia
   - tests/lora
   commands:
     # Which tests share a shard varies, and forking an engine is unsafe once an

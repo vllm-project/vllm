@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 from torch import nn
@@ -433,6 +433,15 @@ class MuseSparkMoE(nn.Module):
             and not isinstance(quant_config, ModelOptNvFp4Config)
         ):
             raise NotImplementedError("MuseSpark MegaMoE supports BF16 and NVFP4.")
+        lora = vllm_config.lora_config
+        if (
+            mega_backend
+            and lora
+            and (not lora.target_modules or "experts" in lora.target_modules)
+        ):
+            raise NotImplementedError(
+                "Muse Spark MegaMoE does not support routed expert LoRA."
+            )
         self.use_mega_moe = mega_backend
         self.is_nvfp4_mega_moe = mega_backend and layer_is_nvfp4
 
@@ -1971,6 +1980,7 @@ class MuseSparkModel(LlamaModel):
 
 
 class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
+    is_3d_moe_weight: ClassVar[bool] = True
     model_cls = MuseSparkModel
     decoder_layer_cls = MuseSparkDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (

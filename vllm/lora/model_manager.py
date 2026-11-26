@@ -165,7 +165,7 @@ class LoRAModelManager:
             vllm_config and vllm_config.parallel_config.enable_expert_parallel
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
-        self._create_lora_modules()
+        self._create_lora_modules(vllm_config)
 
         self._classification_head: tuple[str, BaseClassificationHeadWithLoRA] | None = (
             None
@@ -474,7 +474,7 @@ class LoRAModelManager:
         self._last_mapping = None
         self._last_slot_layout = None
 
-    def _create_lora_modules(self):
+    def _create_lora_modules(self, vllm_config: VllmConfig):
         def _parent_module(module_name: str) -> str:
             # module name is a dot separated name.
             # for example:
@@ -560,7 +560,11 @@ class LoRAModelManager:
 
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
+            layer_config = self.model.config
             if isinstance(module, MoERunner):
+                # Multimodal text configs can omit the checkpoint architecture.
+                if self._is_3d_moe_model and not layer_config.architectures:
+                    layer_config = vllm_config.model_config.hf_config
                 # packed_moduled_lst is used here to just determine whether to
                 # instantiate FusedMoE3DWithLoRA or FusedMoEWithLoRA, and the
                 # difference between these two LoRA layers is whether the
@@ -581,7 +585,7 @@ class LoRAModelManager:
                     self.lora_slots,
                     self.lora_config,
                     packed_moduled_lst,
-                    self.model.config,
+                    layer_config,
                 )
             new_module = replace_submodule(self.model, module_name, new_module)
 

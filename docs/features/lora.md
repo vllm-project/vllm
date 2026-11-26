@@ -483,7 +483,24 @@ vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
 
 For Muse Spark text attention, use `--lora-target-modules qkv_proj` to keep
-LoRA on the attention projection. The routed experts do not support LoRA.
+LoRA on the attention projection.
 The packed module targets the fused query, key, value,
 and output-gate projection. PEFT adapters can also target the individual
 Hugging Face modules `q_proj`, `k_proj`, `v_proj`, and `gate_proj`.
+
+On NVIDIA Hopper, use `--lora-target-modules experts` for unquantized Muse
+Spark routed experts, or `--lora-target-modules qkv_proj experts` for both
+attention and experts. For the Hugging Face model, set PEFT's
+`target_parameters=["mlp.experts.gate_up_proj", "mlp.experts.down_proj"]` to
+adapt the stacked expert weights. The Triton backend applies both updates
+before the per-expert RMSNorm and subsequent router-weighted sum.
+
+For BF16 Muse Spark on Hopper, the Python API also provides an experimental
+merge-order path for FP32 expert adapters. Set `lora_dtype=torch.float32`,
+`lora_target_modules=["experts"]`, `max_loras=1`, `max_lora_rank=8`, and
+`enforce_eager=True` with tensor parallel size 1 or 2 and expert parallelism
+disabled. Each weight tile computes the FP32 low-rank update, rounds it to
+BF16, adds it to the base weight in BF16, and then computes the projection.
+This preserves per-request adapter selection without storing a merged copy
+of every expert. Numerical comparisons used a rank-8 adapter with unit
+scaling. Latency depends on the expert dimensions and batch shape.

@@ -147,6 +147,7 @@ def test_muse_spark_attention_only_lora(targets, expert_lora):
     with set_current_vllm_config(config):
         moe = _moe_config(is_lora_enabled=True)
     assert moe.is_lora_enabled == expert_lora
+    _validate_route_major_deployment(moe, supports_lora=True)
     if expert_lora:
         with pytest.raises(NotImplementedError, match="MoE LoRA"):
             _validate_route_major_deployment(moe)
