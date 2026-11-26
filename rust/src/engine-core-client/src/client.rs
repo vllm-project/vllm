@@ -345,17 +345,37 @@ impl EngineCoreClient {
     /// handshake. In bootstrapped mode it binds the provided frontend
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
+        Self::connect_internal(config, None).await
+    }
+
+    /// Connect with an explicit input-socket send timeout override for tests.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn connect_with_input_send_timeout(
+        config: EngineCoreClientConfig,
+        input_send_timeout: Duration,
+    ) -> Result<Self> {
+        Self::connect_internal(config, Some(input_send_timeout)).await
+    }
+
+    async fn connect_internal(
+        config: EngineCoreClientConfig,
+        input_send_timeout: Option<Duration>,
+    ) -> Result<Self> {
         config.validate()?;
         let runtime = build_zmq_runtime();
         let handle = runtime.handle().clone();
-        let connect_task =
-            AbortOnDropHandle::new(handle.spawn(Self::connect_on_runtime(config, runtime)));
+        let connect_task = AbortOnDropHandle::new(handle.spawn(Self::connect_on_runtime(
+            config,
+            runtime,
+            input_send_timeout,
+        )));
         connect_task.await?
     }
 
     async fn connect_on_runtime(
         config: EngineCoreClientConfig,
         runtime: BackgroundShutdownRuntime,
+        input_send_timeout: Option<Duration>,
     ) -> Result<Self> {
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
@@ -413,7 +433,7 @@ impl EngineCoreClient {
             }
         };
 
-        Self::from_connected(config, connected, runtime).await
+        Self::from_connected(config, connected, runtime, input_send_timeout).await
     }
 
     /// Create a new client instance from the connected transport state after
@@ -422,20 +442,28 @@ impl EngineCoreClient {
         config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
         runtime: BackgroundShutdownRuntime,
+        #[cfg_attr(not(any(test, feature = "test-util")), allow(unused_variables))]
+        input_send_timeout: Option<Duration>,
     ) -> Result<Self> {
         validate_lora_capabilities(&connected.engines)?;
         let prompt_block_hasher = prompt_block_hasher(&connected.engines);
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
-        let inner = Arc::new(ClientInner::new(
+        let inner = ClientInner::new(
             connected.input_send,
             runtime.handle().clone(),
             config.model_name.clone(),
             config.client_index,
             config.engine_stats_enabled,
             &engines,
-        ));
+        );
+        #[cfg(any(test, feature = "test-util"))]
+        let inner = match input_send_timeout {
+            Some(timeout) => inner.with_input_send_timeout(timeout),
+            None => inner,
+        };
+        let inner = Arc::new(inner);
         let input_watch_task =
             AbortOnDropHandle::new(runtime.spawn(transport::run_input_watch_loop(
                 connected.input_recv,
