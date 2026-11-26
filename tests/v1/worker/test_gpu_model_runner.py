@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -33,6 +34,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.binding import fit_mamba_blocks_to_attention
 from vllm.v1.kv_cache_interface import (
@@ -309,11 +311,13 @@ def test_mamba_blocks_divide_resized_attention_blocks(
     assert layer_configs["mamba.0"].spec.block_size == mamba_block_size
 
 
-@pytest.mark.parametrize("draft_kv_heads", [2, 16])
+@pytest.mark.parametrize("draft_kv_heads", [2, 6, 16])
 def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
     """An EAGLE drafter with more KV per token than the target sets the largest
     attention page. Sized for the target alone, the block makes that page several
-    Mamba pages, and the planner pads every Mamba page up to it."""
+    Mamba pages, and the planner pads every Mamba page up to it. A drafter page
+    that is not a multiple of the target's (3072 and 2048 bytes per token with 6
+    heads) must not grow the planned blocks to an lcm none of them divides."""
     from tests.v1.attention.utils import create_vllm_config
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
@@ -340,6 +344,32 @@ def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
     )
     draft_page = cache_config.block_size * 2 * draft_kv_heads * 128 * 2
     assert cache_config.mamba_page_size_padded == max(target_page, draft_page)
+
+    block_size = cache_config.block_size
+    layer_configs = {
+        "mamba.0": _CheckpointingMambaLayer(None).get_kv_cache_config(vllm_config),
+        "attn.0": FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=block_size,
+                num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+                head_size=model_config.get_head_size(),
+                dtype=model_config.dtype,
+            )
+        ),
+        "draft.0": FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=block_size,
+                num_kv_heads=draft_kv_heads,
+                head_size=128,
+                dtype=model_config.dtype,
+            )
+        ),
+    }
+    block_sizes = [
+        lc.spec.block_size
+        for lc in unify_kv_cache_spec_page_size(layer_configs).values()
+    ]
+    assert math.lcm(*block_sizes) == max(block_sizes)
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
