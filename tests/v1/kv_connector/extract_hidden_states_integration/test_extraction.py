@@ -359,6 +359,10 @@ def _run_vlm_extraction(vllm_runner, tmp_path, case, prompt, *, chunk_size=None)
                 chunk_size=1024,
             ),
             id="qwen3-vl",
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Qwen3-VL hidden states differ across prefill modes on ROCm",
+            ),
         ),
     ],
 )
