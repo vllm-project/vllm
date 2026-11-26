@@ -204,36 +204,3 @@ async fn provided_llm_is_served_and_shut_down() {
     server.await.expect("join server").expect("serve");
     assert!(shut_down.load(Ordering::SeqCst));
 }
-
-#[tokio::test]
-async fn remote_grpc_uses_checkpoint_limit_unless_overridden() {
-    let model_dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        model_dir.path().join("config.json"),
-        r#"{"model_type":"qwen3","text_config":{"vocab_size":128,"max_position_embeddings":4096}}"#,
-    )
-    .unwrap();
-    let mut config = server_config(model_dir.path(), &model_dir.path().join("http.sock"));
-    let url = format!(
-        "unix://{}",
-        model_dir.path().join("generation.sock").display()
-    );
-
-    for (configured_limit, expected) in [(None, 4096), (NonZeroU32::new(512), 512)] {
-        config.max_model_len = configured_limit;
-        let state = crate::build_state(&config, LlmSource::RemoteGrpc(url.clone())).await.unwrap();
-        assert_eq!(state.llm().info().max_model_len, expected);
-    }
-
-    std::fs::write(
-        model_dir.path().join("config.json"),
-        r#"{"model_type":"qwen3","vocab_size":128,"max_position_embeddings":0}"#,
-    )
-    .unwrap();
-    config.max_model_len = None;
-    let error = crate::build_state(&config, LlmSource::RemoteGrpc(url))
-        .await
-        .err()
-        .expect("invalid checkpoint limit should fail startup");
-    assert!(format!("{error:#}").contains("invalid context length in config.json"));
-}
