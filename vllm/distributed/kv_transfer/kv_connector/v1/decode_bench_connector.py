@@ -41,7 +41,9 @@ Example:
 
 """
 
+from collections import defaultdict
 from dataclasses import dataclass
+from math import gcd, prod
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -57,6 +59,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
@@ -77,6 +80,116 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _CircularZeroBucket:
+    tensors: list[torch.Tensor]
+    segments: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+    max_chunks: int
+    num_segments: int
+
+    def zero(self, block_ids: list[int]) -> None:
+        if not block_ids:
+            return
+        device = self.tensors[0].device
+        if device.type == "cpu":
+            indices = torch.tensor(block_ids, dtype=torch.int64, device=device)
+        else:
+            indices = async_tensor_h2d(block_ids, device=device, dtype=torch.int64)
+        if self.segments is not None:
+            from vllm.v1.worker.utils import _zero_kv_blocks_kernel
+
+            _zero_kv_blocks_kernel[
+                (len(block_ids), self.num_segments, self.max_chunks)
+            ](*self.segments, indices, BLOCK_SIZE=1024)
+        tensors = self.tensors[self.num_segments :] if self.segments else self.tensors
+        for tensor in tensors:
+            # FP8 index_fill is not supported on every backend.
+            if tensor.dtype.is_floating_point and tensor.element_size() == 1:
+                tensor = tensor.view(torch.uint8)
+            tensor.index_fill_(0, indices, 0)
+
+
+def _cache_views_may_overlap(left: torch.Tensor, right: torch.Tensor) -> bool:
+    if not left.numel() or not right.numel():
+        return False
+
+    def row_span(view: torch.Tensor) -> int:
+        return view.element_size() * (
+            1
+            + sum(
+                (size - 1) * stride
+                for size, stride in zip(view.shape[1:], view.stride()[1:])
+            )
+        )
+
+    if not left.ndim or not right.ndim:
+        return True
+    # Row starts differ by multiples of this period. Overlapping intervals
+    # are impossible if neither row reaches the other within one period.
+    period = gcd(
+        left.stride(0) * left.element_size(), right.stride(0) * right.element_size()
+    )
+    if not period:
+        return True
+    offset = (right.data_ptr() - left.data_ptr()) % period
+    return offset < row_span(left) or period - offset < row_span(right)
+
+
+def _make_circular_zero_bucket(
+    tensors: list[torch.Tensor],
+    storage_views: dict[tuple[torch.device, int], list[tuple[int, torch.Tensor]]],
+    group_idx: int,
+) -> _CircularZeroBucket:
+    dense, fallback = [], []
+    addresses, strides, sizes = [], [], []
+    for tensor in tensors:
+        page_bytes = prod(tensor.shape[1:]) * tensor.element_size()
+        stride_bytes = tensor.stride(0) * tensor.element_size()
+        address = tensor.data_ptr()
+        if (
+            tensor.device.type == "cuda"
+            and tensor.shape[0] > 0
+            and tensor[0].is_contiguous()
+            and stride_bytes >= page_bytes
+            and page_bytes > 0
+            and page_bytes % 4 == 0
+            and stride_bytes % 4 == 0
+            and address % 4 == 0
+            and sum(
+                view is tensor
+                for owner, view in storage_views[
+                    tensor.device, tensor.untyped_storage().data_ptr()
+                ]
+                if owner == group_idx
+            )
+            == 1
+            and all(
+                not _cache_views_may_overlap(tensor, view)
+                for owner, view in storage_views[
+                    tensor.device, tensor.untyped_storage().data_ptr()
+                ]
+                if owner == group_idx and view is not tensor
+            )
+        ):
+            dense.append(tensor)
+            addresses.append(address)
+            strides.append(stride_bytes // 4)
+            sizes.append(page_bytes // 4)
+        else:
+            fallback.append(tensor)
+    if len(dense) < 2:
+        return _CircularZeroBucket(tensors, None, 0, 0)
+    device = dense[0].device
+    segments = (
+        torch.tensor(addresses, dtype=torch.uint64, device=device),
+        torch.tensor(strides, dtype=torch.int64, device=device),
+        torch.tensor(sizes, dtype=torch.int64, device=device),
+    )
+    return _CircularZeroBucket(
+        dense + fallback, segments, cdiv(max(sizes), 1024), len(dense)
+    )
 
 
 def _get_fp8_dtype(spec: KVCacheSpec, cache_dtype: str) -> torch.dtype | None:
@@ -458,6 +571,8 @@ class DecodeBenchConnectorWorker:
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
             if issubclass(group.manager_cls, CircularBufferManager)
         }
+        self._circular_zero_buckets: dict[int, list[_CircularZeroBucket]] = {}
+        self._aliased_circular_groups: set[int] = set()
         num_zeroed_groups = len(
             self.group_to_layers.keys()
             - self._startup_fill_group_ids
@@ -473,6 +588,44 @@ class DecodeBenchConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Store references to the KV cache tensors."""
         self.kv_caches = kv_caches
+
+        storage_views: dict[
+            tuple[torch.device, int], list[tuple[int, torch.Tensor]]
+        ] = defaultdict(list)
+        for group_idx, layers in self.group_to_layers.items():
+            for layer in layers:
+                cache = kv_caches.get(layer)
+                tensors = cache if isinstance(cache, (tuple, list)) else (cache,)
+                for tensor in tensors:
+                    if isinstance(tensor, torch.Tensor):
+                        key = tensor.device, tensor.untyped_storage().data_ptr()
+                        storage_views[key].append((group_idx, tensor))
+        self._aliased_circular_groups = {
+            group_idx
+            for views in storage_views.values()
+            for group_idx, tensor in views
+            if group_idx in self._zero_fill_group_ids
+            and any(
+                other_group != group_idx and _cache_views_may_overlap(tensor, other)
+                for other_group, other in views
+            )
+        }
+
+        self._circular_zero_buckets.clear()
+        for group_idx in self._zero_fill_group_ids:
+            caches = [kv_caches.get(layer) for layer in self.group_to_layers[group_idx]]
+            buckets: dict[tuple[torch.device, int], list[torch.Tensor]] = defaultdict(
+                list
+            )
+            for cache in caches:
+                if not isinstance(cache, torch.Tensor) or cache.ndim == 0:
+                    break
+                buckets[cache.device, cache.shape[0]].append(cache)
+            else:
+                self._circular_zero_buckets[group_idx] = [
+                    _make_circular_zero_bucket(tensors, storage_views, group_idx)
+                    for tensors in buckets.values()
+                ]
 
         logger.debug(
             "DecodeBenchConnector: Registered %d KV cache layers",
@@ -534,10 +687,17 @@ class DecodeBenchConnectorWorker:
 
         assert self.kv_caches is not None, "KV caches must be registered before filling"
 
+        circular_ids: dict[int, dict[int, None]] = defaultdict(dict)
         for req_id, (block_ids_per_group, num_tokens) in metadata.reqs_to_fill.items():
             # Fill blocks for each KV cache group
             for group_idx, block_ids in enumerate(block_ids_per_group):
-                self._fill_blocks(group_idx, block_ids, num_tokens)
+                if group_idx in self._circular_zero_buckets:
+                    if group_idx in self._aliased_circular_groups:
+                        self._zero_circular_blocks(group_idx, dict.fromkeys(block_ids))
+                        continue
+                    circular_ids[group_idx].update(dict.fromkeys(block_ids))
+                else:
+                    self._fill_blocks(group_idx, block_ids, num_tokens)
 
             block_counts = tuple(len(group) for group in block_ids_per_group)
             logger.debug(
@@ -549,6 +709,14 @@ class DecodeBenchConnectorWorker:
                 req_id,
                 ", ".join(map(str, block_counts)),
             )
+
+        for group_idx, unique_ids in circular_ids.items():
+            self._zero_circular_blocks(group_idx, unique_ids)
+
+    def _zero_circular_blocks(self, group_idx: int, block_ids: dict[int, None]):
+        for bucket in self._circular_zero_buckets[group_idx]:
+            capacity = bucket.tensors[0].shape[0]
+            bucket.zero([idx for idx in block_ids if 0 <= idx < capacity])
 
     def _fill_blocks(self, group_idx: int, block_ids: list[int], num_tokens: int):
         """Fill specified blocks with dummy values for a specific KV cache group.
