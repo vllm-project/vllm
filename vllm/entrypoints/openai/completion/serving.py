@@ -45,12 +45,13 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.outputs import RequestOutput
+from vllm.renderers import BaseRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import decode_token_ids_with_offsets
 from vllm.tokenizers.hf import encode_with_special_tokens_mask
-from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.async_utils import make_async, merge_async_iterators
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
@@ -88,11 +89,55 @@ def _get_echoed_prompt_logprobs(
     return visible_ids, visible_logprobs
 
 
+def _get_source_text_offsets(
+    text: str,
+    offsets: GenericSequence[tuple[int, int]],
+    special_tokens_mask: GenericSequence[int],
+) -> list[int] | None:
+    if len(offsets) != len(special_tokens_mask) or any(
+        not 0 <= start <= end <= len(text) for start, end in offsets
+    ):
+        return None
+    first_source = next(
+        (i for i, special in enumerate(special_tokens_mask) if not special), None
+    )
+    if first_source is None:
+        return None
+    starts = [start for start, _ in offsets]
+    next_start = len(text)
+    for i in range(len(starts) - 1, -1, -1):
+        if special_tokens_mask[i]:
+            starts[i] = 0 if i < first_source else next_start
+        else:
+            next_start = starts[i]
+    return [*starts, len(text)]
+
+
 def _get_prompt_text_offsets(
-    tokenizer: TokenizerLike | None, token_ids: list[int], text: str
+    tokenizer: TokenizerLike | None,
+    token_ids: list[int],
+    text: str,
+    *,
+    prompt_input: EngineInput | None = None,
+    source_text: str | None = None,
 ) -> list[int] | None:
     """Return prompt starts and the continuation boundary in echoed text."""
     if tokenizer is None or not token_ids or text.isascii():
+        return None
+    source_offsets = None
+    if prompt_input is not None and prompt_input["type"] == "token":
+        if source_text == text and prompt_input["prompt_token_ids"] == token_ids:
+            source_offsets = prompt_input.get("prompt_token_offsets")
+            if source_offsets is not None and len(source_offsets) != len(token_ids):
+                source_offsets = None
+        if (echo_mask := prompt_input.get("prompt_echo_mask")) is not None:
+            visible = [
+                i for i in range(len(token_ids)) if i >= len(echo_mask) or echo_mask[i]
+            ]
+            token_ids = [token_ids[i] for i in visible]
+            if source_offsets is not None:
+                source_offsets = [source_offsets[i] for i in visible]
+    if not token_ids:
         return None
     for skip_special_tokens in (False, True):
         decoded = decode_token_ids_with_offsets(
@@ -111,6 +156,11 @@ def _get_prompt_text_offsets(
         for piece in pieces:
             offsets.append(offsets[-1] + len(piece))
         return offsets
+    if source_offsets is not None:
+        # HF source offsets use (0, 0) for tokens added by the postprocessor.
+        source_mask = [int(start == end == 0) for start, end in source_offsets]
+        if starts := _get_source_text_offsets(text, source_offsets, source_mask):
+            return starts
     # Normalization can change text without changing its token IDs. Encoding
     # offsets retain positions in the original echo rather than its decode.
     if (
@@ -136,23 +186,27 @@ def _get_prompt_text_offsets(
                 and special_tokens_mask is not None
                 and len(special_tokens_mask) == len(token_ids)
             ):
-                first_source = next(
-                    (i for i, special in enumerate(special_tokens_mask) if not special),
-                    None,
+                return _get_source_text_offsets(
+                    text, encoding_offsets, special_tokens_mask
                 )
-                if first_source is None:
-                    return None
-                starts = [start for start, _ in encoding_offsets]
-                next_start = len(text)
-                # Added tokens have no source span: prefix tokens precede the
-                # echo; suffix tokens follow it. User special tokens keep theirs.
-                for i in range(len(starts) - 1, -1, -1):
-                    if special_tokens_mask[i]:
-                        starts[i] = 0 if i < first_source else next_start
-                    else:
-                        next_start = starts[i]
-                return [*starts, len(text)]
     return None
+
+
+async def _get_prompt_text_offsets_async(
+    renderer: BaseRenderer,
+    token_ids: list[int],
+    text: str,
+    *,
+    prompt_input: EngineInput,
+    source_text: str | None,
+) -> list[int] | None:
+    return await make_async(_get_prompt_text_offsets, executor=renderer._executor)(
+        renderer.tokenizer,
+        token_ids,
+        text,
+        prompt_input=prompt_input,
+        source_text=source_text,
+    )
 
 
 _PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
@@ -395,6 +449,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             async for i, res in result_generator:
                 final_res_batch[i] = res
 
+            prompt_text_offsets: list[list[int] | None] = []
             for i, final_res in enumerate(final_res_batch):
                 assert final_res is not None
 
@@ -403,6 +458,35 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # with the inputs token IDs
                 if final_res.prompt is None:
                     final_res.prompt = self._extract_prompt_text(engine_inputs[i])
+
+                echo_offsets = None
+                if (
+                    request.echo
+                    and request.logprobs is not None
+                    and not request.return_token_ids
+                    and not (
+                        request.return_tokens_as_token_ids
+                        if request.return_tokens_as_token_ids is not None
+                        else self.return_tokens_as_token_ids
+                    )
+                    and tokenizer is not None
+                    and final_res.prompt
+                    and not final_res.prompt.isascii()
+                ):
+                    assert final_res.prompt_token_ids is not None
+                    source = (
+                        (request.prompt[i] if i < len(request.prompt) else None)
+                        if isinstance(request.prompt, list)
+                        else request.prompt
+                    )
+                    echo_offsets = await _get_prompt_text_offsets_async(
+                        self.renderer,
+                        final_res.prompt_token_ids,
+                        final_res.prompt,
+                        prompt_input=engine_inputs[i],
+                        source_text=source if isinstance(source, str) else None,
+                    )
+                prompt_text_offsets.append(echo_offsets)
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -414,6 +498,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 model_name,
                 tokenizer,
                 request_metadata,
+                prompt_text_offsets=prompt_text_offsets,
                 prompt_echo_masks=(
                     [
                         p.get("prompt_echo_mask") if p["type"] == "token" else None
@@ -571,15 +656,32 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 else self.return_tokens_as_token_ids
                             )
                         ):
-                            if prompt_idx not in prompt_text_offsets:
-                                prompt_text_offsets[prompt_idx] = (
-                                    _get_prompt_text_offsets(
-                                        tokenizer,
-                                        as_list(echo_token_ids),
-                                        prompt_text,
+                            if (
+                                prompt_idx not in prompt_text_offsets
+                                and tokenizer is not None
+                                and not prompt_text.isascii()
+                            ):
+                                source = (
+                                    (
+                                        request.prompt[prompt_idx]
+                                        if prompt_idx < len(request.prompt)
+                                        else None
                                     )
+                                    if isinstance(request.prompt, list)
+                                    else request.prompt
                                 )
-                            echo_offsets = prompt_text_offsets[prompt_idx]
+                                prompt_text_offsets[
+                                    prompt_idx
+                                ] = await _get_prompt_text_offsets_async(
+                                    self.renderer,
+                                    as_list(prompt_token_ids),
+                                    prompt_text,
+                                    prompt_input=engine_inputs[prompt_idx],
+                                    source_text=(
+                                        source if isinstance(source, str) else None
+                                    ),
+                                )
+                            echo_offsets = prompt_text_offsets.get(prompt_idx)
                         prompt_token_ids_to_return = prompt_token_ids
                         has_echoed[i] = True
                     else:
@@ -787,6 +889,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
         *,
         prompt_echo_masks: list[list[bool] | None] | None = None,
+        prompt_text_offsets: list[list[int] | None] | None = None,
     ) -> CompletionResponse:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
@@ -800,8 +903,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
             assert prompt_token_ids is not None
             prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
             prompt_text = final_res.prompt
-            echo_offsets = None
-            echo_offsets_computed = False
+            echo_offsets = (
+                prompt_text_offsets[prompt_idx] if prompt_text_offsets else None
+            )
 
             token_ids: GenericSequence[int]
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
@@ -847,23 +951,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     token_ids = output.token_ids
                     out_logprobs = output.logprobs
                     output_text = output.text
-
-                if (
-                    request.echo
-                    and request.logprobs is not None
-                    and not request.return_token_ids
-                    and not echo_offsets_computed
-                    and not (
-                        request.return_tokens_as_token_ids
-                        if request.return_tokens_as_token_ids is not None
-                        else self.return_tokens_as_token_ids
-                    )
-                ):
-                    assert prompt_text is not None
-                    echo_offsets = _get_prompt_text_offsets(
-                        tokenizer, as_list(echo_token_ids), prompt_text
-                    )
-                    echo_offsets_computed = True
 
                 if request.logprobs is not None:
                     assert out_logprobs is not None, "Did not output logprobs"

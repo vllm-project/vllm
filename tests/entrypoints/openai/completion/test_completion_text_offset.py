@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import json
+import threading
 
 import pytest
 
@@ -10,6 +12,7 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import (
     OpenAIServingCompletion,
     _get_prompt_text_offsets,
+    _get_prompt_text_offsets_async,
 )
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob
@@ -21,6 +24,7 @@ TOKENS = [(1, "abc"), (2, " de"), (3, "!")]
 TEXT_DELTAS = ["ab", "c d", "e!"]
 
 
+@pytest.mark.parametrize("reuse_source_offsets", [False, True])
 @pytest.mark.parametrize("add_special_tokens", [False, True])
 @pytest.mark.parametrize("special_count", [1, 2])
 @pytest.mark.parametrize(
@@ -33,8 +37,26 @@ TEXT_DELTAS = ["ab", "c d", "e!"]
     ],
 )
 def test_normalized_echo_offsets_preserve_special_token_boundaries(
-    text, source_starts, add_special_tokens, special_count
+    text, source_starts, add_special_tokens, special_count, reuse_source_offsets
 ):
+    tokenizer = _normalized_tokenizer(special_count)
+    ids = tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    expected = (
+        [*[0] * special_count, *source_starts, *[len(text)] * special_count]
+        if add_special_tokens
+        else source_starts
+    )
+    prompt_input = tokens_input(ids, prompt=text)
+    if reuse_source_offsets:
+        prompt_input["prompt_token_offsets"] = tokenizer(
+            text, add_special_tokens=add_special_tokens, return_offsets_mapping=True
+        )["offset_mapping"]
+    assert _get_prompt_text_offsets(
+        tokenizer, ids, text, prompt_input=prompt_input, source_text=text
+    ) == [*expected, len(text)]
+
+
+def _normalized_tokenizer(special_count=1):
     from tokenizers import (
         Tokenizer,
         decoders,
@@ -62,13 +84,105 @@ def test_normalized_echo_offsets_preserve_special_token_boundaries(
     tokenizer = TokenizersBackend(
         tokenizer_object=backend, bos_token="<s>", eos_token="</s>", unk_token="[UNK]"
     )
-    ids = tokenizer.encode(text, add_special_tokens=add_special_tokens)
-    expected = (
-        [*[0] * special_count, *source_starts, *[len(text)] * special_count]
-        if add_special_tokens
-        else source_starts
+    return tokenizer
+
+
+@pytest.mark.parametrize("stale_cache", ["text", "ids", "length", "bounds"])
+def test_echo_offsets_ignore_stale_source_offsets(stale_cache):
+    tokenizer = _normalized_tokenizer()
+    text = " É x"
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    prompt_input = tokens_input(ids, prompt=text)
+    prompt_input["prompt_token_offsets"] = [(1, 2), (3, 4)]
+    source_text = text
+    if stale_cache == "text":
+        source_text = "É x"
+        prompt_input["prompt_token_offsets"] = [(0, 1), (2, 3)]
+    elif stale_cache == "ids":
+        prompt_input["prompt_token_ids"] = list(reversed(ids))
+    elif stale_cache == "length":
+        prompt_input["prompt_token_offsets"] = [(1, 2)]
+    else:
+        prompt_input["prompt_token_offsets"] = [(1, 2), (99, 100)]
+    assert _get_prompt_text_offsets(
+        tokenizer, ids, text, prompt_input=prompt_input, source_text=source_text
+    ) == [1, 3, len(text)]
+
+
+@pytest.mark.parametrize(
+    "echo_mask", [[False], [True, True, True, False], [False, True, True, False]]
+)
+def test_echo_offsets_reuse_source_offsets_after_masking(echo_mask):
+    tokenizer = _normalized_tokenizer()
+    text = " É x"
+    encoding = tokenizer(text, return_offsets_mapping=True)
+    ids = encoding["input_ids"]
+    prompt_input = tokens_input(ids, prompt=text)
+    prompt_input["prompt_token_offsets"] = encoding["offset_mapping"]
+    prompt_input["prompt_echo_mask"] = echo_mask
+    expected = [
+        offset
+        for i, offset in enumerate([0, 1, 3, len(text)])
+        if i >= len(echo_mask) or echo_mask[i]
+    ]
+    assert _get_prompt_text_offsets(
+        tokenizer, ids, text, prompt_input=prompt_input, source_text=text
+    ) == [*expected, len(text)]
+
+
+@pytest.mark.asyncio
+async def test_echo_offsets_use_renderer_tokenizer_executor(tmp_path):
+    from transformers import OPTConfig
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.renderers.hf import HfRenderer
+
+    OPTConfig(vocab_size=5).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="float32",
+            max_model_len=32,
+            renderer_num_workers=1,
+        )
     )
-    assert _get_prompt_text_offsets(tokenizer, ids, text) == [*expected, len(text)]
+    renderer = HfRenderer(config, _normalized_tokenizer())
+    text = " É x"
+    ids = renderer.get_tokenizer().encode(text, add_special_tokens=False)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+
+    def occupy_worker():
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(timeout=10)
+
+    worker = renderer._executor.submit(occupy_worker)
+    task = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task = asyncio.create_task(
+            _get_prompt_text_offsets_async(
+                renderer,
+                ids,
+                text,
+                prompt_input=tokens_input(ids, prompt=text),
+                source_text=text,
+            )
+        )
+        checkpoint = asyncio.Event()
+        loop.call_soon(checkpoint.set)
+        await checkpoint.wait()
+        # The event loop progressed, but alignment waits for the renderer pool.
+        assert not task.done()
+        release.set()
+        assert await asyncio.wait_for(task, timeout=5) == [1, 3, len(text)]
+        await asyncio.wrap_future(worker)
+    finally:
+        release.set()
+        if task is not None:
+            await task
+        renderer.shutdown()
 
 
 def _logprobs(i: int) -> dict[int, Logprob]:
