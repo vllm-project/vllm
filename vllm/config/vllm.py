@@ -2301,6 +2301,8 @@ class VllmConfig:
                     # reduce-scatter on the comm stream under DBO.
                     "allgather_reducescatter",
                 ]
+                if self.parallel_config.mori_ep_v2:
+                    supported_backends.append("mori")
             else:
                 # CUDA and other platforms.
                 supported_backends = [
@@ -3612,9 +3614,10 @@ class VllmConfig:
         """Collect what the model runner cannot combine with DBO.
 
         The runner microbatches a decoder forward pass (drafting runs whole,
-        after it). Anything else that slices or replays the batch differently
-        (adapters, pipeline stages, prefill context parallelism, encoders) is
-        not handled yet.
+        after it). Each pipeline stage microbatches its own forward pass and
+        stages still exchange whole batches. Anything else that slices or
+        replays the batch differently (adapters, prefill context parallelism,
+        encoders) is not handled yet.
         """
         unsupported: list[str] = []
         model_config = self.model_config
@@ -3623,8 +3626,6 @@ class VllmConfig:
         schedule = parallel_config.dbo_schedule
         if self.lora_config is not None:
             unsupported.append("dual batch overlap with LoRA")
-        if parallel_config.pipeline_parallel_size > 1:
-            unsupported.append("dual batch overlap with pipeline parallelism")
         if parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("dual batch overlap with prefill context parallelism")
         if model_config is not None and (
