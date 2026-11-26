@@ -424,7 +424,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         layer_config = super().get_kv_cache_config(vllm_config)
-        if not self._ring_block:
+        if not self.use_replayssm:
             return layer_config
         assert layer_config is not None
         return replace(
@@ -436,56 +436,41 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         super().bind_kv_cache(kv_cache)
-        if self._ring_block:
+        if self.use_replayssm:
             self.kv_cache += kda_replayssm.ring_views(
                 kv_cache.squeeze(dim=(1, 2)), self.local_num_heads, self.head_dim
             )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        if self._ring_block:
+        if self.use_replayssm:
             return kda_replayssm.KDAReplaySSMVerifyBackend
         return super().get_attn_backend()
 
-    @property
-    def _ring_block(self) -> bool:
-        """Whether each request keeps its rings in a Mamba block of their own."""
-        return self.use_replayssm and not kda_replayssm.rings_in_page(
-            self.cache_config, self.num_spec
-        )
-
     def get_state_dtype(
         self,
-    ) -> tuple[torch.dtype, ...]:
+    ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        return MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
-        if kda_replayssm.rings_in_page(self.cache_config, self.num_spec):
-            return dtypes + kda_replayssm.RING_DTYPES
-        return dtypes
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         # conv_state width must include num_spec so the spec-decode conv update
         # (causal_conv1d_update with num_accepted_tokens + max_query_len) can
         # slide the window across the draft-verify tokens without reading past
         # the allocated width. Matches qwen_gdn_linear_attn.get_state_shape.
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
-        if kda_replayssm.rings_in_page(self.cache_config, self.num_spec):
-            return shapes + kda_replayssm.ring_shapes(
-                divide(self.num_heads, self.tp_size), self.head_dim
-            )
-        return shapes
 
     def __init__(
         self,
@@ -504,8 +489,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
 
-        recurrent_state_shape = self.get_state_shape()[1]
-        recurrent_state_dtype = self.get_state_dtype()[1]
+        _, recurrent_state_shape = self.get_state_shape()
+        _, recurrent_state_dtype = self.get_state_dtype()
         scatter_states.register_warmup(
             state_shape=recurrent_state_shape,
             state_dtype=recurrent_state_dtype,
@@ -601,7 +586,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
         additional_config = vllm_config.additional_config
-        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
         self.kda_prefill_backend = _resolve_kda_prefill_backend(
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
@@ -632,7 +617,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             # Per-slot cursors, bound by initialize_replayssm_ring_trackers().
             self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
             self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
-            self._plans_replayssm_decode = True
         else:
             # One option (`--kda-decode-backend`) for every decode row: with
             # speculative decoding they are draft-verify rows of 1 + num_spec
@@ -1126,12 +1110,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g_a: torch.Tensor,
         out: torch.Tensor,
     ) -> tuple[int, torch.Tensor | None]:
-        """Runs the step's decode or verify rows through the ReplaySSM kernel.
-        Returns the leading token rows it wrote to `out` (decode rows, or every
-        row of a verify step without prefills) and, in a step that mixes verify
-        rows and prefills, their output `[1, tokens, H, D]` for `spec_token_indx`.
+        """Runs the step's verify rows through the ReplaySSM kernel. Returns the
+        leading token rows it wrote to `out` (every row of a verify step without
+        prefills) and, in a step that mixes verify rows and prefills, their
+        output `[1, tokens, H, D]` for `spec_token_indx`.
         """
-        if not (metadata.num_decodes or metadata.num_spec_decodes):
+        if not metadata.num_spec_decodes:
             return 0, None
         cursors = kda_replayssm.step_cursors(self, metadata)
         num_reqs, query_len = cursors.slot.numel(), 1 + self.num_spec
@@ -1181,7 +1165,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim**-0.5,
             self.o_norm.eps,
         )
-        num_tokens = metadata.num_decode_tokens + metadata.num_spec_decode_tokens
+        num_tokens = metadata.num_spec_decode_tokens
         if scattered:
             return 0, step_out[:num_tokens].unsqueeze(0)
         if not direct:
@@ -1513,15 +1497,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 # Init cache
                 scatter_states(
                     recurrent_state, last_recurrent_state, prefill_state_indices
-                )
-            if (
-                self.use_replayssm
-                and not self.num_spec
-                and self._plans_replayssm_decode
-            ):
-                # Decode appends to the ring that prefill leaves empty.
-                self._replayssm_ring_start.index_fill_(
-                    0, prefill_state_indices.long(), 0
                 )
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_query_start_loc is not None

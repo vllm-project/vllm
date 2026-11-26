@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash KDA ReplaySSM decode and verify step (CUDA, sm_90a/100a/103a).
+"""GLM-5.3-Flash KDA ReplaySSM verify step (CUDA, sm_90a/100a/103a).
 
 One launch per layer covers the `f_b` / `g_b` projections, the short conv, the
 replay of the committed ring records onto the checkpoint, the new tokens and the
-gated RMSNorm. Plain decode (T = 1) flushes when `c + 1 == L` and stores the
-state after the token; verify (T = 6, 9) flushes when `c + q > L` and stores the
+gated RMSNorm. A verify step (T = 6, 9) flushes when `c + q > L` and stores the
 committed state. See ops/kda_replayssm.cu.
 """
 
@@ -17,10 +16,9 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import plan_replayssm_decode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
@@ -37,12 +35,6 @@ _OPS = Path(__file__).parent / "ops"
 def ring_shapes(num_heads: int, head_dim: int) -> tuple[tuple[int, int, int], ...]:
     """The u, k and g rings appended to the KDA state: `[H, R, D]` each."""
     return ((num_heads, RING_LEN, head_dim),) * 3
-
-
-def rings_in_page(cache_config: CacheConfig, num_spec: int) -> bool:
-    """Whether the rings share the state's page; with speculation each request
-    keeps them in one Mamba block of their own (`ring_slot`)."""
-    return cache_config.use_replayssm and not num_spec
 
 
 def ring_views(
@@ -82,8 +74,7 @@ def check_supported(
     cache_config = vllm_config.cache_config
     query_len = 1 + vllm_config.num_speculative_tokens
     unsupported = {
-        f"{query_len - 1} speculative tokens (needs 0, 5 or 8)": query_len
-        not in (1, 6, 9),
+        f"{query_len - 1} speculative tokens (needs 5 or 8)": query_len not in (6, 9),
         f"{num_heads} local heads (needs 8 or 16: TP8 or TP4)": num_heads
         not in (8, 16),
         "head_dim other than 128 or conv width other than 4": (head_dim, conv_size)
@@ -181,48 +172,24 @@ def kda_replayssm_step(
 
 
 def step_cursors(layer, metadata: GDNAttentionMetadata) -> SimpleNamespace:
-    """The step's request rows and cursors, built once per step and cached on
-    the metadata. Verify rows read the ReplaySSM tracker (committed after acceptance by
-    the runner); decode rows read the GDN standard-decode counter, which the
-    group's planner layer advances here (`c' = 0` on a flush, else `c + 1`)."""
+    """The step's verify rows and cursors, built once per step and cached on
+    the metadata. The cursors are the ReplaySSM tracker's, committed after
+    acceptance by the runner."""
     cached = getattr(metadata, "_kda_replayssm_cursors", None)
     if cached is not None:
         return cached
-    if layer.num_spec:
-        assert metadata.num_spec_decodes and not metadata.num_decodes
-        assert metadata.spec_state_indices_tensor is not None
-        assert metadata.num_accepted_tokens is not None
-        slot = metadata.spec_state_indices_tensor[:, 0].contiguous()
-        cursors = SimpleNamespace(
-            query_start_loc=metadata.spec_query_start_loc,
-            slot=slot,
-            # The rings fill the request's speculative block.
-            ring_slot=metadata.spec_state_indices_tensor[:, 1].contiguous(),
-            num_accepted=metadata.num_accepted_tokens,
-            ring_start=layer._replayssm_ring_start.index_select(0, slot),
-            num_committed=layer._replayssm_prev_num_accepted.index_select(0, slot),
-        )
-    else:
-        assert metadata.non_spec_state_indices_tensor is not None
-        assert metadata.non_spec_query_start_loc is not None
-        assert metadata.write_pos_d is not None and metadata.is_flush_d is not None
-        n = metadata.num_decodes
-        slot = metadata.non_spec_state_indices_tensor[:n].contiguous()
-        assert layer._plans_replayssm_decode, "the planner layer runs first"
-        plan_replayssm_decode(
-            layer._replayssm_ring_start,
-            slot,
-            metadata.write_pos_d,
-            metadata.is_flush_d,
-            buffer_len=WINDOW,
-        )
-        cursors = SimpleNamespace(
-            query_start_loc=metadata.non_spec_query_start_loc[: n + 1],
-            slot=slot,
-            ring_slot=slot,
-            num_accepted=torch.ones_like(slot),
-            ring_start=torch.zeros_like(slot),
-            num_committed=metadata.write_pos_d[:n],
-        )
+    assert metadata.num_spec_decodes and not metadata.num_decodes
+    assert metadata.spec_state_indices_tensor is not None
+    assert metadata.num_accepted_tokens is not None
+    slot = metadata.spec_state_indices_tensor[:, 0].contiguous()
+    cursors = SimpleNamespace(
+        query_start_loc=metadata.spec_query_start_loc,
+        slot=slot,
+        # The rings fill the request's speculative block.
+        ring_slot=metadata.spec_state_indices_tensor[:, 1].contiguous(),
+        num_accepted=metadata.num_accepted_tokens,
+        ring_start=layer._replayssm_ring_start.index_select(0, slot),
+        num_committed=layer._replayssm_prev_num_accepted.index_select(0, slot),
+    )
     metadata._kda_replayssm_cursors = cursors  # type: ignore[attr-defined]
     return cursors

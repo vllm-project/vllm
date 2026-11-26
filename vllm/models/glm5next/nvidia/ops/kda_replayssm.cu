@@ -1,28 +1,23 @@
-// KDA ReplaySSM decode (T = 1) / verify (T = 6, T = 9, q_n tokens per request)
-// step for one B200 rank, vLLM layouts.
+// KDA ReplaySSM verify (T = 6, T = 9, q_n tokens per request) step for one
+// B200 rank, vLLM layouts.
 //
 // Request n owns the packed token rows b_n .. b_n + q_n - 1 (b_n =
 // query_start_loc[n], q_n = query_start_loc[n+1] - b_n) of the flat token
 // buffer [N*T, ...]; the token args are [N, T, ...] views of it, so flat row r
 // is at (r / T) * stride[0] + (r % T) * stride[1]. The kernels are templated on
-// the capacity T (1, 6, 9) and mask the tokens q_n .. T - 1 (zero inputs, never
+// the capacity T (6, 9) and mask the tokens q_n .. T - 1 (zero inputs, never
 // stored). A request with q_n = 0 or slot 0 (padded) touches no cache. Each CTA
 // (h, n) also zeroes the out rows n*T .. n*T + T - 1 of head h that lie at or
 // past query_start_loc[N] (the tail of the batch). The ring has R = 32 rows per
-// slot and head, at slot ring_slot[n] (each ring's slots stride0 apart); verify
-// requests flush when c + q_n > L, decode requests when c + 1 == L.
+// slot and head, at slot ring_slot[n] (each ring's slots stride0 apart); a
+// request flushes when c + q_n > L.
 //
 // Work unit = (head h, request n), one CTA of 256 threads per unit. Routing by
 // T and the unit count H N:
-// - T = 1, 6 up to WB_UNITS units: step_kernel<T, FZ, WB> (one CTA per SM),
-//   the gate and output-gate projections in the CTA (bf16 mma), the head's
-//   weights by bulk copy into shared memory;
-// - T = 1 up to FZ_UNITS_T1 units: step_kernel<1, FZ> (two CTAs per SM), the
-//   weights as mma fragments from global;
-// - T = 1 above that: proj_kernel (both projections, one CTA per head,
-//   projection and PR packed rows), then t1_kernel (three CTAs per SM)
-//   launched with PDL;
-// - T = 6 above WB_UNITS, every T = 9: proj_kernel, then step_kernel<T, !FZ>
+// - T = 6 up to FZ_UNITS units: step_kernel<6, FZ> (one CTA per SM), the
+//   gate and output-gate projections in the CTA (bf16 mma), the head's weights
+//   by bulk copy into shared memory;
+// - T = 6 above FZ_UNITS, every T = 9: proj_kernel, then step_kernel<T, !FZ>
 //   (two CTAs per SM) launched with PDL.
 // Any other T launches an invalid configuration, so the call fails.
 // Per unit: the conv history and token rows, ring records and activations by
@@ -41,22 +36,18 @@
 //       token-token coefficients (TF32 mma)
 //   u_t = beta_t (v_t - Q_2t - sum_{i<t} u_i C_i,2t)
 //   o_t = scale (Q_2t+1 + sum_{i<=t} u_i C_i,2t+1)
-// The stored checkpoint on flush is S_c (T > 1: staged in the checkpoint
-// buffer, one bulk store) or S_c e^{g_0} + u_0 khat_0^T (T = 1, from registers
-// by each warp right after its Q: a row's u_0 needs only its Q).
+// The stored checkpoint on flush is S_c (dense rows: staged in the checkpoint
+// buffer, one bulk store).
 //
 // step_kernel: warp w holds state rows 16w .. 16w+15 in registers, in a layout
 // that is at once the accumulator fragment of the record product and the A
 // fragment of Q (the K order permuted within 16-column groups), so the
 // checkpoint is read from shared memory and written back to global memory with
 // 16-byte accesses.
-// t1_kernel: Q = S0 (E Y) + U^T (K' Y) straight from the checkpoint in shared
-// memory; S_c only on a flush.
 #include "kda_replayssm.cuh"
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include "kda_replayssm_utils.cuh"
-#include <algorithm>
 
 namespace {
 
@@ -67,12 +58,8 @@ constexpr int TMAX = 9;
 static_assert(L + TMAX <= R, "ring too short for c + q appends");
 constexpr int NTHR = 256;
 constexpr float LOG2E = 1.4426950408889634f;
-// T = 1: up to this many units the projections in the step CTAs (above:
-// t1_kernel)
-constexpr int FZ_UNITS_T1 = 512;
-
 // up to this many units (one CTA per SM) the fused weights come by bulk copy
-constexpr int WB_UNITS = 148;
+constexpr int FZ_UNITS = 148;
 
 __device__ __forceinline__ float fexp(float x) {
   return ptx::ex2_approx(x * LOG2E);
@@ -149,12 +136,6 @@ __device__ __forceinline__ void tred(float (&p)[N], int lane) {
       const float keep = up ? p[32 * b + i + O] : p[32 * b + i];
       p[32 * b + i] = keep + __shfl_xor_sync(0xffffffffu, send, O);
     }
-}
-
-__device__ __forceinline__ float wsum(float x) {
-#pragma unroll
-  for (int off = 16; off; off >>= 1) x += __shfl_xor_sync(0xffffffffu, x, off);
-  return x;
 }
 
 // Warp sums of P values (P a power of two, at most 32): afterwards lane l holds
@@ -327,7 +308,6 @@ struct StepArgs {
   // flashinfer / triton: conv output and recurrent output rounded to bf16
   int rounded;
   int round_z;  // output-gate logits rounded to bf16 (all but split_gate)
-  int wave;     // t1_kernel: resident CTAs of the launch (its first wave)
 };
 
 template <int T>
@@ -343,7 +323,7 @@ template <int T>
 // Y, the token keys kt and the token-token coefficients C = kt^T Y, from the
 // token phase on
 struct TokBuf {
-  // 2T targets in n-tiles of 8: 8, 16, 24 at T 1, 6, 9
+  // 2T targets in n-tiles of 8: 16, 24 at T 6, 9
   static constexpr int NB = (2 * T + 7) / 8 * 8;
   float y[NB][D + 16];
   // kt_i = khat_i e^{-Gcum_i} (fp32; the m16 tile's rows past T are zero
@@ -386,16 +366,11 @@ struct Smem {
   // split_gate)
   alignas(16) float zs[T][D];
   alignas(16) float ef[D];
-  // T = 1 only: the flush rows' gate, key and v
-  static constexpr int D1 = T == 1 ? D : 4;
-  alignas(16) float egk[D1];
-  alignas(16) float kh0[D1];
-  alignas(16) float us[D1];
   // squared norms of q, k per token: four warp partials
   alignas(16) float nsq[2][T][4];
   alignas(16) float ssq[T][4];
   alignas(8) uint64_t bar;   // checkpoint bulk copy
-  alignas(8) uint64_t wbar;  // WB: the head's projection weights
+  alignas(8) uint64_t wbar;  // FZ: the head's projection weights
 };
 
 template <class S>
@@ -412,12 +387,12 @@ struct Unit {
 
 // One CTA per unit (head blockIdx.x, request blockIdx.y), T the token capacity;
 // the unit's q <= T tokens.
-template <int T, bool FZ, bool WB>
-__global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
+template <int T, bool FZ>
+__global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
     step_kernel(const __grid_constant__ StepArgs P) {
   using S = Smem<T, FZ>;
   constexpr int M = S::M, NB = S::NB, NT8 = NB / 8, TA = S::TA;
-  constexpr bool KS = T == 1 || FZ;  // record-key row swizzle
+  constexpr bool KS = FZ;  // record-key row swizzle
   extern __shared__ __align__(16) unsigned char smem_raw[];
   S& s = *reinterpret_cast<S*>(smem_raw);
   const kda_replayssm::Args& a = P.a;
@@ -555,15 +530,15 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
   // are in flight.
   if (tid == 0) {
     ptx::mbarrier_init(sa(&s.bar), 1);
-    if (WB) ptx::mbarrier_init(sa(&s.wbar), 1);
+    if (FZ) ptx::mbarrier_init(sa(&s.wbar), 1);
     ptx::fence_mbarrier_init();
   }
   const Unit cur = scalars();
-  // WB (one CTA per SM): the head's g_b and f_b weights by two bulk copies into
+  // FZ (one CTA per SM): the head's g_b and f_b weights by two bulk copies into
   // the shared memory after S
   const __nv_bfloat16* wts =
       reinterpret_cast<const __nv_bfloat16*>(smem_raw + wts_offset<S>());
-  if (WB && tid == 0) {
+  if (FZ && tid == 0) {
     const int64_t hw = static_cast<int64_t>(blockIdx.x) * D * D;
     ptx::mbarrier_arrive_expect_tx(sa(&s.wbar), 2 * D * D * 2);
     ptx::bulk_copy_g2s(sa(wts), a.g_b_weight + hw, D * D * 2, sa(&s.wbar));
@@ -575,7 +550,7 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
   if (cur.slot <= 0 || cur.q <= 0) {
     if (tid == 0) {
       // the weight copy lands before the CTA exits
-      if (WB) ptx::mbarrier_wait_parity(sa(&s.wbar), 0);
+      if (FZ) ptx::mbarrier_wait_parity(sa(&s.wbar), 0);
     }
     return;
   }
@@ -584,28 +559,19 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
   const float nwv =
       tid >= D ? __uint_as_float(ptx::ld_global_u32(a.norm_weight + d)) : 0.f;
   head_regs(cur.h);
-  // FZ: weight fragments of channels 32 (w % 4) ..: g_b_weight (first half),
-  // f_b_weight (second)
   uint4 pw[4][4];
-  if (FZ && !WB)
-    proj_load(pw,
-              (tid < D ? a.g_b_weight : a.f_b_weight) +
-                  (static_cast<int64_t>(cur.h) * D + 32 * (w & 3)) * D,
-              g, tq);
-  // WB: the gate fragments of the second half from the bulk-copied f_b
+  // FZ: the gate fragments of the second half from the bulk-copied f_b
   auto weights_from_smem = [&]() {
-    if (WB) {
-      ptx::mbarrier_wait_parity(sa(&s.wbar), 0);
-      proj_lds(pw, wts + D * D + 32 * (w & 3) * D, g, tq);
-    }
+    ptx::mbarrier_wait_parity(sa(&s.wbar), 0);
+    proj_lds(pw, wts + D * D + 32 * (w & 3) * D, g, tq);
   };
 
   {
     const int h = cur.h, slot = cur.slot, rslot = cur.rslot, c = cur.c,
               r0 = cur.r0, b = cur.b, q = cur.q;
-    // beta logits of the tokens (second half; at T = 1 every thread); 0 past q
+    // beta logits of the tokens (second half); 0 past q
     float bt[T];
-    if (T == 1 || tid >= D)
+    if (tid >= D)
 #pragma unroll
       for (int t = 0; t < T; ++t)
         bt[t] =
@@ -619,10 +585,9 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
     issue_ck(cur);  // the checkpoint after the small inputs have landed
 
     {
-      // verify: flush when the committed records and the new tokens overflow
-      // the window; decode: at the last record
-      const bool flush = T > 1 ? c + q > L : c + 1 == L;
-      const bool append = T > 1 || !flush;
+      // flush when the committed records and the new tokens overflow the
+      // window
+      const bool flush = c + q > L;
       float* ckp = a.checkpoint + slot * a.checkpoint_stride[0] +
                    h * a.checkpoint_stride[1];
       const int64_t ring_base = static_cast<int64_t>(h) * R;
@@ -672,13 +637,6 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
         }
         const float sw = wsums(ss, lane);
         if (lane < 2 * T) s.nsq[lane / T][lane % T][w] = sw;
-        // output-gate logits of channels 32w .. (WB: by the second half in the
-        // token phase)
-        if (FZ && !WB) {
-          float za[4][4] = {};
-          proj_mma<false>(za, pw, &s.ga[0][0], TA, g, tq);
-          store_proj(s.zs, za, 32 * w, P.round_z);
-        }
         // v of value row d; the raw gate g1 = bf16(f_a f_b^T) of channels 32 (w
         // - 4) ..; the records of column d
       } else {
@@ -706,8 +664,6 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
           ptx::cp_async_commit();
         }
         conv_part(2, wcr[0], vr);
-        // v of value row d, for the flush rows' u in the Q phase
-        if (T == 1) s.us[d] = vr[0];
         float suf = 0.f;  // sum of the gates of the records after j
         float kw[L];
 #pragma unroll
@@ -758,24 +714,19 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
           s.B.tok.y[2 * t][d] = yk;
           s.B.tok.y[2 * t + 1][d] = yq;
           s.B.tok.kt[t][d] = khat[t] * fexp(-gcum[t]);
-          if (append && t < q) {
+          if (t < q) {
             const int64_t row = (ring_base + ((r0 + c + t) & (R - 1))) * D + d;
             a.k_ring[rslot * a.k_ring_stride0 + row] =
                 __float2bfloat16_rn(khat[t]);
             a.g_ring[rslot * a.g_ring_stride0 + row] = gk[t];
           }
         }
-        if (T == 1) {
-          s.egk[d] = fexp(gk[0]);
-          s.kh0[d] = khat[0];
-        }
       } else {
 #pragma unroll
-        // in place: sigmoid(z) (WB: z still being written) and sigmoid(beta) (T
-        // > 1)
+        // in place: sigmoid(z) (FZ: z still being written) and sigmoid(beta)
         for (int t = 0; t < T; ++t) {
-          if (!WB) s.zs[t][d] = sigm(s.zs[t][d]);
-          if (T > 1) bt[t] = __fdividef(1.f, 1.f + fexp(-bt[t]));
+          if (!FZ) s.zs[t][d] = sigm(s.zs[t][d]);
+          bt[t] = __fdividef(1.f, 1.f + fexp(-bt[t]));
         }
         if (NB > M)  // Y rows past the targets
           for (int i = d; i < (NB - M) * (S::YS / 4); i += D)
@@ -784,7 +735,7 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
                 make_float4(0.f, 0.f, 0.f, 0.f);
         // output-gate logits of channels 32 (w - 4) .. from the bulk-copied g_b
         // (needed only by the norm)
-        if (WB) {
+        if (FZ) {
           proj_lds(pw, wts + 32 * (w - 4) * D, g, tq);
           float za[4][4] = {};
           proj_mma<false>(za, pw, &s.ga[0][0], TA, g, tq);
@@ -906,42 +857,13 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
           qt[8 * nt + 2 * tq][v1] = qa[0][nt][2] + qa[1][nt][2];
           qt[8 * nt + 2 * tq + 1][v1] = qa[0][nt][3] + qa[1][nt][3];
         }
-        // the new checkpoint S_c e^{g_0} + u_0 khat_0^T of the warp's rows,
-        // stored right away:
-        if (T == 1 && flush) {
-          // at T = 1 u_0 of a row needs only its own Q (lanes tq = 0 hold Q_k
-          // of rows v0, v1)
-          const float sbt = __fdividef(1.f, 1.f + fexp(-bt[0]));
-          const float qk0 =
-              __shfl_sync(0xffffffffu, qa[0][0][0] + qa[1][0][0], lane & ~3);
-          const float qk1 =
-              __shfl_sync(0xffffffffu, qa[0][0][2] + qa[1][0][2], lane & ~3);
-          const float u0 = sbt * (s.us[v0] - qk0), u1 = sbt * (s.us[v1] - qk1);
-          float* f0 = ckp + v0 * a.checkpoint_stride[2] + 4 * tq;
-          float* f1 = ckp + v1 * a.checkpoint_stride[2] + 4 * tq;
-#pragma unroll
-          for (int m = 0; m < 8; ++m) {
-            const float4 eg = ld4(&s.egk[16 * m + 4 * tq]),
-                         kk = ld4(&s.kh0[16 * m + 4 * tq]);
-            *reinterpret_cast<float4*>(f0 + 16 * m) =
-                make_float4(f(st[0][m].x) * eg.x + u0 * kk.x,
-                            f(st[0][m].y) * eg.y + u0 * kk.y,
-                            f(st[0][m].z) * eg.z + u0 * kk.z,
-                            f(st[0][m].w) * eg.w + u0 * kk.w);
-            *reinterpret_cast<float4*>(f1 + 16 * m) =
-                make_float4(f(st[1][m].x) * eg.x + u1 * kk.x,
-                            f(st[1][m].y) * eg.y + u1 * kk.y,
-                            f(st[1][m].z) * eg.z + u1 * kk.z,
-                            f(st[1][m].w) * eg.w + u1 * kk.w);
-          }
-        }
       }
       float* ck0 = ckp + v0 * a.checkpoint_stride[2] + 4 * tq;
       float* ck1 = ckp + v1 * a.checkpoint_stride[2] + 4 * tq;
       // The new checkpoint S_c (committed records only): with dense rows staged
       // in the checkpoint buffer (read only into registers) and stored by one
       // bulk copy, else by the threads.
-      const bool ck_bulk = T > 1 && flush && a.checkpoint_stride[2] == D;
+      const bool ck_bulk = flush && a.checkpoint_stride[2] == D;
       if (ck_bulk) {
         const bool odd = g & 1;  // the bank order of the loads
 #pragma unroll
@@ -955,7 +877,7 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
                 odd ? st[r][mp] : st[r][mp + 1];
           }
         ptx::fence_proxy_async_smem();
-      } else if (T > 1 && flush) {
+      } else if (flush) {
 #pragma unroll
         for (int m = 0; m < 8; ++m) {
           *reinterpret_cast<uint4*>(ck0 + 16 * m) = st[0][m];
@@ -981,8 +903,7 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
           float kq = qv[2 * t];
 #pragma unroll
           for (int i = 0; i < t; ++i) kq += u_[i] * s.B.tok.cs[i][2 * t];
-          u_[t] = (T > 1 ? bt[t] : __fdividef(1.f, 1.f + fexp(-bt[t]))) *
-                  (vr[t] - kq);
+          u_[t] = bt[t] * (vr[t] - kq);
         }
 #pragma unroll
         for (int t = 0; t < T; ++t) {
@@ -992,12 +913,11 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
           ov *= a.scale;
           o[t] = P.rounded ? bfr(ov) : ov;
         }
-        if (append)
 #pragma unroll
-          for (int t = 0; t < T; ++t)
-            if (t < q)
-              a.u_ring[rslot * a.u_ring_stride0 +
-                       (ring_base + ((r0 + c + t) & (R - 1))) * D + d] = u_[t];
+        for (int t = 0; t < T; ++t)
+          if (t < q)
+            a.u_ring[rslot * a.u_ring_stride0 +
+                     (ring_base + ((r0 + c + t) & (R - 1))) * D + d] = u_[t];
         constexpr int PO = pow2_at_least(T);
         float ss[PO] = {};
 #pragma unroll
@@ -1016,7 +936,7 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
                 (s.ssq[t][0] + s.ssq[t][1] + s.ssq[t][2] + s.ssq[t][3]) *
                 (1.f / D);
             const float y = o[t] * rsqrtf(ms + a.norm_eps) * nwv *
-                            (WB ? sigm(s.zs[t][d]) : s.zs[t][d]);
+                            (FZ ? sigm(s.zs[t][d]) : s.zs[t][d]);
             a.out[((static_cast<int64_t>(b) + t) * H + h) * D + d] =
                 __float2bfloat16_rn(y);
           }
@@ -1031,459 +951,29 @@ __global__ void __launch_bounds__(NTHR, (WB || (T > 6 && FZ)) ? 1 : 2)
   }
 }
 
-// ------------------------------------------------------------------------------------------------
-// T = 1
-
-// T = 1 above FZ_UNITS_T1: one CTA per unit (head, request), 256 threads, three
-// CTAs per SM (75 KB of shared memory: the ring records and conv inputs are
-// staged in the checkpoint buffer before its copy). The state is not held in
-// registers: Q = S_c Y is computed as S0 (E Y) + U^T (K' Y) from the checkpoint
-// in shared memory, and the record product S_c only on a flush (a second pass
-// over the same rows).
-struct T1Smem {
-  union Ck {
-    float sck[D][D];  // checkpoint rows
-    // the small inputs, read into registers before the checkpoint copy is
-    // issued
-    struct {
-      float rec_u[L][D];
-      float rec_g[L][D];
-      __nv_bfloat16 rec_k[L][D];
-      __nv_bfloat16 hist[3][3][D];  // conv history rows
-      __nv_bfloat16 xw[3][D];       // the new conv row
-    } in;
-  };
-  alignas(16) Ck k;
-  union Mid {
-    struct {
-      float kq[2][D];   // conv outputs k, q of channel d
-      float g1s[D];     // raw gate bf16(f_a f_b^T)
-      float yb[2][D];   // E Y_k, E Y_q (B operand of Q)
-      float2 qs[D];     // S0 (E Y) of value row v
-      float zp[4][32];  // K' Y partials of the four column warps, index 2 j + m
-      float zsum[32];
-    } a;
-    __half u16[D][L];  // flush: the records' u of value row v
-  };
-  alignas(16) Mid m;
-  // flush: record keys k_j e^{G_c - G_j + g_0}, per column, j at 4 ((j % 8) /
-  // 2) + j % 2 + 2 (j / 8)
-  alignas(16) __half kpt[D][L];
-  alignas(16) float zs[D];   // output-gate logits
-  alignas(16) float ef[D];   // flush: E e^{g_0}
-  alignas(16) float kh0[D];  // flush: khat
-  alignas(16) float us[D];   // flush: u of value row v
-  float cp[4];               // khat . qhat partials
-  float nsq[2][4];           // squared norms of q, k: four warp partials
-  float ssq[4];
-  alignas(8) uint64_t bar;
-};
-
-// Checkpoint rows v0, v1 of 16-column group pair (mp, mp + 1) as 4 columns per
-// lane; lanes of odd rows read the two groups in the other order (rows g and g
-// + 1 of a quarter-warp on different banks).
-__device__ __forceinline__ void ck_pair(uint4 (&x)[2][2], const float (*sck)[D],
-                                        int v0, int v1, int mp, int g, int tq) {
-  const bool odd = g & 1;
-#pragma unroll
-  for (int r = 0; r < 2; ++r) {
-    const float* row = sck[r ? v1 : v0];
-    const uint4 p =
-        *reinterpret_cast<const uint4*>(row + 16 * (mp + odd) + 4 * tq);
-    const uint4 q =
-        *reinterpret_cast<const uint4*>(row + 16 * (mp + 1 - odd) + 4 * tq);
-    x[r][0] = odd ? q : p;
-    x[r][1] = odd ? p : q;
-  }
-}
-
-// Threads 0 .. 127 (channel d): the conv, then the delta rule and the norm of
-// value row d. Threads 128 .. 255 (column d): records, gate, Y, K' Y. All eight
-// warps: Q = S0 (E Y) for rows 16w .. 16w + 15, and the flush. The checkpoint
-// copy is issued after the small inputs have landed (issued with them, it
-// delays them behind the bulk traffic).
-__global__ void __launch_bounds__(NTHR, 3)
-    t1_kernel(const __grid_constant__ StepArgs P) {
-  extern __shared__ __align__(16) unsigned char smem_raw[];
-  T1Smem& s = *reinterpret_cast<T1Smem*>(smem_raw);
-  const kda_replayssm::Args& a = P.a;
-  const int H = static_cast<int>(a.dims.H), HD = H * D,
-            NR = static_cast<int>(a.dims.N);
-  const int h = blockIdx.x, n = blockIdx.y;
-  const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31, g = lane >> 2,
-            tq = lane & 3;
-  const int d = tid & (D - 1);
-  const bool col = tid >= D;
-  if (tid == 0) {  // before the scalar loads: the fence would wait for them
-    ptx::mbarrier_init(sa(&s.bar), 1);
-    ptx::fence_mbarrier_init();
-  }
-  const int slot = static_cast<int>(ptx::ld_global_u32(a.slot + n));
-  const int rslot = static_cast<int>(ptx::ld_global_u32(a.ring_slot + n));
-  const int acc = static_cast<int>(ptx::ld_global_u32(a.num_accepted + n));
-  const int r0 = static_cast<int>(ptx::ld_global_u32(a.ring_start + n));
-  const int c = static_cast<int>(ptx::ld_global_u32(a.num_committed + n));
-  const Toks tk = req_tokens(a.query_start_loc, n, NR, 1);
-  const int b = tk.b;  // the request's packed token row
-  zero_tail(a.out, n, h, H, 1, tk.total, tid);
-  // padded request: no cache touched, no output row of its own
-  if (slot <= 0 || tk.q <= 0) return;
-  __nv_bfloat16* outp = a.out + (static_cast<int64_t>(b) * H + h) * D;
-  const bool flush = c + 1 == L;
-  float* ckp =
-      a.checkpoint + slot * a.checkpoint_stride[0] + h * a.checkpoint_stride[1];
-  const __nv_bfloat16* cs =
-      a.conv_state + slot * a.conv_state_stride[0] + h * a.conv_state_stride[3];
-  // the new conv row and the history (one cp.async group with the records)
-  if (tid < 48) {
-    const int p = tid >> 4, ch = tid & 15;
-    ptx::cp_async_16(sa(&s.k.in.xw[p][8 * ch]),
-                     a.x + trow(b, 1, a.x_stride[0], a.x_stride[1]) +
-                         h * a.x_stride[3] + p * a.x_stride[2] + 8 * ch);
-  } else if (tid < 48 + 144) {
-    const int i = tid - 48, r = i / 48, p = (i >> 4) % 3, ch = i & 15;
-    ptx::cp_async_16(sa(&s.k.in.hist[r][p][8 * ch]),
-                     cs + (acc - 1 + r) * a.conv_state_stride[1] +
-                         p * a.conv_state_stride[2] + 8 * ch);
-  }
-  const int64_t ring_base = static_cast<int64_t>(h) * R;
-  {
-    const int e = tid & 15;
-    for (int j = tid >> 4; j < c; j += NTHR / 16) {
-      const int64_t row = (ring_base + ((r0 + j) & (R - 1))) * D;
-      ptx::cp_async_16(sa(&s.k.in.rec_u[j][4 * e]),
-                       a.u_ring + rslot * a.u_ring_stride0 + row + 4 * e);
-      ptx::cp_async_16(sa(&s.k.in.rec_u[j][64 + 4 * e]),
-                       a.u_ring + rslot * a.u_ring_stride0 + row + 64 + 4 * e);
-      ptx::cp_async_16(sa(&s.k.in.rec_g[j][4 * e]),
-                       a.g_ring + rslot * a.g_ring_stride0 + row + 4 * e);
-      ptx::cp_async_16(sa(&s.k.in.rec_g[j][64 + 4 * e]),
-                       a.g_ring + rslot * a.g_ring_stride0 + row + 64 + 4 * e);
-      ptx::cp_async_16(sa(&s.k.in.rec_k[j][8 * e]),
-                       a.k_ring + rslot * a.k_ring_stride0 + row + 8 * e);
-    }
-  }
-  // CTAs past the first wave start after proj_kernel has finished: their gate
-  // and output-gate rows come with the small inputs (the first wave loads them
-  // after the conv)
-  const bool gz_early =
-      static_cast<int>(blockIdx.y * gridDim.x + blockIdx.x) >= P.wave;
-  if (gz_early && tid >= NTHR - 64) {
-    ptx::griddep_wait();
-    const int i = tid - (NTHR - 64), pj = i >> 5, ch = i & 31;
-    ptx::cp_async_16(
-        sa((pj ? s.zs : s.m.a.g1s) + 4 * ch),
-        P.gz + (static_cast<int64_t>(pj) * NR + b) * HD + h * D + 4 * ch);
-  }
-  ptx::cp_async_commit();
-  const int v0 = 16 * w + g, v1 = v0 + 8;
-  // conv weights and the records' u of row d (first half); records' g, k
-  // (second)
-  float wcr[3][4], ur[L], rg[L], rk[L];
-  float dtb = 0.f, a_log = 0.f, sb = 0.f, nwv = 0.f;
-  if (!col) {
-#pragma unroll
-    for (int p = 0; p < 3; ++p)
-#pragma unroll
-      for (int j = 0; j < 4; ++j)
-        wcr[p][j] = __uint_as_float(
-            ptx::ld_global_u32(a.conv_weight + ((p * 4 + j) * H + h) * D + d));
-    sb = __bfloat162float(__ushort_as_bfloat16(ptx::ld_global_u16(
-        a.beta + trow(b, 1, a.beta_stride[0], a.beta_stride[1]) + h)));
-    nwv = __uint_as_float(ptx::ld_global_u32(a.norm_weight + d));
-  } else {
-    dtb = __uint_as_float(ptx::ld_global_u32(a.dt_bias + h * D + d));
-    a_log = __uint_as_float(ptx::ld_global_u32(a.A_log + h));
-  }
-  ptx::cp_async_wait<0>();
-  __syncthreads();
-
-  float E = 1.f, vr = 0.f;
-#pragma unroll
-  for (int j = 0; j < L; ++j) {
-    if (!col) {
-      ur[j] = j < c ? s.k.in.rec_u[j][d] : 0.f;
-    } else {
-      rg[j] = j < c ? s.k.in.rec_g[j][d] : 0.f;
-      rk[j] = j < c ? __bfloat162float(s.k.in.rec_k[j][d]) : 0.f;
-    }
-  }
-  float hf[3][4];
-  if (!col)
-#pragma unroll
-    for (int p = 0; p < 3; ++p) {
-#pragma unroll
-      for (int i = 0; i < 3; ++i)
-        hf[p][i] = __bfloat162float(s.k.in.hist[i][p][d]);
-      hf[p][3] = __bfloat162float(s.k.in.xw[p][d]);
-    }
-  // the small inputs are in registers: the checkpoint copy may overwrite them
-  __syncthreads();
-  if (tid == 0) {
-    ptx::mbarrier_arrive_expect_tx(sa(&s.bar), D * D * 4);
-    ptx::bulk_copy_g2s(sa(&s.k.sck[0][0]), ckp, D * D * 4, sa(&s.bar));
-  }
-  // conv + SiLU of channel d in q, k, v; the new conv rows; squared norms of q
-  // and k
-  if (!col) {
-    const bool rnd = P.rounded;
-    float y[3];
-#pragma unroll
-    for (int p = 0; p < 3; ++p) {
-      const float pre = ((wcr[p][0] * hf[p][0] + wcr[p][1] * hf[p][1]) +
-                         wcr[p][2] * hf[p][2]) +
-                        wcr[p][3] * hf[p][3];
-      const float v = __fdividef(pre, 1.f + fexp(-pre));
-      y[p] = rnd ? bfr(v) : v;
-    }
-    s.m.a.kq[0][d] = y[1];
-    s.m.a.kq[1][d] = y[0];
-    vr = y[2];
-    const float sq = wsum(y[0] * y[0]), sk = wsum(y[1] * y[1]);
-    if (lane == 0) {
-      s.nsq[0][w] = sq;
-      s.nsq[1][w] = sk;
-    }
-#pragma unroll
-    // the new conv rows: history rows 1, 2, then the token
-    for (int p = 0; p < 3; ++p) {
-      __nv_bfloat16* cw = a.conv_state + slot * a.conv_state_stride[0] +
-                          p * a.conv_state_stride[2] +
-                          h * a.conv_state_stride[3] + d;
-      cw[0] = __float2bfloat16_rn(hf[p][1]);
-      cw[a.conv_state_stride[1]] = __float2bfloat16_rn(hf[p][2]);
-      cw[2 * a.conv_state_stride[1]] = __float2bfloat16_rn(hf[p][3]);
-    }
-    // decayed record keys k_j e^{G_c - G_j} of column d (in rk), E = e^{G_c};
-    // this head's gate rows
-  } else {
-    float suf = 0.f;
-#pragma unroll
-    for (int j = L - 1; j >= 0; --j) {
-      rk[j] *= fexp(suf);
-      suf += rg[j];
-    }
-    E = fexp(suf);
-    if (!gz_early) {
-      ptx::griddep_wait();
-      if (d < 64) {
-        const int pj = d >> 5, ch = d & 31;
-        ptx::cp_async_16(
-            sa((pj ? s.zs : s.m.a.g1s) + 4 * ch),
-            P.gz + (static_cast<int64_t>(pj) * NR + b) * HD + h * D + 4 * ch);
-      }
-      ptx::cp_async_commit();
-      ptx::cp_async_wait<0>();
-    }
-  }
-  __syncthreads();
-
-  float khat = 0.f;
-  // column d: gate, khat, qhat, E Y, the K' Y and khat . qhat partials, ring
-  // appends of k and g
-  if (col) {
-    const float ea = expf(a_log);
-    const float x = ea * (s.m.a.g1s[d] + dtb);
-    const float gk = __fdividef(a.lower_bound, 1.f + fexp(-x));
-    khat = s.m.a.kq[0][d] * rsqrtf(s.nsq[1][0] + s.nsq[1][1] + s.nsq[1][2] +
-                                   s.nsq[1][3] + 1e-6f);
-    const float qh = s.m.a.kq[1][d] * rsqrtf(s.nsq[0][0] + s.nsq[0][1] +
-                                             s.nsq[0][2] + s.nsq[0][3] + 1e-6f);
-    const float eg = fexp(gk);
-    const float yk = khat * eg, yq = qh * eg;
-    s.m.a.yb[0][d] = E * yk;
-    s.m.a.yb[1][d] = E * yq;
-    float pz[32];
-#pragma unroll
-    for (int j = 0; j < L; ++j) {
-      pz[2 * j] = rk[j] * yk;
-      pz[2 * j + 1] = rk[j] * yq;
-    }
-    tred<16>(pz, lane);
-    tred<8>(pz, lane);
-    tred<4>(pz, lane);
-    tred<2>(pz, lane);
-    tred<1>(pz, lane);
-    s.m.a.zp[w - 4][lane] = pz[0];
-    const float cq = wsum(khat * qh);
-    if (lane == 0) s.cp[w - 4] = cq;
-    if (!flush) {
-      const int64_t row = (ring_base + ((r0 + c) & (R - 1))) * D + d;
-      a.k_ring[rslot * a.k_ring_stride0 + row] = __float2bfloat16_rn(khat);
-      a.g_ring[rslot * a.g_ring_stride0 + row] = gk;
-    } else {
-      // positions 4tq' .. 4tq' + 3 hold j = 2tq', 2tq' + 1, 2tq' + 8, 2tq' + 9
-      uint32_t kp[8];
-#pragma unroll
-      for (int t4 = 0; t4 < 4; ++t4) {
-        kp[2 * t4] = h2(rk[2 * t4] * eg, rk[2 * t4 + 1] * eg);
-        kp[2 * t4 + 1] = h2(rk[2 * t4 + 8] * eg, rk[2 * t4 + 9] * eg);
-      }
-      *reinterpret_cast<uint4*>(&s.kpt[ks<true>(d)][0]) =
-          make_uint4(kp[0], kp[1], kp[2], kp[3]);
-      *reinterpret_cast<uint4*>(&s.kpt[ks<true>(d)][8]) =
-          make_uint4(kp[4], kp[5], kp[6], kp[7]);
-      s.ef[d] = E * eg;
-      s.kh0[d] = khat;
-    }
-  }
-  __syncthreads();
-
-  if (tid < 32)
-    s.m.a.zsum[lane] = s.m.a.zp[0][lane] + s.m.a.zp[1][lane] +
-                       s.m.a.zp[2][lane] + s.m.a.zp[3][lane];
-  ptx::mbarrier_wait_parity(sa(&s.bar), 0);
-  {  // Q = S0 (E Y) for rows v0, v1 (TF32 m16n8k8; n columns 0, 1 used)
-    float qa[2][4] = {};
-#pragma unroll
-    for (int mp = 0; mp < 8; mp += 2) {
-      uint4 x[2][2];
-      ck_pair(x, s.k.sck, v0, v1, mp, g, tq);
-#pragma unroll
-      for (int e = 0; e < 2; ++e) {
-        const int m = mp + e;
-        const float4 b = g < 2 ? ld4(&s.m.a.yb[g < 2 ? g : 0][16 * m + 4 * tq])
-                               : make_float4(0.f, 0.f, 0.f, 0.f);
-        const uint32_t a0[4] = {tf(f(x[0][e].x)), tf(f(x[1][e].x)),
-                                tf(f(x[0][e].y)), tf(f(x[1][e].y))};
-        const uint32_t a1[4] = {tf(f(x[0][e].z)), tf(f(x[1][e].z)),
-                                tf(f(x[0][e].w)), tf(f(x[1][e].w))};
-        ptx::mma_m16n8k8_tf32(qa[e], a0, tf(b.x), tf(b.y));
-        ptx::mma_m16n8k8_tf32(qa[e], a1, tf(b.z), tf(b.w));
-      }
-    }
-    if (tq == 0) {
-      s.m.a.qs[v0] = make_float2(qa[0][0] + qa[1][0], qa[0][1] + qa[1][1]);
-      s.m.a.qs[v1] = make_float2(qa[0][2] + qa[1][2], qa[0][3] + qa[1][3]);
-    }
-  }
-  __syncthreads();
-
-  float o = 0.f;
-  // value row d: Q = S0 (E Y) + U^T (K' Y), the delta rule, ring append of u,
-  // the RMS sum
-  if (!col) {
-    const float2 q0 = s.m.a.qs[d];
-    float qk = q0.x, qq = q0.y;
-#pragma unroll
-    for (int j4 = 0; j4 < L / 2; ++j4) {
-      const float4 z = ld4(&s.m.a.zsum[4 * j4]);
-      qk += ur[2 * j4] * z.x + ur[2 * j4 + 1] * z.z;
-      qq += ur[2 * j4] * z.y + ur[2 * j4 + 1] * z.w;
-    }
-    const float ckq = s.cp[0] + s.cp[1] + s.cp[2] + s.cp[3];
-    const float u0 = __fdividef(1.f, 1.f + fexp(-sb)) * (vr - qk);
-    const float ov = a.scale * (qq + u0 * ckq);
-    o = P.rounded ? bfr(ov) : ov;
-    if (!flush)
-      a.u_ring[rslot * a.u_ring_stride0 +
-               (ring_base + ((r0 + c) & (R - 1))) * D + d] = u0;
-    else
-      s.us[d] = u0;
-    const float ss = wsum(o * o);
-    if (lane == 0) s.ssq[w] = ss;
-  }
-  __syncthreads();
-
-  // gated RMSNorm of value row d; on a flush the records' u of row d as f16
-  if (!col) {
-    const float ms = (s.ssq[0] + s.ssq[1] + s.ssq[2] + s.ssq[3]) * (1.f / D);
-    outp[d] =
-        __float2bfloat16_rn(o * rsqrtf(ms + a.norm_eps) * nwv * sigm(s.zs[d]));
-    if (flush) {
-      uint32_t up[8];
-#pragma unroll
-      for (int i = 0; i < 8; ++i) up[i] = h2(ur[2 * i], ur[2 * i + 1]);
-      *reinterpret_cast<uint4*>(&s.m.u16[d][0]) =
-          make_uint4(up[0], up[1], up[2], up[3]);
-      *reinterpret_cast<uint4*>(&s.m.u16[d][8]) =
-          make_uint4(up[4], up[5], up[6], up[7]);
-    }
-  }
-  if (flush) {
-    // the new checkpoint S0 E e^{g_0} + U^T K' e^{g_0} + u_0 khat^T (f16
-    // m16n8k16 over the records)
-    __syncthreads();
-    // the records' u as the A operand (rows v0, v1; j 2tq, 2tq + 1, 2tq + 8,
-    // 2tq + 9); a flush has c = L - 1 records
-    const auto ru = [&](int j, int v) {
-      return *reinterpret_cast<const uint32_t*>(&s.m.u16[v][j]);
-    };
-    const uint32_t au[4] = {ru(2 * tq, v0), ru(2 * tq, v1), ru(2 * tq + 8, v0),
-                            ru(2 * tq + 8, v1)};
-    const int cl = 4 * (g >> 1) + (g & 1);
-    const int ka_row = ks<true>(cl), kb_row = ks<true>(cl + 2);
-    const float u0 = s.us[v0], u1 = s.us[v1];
-    float* ck0 = ckp + v0 * a.checkpoint_stride[2] + 4 * tq;
-    float* ck1 = ckp + v1 * a.checkpoint_stride[2] + 4 * tq;
-#pragma unroll
-    for (int mp = 0; mp < 8; mp += 2) {
-      uint4 x[2][2];
-      ck_pair(x, s.k.sck, v0, v1, mp, g, tq);
-#pragma unroll
-      for (int e = 0; e < 2; ++e) {
-        const int m = mp + e;
-        const float4 E4 = ld4(&s.ef[16 * m + 4 * tq]),
-                     K4 = ld4(&s.kh0[16 * m + 4 * tq]);
-        const uint2 ka =
-            *reinterpret_cast<const uint2*>(&s.kpt[16 * m + ka_row][4 * tq]);
-        const uint2 kb =
-            *reinterpret_cast<const uint2*>(&s.kpt[16 * m + kb_row][4 * tq]);
-        float ca[4] = {f(x[0][e].x) * E4.x, f(x[0][e].y) * E4.y,
-                       f(x[1][e].x) * E4.x, f(x[1][e].y) * E4.y};
-        float cb[4] = {f(x[0][e].z) * E4.z, f(x[0][e].w) * E4.w,
-                       f(x[1][e].z) * E4.z, f(x[1][e].w) * E4.w};
-        ptx::mma_m16n8k16_f16(ca, au, ka.x, ka.y);
-        ptx::mma_m16n8k16_f16(cb, au, kb.x, kb.y);
-        *reinterpret_cast<float4*>(ck0 + 16 * m) =
-            make_float4(ca[0] + u0 * K4.x, ca[1] + u0 * K4.y, cb[0] + u0 * K4.z,
-                        cb[1] + u0 * K4.w);
-        *reinterpret_cast<float4*>(ck1 + 16 * m) =
-            make_float4(ca[2] + u1 * K4.x, ca[3] + u1 * K4.y, cb[2] + u1 * K4.z,
-                        cb[3] + u1 * K4.w);
-      }
-    }
-  }
-}
-
 // B200 (sm_100): 227 KB of dynamic shared memory per block
 constexpr size_t SMEM_MAX = 232448;
-static_assert(sizeof(T1Smem) <= SMEM_MAX, "t1_kernel shared memory");
 
-void launch_t1(StepArgs sa_, const kda_replayssm::Ctx& ctx) {
-  static int per_sm = 0;
-  if (!per_sm) {
-    cu::max_dynamic_smem(t1_kernel, sizeof(T1Smem));
-    cu::smem_carveout(t1_kernel, cudaSharedmemCarveoutMaxShared);
-    cu::smem_carveout(proj_kernel, cudaSharedmemCarveoutMaxShared);
-    per_sm = std::max(1, cu::blocks_per_sm(t1_kernel, NTHR, sizeof(T1Smem)));
-  }
-  sa_.wave = per_sm * ctx.sm_count;
-  const kda_replayssm::Dims& d = sa_.a.dims;
-  cu::launch_pdl(t1_kernel, dim3(d.H, d.N), dim3(NTHR), sizeof(T1Smem),
-                 ctx.stream, sa_);
-}
-
-template <int T, bool FZ, bool WB = false>
+template <int T, bool FZ>
 void launch_step(const StepArgs& sa_, const kda_replayssm::Ctx& ctx) {
   using K = Smem<T, FZ>;
-  constexpr size_t bytes = WB ? wts_offset<K>() + 2 * D * D * 2 : sizeof(K);
+  constexpr size_t bytes = FZ ? wts_offset<K>() + 2 * D * D * 2 : sizeof(K);
   static_assert(bytes <= SMEM_MAX, "step_kernel shared memory");
   static bool init = false;
   if (!init) {
-    cu::max_dynamic_smem(step_kernel<T, FZ, WB>, bytes);
+    cu::max_dynamic_smem(step_kernel<T, FZ>, bytes);
     // the full carveout: two CTAs per SM (the default carveout leaves room for
     // one), and proj_kernel beside them
-    cu::smem_carveout(step_kernel<T, FZ, WB>, cudaSharedmemCarveoutMaxShared);
+    cu::smem_carveout(step_kernel<T, FZ>, cudaSharedmemCarveoutMaxShared);
     cu::smem_carveout(proj_kernel, cudaSharedmemCarveoutMaxShared);
     init = true;
   }
   const kda_replayssm::Dims& d = sa_.a.dims;
   const dim3 grid(d.H, d.N);
   if (FZ)
-    step_kernel<T, FZ, WB><<<grid, dim3(NTHR), bytes, ctx.stream>>>(sa_);
+    step_kernel<T, FZ><<<grid, dim3(NTHR), bytes, ctx.stream>>>(sa_);
   else
-    cu::launch_pdl(step_kernel<T, FZ, WB>, grid, dim3(NTHR), bytes, ctx.stream,
+    cu::launch_pdl(step_kernel<T, FZ>, grid, dim3(NTHR), bytes, ctx.stream,
                    sa_);
 }
 
@@ -1503,26 +993,22 @@ void kernel_workspace(const Dims& d, size_t* scratch_bytes) {
 
 void kernel_run(const Args& x, const Ctx& ctx) {
   const Dims& d = x.dims;
-  if ((d.T != 1 && d.T != 6 && d.T != 9) || d.D != D || d.N < 1 ||
-      d.N > 65535 || d.H < 1) {
+  if ((d.T != 6 && d.T != 9) || d.D != D || d.N < 1 || d.N > 65535 || d.H < 1) {
     // fails loudly: cudaErrorInvalidConfiguration
     unsupported_kernel<<<1, 2048, 0, ctx.stream>>>();
     return;
   }
   const int NT = static_cast<int>(d.N * d.T), HD = static_cast<int>(d.H * d.D);
-  // vLLM's route for the shape: KdaSplit only at TP4 with T = 1 or 6, up to 16
-  // tokens per graph (split) and 32-64 tokens (split_gate); FlashInfer (other T
-  // = 1 and TP4 T = 6 rows) and Triton (TP8 T = 6, every T = 9) round to bf16.
-  const bool ks_route = d.H == 16 && (d.T == 1 || d.T == 6);
+  // vLLM's route for the shape: KdaSplit only at TP4 with T = 6, up to 16
+  // tokens per graph (split) and 32-64 tokens (split_gate); FlashInfer (other
+  // TP4 T = 6 rows) and Triton (TP8 T = 6, every T = 9) round to bf16.
+  const bool ks_route = d.H == 16 && d.T == 6;
   const bool split = ks_route && NT <= 16;
   const bool split_gate = ks_route && NT >= 32 && NT <= 64;
-  // The projections in the step CTAs (FZ) for T = 1 up to FZ_UNITS_T1 units and
-  // T = 6 up to WB_UNITS units (the head's weights by bulk copy there, one CTA
-  // per SM); otherwise in their own launch (weights read once per head and PR
-  // tokens).
-  const int64_t units = d.N * d.H;
-  const bool wb = units <= WB_UNITS && d.T != 9;
-  const bool fz = wb || (d.T == 1 && units <= FZ_UNITS_T1);
+  // The projections in the step CTAs (FZ) for T = 6 up to FZ_UNITS units (the
+  // head's weights by bulk copy there, one CTA per SM); otherwise in their own
+  // launch (weights read once per head and PR tokens).
+  const bool fz = d.N * d.H <= FZ_UNITS && d.T == 6;
   float* gz = static_cast<float*>(ctx.scratch);
   if (!fz) {
     ProjArgs p{};
@@ -1538,16 +1024,9 @@ void kernel_run(const Args& x, const Ctx& ctx) {
     proj_kernel<<<dim3(d.H, 2, (NT + PR - 1) / PR), 128, 0, ctx.stream>>>(p);
   }
   const StepArgs sa_{x, gz, !(split || split_gate), !split_gate};
-  if (d.T == 1) {
-    if (!fz)
-      launch_t1(sa_, ctx);
-    else if (wb)
-      launch_step<1, true, true>(sa_, ctx);
-    else
-      launch_step<1, true>(sa_, ctx);
-  } else if (d.T == 6) {
-    if (wb)
-      launch_step<6, true, true>(sa_, ctx);
+  if (d.T == 6) {
+    if (fz)
+      launch_step<6, true>(sa_, ctx);
     else
       launch_step<6, false>(sa_, ctx);
   } else {  // T = 9

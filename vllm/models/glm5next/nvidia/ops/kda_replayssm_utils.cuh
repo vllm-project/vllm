@@ -23,17 +23,6 @@ inline cudaError_t smem_carveout(Kernel* kernel, int percent) {
       kernel, cudaFuncAttributePreferredSharedMemoryCarveout, percent);
 }
 
-// Blocks per SM at `threads` threads and `smem` bytes of dynamic shared memory
-// (0 on error); call after max_dynamic_smem and smem_carveout.
-template <typename Kernel>
-inline int blocks_per_sm(Kernel* kernel, int threads, size_t smem) {
-  int n = 0;
-  return cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, kernel, threads,
-                                                       smem) == cudaSuccess
-             ? n
-             : 0;
-}
-
 // Launches with programmatic dependent launch: the kernel may start while the
 // previous kernel in the stream still runs, so it calls ptx::griddep_wait()
 // before it reads that kernel's output.

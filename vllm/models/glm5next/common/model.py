@@ -104,7 +104,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv, round_up
 
-from ..nvidia import kda_replayssm
 from ..nvidia.specialized_decode.runtime import specialized_decode_config
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
@@ -1314,21 +1313,17 @@ class Glm5NextForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, ...]:
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-        num_spec = vllm_config.num_speculative_tokens
-        if kda_replayssm.rings_in_page(vllm_config.cache_config, num_spec):
-            return dtypes + kda_replayssm.RING_DTYPES
-        return dtypes
 
     @classmethod
-    def get_mamba_state_shape_from_config(  # type: ignore[override]
+    def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -1337,18 +1332,13 @@ class Glm5NextForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_num_heads,
             hf_config.linear_head_dim,
             conv_kernel_size=hf_config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
-        if kda_replayssm.rings_in_page(vllm_config.cache_config, num_spec):
-            return shapes + kda_replayssm.ring_shapes(
-                hf_config.linear_num_heads // tp_size, hf_config.linear_head_dim
-            )
-        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
