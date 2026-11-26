@@ -277,6 +277,11 @@ class Inkling2Experts(nn.Module):
                     up_cap=self.up_cap,
                     prefix=f"{self.prefix}.mega",
                 )
+                if not self.dp_ep and self.ep_size > 1:
+                    # The launch writes 0 to the rows of tokens with no local expert.
+                    self.token_rows = torch.arange(
+                        self.mega.max_num_tokens, dtype=torch.int32, device=l1[0].device
+                    )
         if self.mega is None:
             self.humming = (
                 HummingNVFP4Experts(weights, self.shapes)
@@ -358,9 +363,8 @@ class Inkling2Experts(nn.Module):
                 down = self.mega(x, gammas.view(ids.shape), ids)
                 if self.dp_ep or self.ep_size == 1:
                     return down
-                # This rank's partial sum, one row per token with a local expert.
-                rows = torch.arange(ids.shape[0], device=ids.device, dtype=torch.int32)
-                topk, src2dst = 1, torch.where((ids >= 0).any(1), rows, -1)
+                # This rank's partial sum, one row per token.
+                topk, src2dst = 1, self.token_rows[: ids.shape[0]]
             else:
                 assert self.humming is not None, "process_weights_after_loading"
                 down = self.humming(

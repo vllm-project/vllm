@@ -292,19 +292,88 @@ def _data_parallel_worker(rank: int, world: int, port: int, path: str, queue) ->
     cleanup_dist_env_and_memory()
 
 
+def _tensor_parallel_worker(rank: int, world: int, port: int, path: str, queue) -> None:
+    """One tensor-parallel rank of `test_tensor_parallel_matches_humming`."""
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.forward_context import set_forward_context
+
+    torch.accelerator.set_device_index(rank)
+    failures = []
+    init_distributed_environment(
+        world, rank, f"tcp://127.0.0.1:{port}", local_rank=rank, backend="nccl"
+    )
+    with set_current_vllm_config(VllmConfig()):
+        initialize_model_parallel(world, 1)
+    with _open_checkpoint(path) as checkpoint:
+        for layer in (0, 9, 19):
+            humming = _layer(checkpoint, layer, "auto")
+            mega = _layer(checkpoint, layer, "deep_gemm_mega_moe")
+            assert type(mega.experts.mega) is Inkling2LocalMegaMoEExperts
+            for tokens in (1, 8, 128, 1024):
+                torch.manual_seed(1000 * layer + tokens)
+                x = _input(checkpoint, layer, tokens)
+                ours, control = mega(x), humming(x)
+                ref = _reference(checkpoint, layer, humming, x)
+                if mismatch := _mismatch(ours, control, ref):
+                    failures.append(f"layer {layer} {tokens} tokens: {mismatch}")
+
+        # CUDA graph replay of a padded batch, padding rows (NaN) out as 0.
+        padded, real = 8, 5
+        mega = _layer(checkpoint, 0, "deep_gemm_mega_moe")
+        x = _input(checkpoint, 0, padded)
+        x[real:] = float("nan")
+        context = set_forward_context(
+            None,
+            VllmConfig(),
+            num_tokens=padded,
+            is_padding=torch.arange(padded, device="cuda") >= real,
+        )
+        with context:
+            mega(x)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = mega(x)
+            for i in range(3):
+                torch.manual_seed(10 * i)
+                x.copy_(_input(checkpoint, 0, padded))
+                x[real:] = float("nan")
+                expected = mega(x)
+                graph.replay()
+                if not torch.equal(captured, expected):
+                    failures.append(f"graph replay {i} differs")
+                if not (captured[real:] == 0).all():
+                    failures.append(f"graph replay {i}: padding rows")
+    queue.put((rank, failures))
+    cleanup_dist_env_and_memory()
+
+
+def _spawn(worker, path: str, world: int = 4) -> None:
+    """Runs `worker` on `world` ranks, one GPU each; fails on any rank's
+    failures."""
+    if torch.accelerator.device_count() < world:
+        pytest.skip(f"needs {world} GPUs")
+    queue = mp.get_context("spawn").Queue()
+    mp.spawn(worker, args=(world, get_open_port(), path, queue), nprocs=world)
+    results = dict(queue.get() for _ in range(world))
+    assert all(not f for f in results.values()), results
+
+
 def test_data_parallel_matches_single_rank_humming(checkpoint_path):
     """4 data-parallel ranks: with expert parallelism the 4-rank MegaMoE
     launch and the all-gather / reduce-scatter Humming path, and with
     replicated experts each rank's own launch, match one rank's Humming over
     all experts on each rank's own tokens, also with unequal token counts.
     The expert-parallel paths replay bitwise from a CUDA graph."""
-    world = 4
-    if torch.accelerator.device_count() < world:
-        pytest.skip(f"needs {world} GPUs")
-    queue = mp.get_context("spawn").Queue()
-    port = get_open_port()
-    mp.spawn(
-        _data_parallel_worker, args=(world, port, checkpoint_path, queue), nprocs=world
-    )
-    results = dict(queue.get() for _ in range(world))
-    assert all(not f for f in results.values()), results
+    _spawn(_data_parallel_worker, checkpoint_path)
+
+
+def test_tensor_parallel_matches_humming(checkpoint_path):
+    """4 tensor-parallel ranks: each rank's own MegaMoE launch over its
+    experts, all-reduced, matches Humming at TP 4 and replays bitwise from a
+    CUDA graph. Padding rows come out as 0, as do the rows of tokens with no
+    expert on a rank, which the reduction reads too."""
+    _spawn(_tensor_parallel_worker, checkpoint_path)
