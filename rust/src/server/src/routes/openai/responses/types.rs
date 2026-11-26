@@ -13,14 +13,13 @@ use std::fmt;
 
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
-    Function, FunctionChoice, InputAudio, ReasoningEffort, StringOrArray, ToolChoiceValue,
-    ToolReference, default_true, deserialize_request_top_k,
+    Function, FunctionChoice, ImageDetail, InputAudio, ReasoningEffort, StringOrArray,
+    ToolChoiceValue, ToolReference, default_true, deserialize_request_top_k,
 };
-use llm_multimodal::ImageDetail;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use validator::Validate;
+use vllm_chat::AllowedToolsMode;
 
 /// Responses API `input` field: either a plain string (single user message)
 /// or a list of input/output items.
@@ -155,6 +154,71 @@ pub enum ServiceTier {
     Priority,
 }
 
+/// Request fields the frontend validates at most and echoes back unchanged on
+/// the response. Flattened into both [`ResponsesRequest`] and
+/// [`ResponsesResponse`], so they need no per-field plumbing in between.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseEchoFields {
+    /// Accepted without built-in tools, which it would limit.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
+    /// Size-checked in validation.
+    #[serde(default)]
+    pub metadata: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    #[serde(default)]
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    #[serde(default)]
+    pub safety_identifier: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// Responses API `prompt_cache_retention` values. Accepted and echoed; the
+/// frontend does not act on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptCacheRetention {
+    /// Older OpenAI SDKs send `in-memory`; it is echoed as `in_memory`.
+    #[serde(rename = "in_memory", alias = "in-memory")]
+    InMemory,
+    #[serde(rename = "24h")]
+    Hours24,
+}
+
+/// Responses API `prompt_cache_options`. Accepted and echoed with defaults
+/// applied; the frontend does not act on them. The request-only `prewarm`
+/// key is not declared: its cache preparation is not implemented, and it is
+/// omitted from the echo, like OpenAI's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PromptCacheOptions {
+    #[serde(default)]
+    pub mode: PromptCacheMode,
+    #[serde(default)]
+    pub ttl: PromptCacheTtl,
+    #[serde(default)]
+    pub comparison_response_id: Option<String>,
+}
+
+/// Responses API `prompt_cache_options.mode` values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheMode {
+    #[default]
+    Implicit,
+    Explicit,
+}
+
+/// Responses API `prompt_cache_options.ttl` values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptCacheTtl {
+    #[default]
+    #[serde(rename = "30m")]
+    Minutes30,
+}
+
 /// One Responses API tool.
 ///
 /// The function tool is the chat-completions [`Function`] flattened next to
@@ -164,6 +228,28 @@ pub enum ServiceTier {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponsesTool {
+    Function(Function),
+    /// Function tools grouped under a namespace. The model sees each one as
+    /// `<namespace>__<name>`; see `tools.rs`.
+    Namespace(NamespaceTool),
+}
+
+/// Responses API `namespace` tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NamespaceTool {
+    /// The namespace name used in tool calls.
+    pub name: String,
+    /// A description of the namespace. Only echoed: like Python, the model
+    /// sees the flattened function tools alone.
+    pub description: String,
+    pub tools: Vec<NamespacedTool>,
+}
+
+/// One tool inside a [`NamespaceTool`]. Custom tools are rejected during
+/// deserialization, as they are at the top level.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NamespacedTool {
     Function(Function),
 }
 
@@ -184,9 +270,8 @@ pub enum ResponseToolChoice {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseToolChoiceObject {
     Function(FunctionChoice),
-    /// TODO: support `allowed_tools` tool choices.
     AllowedTools {
-        mode: String,
+        mode: AllowedToolsMode,
         tools: Vec<ToolReference>,
     },
 }
@@ -205,8 +290,11 @@ pub enum ResponseToolChoiceObject {
 /// are accepted for Codex/Python compatibility, without generating encrypted
 /// state, summaries, or applying a verbosity policy. Other `include` values
 /// that this frontend cannot produce are rejected.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ResponsesRequest {
+    /// Fields echoed back unchanged; see [`ResponseEchoFields`].
+    #[serde(flatten)]
+    pub echo: ResponseEchoFields,
     /// The model ID served by this frontend. Optional; defaults to the
     /// served model when omitted.
     #[serde(default)]
@@ -226,10 +314,6 @@ pub struct ResponsesRequest {
     pub parallel_tool_calls: Option<bool>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
-    #[serde(default)]
-    pub max_tool_calls: Option<u32>,
-    #[serde(default)]
-    pub metadata: Option<HashMap<String, String>>,
     #[serde(default)]
     pub previous_response_id: Option<String>,
     /// Harmony-only stateless replay history. The Rust frontend does not
@@ -271,8 +355,6 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub truncation: Option<ResponseTruncation>,
     #[serde(default)]
-    pub user: Option<String>,
-    #[serde(default)]
     pub include: Option<Vec<String>>,
     #[serde(default)]
     pub presence_penalty: Option<f32>,
@@ -286,8 +368,9 @@ pub struct ResponsesRequest {
     pub stop: Option<StringOrArray>,
     #[serde(default)]
     pub ignore_eos: bool,
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    pub skip_special_tokens: Option<bool>,
+    /// Accepted as a no-op, as on chat completions.
+    #[allow(dead_code)]
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
     #[serde(default)]
@@ -298,6 +381,10 @@ pub struct ResponsesRequest {
     pub logit_bias: Option<HashMap<String, f32>>,
     #[serde(default)]
     pub stop_token_ids: Option<Vec<u32>>,
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited, as on chat completions.
+    #[serde(default)]
+    pub thinking_token_budget: Option<i64>,
 
     // Extra request parameters shared with the other vLLM endpoints.
     /// Caller-supplied request ID used to derive the response and engine IDs.
@@ -308,7 +395,6 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub priority: Option<i32>,
     #[serde(default)]
-    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
     #[serde(default)]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
@@ -329,13 +415,12 @@ pub struct ResponsesRequest {
     pub vllm_xargs: Option<HashMap<String, Value>>,
 }
 
-impl crate::routes::openai::utils::types::Normalizable for ResponsesRequest {}
-
 /// One typed input/output item of [`ResponsesInput::Items`].
 ///
 /// Variants cover the supported Responses API history surface: messages,
-/// function calls, function call outputs, and reasoning items. Other item
-/// types (`custom_tool_call`, `mcp_call`, ...) fail deserialization;
+/// function calls, function call outputs, and reasoning items, plus the
+/// `additional_tools` items that declare tools. Other item types
+/// (`custom_tool_call`, `mcp_call`, ...) fail deserialization;
 /// `item_reference` is kept to report that it requires the response store.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", remote = "Self")]
@@ -346,6 +431,10 @@ pub enum ResponseInputItem {
     FunctionCall(ResponseInputFunctionCall),
     FunctionCallOutput(ResponseInputFunctionCallOutput),
     Reasoning(ResponseInputReasoning),
+    /// Tools declared in the input instead of in `tools`, as Codex does.
+    /// They are moved into the request tools before the input is converted;
+    /// see `tools.rs`.
+    AdditionalTools(ResponseInputAdditionalTools),
     ItemReference {},
 }
 
@@ -436,6 +525,9 @@ pub enum ResponseInputContentPart {
 pub struct ResponseInputFunctionCall {
     pub call_id: String,
     pub name: String,
+    /// Namespace of a function from a `namespace` tool.
+    #[serde(default)]
+    pub namespace: Option<String>,
     pub arguments: String,
     #[serde(default)]
     pub id: Option<String>,
@@ -453,6 +545,13 @@ pub struct ResponseInputFunctionCallOutput {
     pub id: Option<String>,
     #[serde(default)]
     pub status: Option<ResponseItemStatus>,
+}
+
+/// One `additional_tools` input item. Its tools are deserialized like the
+/// top-level `tools`; its `role` (always `developer`) is not read.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ResponseInputAdditionalTools {
+    pub tools: Vec<ResponsesTool>,
 }
 
 /// One `reasoning` input item (assistant reasoning in history).
@@ -547,7 +646,11 @@ pub enum ResponseOutputItem {
     FunctionCall {
         id: String,
         call_id: String,
+        /// The function name, without its namespace.
         name: String,
+        /// Namespace of a function from a `namespace` tool.
+        #[serde(default)]
+        namespace: Option<String>,
         arguments: String,
         #[serde(default)]
         status: Option<ResponseItemStatus>,
@@ -646,10 +749,6 @@ pub struct ResponsesResponse {
     #[serde(default)]
     pub instructions: Option<String>,
     pub max_output_tokens: u32,
-    #[serde(default)]
-    pub max_tool_calls: Option<u32>,
-    #[serde(default)]
-    pub metadata: Option<HashMap<String, String>>,
     pub model: String,
     pub output: Vec<ResponseOutputItem>,
     pub parallel_tool_calls: bool,
@@ -673,8 +772,6 @@ pub struct ResponsesResponse {
     pub truncation: ResponseTruncation,
     #[serde(default)]
     pub usage: Option<ResponseUsage>,
-    #[serde(default)]
-    pub user: Option<String>,
     /// vLLM-specific per-request metrics. Omitted unless enabled server-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<PerRequestMetrics>,
@@ -684,6 +781,9 @@ pub struct ResponsesResponse {
     pub kv_transfer_params: Option<Value>,
     #[serde(default)]
     pub ec_transfer_params: Option<Value>,
+    /// Fields echoed back unchanged; see [`ResponseEchoFields`].
+    #[serde(flatten)]
+    pub echo: ResponseEchoFields,
 }
 
 /// The failure detail carried by a failed Responses API response.
@@ -709,6 +809,7 @@ impl serde::Serialize for ResponseObject {
 mod tests {
     use expect_test::expect;
     use serde_json::json;
+    use thiserror_ext::AsReport as _;
 
     use super::*;
 
@@ -740,17 +841,6 @@ mod tests {
 
             assert_eq!(request.top_k, expected);
         }
-    }
-
-    #[test]
-    fn request_rejects_empty_cache_salt() {
-        let request: ResponsesRequest = serde_json::from_value(json!({
-            "input": "hello",
-            "cache_salt": "",
-        }))
-        .expect("deserialize request");
-
-        assert!(request.validate().is_err());
     }
 
     #[test]
@@ -796,6 +886,28 @@ mod tests {
     }
 
     #[test]
+    fn additional_tools_items_are_validated_like_top_level_tools() {
+        for (tools, expected) in [
+            (json!("oops"), "expected a sequence"),
+            (
+                json!([{"type": "custom", "name": "exec"}]),
+                "unknown variant `custom`",
+            ),
+        ] {
+            let error = serde_json::from_value::<ResponsesRequest>(json!({
+                "input": [
+                    {"type": "additional_tools", "role": "developer", "tools": tools},
+                    {"role": "user", "content": "hi"},
+                ],
+            }))
+            .unwrap_err();
+
+            let report = error.to_report_string();
+            assert!(report.contains(expected), "{report}");
+        }
+    }
+
+    #[test]
     fn response_serializes_without_none_fields() {
         let response = ResponsesResponse {
             id: "resp_1".to_string(),
@@ -807,8 +919,7 @@ mod tests {
             incomplete_details: None,
             instructions: Some("be terse".to_string()),
             max_output_tokens: 16,
-            max_tool_calls: None,
-            metadata: None,
+            echo: ResponseEchoFields::default(),
             model: "test-model".to_string(),
             output: vec![ResponseOutputItem::Message {
                 id: "msg_1".to_string(),
@@ -849,7 +960,6 @@ mod tests {
                 },
                 total_tokens: 5,
             }),
-            user: None,
             metrics: None,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
@@ -868,8 +978,6 @@ mod tests {
               "incomplete_details": null,
               "instructions": "be terse",
               "max_output_tokens": 16,
-              "max_tool_calls": null,
-              "metadata": null,
               "model": "test-model",
               "output": [
                 {
@@ -915,11 +1023,17 @@ mod tests {
                 },
                 "total_tokens": 5
               },
-              "user": null,
               "presence_penalty": 0.0,
               "frequency_penalty": 0.0,
               "kv_transfer_params": null,
-              "ec_transfer_params": null
+              "ec_transfer_params": null,
+              "max_tool_calls": null,
+              "metadata": null,
+              "prompt_cache_key": null,
+              "prompt_cache_options": null,
+              "prompt_cache_retention": null,
+              "safety_identifier": null,
+              "user": null
             }"#]]
         .assert_eq(&serde_json::to_string_pretty(&response).unwrap());
     }

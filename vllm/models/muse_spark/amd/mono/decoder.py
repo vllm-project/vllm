@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x decode monokernel: layers 1-60 of a verify step as FlyDSL launches.
+"""Muse Spark decode monokernel: layers 1-60 of a verify step as FlyDSL launches.
 
 See README.md. Every rank must take the same path (the kernel waits on its
 peers), so the decision uses only rank-invariant data: the static deployment
@@ -8,7 +8,7 @@ checked at attach, the batch shape and the attention metadata counts.
 """
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
@@ -21,8 +21,8 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.models.muse_spark.common.layers import (
-    MuseSpark1xNormPreservingResidualConnection,
-    MuseSpark1xRMSNormWithInputScale,
+    MuseSparkNormPreservingResidualConnection,
+    MuseSparkRMSNormWithInputScale,
     norm_then_gated_residual,
 )
 
@@ -44,6 +44,13 @@ HEALTH_POLL_INTERVAL = 64
 # Other builds and layer 1 run vLLM's attention op.
 FUSED_ATTENTION = {8: ("swa", "full"), 16: ("swa", "full"), 32: ("swa", "full")}
 SLIDING_WINDOW = (2047, 0)
+# Other launches' health checks (the DSpark drafter's), run by poll_health.
+_HEALTH_CHECKS: dict[int, Callable[[], None]] = {}
+
+
+def register_health_check(key: int, check: Callable[[], None]) -> None:
+    _HEALTH_CHECKS[key] = check
+
 
 # The model shape the K3 build is specialized for.
 KERNEL_CONFIG: dict[str, float] = {
@@ -63,7 +70,7 @@ KERNEL_CONFIG: dict[str, float] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonoDims:
     """Per-rank tensor sizes of a TP = EP rank."""
 
@@ -121,7 +128,7 @@ class MonoDims:
 
 
 def bucket_of(rows: int) -> int | None:
-    """The kernel build that serves ``rows`` (padded up); None = stock."""
+    """The kernel build that serves `rows` (padded up); None = stock."""
     if rows <= 0 or rows % ROWS_PER_REQUEST:
         return None
     if rows in K3_ROWS:
@@ -169,7 +176,7 @@ class LayerWeights:
 
 
 def effective_norm_weight(norm: nn.Module) -> torch.Tensor:
-    """The bf16 multiplier the kernel applies: ``weight (+ gain_center)``."""
+    """The bf16 multiplier the kernel applies: `weight (+ gain_center)`."""
     weight = norm.weight.detach().float()
     if norm.zero_centered_gamma:
         weight = weight + norm.gain_center
@@ -188,7 +195,7 @@ def _rows(t: torch.Tensor, rank: int, n: int) -> torch.Tensor:
 def collect_layer_weights(
     layers: Sequence[nn.Module], i: int, rank: int, dims: MonoDims
 ) -> LayerWeights:
-    """Layer i's kernel weights from decoder layers ``i`` and ``i + 1``; no copy."""
+    """Layer i's kernel weights from decoder layers `i` and `i + 1`; no copy."""
     layer, nxt = layers[i], layers[i + 1]
     moe = layer.feed_forward
     experts = _routed_experts(layer)
@@ -332,12 +339,12 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
         for name in ("add_attn", "add_ffn"):
             conn = getattr(layer, name)
             if not isinstance(
-                conn, MuseSpark1xNormPreservingResidualConnection
+                conn, MuseSparkNormPreservingResidualConnection
             ) or not getattr(conn, "_coefficients_ready", False):
                 bad(f"layer {i}: {name} coefficients not materialized")
         if layer.post_attn_norm.has_weight:
             bad(f"layer {i}: post_attn_norm has a weight")
-        if not isinstance(layer.post_ffn_norm, MuseSpark1xRMSNormWithInputScale):
+        if not isinstance(layer.post_ffn_norm, MuseSparkRMSNormWithInputScale):
             bad(f"layer {i}: post_ffn_norm type")
         if not getattr(layer, "is_moe_layer", False):
             bad(f"layer {i}: dense FFN")
@@ -374,7 +381,7 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
 
 
 def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int) -> str | None:
-    """K3 writes bf16 LBHNC pages: ``[block][kv head][16 tokens][K | V]``."""
+    """K3 writes bf16 LBHNC pages: `[block][kv head][16 tokens][K | V]`."""
     if kv_cache.numel() == 0:
         return "kv:unbound"
     if kv_cache.dtype != torch.bfloat16:
@@ -388,8 +395,8 @@ def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int) -> str | None:
 
 
 def attention_type(layer: nn.Module) -> str | None:
-    """``"swa"`` / ``"full"`` when the fused attention can run layer's
-    attention (vLLM's ``sliding_window`` (2047, 0) or none); else None."""
+    """`"swa"` / `"full"` when the fused attention can run layer's
+    attention (vLLM's `sliding_window` (2047, 0) or none); else None."""
     window = getattr(
         getattr(layer.self_attn.attn, "impl", None), "sliding_window", None
     )
@@ -403,7 +410,7 @@ def attention_type(layer: nn.Module) -> str | None:
 def fused_attention_layers(
     layers: Sequence[nn.Module], max_model_len: int, max_keys: int
 ) -> dict[int, str]:
-    """Layers whose attention the launches can fuse: ``{i: type}``.
+    """Layers whose attention the launches can fuse: `{i: type}`.
 
     Empty when a request may hold more keys than a build stages block ids for.
     """
@@ -422,7 +429,7 @@ def batch_refusal(
 ) -> str | None:
     """Why this step runs stock, from rank-invariant data only; None = mono.
 
-    Reads the attention metadata of the kernels' layers (``layer_names``) only:
+    Reads the attention metadata of the kernels' layers (`layer_names`) only:
     the dict also holds the draft model's layers.
     """
     if bucket_of(num_tokens) is None:
@@ -455,9 +462,9 @@ def batch_refusal(
     return None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonoKernels:
-    """The FlyDSL kernel modules (``kernels.k3``, ``k5``, ``k5m``, ``attn_frag``)."""
+    """The FlyDSL kernel modules (`kernels.k3`, `k5`, `k5m`, `attn_frag`)."""
 
     k3: ModuleType
     k5: ModuleType
@@ -467,7 +474,7 @@ class MonoKernels:
 
 class _FusedAttention:
     """The fused attention of one build: its output, scratch and descriptor
-    tables (``kernels/attn_frag.py``; row i = layer i).
+    tables (`kernels/attn_frag.py`; row i = layer i).
 
     A table holds pointers and counts only (q, KV cache, block table,
     seq_lens, output, request count, scale). Tables are keyed by their
@@ -505,7 +512,7 @@ class _FusedAttention:
     def table(
         self, layers: Sequence[nn.Module], q_of: Any, num_reqs: int
     ) -> torch.Tensor:
-        """The descriptor table of this step; ``q_of(i)`` = layer i's q."""
+        """The descriptor table of this step; `q_of(i)` = layer i's q."""
         rows = {}
         for i in self.layers:
             md, _, kv_cache, _ = get_attention_context(
@@ -691,7 +698,7 @@ class _K5Bucket(_Bucket):
     """24-128 rows: HA (attention boundary, router, pre-expert projection),
     HM (the local experts) and HB (FFN boundary, next QKV) a layer; between
     the launches the residual stream lives token-sharded unless the build
-    replicates it (``key.bnd``)."""
+    replicates it (`key.bnd`)."""
 
     def __init__(
         self,
@@ -809,7 +816,7 @@ class _K5Bucket(_Bucket):
 
 
 def built_buckets(max_num_seqs: int) -> list[int]:
-    """The builds a server with ``max_num_seqs`` requests can use."""
+    """The builds a server with `max_num_seqs` requests can use."""
     max_rows = min(max_num_seqs, K5_ROWS[-1] // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
     return sorted(
         {
@@ -996,6 +1003,8 @@ class MuseSparkMono:
         """
         if torch.cuda.is_current_stream_capturing():
             return
+        for check in _HEALTH_CHECKS.values():
+            check()
         self._steps += 1
         if self._health_event is not None and self._health_event.query():
             self._health_event = None

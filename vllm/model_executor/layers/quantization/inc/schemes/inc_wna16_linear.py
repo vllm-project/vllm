@@ -307,11 +307,11 @@ class INCXPULinearBase(INCLinearScheme):
 class INCXPULinearMethod(INCXPULinearBase):
     """XPU linear method for INC w4a16 quantization (symmetric only).
 
-    Supports both GPTQ-packed (``auto_round:auto_gptq``) and AWQ-packed
-    (``auto_round:auto_awq``) AutoRound checkpoints. AWQ-packed qweights are
+    Supports both GPTQ-packed (`auto_round:auto_gptq`) and AWQ-packed
+    (`auto_round:auto_awq`) AutoRound checkpoints. AWQ-packed qweights are
     losslessly repacked into the GPTQ-style nibble layout during
-    ``process_weights_after_loading``, before the final oneDNN "NT" transpose
-    that ``torch.ops._xpu_C.int4_gemm_w4a16`` expects.
+    `process_weights_after_loading`, before the final oneDNN "NT" transpose
+    that `torch.ops._xpu_C.int4_gemm_w4a16` expects.
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

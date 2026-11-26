@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Prepare/finalize stages that do no expert-parallel communication.
 
-Selected by ``all2all_backend="passthrough"``: the experts implementation
+Selected by `all2all_backend="passthrough"`: the experts implementation
 dispatches, combines and reduces itself, so nothing is left for these stages.
 """
 

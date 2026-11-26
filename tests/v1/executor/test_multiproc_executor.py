@@ -73,7 +73,7 @@ def test_execute_worker_rpc_returns_worker_exception():
     "method,result",
     [
         ("take_draft_token_ids", DraftTokenIds(["req"], [[1, 2, 3]])),
-        ("execute_dummy_batch", None),
+        ("execute_dummy_batch", ["iteration record"]),
     ],
 )
 def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stalled):

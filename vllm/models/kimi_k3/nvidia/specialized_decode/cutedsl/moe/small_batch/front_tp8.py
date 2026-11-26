@@ -12,7 +12,6 @@ from ...common.primitives import (
     bf16,
     copy_bulk,
     copy_g2s,
-    div_rn,
     early_weights,
     fma,
     gate_bf16_bits,
@@ -22,13 +21,15 @@ from ...common.primitives import (
     mailbox_load,
     mailbox_store,
     mma_into,
+    mul_rn,
     multicast_words,
     named_barrier,
     published,
     routing_add,
     routing_sigmoid,
     routing_weight,
-    sigmoid,
+    situ_gate,
+    situ_up,
     smem_words,
     split,
     store_gate_mailbox,
@@ -131,8 +132,8 @@ class MoeSharedTP8:
             ua0 = table_load(tables.iterator + 65536 + (up[0] >> 16))
             ga1 = table_load(tables.iterator + (gate[1] >> 16))
             ua1 = table_load(tables.iterator + 65536 + (up[1] >> 16))
-            hsm[column] = Float32(BFloat16(ga0 * ua0))
-            hsm[column + 1] = Float32(BFloat16(ga1 * ua1))
+            hsm[column] = Float32(BFloat16(mul_rn(ga0, ua0)))
+            hsm[column + 1] = Float32(BFloat16(mul_rn(ga1, ua1)))
         cute.arch.sync_threads()
         out = (hsm, output, par3, lane)
         if lsu_count > 0:
@@ -165,13 +166,9 @@ class SharedSituTables:
         tid, _, _, cta = thread()
         index = 256 * cta + tid
         value = bf16(Uint32(index))
-        gate = div_rn(value, beta)
-        probability = sigmoid(value)
-        tables[index] = (beta * cute.math.tanh(gate, fastmath=False)) * probability
-        up = value
-        if linear_beta > 0:
-            scaled = div_rn(value, linear_beta)
-            up = linear_beta * cute.math.tanh(scaled, fastmath=False)
+        # situ_and_mul(gate, up) == mul_rn(tables[gate], tables[65536 + up]).
+        tables[index] = situ_gate(value, beta)
+        up = situ_up(value, linear_beta)
         tables[65536 + index] = up
 
 

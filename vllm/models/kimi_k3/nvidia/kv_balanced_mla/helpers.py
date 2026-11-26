@@ -72,11 +72,11 @@ def compute_q_tile_layout(
 ) -> tuple[int, int, int]:
     """Return total rows, tile count and valid rows in the final query tile.
 
-    ``num_heads`` is the positive head count per query, ``seq_len_q`` is the
-    positive query length, and ``m_tile`` is the positive MMA row capacity.
+    `num_heads` is the positive head count per query, `seq_len_q` is the
+    positive query length, and `m_tile` is the positive MMA row capacity.
     Heads must fit within one MMA tile. Following FlashInfer PR #4178,
-    consecutive rows represent ``query_token * num_heads + head`` and may
-    cross query boundaries. The returned tail is in ``[1, m_tile]``.
+    consecutive rows represent `query_token * num_heads + head` and may
+    cross query boundaries. The returned tail is in `[1, m_tile]`.
     """
     if min(num_heads, seq_len_q, m_tile) <= 0 or num_heads > m_tile:
         raise ValueError("Require positive H, Sq and M, with H <= M")
@@ -365,9 +365,9 @@ def create_mla_static_tile_scheduler(
 
 class MLAWorkListTileScheduler:
     """Persistent tile scheduler over a device work list (added for the Kimi K3
-    KV-balanced MLA decode). CTA ``i`` of the grid walks clusters ``i // cluster``,
-    then every ``grid / cluster`` further; entry ``c`` of the list is
-    ``(q_tile * B + batch) << 8 | split``, or < 0. The valid entries are a prefix
+    KV-balanced MLA decode). CTA `i` of the grid walks clusters `i // cluster`,
+    then every `grid / cluster` further; entry `c` of the list is
+    `(q_tile * B + batch) << 8 | split`, or < 0. The valid entries are a prefix
     followed by at least one wave of negative entries, so every walk ends inside
     the list."""
 

@@ -73,6 +73,25 @@ def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
     return {**(base or {}), **(override or {})}
 
 
+def _with_unique_cache_salt(request_func_input: RequestFuncInput) -> RequestFuncInput:
+    """Copy with a fresh `cache_salt`, so the request cannot hit, or be hit by,
+    other requests in the prefix cache."""
+    return replace(
+        request_func_input,
+        extra_body={
+            **(request_func_input.extra_body or {}),
+            "cache_salt": f"warmup-{uuid.uuid4().hex}",
+        },
+    )
+
+
+def _rejects_cache_salt(output: RequestFuncOutput) -> bool:
+    """Whether the server refused the request as invalid (HTTP 400 or 422), as a
+    server that does not accept `cache_salt` does. Other failures can be
+    transient, so they are retried with the salt."""
+    return output.status_code in (400, 422)
+
+
 TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) and (
     shutil.which("gnuplot") is not None
 )
@@ -197,7 +216,7 @@ async def get_first_model_from_server(
             ) from e
 
 
-@dataclass
+@dataclass(slots=True)
 class SpecDecodeMetrics:
     """Speculative decoding metrics from the server's Prometheus endpoint."""
 
@@ -205,6 +224,7 @@ class SpecDecodeMetrics:
     num_draft_tokens: int
     num_accepted_tokens: int
     accepted_per_pos: dict[int, int]
+    num_verified_tokens: int
 
 
 async def fetch_spec_decode_metrics(
@@ -225,6 +245,7 @@ async def fetch_spec_decode_metrics(
             num_draft_tokens = 0
             num_accepted_tokens = 0
             accepted_per_pos: dict[int, int] = {}
+            num_verified_tokens = 0
             found_spec_decode = False
 
             for line in text.split("\n"):
@@ -257,6 +278,8 @@ async def fetch_spec_decode_metrics(
                                 )
                         elif "num_accepted_tokens" in metric_name:
                             num_accepted_tokens += int(float(parts[-1]))
+                        elif "num_verified_tokens_total" in metric_name:
+                            num_verified_tokens += int(float(parts[-1]))
 
             if not found_spec_decode:
                 return None
@@ -266,12 +289,13 @@ async def fetch_spec_decode_metrics(
                 num_draft_tokens=num_draft_tokens,
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
+                num_verified_tokens=num_verified_tokens,
             )
     except (TimeoutError, aiohttp.ClientError):
         return None
 
 
-@dataclass
+@dataclass(slots=True)
 class DiffusionMetrics:
     """Diffusion (dLLM) decoding metrics from the server's Prometheus endpoint."""
 
@@ -338,7 +362,7 @@ class TaskType(Enum):
     POOLING = "pooling"
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkMetrics:
     completed: int
     failed: int
@@ -373,7 +397,7 @@ class BenchmarkMetrics:
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
 
 
-@dataclass
+@dataclass(slots=True)
 class EmbedBenchmarkMetrics:
     completed: int
     failed: int
@@ -481,7 +505,7 @@ async def get_request(
 
     # if the traces have timing info then:
     if not self_timed:
-        for request_index, request in enumerate(input_requests):
+        for request_index in range(len(input_requests)):
             current_request_rate = _get_current_request_rate(
                 ramp_up_strategy,
                 ramp_up_start_rps,
@@ -525,7 +549,7 @@ async def get_request(
             normalize_factor = target_total_delay_s / delay_ts[-1]
             delay_ts = [delay * normalize_factor for delay in delay_ts]
     else:
-        for request_index, request in enumerate(input_requests):
+        for request in input_requests:
             # this is cumulative running ts, from which sleep is calculated later
             if request.timestamp is not None:
                 delay_ts.append(request.timestamp)
@@ -722,7 +746,7 @@ def calculate_metrics(
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
 
-        for i, output in enumerate(successful_outputs):
+        for output in successful_outputs:
             # Calculate token generation timestamp using
             # start_time, ttft, and itl
             token_times = [output.start_time + output.ttft]
@@ -906,8 +930,33 @@ async def benchmark(
     )
 
     if ready_check_timeout_sec > 0:
+
+        async def ready_check_request_func(
+            request_func_input: RequestFuncInput,
+            session: aiohttp.ClientSession,
+            pbar: tqdm | None = None,
+        ) -> RequestFuncOutput:
+            # Salted like the warmups so the check does not prime the prefix cache
+            # for request 0; unsalted only if the server rejects cache_salt.
+            output = await request_func(
+                request_func_input=_with_unique_cache_salt(request_func_input),
+                session=session,
+                pbar=pbar,
+            )
+            if not _rejects_cache_salt(output):
+                return output
+            output = await request_func(
+                request_func_input=request_func_input, session=session, pbar=pbar
+            )
+            if output.success:
+                print(
+                    "WARNING: the ready check succeeded only without cache_salt; "
+                    "the first measured request may hit the prefix cache."
+                )
+            return output
+
         test_output = await wait_for_endpoint(
-            request_func,
+            ready_check_request_func,
             test_input,
             session,
             timeout_seconds=ready_check_timeout_sec,
@@ -931,18 +980,31 @@ async def benchmark(
             if max_concurrency
             else contextlib.nullcontext()
         )
-        warmup_tasks = []
 
-        async def warmup_limited_request_func():
+        async def warmup_limited_request_func(salted: bool) -> RequestFuncOutput:
+            # A unique cache_salt per warmup prevents prefix cache hits among
+            # warmups and the run.
+            warmup_input = _with_unique_cache_salt(test_input) if salted else test_input
             async with warmup_semaphore:
                 return await request_func(
-                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                    request_func_input=warmup_input, session=session, pbar=warmup_pbar
                 )
 
-        for _ in range(num_warmups):
-            request_task = asyncio.create_task(warmup_limited_request_func())
-            warmup_tasks.append(request_task)
-        _ = await asyncio.gather(*warmup_tasks)
+        warmup_outputs = await asyncio.gather(
+            *(warmup_limited_request_func(salted=True) for _ in range(num_warmups))
+        )
+        rejected = [output for output in warmup_outputs if _rejects_cache_salt(output)]
+        if rejected and not any(output.success for output in warmup_outputs):
+            print(
+                f"WARNING: no warmup request succeeded and the server rejected "
+                f"{len(rejected)} of them (HTTP {rejected[0].status_code}); "
+                "retrying without cache_salt."
+            )
+            if warmup_pbar is not None:
+                warmup_pbar.reset()
+            await asyncio.gather(
+                *(warmup_limited_request_func(salted=False) for _ in range(num_warmups))
+            )
 
         if warmup_pbar is not None:
             warmup_pbar.close()
@@ -1142,6 +1204,10 @@ async def benchmark(
             spec_decode_metrics_after.num_accepted_tokens
             - spec_decode_metrics_before.num_accepted_tokens
         )
+        delta_verified = (
+            spec_decode_metrics_after.num_verified_tokens
+            - spec_decode_metrics_before.num_verified_tokens
+        )
         per_pos_rates: list[float] = []
         if delta_drafts > 0:
             positions = sorted(
@@ -1165,6 +1231,7 @@ async def benchmark(
                 "num_drafts": delta_drafts,
                 "draft_tokens": delta_draft_tokens,
                 "accepted_tokens": delta_accepted,
+                "verified_tokens": delta_verified,
                 "acceptance_rate": acceptance_rate,
                 "acceptance_length": acceptance_length,
                 "per_position_acceptance_rates": per_pos_rates,
@@ -1381,6 +1448,9 @@ async def benchmark(
         result["spec_decode_accepted_tokens"] = int(
             spec_decode_stats["accepted_tokens"]
         )
+        result["spec_decode_verified_tokens"] = int(
+            spec_decode_stats["verified_tokens"]
+        )
         result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
             "per_position_acceptance_rates", []
         )
@@ -1464,7 +1534,7 @@ async def benchmark(
             value = diffusion_stats[key]
             if value_fmt.endswith("d}"):
                 value = int(value)
-            print("{:<40} ".format(label) + value_fmt.format(value))
+            print(f"{label:<40} " + value_fmt.format(value))
 
     if spec_decode_stats is not None and diffusion_stats is None:
         print("{s:{c}^{n}}".format(s="Speculative Decoding", n=50, c="-"))
@@ -1487,6 +1557,11 @@ async def benchmark(
         print(
             "{:<40} {:<10}".format(
                 "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Verified tokens:", int(spec_decode_stats["verified_tokens"])
             )
         )
         per_pos = spec_decode_stats.get("per_position_acceptance_rates", [])
@@ -1781,7 +1856,10 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--num-warmups",
         type=int,
         default=0,
-        help="Number of warmup requests.",
+        help="Number of warmup requests. Each resends the first request with a "
+        "unique cache_salt, so warmups do not prime the prefix cache for the "
+        "run; if none succeeds and the server rejects any (HTTP 400 or 422), "
+        "they are retried without it.",
     )
     parser.add_argument(
         "--profile",
@@ -1990,7 +2068,10 @@ def add_cli_args(parser: FlexibleArgumentParser):
         type=int,
         default=0,
         help="Maximum time to wait for the endpoint to become ready "
-        "in seconds. Ready check will be skipped by default.",
+        "in seconds. Ready check will be skipped by default. The check sends "
+        "the first request with a unique cache_salt (unsalted if the server "
+        "rejects it with HTTP 400 or 422), so it does not prime the prefix "
+        "cache for the run.",
     )
 
     parser.add_argument(

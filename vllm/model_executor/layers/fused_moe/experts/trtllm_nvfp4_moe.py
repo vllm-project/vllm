@@ -305,7 +305,15 @@ class TrtLlmNvFp4ExpertsBase:
 
 
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
-    """Modular version of the implementation (just the experts)."""
+    """Modular version of the implementation (just the experts).
+
+    The TRTLLM-Gen kernel skips padding rows (topk_ids == -1), so it consumes
+    the padded contiguous layout DeepEP v2 produces.
+    """
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     def __init__(
         self,
@@ -358,7 +366,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
     ) -> UnfinalizedMoEOutput | None:
-        """Finalize into ``output``, or stop after GEMM2 when it is None."""
+        """Finalize into `output`, or stop after GEMM2 when it is None."""
         import flashinfer
 
         assert self.quant_config.w1_scale is not None

@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardFusable,
     InputHadamardLinearMethod,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -182,13 +183,16 @@ class QuarkConfig(QuantizationConfig):
     ):
         """Find the linear layers exported with an online input rotation.
 
-        Quark's ``RotationConfig`` with ``online_r1_rotation`` (or ``r4``)
+        Quark's `RotationConfig` with `online_r1_rotation` (or `r4`)
         keeps the activation rotation online: the weight is stored rotated
-        along its input dimension, and the layer carries an ``input_rotation``
-        tensor (a +-1 int8 Hadamard matrix of size ``rotation_size``) that the
+        along its input dimension, and the layer carries an `input_rotation`
+        tensor (a +-1 int8 Hadamard matrix of size `rotation_size`) that the
         activation must be multiplied by first.
         """
         algo_configs = self.quant_config.get("algo_config") or []
+        # Older Quark exports store a single algorithm as a dict, not a list.
+        if isinstance(algo_configs, dict):
+            algo_configs = [algo_configs]
         if not any(algo.get("name") == "rotation" for algo in algo_configs):
             return
         metadata = get_safetensors_params_metadata(model_name, revision=revision)
@@ -223,7 +227,7 @@ class QuarkConfig(QuantizationConfig):
     def _scale_block_rows(self, prefix: str, layer_type: type[torch.nn.Module]) -> int:
         """How many weight rows one checkpoint scale row covers.
 
-        1 for the canonical 1-D per-group MX spelling; ``block_size[0]`` for
+        1 for the canonical 1-D per-group MX spelling; `block_size[0]` for
         MXFP8 exports that spell the scale 2-D (DeepSeek-V4.1 uses 32). The
         scheme cannot work this out itself: it has no handle on the layer name,
         and tensor-parallel sharding narrows the loaded scale so the ratio is
@@ -301,15 +305,15 @@ class QuarkConfig(QuantizationConfig):
         | None,
     ]:
         """Return weight key, activation key, and quant method class for
-        the given ``prefix`` and ``layer_type``.
+        the given `prefix` and `layer_type`.
 
-        This is the counterpart of ``get_quant_method`` without quant method
+        This is the counterpart of `get_quant_method` without quant method
         instantiation.
 
         TODO: integrate as part of base QuantizationConfig.get_quant_method_target
         in the future.
 
-        ``None`` denotes an unquantized/BF16 activation.
+        `None` denotes an unquantized/BF16 activation.
         """
         is_routed_experts = issubclass(layer_type, RoutedExperts)
         if should_ignore_layer(
@@ -1035,7 +1039,7 @@ class QuarkConfig(QuantizationConfig):
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 
-class QuarkLinearMethod(LinearMethodBase):
+class QuarkLinearMethod(LinearMethodBase, InputHadamardFusable):
     def __init__(self, quantization_config: QuarkConfig):
         self.quantization_config = quantization_config
 
@@ -1100,6 +1104,12 @@ class QuarkLinearMethod(LinearMethodBase):
             raise ValueError("A scheme must be defined for each layer")
 
         return scheme.apply_weights(layer, x, bias=bias)
+
+    def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
+        scheme = layer.scheme
+        return isinstance(scheme, InputHadamardFusable) and (
+            scheme.fuse_input_hadamard(layer, size)
+        )
 
 
 class QuarkKVCacheMethod(BaseKVCacheMethod):

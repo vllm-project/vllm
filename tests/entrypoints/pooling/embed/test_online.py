@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 import openai
@@ -30,7 +32,7 @@ from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
 input_text = "The best thing about vLLM is that it supports many different models"
@@ -60,6 +62,70 @@ input_tokens = [
 ROCM_DETERMINISM_ARGS: list[str] = (
     ["--max-num-seqs", "1"] if current_platform.is_rocm() else []
 )
+
+
+def test_pooling_rejects_media_before_fetching_on_text_model(
+    server: RemoteOpenAIServer,
+) -> None:
+    requested = threading.Event()
+
+    class MediaHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requested.set()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"not an image")
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    media_server = ThreadingHTTPServer(("127.0.0.1", 0), MediaHandler)
+    thread = threading.Thread(target=media_server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        response = requests.post(
+            server.url_for("/pooling"),
+            json={
+                "model": MODEL_NAME,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": (
+                                        f"http://127.0.0.1:{media_server.server_port}/image"
+                                    )
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            timeout=10,
+        )
+        assert response.status_code == 400
+        assert "not a multimodal model" in response.text
+        assert not requested.is_set()
+    finally:
+        media_server.shutdown()
+        thread.join()
+        media_server.server_close()
+
+
+def test_pooling_rejects_request_tokenizer_options(server: RemoteOpenAIServer):
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"padding": False},
+        },
+        timeout=10,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "chat_template_kwargs"
 
 
 @pytest.fixture(scope="module")
@@ -286,17 +352,15 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
     ]
 
-    with pytest.raises(openai.BadRequestError):
-        response = await client.embeddings.create(
+    with pytest.raises(openai.BadRequestError) as err:
+        await client.embeddings.create(
             model=model_name,
             input=input_texts,
             extra_body={"truncate_prompt_tokens": 8193},
         )
-        assert "error" in response.object
-        assert (
-            "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please request a smaller truncation size." in response.message
-        )
+    assert err.value.status_code == 400
+    error_message = err.value.response.json()["error"]["message"]
+    assert "Please request a smaller truncation size." in error_message
 
 
 @pytest.mark.asyncio

@@ -95,12 +95,12 @@ def build_ultraquant_decode_hd256_module(
 ):
     """Build the production UltraQuant D=256 decode kernel.
 
-    ``padded_slot`` is the per-(token, head) slot stride in bytes
-    (``kv_cache.shape[3]``, >= 272). Cache layout is
-    ``[num_blocks, block_size, num_kv_heads, padded_slot]`` uint8 AoS.
+    `padded_slot` is the per-(token, head) slot stride in bytes
+    (`kv_cache.shape[3]`, >= 272). Cache layout is
+    `[num_blocks, block_size, num_kv_heads, padded_slot]` uint8 AoS.
 
     QK is always scaled FP4×E4M3 MFMA; V always uses native CVT + HW
-    transpose; tile-groups are always strided. ``fuse_qrot`` selects the
+    transpose; tile-groups are always strided. `fuse_qrot` selects the
     in-kernel WHT when the query layout is eligible.
     """
     # QG=6 (Qwen3.6 full-attention layers) reuses the 8-row WHT lane map with

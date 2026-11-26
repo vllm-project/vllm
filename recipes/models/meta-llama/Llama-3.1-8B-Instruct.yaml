@@ -46,6 +46,15 @@ variants:
     vram_minimum_gb: 20
     description: "Full precision BF16"
     supported_hardware: [h100, h200, mi300x, mi325x, mi355x, trillium, xeon6, arc_pro_b60, arc_pro_b70]
+    hardware_overrides:
+      arc_pro_b60:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
   w8a8_int8:
     model_id: "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8"
     precision: int8
@@ -280,7 +289,8 @@ guide: |
   ## Troubleshooting
 
   **OOM on small GPUs:**
-  Lower `--max-model-len` or `--gpu-memory-utilization`.
+  Lower `--max-model-len` or `--max-num-seqs`. On TPU, XPU and CPU, lowering
+  `--gpu-memory-utilization` also leaves more headroom.
 
   **EAGLE3 draft head not loading:**
   Upgrade vLLM to >= 0.9.0 — earlier releases don't support the EAGLE3 verification path.

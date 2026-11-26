@@ -941,6 +941,19 @@ class ECMooncakeWorker:
         self._failed_loads = set()
         return meta
 
+    def reset(self) -> None:
+        """Invalidate published ConsumerMemoryPool residents after a reset.
+
+        `reset_encoder_cache` already clears the worker encoder cache,
+        and the Scheduler expires its own records. Unleased published
+        residents are evicted at once; leased ones are marked
+        invalidated, so lookups miss, `take` refuses their stale READY
+        leases, and the entry is evicted at final lease release.
+        In-flight WRITING reservations are not cancelled. Safe to call
+        before the receive slab is prepared.
+        """
+        self._consumer_memory.invalidate_published()
+
     def close(self) -> None:
         if self._shutdown:
             return

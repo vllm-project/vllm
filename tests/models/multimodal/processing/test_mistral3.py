@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for Mistral3's multimodal preprocessing kwargs."""
+"""Tests for Mistral3's and Pixtral (HF)'s multimodal preprocessing kwargs."""
 
 import pytest
 import torch
@@ -35,6 +35,7 @@ from ...utils import build_model_context
 _MODEL_CONFIG_KWARGS = {"config_format": "hf"}
 _MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
+_PIXTRAL_HF_MODEL_ID = "mistral-community/pixtral-12b"
 
 _RGB_MEAN = [0.48145466, 0.4578275, 0.40821073]
 _RGB_STD = [0.26862954, 0.26130258, 0.27577711]
@@ -43,7 +44,8 @@ _RGB_RESCALE = 1.0 / 255.0
 
 @pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.skipif(
-    not HAS_TRITON or not current_platform.is_cuda(), reason="CUDA Triton kernel"
+    not HAS_TRITON or not current_platform.is_cuda_alike(),
+    reason="CUDA or ROCm Triton kernel",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("normalize", [False, True])
@@ -229,6 +231,48 @@ def test_processor_size_override(
     assert expected_from_pixel_values == expected_toks_per_img
     assert hf_placeholder_tokens.count(hf_processor.image_token_id) == (
         expected_from_pixel_values * num_imgs
+    )
+    assert prompt_update_tokens == hf_placeholder_tokens
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected_toks_per_img"),
+    [
+        ({}, 3072),
+        ({"size": {"longest_edge": 512}}, 768),
+        ({"images_kwargs": {"size": {"longest_edge": 512}}}, 768),
+    ],
+)
+@pytest.mark.parametrize("kwargs_on_init", [True, False])
+def test_pixtral_hf_processor_size_override(
+    mm_processor_kwargs: dict[str, object],
+    expected_toks_per_img: int,
+    kwargs_on_init: bool,
+):
+    ctx = build_model_context(
+        _PIXTRAL_HF_MODEL_ID,
+        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
+    hf_processor = AutoProcessor.from_pretrained(
+        _PIXTRAL_HF_MODEL_ID,
+        fix_mistral_regex=True,
+    )
+
+    image = Image.new("RGB", (1024, 768), color=(127, 127, 127))
+    merged_mm_kwargs = processor.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+    pixel_values, hf_placeholder_tokens = _process_images_with_hf(
+        hf_processor, [image], merged_mm_kwargs
+    )
+    prompt_update_tokens = _placeholder_tokens_from_prompt_updates(
+        processor, [image], pixel_values, hf_processor_mm_kwargs
+    )
+
+    assert (
+        _expected_placeholder_tokens_per_image(hf_processor, pixel_values[0])
+        == expected_toks_per_img
     )
     assert prompt_update_tokens == hf_placeholder_tokens
 

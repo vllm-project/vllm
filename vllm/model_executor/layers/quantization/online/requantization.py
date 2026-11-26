@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.model_loader.reload.layerwise import (
+    initialize_online_processing,
+)
+from vllm.model_executor.model_loader.reload.meta import to_meta_tensor
 
 _requantization_source: ContextVar[bool] = ContextVar(
     "requantization_source", default=False
@@ -15,10 +20,12 @@ _requantization_source: ContextVar[bool] = ContextVar(
 
 
 @contextmanager
-def requantization_source_scope() -> Iterator[None]:
-    """Mark quantization methods created in this scope as requantization sources.
+def skip_checkpoint_backend_selection() -> Generator[None]:
+    """Skip backend selection for checkpoint quantization methods in this scope.
 
-    Their weights are only dequantized, so oracles can skip backend selection.
+    Covers checkpoint methods used as requantization sources (their weights are
+    only dequantized) and unquantized checkpoint methods discarded when an online
+    target replaces them, so oracles need not probe a compute backend.
     """
     token = _requantization_source.set(True)
     try:
@@ -34,6 +41,31 @@ def is_requantization_source() -> bool:
 class OnlineRequantizationMixin:
     """Shared lifecycle for converting serialized weights before quantization."""
 
+    # Only the MXFP4, FP8 per-channel (PTPC) linear and MXFP8 MoE online methods
+    # honor an activation override for now.
+    accepts_activation_override: bool = False
+
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        """Final activation key for a requested (or default) key."""
+        # TODO: this should be removed and handled by oracles once oracles are
+        # refactored.
+        if explicit and not cls.accepts_activation_override:
+            raise NotImplementedError(
+                f"activation override is not supported for online {cls.__name__}"
+            )
+        if activation_quant_key is not None and activation_quant_key.scale.static:
+            # Online quantization has no calibrated static activation scales.
+            raise NotImplementedError(
+                f"online {cls.__name__} cannot honour "
+                f"activation={activation_quant_key}: static activation scales are "
+                "not supported. Use a dynamic activation key, or 'activation: null'."
+            )
+
+        return activation_quant_key
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.requantization_source: QuantizeMethodBase | None = None
@@ -42,7 +74,6 @@ class OnlineRequantizationMixin:
     def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
         """Configure serialized-weight conversion before online quantization."""
         self.requantization_source = source_method
-        self.uses_meta_device = False
 
     def create_requantization_source_weights(
         self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
@@ -52,22 +83,36 @@ class OnlineRequantizationMixin:
             return False
 
         existing_parameter_names = set(layer._parameters)
-        self.requantization_source.create_weights(
-            layer, *weight_args, **extra_weight_attrs
-        )
+        # Schemes may select kernels in `create_weights`: skip them for sources.
+        with skip_checkpoint_backend_selection():
+            self.requantization_source.create_weights(
+                layer, *weight_args, **extra_weight_attrs
+            )
         self.requantization_source_parameters = {
             name: parameter
             for name, parameter in layer._parameters.items()
             if name not in existing_parameter_names and parameter is not None
         }
-        for parameter in self.requantization_source_parameters.values():
+        for name, parameter in self.requantization_source_parameters.items():
             # `replace_parameter` then registers new params over these.
             parameter.requantization_source = True
+            # The serialized weights live on the meta device and are materialized
+            # one layer at a time by the layerwise processing loader: a layer is
+            # requantized as soon as it is loaded, so the peak memory is the
+            # quantized model plus one layer of serialized weights.
+            meta_parameter = to_meta_tensor(parameter)
+            layer.register_parameter(name, meta_parameter)
+            self.requantization_source_parameters[name] = meta_parameter
+        initialize_online_processing(layer)
         return True
 
     def release_requantization_source_weights(self, layer: torch.nn.Module) -> None:
         """Release serialized parameters after successful requantization."""
-        for name, source_parameter in self.requantization_source_parameters.items():
-            if layer._parameters.get(name) is source_parameter:
+        for name in self.requantization_source_parameters:
+            # Materialization re-creates the parameter, keeping its attributes.
+            parameter = layer._parameters.get(name)
+            if parameter is not None and getattr(
+                parameter, "requantization_source", False
+            ):
                 delattr(layer, name)
         self.requantization_source_parameters.clear()
