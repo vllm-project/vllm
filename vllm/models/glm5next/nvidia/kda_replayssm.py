@@ -10,6 +10,7 @@ committed state. See ops/kda_replayssm.cu.
 
 import functools
 import math
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -21,15 +22,19 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 RING_LEN = 32
 WINDOW = 16
 RING_DTYPES = (torch.float32, torch.bfloat16, torch.float32)
+# Layers per materialize program: few programs to skip, enough to publish.
+MATERIALIZE_LAYERS = 8
 _OPS = Path(__file__).parent / "ops"
 
 
@@ -88,7 +93,6 @@ def check_supported(
         f"--replayssm-buffer-len other than {WINDOW}": (
             cache_config.replayssm_buffer_len != WINDOW
         ),
-        "prefix caching": cache_config.enable_prefix_caching,
         "--mamba-backend other than triton": vllm_config.mamba_config.backend
         != MambaBackendEnum.TRITON,
         "the DS conv-state layout": is_conv_state_dim_first(),
@@ -207,3 +211,110 @@ def step_cursors(layer, metadata: GDNAttentionMetadata) -> StepCursors:
     )
     held[id(metadata)] = cursors
     return cursors
+
+
+@triton.jit
+def _slot_base(ptrs, strides, i, slot, DTYPE: tl.constexpr):
+    return tl.load(ptrs + i).to(tl.pointer_type(DTYPE)) + slot * tl.load(strides + i)
+
+
+@triton.jit
+def _materialize_kernel(
+    ptrs,
+    strides,
+    src_slots,
+    ring_slots,
+    dst_slots,
+    ring_start,
+    flush_count,
+    active_request_indices,
+    num_layers,
+    PAD_SLOT_ID: tl.constexpr,
+    MAX_NUM_REQS: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    D: tl.constexpr,
+    R: tl.constexpr,
+    LAYERS: tl.constexpr,
+):
+    req = tl.load(active_request_indices + tl.program_id(0))
+    if req < 0:
+        return
+    head = tl.program_id(1) % NUM_HEADS
+    first_layer = tl.program_id(1) // NUM_HEADS * LAYERS
+    rows = tl.arange(0, R)
+    offs = tl.arange(0, D)
+    records = rows[:, None] < tl.load(flush_count + req)
+    ring_rows = (tl.load(ring_start + req) + rows) % R
+    ring = head * R * D + ring_rows[:, None] * D + offs[None, :]
+    state = head * D * D + offs[:, None] * D + offs[None, :]
+    for layer in range(first_layer, min(first_layer + LAYERS, num_layers)):
+        slot_offset = layer * MAX_NUM_REQS + req
+        src = tl.load(src_slots + slot_offset).to(tl.int64)
+        dst = tl.load(dst_slots + slot_offset).to(tl.int64)
+        if (src != PAD_SLOT_ID) & (dst != PAD_SLOT_ID):
+            # `[layers, 4]` tables: checkpoint, u, k, g.
+            i = 4 * layer
+            ring_slot = tl.load(ring_slots + slot_offset).to(tl.int64)
+            u = _slot_base(ptrs, strides, i + 1, ring_slot, tl.float32)
+            k = _slot_base(ptrs, strides, i + 2, ring_slot, tl.bfloat16)
+            g = _slot_base(ptrs, strides, i + 3, ring_slot, tl.float32)
+            u = tl.load(u + ring, mask=records, other=0.0)
+            k = tl.load(k + ring, mask=records, other=0.0).to(tl.float32)
+            g = tl.load(g + ring, mask=records, other=0.0)
+            # S_n = S_0 e^{G} + sum_j u_j (k_j e^{gates after j})^T, G the gate sum.
+            after = tl.cumsum(g, axis=0, reverse=True) - g
+            S = tl.load(_slot_base(ptrs, strides, i, src, tl.float32) + state)
+            S = S * tl.exp(tl.sum(g, axis=0))[None, :]
+            S = tl.dot(tl.trans(u), k * tl.exp(after), S, input_precision="tf32x3")
+            tl.store(_slot_base(ptrs, strides, i, dst, tl.float32) + state, S)
+
+
+def replayssm_materializer(mixers: Sequence) -> Callable[..., None]:
+    """The prefix-cache snapshot writer of these KDA layers: it stores each
+    `src` checkpoint `[H, V, K]`, advanced by the first `flush_count` records
+    of the rings at `ring_slots`, at `dst` (a `[layers, max_num_reqs]` slot
+    table each), for the requests in `active_request_indices`."""
+    caches = [mixer.kv_cache[1:] for mixer in mixers]
+    device = caches[0][0].device
+    ptrs, strides = (
+        torch.tensor(
+            [[f(state) for state in cache] for cache in caches],
+            dtype=torch.int64,
+            device=device,
+        )
+        for f in (torch.Tensor.data_ptr, lambda t: t.stride(0))
+    )
+    num_heads, head_dim = caches[0][0].shape[1:3]
+
+    def materialize(
+        src_slots: torch.Tensor,
+        ring_slots: torch.Tensor,
+        dst_slots: torch.Tensor,
+        ring_start: torch.Tensor,
+        flush_count: torch.Tensor,
+        active_request_indices: torch.Tensor,
+        num_reqs: int,
+    ) -> None:
+        num_layers = len(caches)
+        _materialize_kernel[
+            (num_reqs, num_heads * triton.cdiv(num_layers, MATERIALIZE_LAYERS))
+        ](
+            ptrs,
+            strides,
+            src_slots,
+            ring_slots,
+            dst_slots,
+            ring_start,
+            flush_count,
+            active_request_indices,
+            num_layers,
+            PAD_SLOT_ID=NULL_BLOCK_ID,
+            MAX_NUM_REQS=src_slots.size(1),
+            NUM_HEADS=num_heads,
+            D=head_dim,
+            R=RING_LEN,
+            LAYERS=MATERIALIZE_LAYERS,
+            num_warps=8,
+        )
+
+    return materialize
