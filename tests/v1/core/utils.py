@@ -6,6 +6,7 @@ import torch
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     DiffusionConfig,
     ECTransferConfig,
     KVTransferConfig,
@@ -100,11 +101,13 @@ def create_scheduler(
     speculative_config: SpeculativeConfig | None = None,
     encoder_cache_size: int | None = None,
     enable_logging_iteration_details: bool = False,
+    device: str = "auto",
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
     Args:
       model: model under test
+      device: Device type; use cpu for hardware-independent scheduler tests.
       max_num_seqs: max sequences to schedule
       max_num_batch_tokens: max num tokens to batch
       enable_prefix_caching: optionally force APC config
@@ -217,6 +220,7 @@ def create_scheduler(
         diffusion_config = DiffusionConfig(canvas_length=diffusion_canvas_length)
 
     vllm_config = VllmConfig(
+        device_config=DeviceConfig(device),
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,

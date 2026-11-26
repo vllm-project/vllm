@@ -8,3 +8,4 @@ include tools/build_rust.py
 
 recursive-include cmake *
 recursive-include csrc *
+recursive-include vllm/distributed/kv_transfer/kv_connector/v1/peer_l1/native *.h *.cpp

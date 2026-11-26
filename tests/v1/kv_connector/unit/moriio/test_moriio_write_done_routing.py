@@ -637,6 +637,7 @@ def test_deferred_write_timeout_notifies_every_fanout_target(
 
 def test_write_scheduler_waits_for_worker_ack_past_defer_deadline():
     scheduler = SimpleNamespace(
+        pd_replay=None,
         is_producer=True,
         mode=MoRIIOMode.WRITE,
         _defer_timeout=60.0,

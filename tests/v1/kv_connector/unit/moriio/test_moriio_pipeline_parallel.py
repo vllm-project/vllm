@@ -111,6 +111,7 @@ class _DecodeScheduler(MoRIIOConnectorScheduler):
 def _decode_scheduler(*, send: bool = False) -> _DecodeScheduler:
     """A decode scheduler that records its notifications, or sends them."""
     scheduler = _DecodeScheduler.__new__(_DecodeScheduler)
+    scheduler.pd_replay = None
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = False
     scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
@@ -138,6 +139,7 @@ def _decode_scheduler(*, send: bool = False) -> _DecodeScheduler:
 def _prefill_scheduler(pp_size: int, tp_size: int, host: str, notify_port: int):
     """The prefill-side state request_finished reads."""
     scheduler = SimpleNamespace(
+        pd_replay=None,
         is_producer=True,
         _is_hma_required=False,
         _has_mamba=False,

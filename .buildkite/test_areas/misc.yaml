@@ -251,6 +251,34 @@ steps:
   - python3 -c "import mori"
   - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
+- label: ":computer: (CPU) Peer L1 Connector Unit Tests"
+  key: peer-l1-connector-unit-cpu
+  automatic_shard: true
+  depends_on:
+  - image-build-cpu
+  device: cpu-small
+  timeout_in_minutes: 20
+  working_dir: /vllm-workspace/tests
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/peer_l1/
+  - vllm/distributed/kv_transfer/kv_connector/lookup.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_engine.py
+  - tests/v1/kv_connector/unit/test_peer_l1
+  - tests/v1/kv_connector/unit/test_prefix_lookup.py
+  - tests/v1/kv_connector/unit/peer_l1_utils.py
+  - tests/v1/kv_connector/unit/utils.py
+  - tests/v1/kv_connector/unit/moriio/test_moriio_pd_replay.py
+  - tests/v1/core/test_prefix_caching.py
+  - tests/v1/core/utils.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - >-
+    pytest -v -s
+    v1/kv_connector/unit/test_peer_l1*.py
+    v1/kv_connector/unit/test_prefix_lookup.py
+
 - label: ":amd: (MI355 DPX) UMBP Connector Integration"
   key: amd-umbp-connector-integration-mi355
   automatic_shard: true

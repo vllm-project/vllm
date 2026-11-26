@@ -3,17 +3,22 @@
 """Tests for EngineCoreProc handling inputs while waiting for a step's output."""
 
 import queue
+import threading
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
 from unittest import mock
+from uuid import uuid4
 
 import pytest
+import zmq
 
+from tests.v1.kv_connector.unit.utils import MockKVConnector
 from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.engine import core as engine_core
 from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.executor.abstract import Executor
 
 ADD = EngineCoreRequestType.ADD
 ABORT = EngineCoreRequestType.ABORT
@@ -175,3 +180,183 @@ def test_stop_on_add_returns_at_first_add():
     assert not engine._handle_inputs_while_waiting(
         PollableFuture(ready_after=3), stop_on_add=True
     )
+
+
+@pytest.mark.parametrize("notify_before_get", [True, False])
+def test_connector_wakeup_closes_idle_queue_race(notify_before_get):
+    """A notification both before and during a blocking get wakes the engine."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from vllm.v1.engine.core import _ConnectorWakeup
+
+    inputs: queue.Queue = queue.Queue()
+    wakeup = _ConnectorWakeup(inputs)
+    with ThreadPoolExecutor(1) as executor:
+        if notify_before_get:
+            wakeup.notify()
+        waiting = executor.submit(inputs.get, True, 5)
+        wakeup.notify()
+        assert waiting.result(timeout=5) == (
+            EngineCoreRequestType.WAKEUP,
+            None,
+        )
+        wakeup.notify()
+        assert inputs.empty()
+        wakeup.consume()
+        wakeup.notify()
+        assert inputs.get_nowait()[0] == EngineCoreRequestType.WAKEUP
+
+
+class WakeupConnector(MockKVConnector):
+    def __init__(self, vllm_config, role, kv_cache_config):
+        super().__init__(vllm_config, role, kv_cache_config)
+        self.endpoint = vllm_config.kv_transfer_config.kv_connector_extra_config[
+            "endpoint"
+        ]
+        self.pending = threading.Event()
+        self.stepped = threading.Event()
+        self.stop = threading.Event()
+        self.callback = None
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    def set_engine_wakeup(self, callback):
+        self.callback = callback
+
+    def serve(self):
+        with zmq.Context() as ctx, ctx.socket(zmq.REP) as socket:
+            socket.bind(self.endpoint)
+            while not self.stop.is_set():
+                if socket.poll(100):
+                    socket.recv()
+                    self.pending.set()
+                    if self.callback is not None:
+                        self.callback()
+                    if self.stepped.wait(5):
+                        socket.send(b"stepped")
+
+    def has_pending_push_work(self):
+        return self.pending.is_set()
+
+    def build_connector_meta(self, output):
+        self.pending.clear()
+        self.stepped.set()
+        return super().build_connector_meta(output)
+
+    def shutdown(self):
+        self.stop.set()
+        if self.thread:
+            self.thread.join(timeout=5)
+
+
+class WakeupExecutor(Executor):
+    def _init_executor(self):
+        pass
+
+    def check_health(self):
+        pass
+
+    def collective_rpc(
+        self, method, timeout=None, args=(), kwargs=None, non_block=False
+    ):
+        from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+
+        result = {
+            "get_kv_cache_layer_configs": [{}],
+            "get_supported_kv_cache_layouts": [["LBNHC"]],
+            "get_supported_tasks": [("generate",)],
+            "get_kv_connector_handshake_metadata": [None],
+            "compile_or_warm_up_model": [],
+            "execute_model": [EMPTY_MODEL_RUNNER_OUTPUT],
+        }.get(method, [None])
+        if non_block:
+            future: Future[list[Any]] = Future()
+            future.set_result(result)
+            return future
+        return result
+
+    def execute_model(self, scheduler_output, non_block=False):
+        from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+
+        if non_block:
+            future: Future[Any] = Future()
+            future.set_result(EMPTY_MODEL_RUNNER_OUTPUT)
+            return future
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+
+@pytest.fixture
+def wakeup_config(tmp_path):
+    from transformers import OPTConfig
+
+    from vllm.config import (
+        CacheConfig,
+        DeviceConfig,
+        KVTransferConfig,
+        ModelConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
+
+    OPTConfig(
+        hidden_size=64,
+        num_attention_heads=2,
+        ffn_dim=128,
+        num_hidden_layers=1,
+        vocab_size=128,
+        max_position_embeddings=64,
+    ).save_pretrained(tmp_path)
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), skip_tokenizer_init=True, dtype="float32"
+        ),
+        device_config=DeviceConfig("cpu"),
+        cache_config=CacheConfig(
+            block_size=16, enable_prefix_caching=False, enable_extensible_kv_cache=False
+        ),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_num_seqs=2,
+            max_model_len=64,
+            max_num_batched_tokens=64,
+            enable_chunked_prefill=False,
+            async_scheduling=False,
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="WakeupConnector",
+            kv_connector_module_path=__name__,
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "matched_tokens": 0,
+                "is_async": False,
+                "endpoint": f"ipc://@vllm-wakeup-{uuid4().hex}",
+            },
+        ),
+    )
+
+
+def test_idle_engine_proc_steps_for_connector_and_shuts_down(wakeup_config):
+    import zmq
+
+    from vllm.v1.engine.core_client import EngineCoreClient, SyncMPClient
+
+    client = EngineCoreClient.make_client(
+        multiprocess_mode=True,
+        asyncio_mode=False,
+        vllm_config=wakeup_config,
+        executor_class=WakeupExecutor,
+        collect_stats=False,
+    )
+    assert isinstance(client, SyncMPClient)
+    try:
+        client.call_utility("pause_scheduler", "wait", False, False)
+        with zmq.Context() as ctx, ctx.socket(zmq.REQ) as socket:
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.connect(
+                wakeup_config.kv_transfer_config.kv_connector_extra_config["endpoint"]
+            )
+            socket.send(b"work")
+            assert socket.poll(10000), "Idle engine did not run connector maintenance"
+            assert socket.recv() == b"stepped"
+    finally:
+        client.shutdown()

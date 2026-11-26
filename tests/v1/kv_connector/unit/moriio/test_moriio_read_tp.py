@@ -657,3 +657,42 @@ def test_read_holder_tp_ranks(local_tp_rank, local_tp_size, remote_tp_size, expe
         get_moriio_read_holder_tp_ranks(local_tp_rank, local_tp_size, remote_tp_size)
         == expected
     )
+
+
+def test_owned_read_retains_status_and_arguments_when_native_post_throws(monkeypatch):
+    """A partial native post cannot hide its live status in a Python temporary."""
+    import sys
+    from types import ModuleType
+
+    sdk, cpp = ModuleType("mori"), ModuleType("mori.cpp")
+    monkeypatch.setattr(cpp, "TransferStatus", _Status, raising=False)
+    monkeypatch.setattr(sdk, "cpp", cpp, raising=False)
+    monkeypatch.setitem(sys.modules, "mori", sdk)
+
+    class Memory:
+        def pack(self):
+            return b"registered"
+
+    class Engine:
+        def __init__(self):
+            self._engine = self
+
+        def register_torch_tensor(self, tensor):
+            return Memory()
+
+        def allocate_transfer_uid(self):
+            return 7
+
+        def BatchRead(self, *arguments):
+            assert arguments[5][0] is read.status
+            raise RuntimeError("partial native post")
+
+    engine = Engine()
+    wrapper = MoRIIOWrapper(engine)
+    wrapper.register_local_tensor(torch.empty(8, dtype=torch.uint8))
+    remote = Memory()
+    read = wrapper.prepare_owned_read([4], [0], [4], remote)
+    with pytest.raises(RuntimeError, match="partial native post"):
+        wrapper.submit_owned_read(read)
+    assert read.arguments[5][0] is read.status
+    assert read.arguments[2][0] is remote

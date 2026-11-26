@@ -22,7 +22,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -110,6 +110,17 @@ def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
         if required_kvcache_layout is not None:
             return required_kvcache_layout
     return None
+
+
+def get_kv_connector_storage_allowance(
+    vllm_config: VllmConfig, layers: dict[str, KVCacheLayerConfig]
+) -> dict[str, int] | None:
+    """Resolve the configured connector's extra storage tokens by layer."""
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is None or not kv_config.is_kv_transfer_instance:
+        return None
+    connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+    return connector_cls.get_kv_cache_storage_allowance(vllm_config, layers)
 
 
 def kv_connector_may_load_foreign_kv(vllm_config: VllmConfig) -> bool:

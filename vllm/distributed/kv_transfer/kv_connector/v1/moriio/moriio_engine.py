@@ -3,6 +3,7 @@
 import threading
 import time
 from collections import OrderedDict, defaultdict
+from dataclasses import dataclass
 from math import ceil
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
@@ -864,6 +865,14 @@ class MoRIIOWriter:
         )
 
 
+@dataclass(frozen=True)
+class MoRIIOOwnedRead:
+    """Keep status and arguments alive through partial native posting failures."""
+
+    status: Any
+    arguments: tuple[Any, ...]
+
+
 class MoRIIOWrapper:
     """Wrapper for MoRIIO engine operations.
 
@@ -999,6 +1008,36 @@ class MoRIIOWrapper:
         )
 
         return transfer_status
+
+    def prepare_owned_read(
+        self,
+        sizes: list[int],
+        local_offsets: list[int],
+        remote_offsets: list[int],
+        remote_memory: Any,
+    ) -> MoRIIOOwnedRead:
+        """Prepare before posting; the caller retains this object until drained."""
+        from mori import cpp
+
+        assert self.moriio_engine is not None and self.local_memory_registered
+        status = cpp.TransferStatus()
+        return MoRIIOOwnedRead(
+            status,
+            (
+                [self.local_memory_metadata],
+                [local_offsets],
+                [remote_memory],
+                [remote_offsets],
+                [sizes],
+                [status],
+                [self.moriio_engine.allocate_transfer_uid()],
+            ),
+        )
+
+    def submit_owned_read(self, read: MoRIIOOwnedRead) -> None:
+        """Post using the caller-owned status, including if native BatchRead throws."""
+        assert self.moriio_engine is not None
+        self.moriio_engine._engine.BatchRead(*read.arguments)
 
     def write_remote_data(
         self, transfer_size_byte, local_offset=0, remote_offset=0, session=None

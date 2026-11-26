@@ -620,17 +620,26 @@ class ReqMeta:
 @dataclass
 class MoRIIOConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     blocks_to_zero: set[int]
+    pd_replay_generations: dict[str, int] = field(default_factory=dict)
 
     def aggregate(
         self, other: KVConnectorWorkerMetadata
     ) -> "MoRIIOConnectorWorkerMetadata":
         assert isinstance(other, MoRIIOConnectorWorkerMetadata)
-        return MoRIIOConnectorWorkerMetadata(self.blocks_to_zero | other.blocks_to_zero)
+        return MoRIIOConnectorWorkerMetadata(
+            self.blocks_to_zero | other.blocks_to_zero,
+            {
+                rid: generation
+                for rid, generation in self.pd_replay_generations.items()
+                if other.pd_replay_generations.get(rid) == generation
+            },
+        )
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
+        self.pd_replay_generations: dict[str, int] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_abort: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}

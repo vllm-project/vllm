@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import Literal, Protocol, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
@@ -128,6 +128,18 @@ class KVCacheBlocks:
         return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
 
 
+class StorageRetentionProvider(Protocol):
+    def prepare(
+        self, request: Request, local_tokens: int, external_tokens: int
+    ) -> bool:
+        """Install storage floors and return whether a new floor was created."""
+        ...
+
+    def forget(self, request_id: str) -> None:
+        """Discard provider state when storage retention is cleared."""
+        ...
+
+
 class KVCacheManager:
     def __init__(
         self,
@@ -145,6 +157,7 @@ class KVCacheManager:
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
     ) -> None:
+        self.storage_retention_provider: StorageRetentionProvider | None = None
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
         # collapses to the prior (uncapped) admission behavior. The scheduler
@@ -223,6 +236,23 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+
+    def set_storage_retention(
+        self, request_id: str, starts_by_group: Sequence[int]
+    ) -> None:
+        """Keep storage from each group's absolute start block onward."""
+        managers = self.coordinator.single_type_managers
+        assert len(starts_by_group) == len(managers)
+        assert all(start >= 0 for start in starts_by_group)
+        for manager, start in zip(managers, starts_by_group):
+            manager.storage_retention_starts[request_id] = start
+
+    def clear_storage_retention(self, request_id: str) -> None:
+        """Clear storage floors and their provider's allocation state."""
+        for manager in self.coordinator.single_type_managers:
+            manager.storage_retention_starts.pop(request_id, None)
+        if self.storage_retention_provider is not None:
+            self.storage_retention_provider.forget(request_id)
 
     @property
     def usage(self) -> float:
@@ -528,6 +558,14 @@ class KVCacheManager:
                 "computed tokens to adopt"
             )
 
+        retention_created = False
+        if self.storage_retention_provider is not None:
+            retention_created = self.storage_retention_provider.prepare(
+                request,
+                request.num_computed_tokens + num_new_computed_tokens,
+                num_external_computed_tokens,
+            )
+
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
             if self.retained_hit_group_ids:
@@ -587,6 +625,8 @@ class KVCacheManager:
                 required_blocks - self.block_pool.get_num_free_blocks()
             )
             if full_sequence_shortfall > 0 and self.reclaim_blocks is None:
+                if retention_created:
+                    self.clear_storage_retention(request.request_id)
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -638,6 +678,8 @@ class KVCacheManager:
                 available_blocks - watermark_blocks,
             )
         ):
+            if retention_created:
+                self.clear_storage_retention(request.request_id)
             return None
 
         if (
@@ -689,6 +731,8 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
+        if self.storage_retention_provider is not None:
+            self.storage_retention_provider.forget(request.request_id)
         self.coordinator.free(request)
 
     def remove_skipped_blocks(
@@ -723,6 +767,8 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
+        if self.storage_retention_provider is not None:
+            self.storage_retention_provider.forget(request.request_id)
         return self.coordinator.pop_blocks_for_free(request)
 
     def evict_blocks(self, block_ids: set[int]) -> None:

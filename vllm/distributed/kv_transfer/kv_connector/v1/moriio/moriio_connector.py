@@ -92,6 +92,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     kda_conv_ssm,
     validate_transfer_block_ids,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_pd_replay import (
+    PDReplayRetention,
+    get_pd_replay_storage_allowance,
+    pd_replay_retention_enabled,
+    supports_pd_replay,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
     MoRIIOWriteTPMapping,
     WriteTarget,
@@ -106,6 +112,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
@@ -135,7 +142,8 @@ from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+    from vllm.v1.kv_cache_interface import KVCacheLayerConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -288,6 +296,12 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
     @classmethod
+    def get_kv_cache_storage_allowance(
+        cls, vllm_config: VllmConfig, layers: dict[str, "KVCacheLayerConfig"]
+    ) -> dict[str, int] | None:
+        return get_pd_replay_storage_allowance(vllm_config, layers)
+
+    @classmethod
     def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
         # Registers the device KV cache with an RDMA engine.
         return KVCacheAccess.REGISTERS
@@ -323,6 +337,24 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             + str(self.kv_transfer_config.kv_connector_extra_config["handshake_port"])
         )
         self.mode = get_moriio_mode(self.kv_transfer_config)
+        if pd_replay_retention_enabled(self.kv_transfer_config):
+            if not vllm_config.cache_config.enable_prefix_caching:
+                raise ValueError("PD replay retention requires prefix caching")
+            if any(
+                not supports_pd_replay(g.manager_cls)
+                or not g.enable_kv_transfer
+                or g.host_resident
+                for g in kv_cache_config.kv_cache_groups
+            ):
+                raise ValueError(
+                    "PD replay retention requires transferable full attention "
+                    "or plain SlidingWindowManager groups"
+                )
+            if (
+                vllm_config.parallel_config.decode_context_parallel_size != 1
+                or vllm_config.parallel_config.prefill_context_parallel_size != 1
+            ):
+                raise ValueError("PD replay retention requires DCP=PCP=1")
         parallel_config = vllm_config.parallel_config
         if parallel_config.pipeline_parallel_size > 1 and (
             self.mode != MoRIIOMode.WRITE
@@ -367,6 +399,11 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        super().bind_kv_cache_manager(kv_cache_manager)
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
 
     def _set_port_defaults(self, vllm_config: VllmConfig):
         assert vllm_config.kv_transfer_config is not None, (
@@ -465,9 +502,20 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.get_block_ids_with_load_errors()
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
-        if self.connector_worker is None:
-            return None
-        return self.connector_worker.build_connector_worker_meta()
+        worker_meta = (
+            self.connector_worker.build_connector_worker_meta()
+            if self.connector_worker is not None
+            else None
+        )
+        metadata = self._connector_metadata
+        if (
+            isinstance(metadata, MoRIIOConnectorMetadata)
+            and metadata.pd_replay_generations
+        ):
+            if worker_meta is None:
+                worker_meta = MoRIIOConnectorWorkerMetadata(set())
+            worker_meta.pd_replay_generations = dict(metadata.pd_replay_generations)
+        return worker_meta
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -597,6 +645,8 @@ def _validate_mamba_specs(specs: Collection[MambaSpec]) -> MambaSpec | None:
 
 class MoRIIOConnectorScheduler:
     """Implementation of Scheduler side methods."""
+
+    pd_replay: PDReplayRetention | None = None
 
     def __init__(
         self,
@@ -818,6 +868,12 @@ class MoRIIOConnectorScheduler:
         # so the late write_done can still release its delayed-free blocks.
         self._write_recvs_in_flight: dict[ReqId, bool] = {}
 
+    def bind_kv_cache_manager(self, manager: "KVCacheManager") -> None:
+        if pd_replay_retention_enabled(self.kv_transfer_config):
+            self.pd_replay = PDReplayRetention(
+                manager, self.vllm_config.num_hash_lookahead_tokens, self.is_producer
+            )
+
     def get_exchange_clipped_blocks(
         self,
         block_ids: BlockIds,
@@ -904,6 +960,18 @@ class MoRIIOConnectorScheduler:
         params = request.kv_transfer_params or {}
         if not params.get("do_remote_prefill"):
             return 0, False
+        if self.pd_replay is not None and "remote_engine_id" not in params:
+            self.pd_replay.release(request.request_id)
+            return 0, False
+        if "pd_replay" in params and self.pd_replay is None:
+            raise ValueError("Enable pd_replay_retention on both PD instances")
+        if self.pd_replay is not None:
+            source = self.pd_replay.source(request)
+            return max(
+                min(num_prompt_tokens - 1, source["computed_tokens"])
+                - num_computed_tokens,
+                0,
+            ), False
         if self.mode == MoRIIOMode.WRITE:
             if self._has_mamba:
                 # P pushes h(N-1). Do not publish it under the N-token hash
@@ -929,10 +997,14 @@ class MoRIIOConnectorScheduler:
         the full length. On a full hit that leaves `num_computed_tokens ==
         num_tokens` and trips the scheduler's `num_new_tokens > 0` assert.
         """
+        params = request.kv_transfer_params or {}
+        if self.pd_replay is not None:
+            self.pd_replay.validate_request(request)
+        elif "pd_replay" in params:
+            raise VLLMValidationError("Enable pd_replay_retention on both PD instances")
         if not (self.is_producer and self._has_mamba):
             return
-        params = request.kv_transfer_params
-        if params is not None and params.get("do_remote_decode"):
+        if params.get("do_remote_decode"):
             self._truncate_mamba_request_for_prefill(request)
 
     def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
@@ -1140,7 +1212,15 @@ class MoRIIOConnectorScheduler:
                     if "remote_engine_id" in params:
                         adjusted_remote_block_ids = remote_block_ids
                         if num_external_tokens > 0:
-                            if self._has_mamba:
+                            if self.pd_replay is not None:
+                                local_block_ids, adjusted_remote_block_ids = (
+                                    self.pd_replay.pair(
+                                        request,
+                                        blocks.get_block_ids(),
+                                        num_external_tokens,
+                                    )
+                                )
+                            elif self._has_mamba:
                                 # READ is synchronous, so allocate_slots may hash
                                 # destination blocks before this hook runs. Pair
                                 # the attention and recurrent-state suffixes
@@ -1262,6 +1342,8 @@ class MoRIIOConnectorScheduler:
                             saved_params["remote_block_ids"] = adjusted_remote_block_ids
                         self._req_kv_params[request.request_id] = saved_params
                     else:
+                        if self.pd_replay is not None:
+                            self.pd_replay.release(request.request_id)
                         logger.warning(
                             "Got invalid KVTransferParams: %s. This "
                             "request will not utilize KVTransfer",
@@ -1569,6 +1651,10 @@ class MoRIIOConnectorScheduler:
                 )
                 del self._reqs_need_pending_save[req_id]
 
+        if self.pd_replay is not None and not self.is_producer:
+            meta.pd_replay_generations = self.pd_replay.step_generations(
+                list(self._reqs_need_recv)
+            )
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
@@ -1861,8 +1947,21 @@ class MoRIIOConnectorScheduler:
             return False, None
 
         # On producer
-        if mamba_block_groups is not None:
-            computed_block_ids: BlockIds = [
+        replay_params = None
+        computed_block_ids: BlockIds
+        if self.pd_replay is not None:
+            try:
+                computed_block_ids, replay_params = self.pd_replay.export(
+                    request, cast(BlockIds, block_ids)
+                )
+            except VLLMValidationError as error:
+                self.pd_replay.release(request.request_id)
+                logger.warning(
+                    "Skipping PD export for request %s: %s", request.request_id, error
+                )
+                return False, None
+        elif mamba_block_groups is not None:
+            computed_block_ids = [
                 *[list(group) for group in cast(BlockIds, block_ids)],
                 *[list(group) for group in mamba_block_groups],
             ]
@@ -1896,7 +1995,7 @@ class MoRIIOConnectorScheduler:
         # propagation of the producer's real rank -- no hashing, no reliance on
         # the router independently pinning the same rank. remote_dp_rank_override
         # makes the decode side honor it via the global-rank match gate.
-        return delay_free_blocks, dict(
+        result = dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
@@ -1913,6 +2012,9 @@ class MoRIIOConnectorScheduler:
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             transfer_id=params["transfer_id"],
         )
+        if replay_params is not None:
+            result["pd_replay"] = replay_params
+        return delay_free_blocks, result
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Reconcile worker finished_sending ACKs with the producer lifecycle.
@@ -1944,6 +2046,10 @@ class MoRIIOConnectorScheduler:
         destinations of failed READs that skipped zeroing, so that the next
         step zeroes them.
         """
+        if self.pd_replay is not None:
+            completion = connector_output.kv_connector_worker_meta
+            if isinstance(completion, MoRIIOConnectorWorkerMetadata):
+                self.pd_replay.complete_step(completion.pd_replay_generations)
         if not self.is_producer:
             for req_id in connector_output.finished_recving or ():
                 if self._write_recvs_in_flight.pop(req_id, False):
@@ -1990,6 +2096,8 @@ class MoRIIOConnectorScheduler:
         # Finalize the requests we are surfacing: drop their deferral/park
         # bookkeeping and unmap their transfer ids.
         for req_id in safe:
+            if self.pd_replay is not None:
+                self.pd_replay.release(req_id)
             deferred_info = self._deferred_send_deadlines.pop(req_id, None)
             transfer_id = deferred_info[1] if deferred_info else None
             self._pending_sent_acks.pop(req_id, None)

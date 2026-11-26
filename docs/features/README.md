@@ -4,6 +4,11 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
+## Prefix cache sharing
+
+- [Peer L1 sharing across DP GPU caches](peer_l1_share.md)
+    - [Decode instance cache lending](peer_l1_decode_lending.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

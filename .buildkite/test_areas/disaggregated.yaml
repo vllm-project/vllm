@@ -523,3 +523,39 @@ steps:
         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       commands:
       - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy
+
+- label: ":nvidia: (L4) Peer L1 IPC"
+  key: peer-l1-ipc-2-gpus
+  device: l4
+  num_devices: 2
+  working_dir: "/vllm-workspace/tests"
+  timeout_in_minutes: 20
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/peer_l1/
+    - vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_engine.py
+    - vllm/distributed/kv_transfer/kv_connector/lookup.py
+    - vllm/distributed/kv_transfer/kv_connector/factory.py
+    - vllm/v1/core/block_pool.py
+    - vllm/v1/engine/core.py
+    - vllm/v1/core/kv_cache_utils.py
+    - vllm/v1/core/kv_cache_manager.py
+    - vllm/v1/core/single_type_kv_cache_manager.py
+    - vllm/v1/core/sched/scheduler.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+    - vllm/config/kv_transfer.py
+    - tests/v1/kv_connector/peer_l1_integration/
+    - tests/models/utils.py
+    - tests/utils.py
+  commands:
+    - >-
+      pytest -v -s
+      v1/kv_connector/peer_l1_integration/test_ipc.py
+      v1/kv_connector/peer_l1_integration/test_engine.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Peer L1 IPC"
+      device: mi355_2
+      dind: false
+      depends_on:
+        - image-build-amd

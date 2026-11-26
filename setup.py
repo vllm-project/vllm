@@ -1642,6 +1642,8 @@ package_data = {
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        "distributed/kv_transfer/kv_connector/v1/peer_l1/native/*.cpp",
+        "distributed/kv_transfer/kv_connector/v1/peer_l1/native/*.h",
         # Inkling2 TRT-LLM-gen expert GEMM binding (FlashInfer JIT)
         "models/inkling2/nvidia/ops/*.cu",
         # Built-in multimodal chat template fallbacks (registry.py)

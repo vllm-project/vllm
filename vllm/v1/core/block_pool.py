@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any
+from contextlib import AbstractContextManager
+from typing import Any, Protocol
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -33,6 +34,49 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class BlockLeaseGuard(Protocol):
+    """Protect cached blocks while external readers access their contents."""
+
+    def on_cached(
+        self,
+        block: KVCacheBlock,
+        key: BlockHashWithGroupId,
+        *,
+        num_tokens: int | None,
+    ) -> None:
+        """Observe a cached key and that key's token boundary, if known."""
+        ...
+
+    def on_uncached(self, block: KVCacheBlock, *, popped: bool) -> bool:
+        """Retire aliases and report pins, withholding unreferenced rows.
+
+        `popped` means allocation already removed the row from the free queue.
+        Otherwise the pool removes an unreferenced row if this returns True.
+        Return withheld rows only through `BlockPool.return_withheld`.
+        """
+        ...
+
+    def admission_reserve(self) -> int:
+        """Free blocks reserved against new external pins during allocation."""
+        ...
+
+    def reset_scope(self) -> AbstractContextManager[bool]:
+        """Freeze leases, yield reset readiness, and always unfreeze on exit."""
+        ...
+
+
+class BlockEvictionOrderPolicy(Protocol):
+    """Optional eviction-order hints that cannot affect cache correctness."""
+
+    def classify(self, blocks: list[KVCacheBlock]) -> list[bool]:
+        """Return one flag per newly free cached row; True prepends the row."""
+        ...
+
+    def on_reuse(self, block: KVCacheBlock) -> None:
+        """Forget the free period when `touch` removes a row from the queue."""
+        ...
 
 
 class BlockHashToBlockMap:
@@ -171,6 +215,8 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        self.lease_guard: BlockLeaseGuard | None = None
+        self.eviction_order_policy: BlockEvictionOrderPolicy | None = None
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -659,6 +705,10 @@ class BlockPool:
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+        if self.lease_guard is not None:
+            self.lease_guard.on_cached(
+                block, block_hash_with_group_id, num_tokens=num_tokens
+            )
 
     def move_block_hashes(
         self,
@@ -693,6 +743,9 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
+        if self.lease_guard is not None:
+            return self._get_new_blocks_guarded(num_blocks)
+
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
         if self._reuse_watchers:
@@ -719,6 +772,25 @@ class BlockPool:
                 block.ref_cnt = 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+        return ret
+
+    def _get_new_blocks_guarded(self, num_blocks: int) -> list[KVCacheBlock]:
+        # Retirement can withhold rows, so guarded allocation may need another batch.
+        ret: list[KVCacheBlock] = []
+        while len(ret) < num_blocks:
+            batch = self.free_block_queue.popleft_n(num_blocks - len(ret))
+            for block in batch:
+                if block.block_hash is not None:
+                    _, pinned = self._retire_cached_block(block, popped=True)
+                    if pinned:
+                        continue
+                assert block.ref_cnt == 0
+                block.ref_cnt = 1
+                ret.append(block)
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
+        if self._reuse_watchers:
+            self._notify_reuse(ret)
         return ret
 
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
@@ -763,16 +835,30 @@ class BlockPool:
         self.free_block_queue.insert_before_cached(moved)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+        """Reset cached hash metadata and return whether a key was evicted."""
+        evicted, _ = self._retire_cached_block(block, popped=False)
+        return evicted
+
+    def _retire_cached_block(
+        self, block: KVCacheBlock, *, popped: bool
+    ) -> tuple[bool, bool]:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+            popped: Whether allocation already removed it from the free queue.
 
         Returns:
-            True if the block is evicted, False otherwise.
+            Whether a key was evicted and whether a reader still pins the row.
 
         """
+        pinned = False
+        if self.lease_guard is not None and block.block_hash is not None:
+            pinned = self.lease_guard.on_uncached(block, popped=popped)
+            if pinned and not popped and block.ref_cnt == 0:
+                self.free_block_queue.remove(block)
+
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
@@ -780,10 +866,17 @@ class BlockPool:
         evicted_hashes = self._remove_cached_block_hashes(block)
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
-            return False
+            return False, pinned
 
         self._emit_block_removed_events(evicted_hashes)
-        return True
+        return True, pinned
+
+    def return_withheld(self, blocks: list[KVCacheBlock]) -> None:
+        """Return retired, unreferenced blocks withheld by a lease guard."""
+        for block in blocks:
+            assert block.ref_cnt == 0 and block.block_hash is None
+            assert not block.is_null
+        self.free_block_queue.prepend_n(blocks)
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
@@ -801,6 +894,8 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
+                if self.eviction_order_policy is not None:
+                    self.eviction_order_policy.on_reuse(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -845,6 +940,16 @@ class BlockPool:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
                     blocks_to_evict_last.append(block)
 
+        if self.eviction_order_policy is not None and blocks_to_evict_last:
+            freed_cached = blocks_to_evict_last
+            redundant = self.eviction_order_policy.classify(freed_cached)
+            blocks_to_evict_last = []
+            for block, first in zip(freed_cached, redundant, strict=True):
+                if first:
+                    blocks_to_evict_first.append(block)
+                else:
+                    blocks_to_evict_last.append(block)
+
         # Blocks to reuse first are prepended to the front of the free queue.
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
@@ -882,7 +987,13 @@ class BlockPool:
             False otherwise.
 
         """
-        num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
+        if self.lease_guard is None:
+            return self._reset_prefix_cache()
+        with self.lease_guard.reset_scope() as ready:
+            return ready and self._reset_prefix_cache()
+
+    def _reset_prefix_cache(self) -> bool:
+        num_used_blocks = self.num_gpu_blocks - self.free_block_queue.num_free_blocks
         if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
@@ -922,7 +1033,10 @@ class BlockPool:
             The number of free blocks.
 
         """
-        return self.free_block_queue.num_free_blocks
+        free = self.free_block_queue.num_free_blocks
+        if self.lease_guard is not None:
+            free = max(0, free - self.lease_guard.admission_reserve())
+        return free
 
     def get_num_uncached_free_blocks(self, limit: int) -> int:
         """Count, up to `limit`, the leading uncached free blocks that
@@ -945,7 +1059,7 @@ class BlockPool:
         total_gpu_blocks = self.num_gpu_blocks - 1
         if not total_gpu_blocks:
             return 0
-        return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
+        return 1.0 - (self.free_block_queue.num_free_blocks / total_gpu_blocks)
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.

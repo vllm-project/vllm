@@ -89,6 +89,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     attributes read by the method under test are set."""
 
     def __init__(self, **attrs):
+        self.pd_replay = None
         self.mode = MoRIIOMode.READ
         self.is_producer = False
         self.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
@@ -1316,6 +1317,7 @@ def _report_read_result(scheduler, meta, dst_block_ids, read_failed):
         worker._record_failed_recv("req")
     connector = _FakeConnector(scheduler)
     connector.connector_worker = worker
+    connector.bind_connector_metadata(meta)
     scheduler.update_connector_output(
         KVConnectorOutput(
             invalid_block_ids=connector.get_block_ids_with_load_errors(),

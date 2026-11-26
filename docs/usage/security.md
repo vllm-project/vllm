@@ -41,6 +41,27 @@ Key points from the PyTorch security guide:
 - Messages are sent unencrypted
 - Connections are accepted from anywhere without checks
 
+### Peer L1 KV cache sharing
+
+`PeerL1Connector` uses abstract Unix owner RPC sockets
+`vllm-peer-l1/<engine hash>/<rank>` and subscription sockets with `.sub` appended.
+They are reachable within the local network namespace. A random per-instance
+credential is distributed through the trusted DP memory-handle handshake by
+default, kept in memory, and excluded from HELLO/MEMBERS and logs.
+All deployment ranks must use the same build and handshake format.
+
+With `control_host`, each rank instead listens on TCP
+`control_port + 2 * rank` for owner RPC and the next port for subscriptions;
+`shared_secret_env` is required. Its nonempty environment value must match on
+all peers. The SHA-256 digest is a static credential transmitted in clear text:
+the check is replayable, does not encrypt traffic or authenticate the server,
+and trusts authenticated peers. Isolate these endpoints, the DP bootstrap and
+RDMA transport ports. Protect participant memory and bootstrap access as well.
+
+The native build cache at
+`VLLM_CACHE_ROOT/peer_l1/vllm_peer_l1_<source hash>/` must be writable only by the
+serving account. See [Peer L1 security](../features/peer_l1_share.md#security).
+
 ## Security Recommendations
 
 ### 1. **Network Isolation:**
