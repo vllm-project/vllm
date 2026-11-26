@@ -166,7 +166,13 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
-            let server_config = args.to_server_config();
+            let mut server_config = args.to_server_config();
+            if let Some(url) = &args.remote_generation_url {
+                server_config.max_model_len = args.remote_max_model_len()?;
+                return Server::new(server_config, LlmSource::RemoteGrpc(url.clone()))
+                    .serve(shutdown_signal())
+                    .await;
+            }
 
             let topology = args.data_parallel_lb.resolve(&args.managed_engine, args.headless)?;
             let handshake_port = args.managed_engine.resolve_handshake_port()?;

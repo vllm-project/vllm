@@ -7,6 +7,7 @@ mod control;
 mod convert;
 mod health;
 mod inference;
+pub(crate) mod llm;
 mod media;
 mod render;
 

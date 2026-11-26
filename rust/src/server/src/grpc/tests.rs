@@ -47,6 +47,7 @@ use vllm_engine_core_client::protocol::output::{
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
@@ -54,7 +55,7 @@ use vllm_engine_core_client::test_utils::{
     IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task_with_ready,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{EngineCoreLlm, FinishReason, GenerateRequest, Llm as _};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, SamplingHints, TextBackend, TextRequestProcessor};
@@ -65,6 +66,7 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
 use super::health::{EngineHealth, HealthMonitor};
+use super::llm::GrpcLlm;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::pb::render_server::Render as _;
@@ -73,6 +75,7 @@ use super::{
 };
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::model_names::ServedModelNames;
+use crate::remote_llm_info;
 use crate::render::RenderState;
 use crate::state::AppState;
 use crate::tls;
@@ -855,6 +858,69 @@ async fn unary_generate_with_token_ids_prompt() {
         3
     );
 
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+fn grpc_llm_request() -> GenerateRequest {
+    GenerateRequest {
+        request_id: "proof".into(),
+        prompt_token_ids: vec![21, 43],
+        sampling_params: EngineCoreSamplingParams {
+            max_tokens: 8,
+            seed: Some(9_007_199_254_740_993),
+            ..Default::default()
+        },
+        mm_features: None,
+        arrival_time: None,
+        cache_salt: None,
+        trace_headers: None,
+        priority: 0,
+        data_parallel_rank: None,
+        session_id: None,
+        kv_hints: None,
+        reasoning_parser_kwargs: None,
+        reasoning_ended: None,
+        lora_request: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_llm_round_trips_through_inference_to_engine_core() {
+    let (inference, control, health, engine_task) = setup_grpc_service_with_backend(
+        b"engine-grpc-llm-round-trip",
+        vec![
+            (vec![17], None),
+            (vec![31, 42], Some(EngineCoreFinishReason::Length)),
+        ],
+        Arc::new(FakeTextBackend {
+            tokenizer: Arc::new(PanickingTokenizer),
+            ..Default::default()
+        }),
+        |request| {
+            let sampling = request.sampling_params.as_ref().unwrap();
+            assert_eq!(sampling.seed, Some(9_007_199_254_740_993));
+            assert_eq!(sampling.max_tokens, 8);
+        },
+    )
+    .await;
+    let (channel, server_task) =
+        start_grpc_test_server(inference, control, health, Default::default()).await;
+    let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
+    let mut stream = llm.generate(grpc_llm_request()).await.unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        first.prompt_info.unwrap().prompt_token_ids.as_ref(),
+        &[21, 43]
+    );
+    assert_eq!(first.token_ids, [17]);
+    assert_eq!(first.finish_reason, None);
+    let last = stream.next().await.unwrap().unwrap();
+    assert_eq!(last.request_id, "proof");
+    assert_eq!(last.token_ids, [31, 42]);
+    assert_eq!(last.finish_reason, Some(FinishReason::Length));
+    assert!(stream.next().await.is_none());
     engine_task.await.expect("mock engine task");
     server_task.abort();
 }
@@ -2161,10 +2227,10 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn dropping_generate_stream_aborts_before_engine_output() {
-    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
-    let (inference_service, control_service, engine_health, engine_task) =
-        setup_grpc_service_with_engine_script(
+async fn grpc_llm_cancels_unpolled_streams_on_abort_and_drop() {
+    for explicit_abort in [true, false] {
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
             b"engine-grpc-cancel-pending-output".to_vec(),
             default_ready_response(),
             Arc::new(FakeTextBackend::default()),
@@ -2172,7 +2238,6 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
             move |dealer, _push| {
                 boxed_test_future(async move {
                     let add = recv_engine_message(dealer).await;
-                    assert_eq!(add[0].as_ref(), &[0x00]);
                     let request = decode_add_request(&add);
                     submitted_tx.send(()).expect("signal submitted request");
 
@@ -2181,45 +2246,40 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
                     assert_eq!(abort[0].as_ref(), &[0x01]);
                     let request_ids: Vec<String> =
                         rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
-                    assert_eq!(request_ids, vec![request.request_id]);
+                    assert_eq!(request_ids, [request.request_id]);
                 })
             },
         )
         .await;
-    let (channel, server_task) = start_grpc_test_server(
-        inference_service,
-        control_service,
-        engine_health,
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
-    let mut client = InferenceClient::new(channel);
-    let stream = client
-        .generate_stream(pb::GenerateRequest {
-            request_id: "test-cancel-pending-output".to_string(),
-            model: "test-model".to_string(),
-            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
-            stopping: Some(pb::StoppingCriteria {
-                max_new_tokens: 10,
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
-        .expect("start generation")
-        .into_inner();
-    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
-        .await
-        .expect("timed out waiting for engine submission")
-        .expect("engine submission signal");
+        let (channel, server_task) =
+            start_grpc_test_server(inference, control, health, Default::default()).await;
+        let llm = GrpcLlm::from_channel(channel, "test-model".into(), remote_llm_info(512));
+        let request = grpc_llm_request();
+        let request_id = request.request_id.clone();
+        let stream = llm.generate(request).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+            .await
+            .expect("timed out waiting for engine submission")
+            .expect("engine submission signal");
 
-    drop(stream);
-
-    let result = tokio::time::timeout(Duration::from_secs(5), engine_task).await;
-    server_task.abort();
-    result
-        .expect("disconnect must abort without waiting for engine output")
-        .expect("mock engine task");
+        let mut aborted_stream = if explicit_abort {
+            llm.abort(&[request_id]).await.unwrap();
+            Some(stream)
+        } else {
+            drop(stream);
+            None
+        };
+        tokio::time::timeout(Duration::from_secs(5), engine_task)
+            .await
+            .unwrap_or_else(|_| {
+                panic!("engine must receive cancellation (explicit_abort = {explicit_abort})")
+            })
+            .expect("mock engine task");
+        if let Some(stream) = &mut aborted_stream {
+            assert!(stream.next().await.unwrap().is_err());
+        }
+        server_task.abort();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

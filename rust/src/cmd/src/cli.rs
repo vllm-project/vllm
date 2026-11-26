@@ -1040,6 +1040,7 @@ impl SharedRuntimeArgs {
 
         ServerConfig {
             model: model.id,
+            max_model_len: None,
             revision: model.revision,
             tokenizer,
             hf_config,
@@ -1462,6 +1463,9 @@ impl FrontendArgs {
 #[educe(Debug)]
 #[command(override_usage = "vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]")]
 pub struct ServeArgs {
+    /// Send token generation to a vllm.Inference gRPC endpoint.
+    #[arg(long, conflicts_with = "headless")]
+    pub remote_generation_url: Option<String>,
     /// Only launch the managed Python headless engine and do not start the Rust
     /// frontend.
     #[arg(long)]
@@ -1475,8 +1479,8 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
-    /// TCP port for the gRPC Inference, Control, and Render services. When not
-    /// set, no gRPC server is started.
+    /// TCP port for the gRPC Inference and Render services, and Control when
+    /// the server drives engine-core. When not set, no gRPC server is started.
     #[arg(long)]
     pub grpc_port: Option<u16>,
 
@@ -1519,6 +1523,21 @@ impl ServeArgs {
         });
 
         self.runtime.server_config(listener_mode, grpc_listener_mode)
+    }
+
+    pub(super) fn remote_max_model_len(&self) -> anyhow::Result<Option<NonZeroU32>> {
+        self.managed_engine
+            .max_model_len
+            .as_deref()
+            .map(|value| {
+                parse_human_readable_int(value)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .and_then(NonZeroU32::new)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("remote --max-model-len must be a positive token count")
+                    })
+            })
+            .transpose()
     }
 
     pub(super) fn to_engine_core_config(
