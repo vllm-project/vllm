@@ -752,11 +752,18 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = self._tokenize_prompt(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
+        token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
+        truncation = (
+            params._truncation_slice(self.tokenizer, len(token_ids))
+            if token_ids is not None
+            else None
+        )
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
-        # Detokenize after truncation so the text matches the tokens sent
-        # to the engine.
-        if params.needs_detokenization and "prompt" not in prompt:
+        # Rebuild cached text only for truncation, not padding alone.
+        if params.needs_detokenization and (
+            "prompt" not in prompt or truncation is not None
+        ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
@@ -796,11 +803,18 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = await self._tokenize_prompt_async(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
+        token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
+        truncation = (
+            params._truncation_slice(self.tokenizer, len(token_ids))
+            if token_ids is not None
+            else None
+        )
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
-        # Detokenize after truncation so the text matches the tokens sent
-        # to the engine.
-        if params.needs_detokenization and "prompt" not in prompt:
+        # Rebuild cached text only for truncation, not padding alone.
+        if params.needs_detokenization and (
+            "prompt" not in prompt or truncation is not None
+        ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
@@ -1034,7 +1048,7 @@ class BaseRenderer(ABC, Generic[_T]):
         else:
             engine_input = tokens_input(prompt_token_ids)
 
-        if prompt_text := prompt.get("prompt"):
+        if (prompt_text := prompt.get("prompt")) is not None:
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
@@ -1043,6 +1057,11 @@ class BaseRenderer(ABC, Generic[_T]):
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
             engine_input["prompt_token_offsets"] = offsets
+
+        if engine_input["type"] == "token" and (
+            (echo_mask := prompt.get("prompt_echo_mask")) is not None
+        ):
+            engine_input["prompt_echo_mask"] = echo_mask
 
         return engine_input
 
@@ -1101,7 +1120,7 @@ class BaseRenderer(ABC, Generic[_T]):
         else:
             engine_input = tokens_input(prompt_token_ids)
 
-        if prompt_text := prompt.get("prompt"):
+        if (prompt_text := prompt.get("prompt")) is not None:
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
@@ -1110,6 +1129,11 @@ class BaseRenderer(ABC, Generic[_T]):
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
             engine_input["prompt_token_offsets"] = offsets
+
+        if engine_input["type"] == "token" and (
+            (echo_mask := prompt.get("prompt_echo_mask")) is not None
+        ):
+            engine_input["prompt_echo_mask"] = echo_mask
 
         return engine_input
 
