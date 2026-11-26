@@ -7298,9 +7298,12 @@ def test_mamba_deprioritize_skips_referenced_state():
     assert pool.free_block_queue.get_all_free_blocks()[-1] is t1_blocks[0]
 
 
-def test_mamba_deprioritize_preempted_request_keeps_old_state():
-    """A preempted request does not deprioritize earlier states and cleans up
-    its tracked hit metadata."""
+@pytest.mark.parametrize(
+    "status", [RequestStatus.PREEMPTED, RequestStatus.FINISHED_ABORTED]
+)
+def test_mamba_deprioritize_preempted_request_keeps_old_state(status):
+    """A preempted or aborted request does not deprioritize earlier states and
+    cleans up its tracked hit/tip metadata."""
     block_size = 16
     manager = make_kv_cache_manager(
         _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
@@ -7323,12 +7326,13 @@ def test_mamba_deprioritize_preempted_request_keeps_old_state():
     manager.new_step_starts()
     assert manager.allocate_slots(turn3, 32, hit, blocks)
     turn3.num_computed_tokens = 112
-    # Preempted (not finished): free without deprioritizing turn1's state.
-    turn3.status = RequestStatus.PREEMPTED
+    # Preempted or aborted: free without deprioritizing turn1's state.
+    turn3.status = status
     manager.free(turn3)
     mamba_mgr = manager.coordinator.single_type_managers[1]
     assert isinstance(mamba_mgr, MambaManager)
     assert turn3.request_id not in mamba_mgr._req_hit
+    assert turn3.request_id not in mamba_mgr._req_tip
 
     pool = manager.block_pool
     num_uncached = sum(

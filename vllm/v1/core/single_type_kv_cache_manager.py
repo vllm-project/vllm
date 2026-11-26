@@ -34,7 +34,7 @@ from vllm.v1.kv_cache_interface import (
     get_reusable_prefix_length,
     is_mamba_prefill_checkpoint_valid,
 )
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -2617,7 +2617,11 @@ class MambaManager(SingleTypeKVCacheManager):
     def _deprioritize_superseded_state(self, request: Request) -> None:
         hit_hash = self._req_hit.pop(request.request_id, None)
         tip = self._req_tip.pop(request.request_id, None)
-        if not request.is_finished():
+        if request.status not in (
+            RequestStatus.FINISHED_STOPPED,
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            RequestStatus.FINISHED_REPETITION,
+        ):
             return
 
         pool = self.block_pool
