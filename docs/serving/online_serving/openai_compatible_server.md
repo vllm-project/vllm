@@ -177,9 +177,11 @@ The following extra parameters are supported:
 Completions API, when `echo=true` and `truncate_prompt_tokens` shortens a text
 prompt, with or without an explicit `truncation_side`, the echoed text is rebuilt
 from the retained tokens.
-Tokenizer-added special tokens are omitted from the text and echoed logprobs;
-special tokens supplied in the text are preserved. Model input IDs, prompt-token
-usage and `return_token_ids` responses retain the full truncated token sequence.
+When the tokenizer provides a special-tokens mask, tokenizer-added special tokens
+are omitted from the text and echoed logprobs; otherwise the retained token IDs
+are decoded as is. Special tokens supplied in the text are preserved. Model input
+IDs, prompt-token usage and `return_token_ids` responses retain the full truncated
+token sequence.
 
 ### Chat API
 
