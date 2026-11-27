@@ -366,6 +366,40 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
 
 Full example: [examples/generate/multimodal/vision_language_offline.py](../../examples/generate/multimodal/vision_language_offline.py)
 
+#### Video Frame Sampling { #video-frame-sampling }
+
+Some models sample frames from a video in their Hugging Face processor. You can
+change this sampling with `mm_processor_kwargs`, for all requests
+(`LLM(..., mm_processor_kwargs=...)` or `--mm-processor-kwargs`) or for one
+request (the `mm_processor_kwargs` field of the prompt; online, this needs
+[`--trust-request-mm-kwargs`](../usage/security.md#per-request-multimodal-arguments)).
+Request values take precedence over engine values. The video placeholder is
+sized from the frames the processor returns.
+
+| Model | Supported overrides | Notes |
+| ----- | ------------------- | ----- |
+| LLaVA-OneVision, LLaVA-NeXT-Video | `do_sample_frames`, `num_frames` | The processor does not sample by default, so set `do_sample_frames: True`. It samples from the frames it receives; video metadata is not passed to it. |
+| Qwen3-VL | `num_frames` or `fps`, `min_frames`, `max_frames` | `num_frames` and `fps` are mutually exclusive. `min_frames` and `max_frames` only bound the count derived from `fps`; an explicit `num_frames` is used as is. Each can also be given in the `videos_kwargs` scope, e.g. `{"videos_kwargs": {"max_frames": 64}}`. |
+| GLM-4.1V | `fps` | |
+| Molmo2 | `num_frames`, `max_fps` | |
+
+```python
+outputs = llm.generate({
+    "prompt": prompt,
+    "multi_modal_data": {"video": video},
+    "mm_processor_kwargs": {"do_sample_frames": True, "num_frames": 8},
+})
+```
+
+**Pre-sampled videos.** Each video's metadata has a `do_sample_frames` flag.
+vLLM's video loaders set it to `False` when they keep only some of the video's
+frames, and you can set it yourself when passing `(frames, metadata)` tuples.
+For Qwen3-VL, GLM-4.1V and Molmo2, if `do_sample_frames` is not set in
+`mm_processor_kwargs`, this flag decides whether
+the processor samples again: a pre-sampled video keeps its frames, and the
+overrides above do not apply to it. A `do_sample_frames` value in
+`mm_processor_kwargs` takes precedence over the flag.
+
 #### Video Token Pruning
 
 For supported models, vLLM can prune video tokens after the vision encoder to
