@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):

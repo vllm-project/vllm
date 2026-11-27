@@ -276,13 +276,19 @@ The PR needs to meet the following code quality standards:
 ### Documenting User-Visible Changes
 
 If a PR changes what users can run, configure, or observe, update the rendered
-docs in the same PR; code comments, tests, and PR descriptions alone are not
-found by users or their agents. CLI arguments, config fields, and environment
-variables are documented in their docstring, `help=` text, or
-`environment_variables` comment, which generate the reference pages. Everything
-else goes on its page under `docs/` (feature, model, hardware, deprecation),
-linked from its index. Lead with what it is, how to enable it, and the default,
-using the names users search for.
+docs in the same PR; code comments, tests and PR descriptions alone might not be found by users or their agents.
+
+For popular features, make sure to update the rendered documentation:
+
+- CLI arguments, config/model fields, and environment variables are documented in
+their docstring, `help=` text, or `environment_variables` comment, which generate the reference pages.
+- Everything else goes on its page under `docs/` (feature, model, hardware, deprecation etc.),
+linked from its index.
+
+Lead with what it is, how to enable it, and the default, using the names users search for.
+No need to include implementation details in user-facing documentation.
+
+If the change is niche, you only need to update relevant docstrings or add code comments.
 
 To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
 three times, limited in turn to web search, GitHub, and a local checkout (before

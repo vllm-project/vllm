@@ -105,7 +105,7 @@ class _RenderChatHandler:
 
     def _engine_chat_template_kwargs(self, chat_template_kwargs):
         return CohereServingChatV2._engine_chat_template_kwargs(
-            self,  # type: ignore[arg-type]
+            self,
             chat_template_kwargs,
         )
 

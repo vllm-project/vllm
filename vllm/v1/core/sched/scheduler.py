@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
+from math import lcm
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -21,6 +22,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
+from vllm.distributed.ec_transfer.ec_events import ECCacheEvent, ECEventBatch
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.utils import MROPE_POSITION_DELTA_KEY
@@ -54,6 +56,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.pp_utils import PPMicrobatchCap
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -98,6 +101,8 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    _encoder_cache_epoch: int = 0
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -116,6 +121,7 @@ class Scheduler(SchedulerInterface):
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
+        self.ec_events_config = vllm_config.ec_events_config
         self.parallel_config = vllm_config.parallel_config
         self.collect_stats = collect_stats
         self.observability_config = vllm_config.observability_config
@@ -216,6 +222,10 @@ class Scheduler(SchedulerInterface):
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
+            self.parallel_config.data_parallel_index,
+        )
+        self.ec_event_publisher = EventPublisherFactory.create(
+            self.ec_events_config,
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
@@ -405,6 +415,12 @@ class Scheduler(SchedulerInterface):
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        # PP, not with DP, whose busy loop runs a dummy batch on idle steps.
+        self.skip_idle_steps = (
+            self.use_pp and self.parallel_config.data_parallel_size == 1
+        )
+        # In-flight empty step that no request needs; blocks should_schedule().
+        self._idle_step: SchedulerOutput | None = None
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -433,20 +449,27 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.enable_prefix_caching
         )
-        # TODO: Support models with multiple Mamba specs that require different
-        # prefill checkpoint alignments instead of selecting the first one.
-        self.mamba_prefill_checkpoint_alignment = next(
-            (
-                group.manager_config.params.prefill_checkpoint_alignment
-                for group in kv_cache_config.kv_cache_groups
-                if isinstance(group.manager_config.params, MambaManager.Params)
-            ),
-            None,
+        self.pp_microbatch_cap = PPMicrobatchCap.create(
+            self, self.parallel_config.pipeline_parallel_size
         )
-        self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
-            not isinstance(group.manager_config.params, MambaManager.Params)
-            or group.manager_config.params.num_prefill_checkpoint_blocks > 0
+        mamba_params = [
+            group.manager_config.params
             for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.manager_config.params, MambaManager.Params)
+        ]
+        self.mamba_has_prefill_checkpoint_blocks = bool(mamba_params) and all(
+            p.num_prefill_checkpoint_blocks > 0 for p in mamba_params
+        )
+        mamba_alignments = [
+            p.prefill_checkpoint_alignment
+            for p in mamba_params
+            if p.prefill_checkpoint_alignment is not None
+        ]
+        self.mamba_prefill_checkpoint_alignment = (
+            lcm(*mamba_alignments)
+            if self.mamba_has_prefill_checkpoint_blocks
+            and len(mamba_alignments) == len(mamba_params)
+            else None
         )
         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
         # Split there only if the backend cannot save it within the final chunk.
@@ -739,6 +762,8 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
+        if self.pp_microbatch_cap is not None and token_budget > 0:
+            token_budget = self.pp_microbatch_cap.apply(token_budget)
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -789,16 +814,7 @@ class Scheduler(SchedulerInterface):
             if input_budget <= draft_slots:
                 break
 
-            if (
-                request.num_output_placeholders > 0
-                # Placeholders are included in num_computed_tokens; subtract them
-                # and add the tokens in-flight steps are sure to produce, so no
-                # further steps are needed even if all drafts are rejected.
-                and request.num_computed_tokens
-                + (1 + self._min_in_flight_output_tokens(request))
-                - request.num_output_placeholders
-                >= request.num_prompt_tokens + request.max_tokens
-            ):
+            if self._needs_no_more_steps(request):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the in-flight steps reach request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
@@ -929,6 +945,19 @@ class Scheduler(SchedulerInterface):
                         break
 
                     if self.policy == SchedulingPolicy.PRIORITY:
+                        preempted_encoder_inputs = scheduled_encoder_inputs.get(
+                            preempted_req.request_id
+                        )
+                        if (
+                            preempted_encoder_inputs
+                            and not self.is_encoder_decoder
+                            and not self.encoder_cache_manager.try_rollback_allocations(
+                                preempted_req, preempted_encoder_inputs
+                            )
+                        ):
+                            # Let the scheduled encode run if another request
+                            # in this step is relying on its output.
+                            break
                         victim_index = self.running.index(preempted_req)
                         del self.running[victim_index]
                         if victim_index < req_index:
@@ -942,10 +971,8 @@ class Scheduler(SchedulerInterface):
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
-                            )
                             if preempted_encoder_inputs:
+                                del scheduled_encoder_inputs[preempted_req_id]
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(
@@ -1776,6 +1803,8 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            encoder_cache_events=self.encoder_cache_manager.take_events() or None,
+            encoder_cache_epoch=self._encoder_cache_epoch,
             encoder_input_updates=self._get_encoder_input_updates(
                 num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
             ),
@@ -1819,6 +1848,12 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        if (
+            self.skip_idle_steps
+            and not total_num_scheduled_tokens
+            and not self._has_decode_awaiting_cadence()
+        ):
+            self._idle_step = scheduler_output
         return scheduler_output
 
     def _build_kv_connector_meta(
@@ -2359,6 +2394,12 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # A step with tokens can make schedule() produce work again.
+        if (
+            scheduler_output.total_num_scheduled_tokens
+            or scheduler_output is self._idle_step
+        ):
+            self._idle_step = None
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -2775,6 +2816,14 @@ class Scheduler(SchedulerInterface):
         # Updates dropped at turn end follow the turn's final output.
         self._emit_dropped_streaming_updates(outputs)
 
+        # A batch may complete after its encoder cache entries were reset.
+        ec_events = (
+            scheduler_output.encoder_cache_events
+            if scheduler_output.encoder_cache_epoch == self._encoder_cache_epoch
+            else None
+        )
+        self._publish_ec_events(ec_events or [])
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -2814,6 +2863,14 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _publish_ec_events(self, ec_events: list[ECCacheEvent]) -> None:
+        """Publish EC events together with the ones queued by the EC connector."""
+        if self.ec_connector is not None:
+            ec_events = [*ec_events, *self.ec_connector.take_events()]
+        if ec_events:
+            batch = ECEventBatch(ts=time.time(), events=ec_events)
+            self.ec_event_publisher.publish(batch)
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
         """Whether an encoder input this request needs is still in transit."""
@@ -3139,6 +3196,7 @@ class Scheduler(SchedulerInterface):
         return request_id in self.requests
 
     def add_request(self, request: Request) -> None:
+        self._idle_step = None
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -3383,6 +3441,29 @@ class Scheduler(SchedulerInterface):
         num_running, num_waiting = self.get_request_counts()
         return len(self.requests) > (num_running + num_waiting)
 
+    def _needs_no_more_steps(self, request: Request) -> bool:
+        return (
+            request.num_output_placeholders > 0
+            # Placeholders are included in num_computed_tokens; subtract them
+            # and add the tokens in-flight steps are sure to produce, so no
+            # further steps are needed even if all drafts are rejected.
+            and request.num_computed_tokens
+            + (1 + self._min_in_flight_output_tokens(request))
+            - request.num_output_placeholders
+            >= request.num_prompt_tokens + request.max_tokens
+        )
+
+    def _has_decode_awaiting_cadence(self) -> bool:
+        """Whether a running request still needs a decode but awaits the cadence."""
+        return any(
+            self.current_step < r.next_decode_eligible_step
+            and not self._needs_no_more_steps(r)
+            for r in self.running
+        )
+
+    def should_schedule(self) -> bool:
+        return self._idle_step is None and self.has_requests()
+
     def has_requests(self) -> bool:
         # Override the interface default to also keep the engine alive while a
         # connector still has pending push work (e.g. push-mode WRITE transfers
@@ -3469,8 +3550,12 @@ class Scheduler(SchedulerInterface):
         stale vision embeddings are not reused.
         """
         self.encoder_cache_manager.reset()
+        self._encoder_cache_epoch += 1
         if self.ec_connector is not None:
             self.ec_connector.reset()
+        # An idle engine does not call `update_from_output`, so publish the
+        # queued `AllECCleared` here instead of on the next request.
+        self._publish_ec_events(self.encoder_cache_manager.take_events())
 
     def make_stats(
         self,
@@ -3546,6 +3631,8 @@ class Scheduler(SchedulerInterface):
         logger.debug_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.ec_event_publisher:
+            self.ec_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
 
@@ -3565,7 +3652,9 @@ class Scheduler(SchedulerInterface):
         return self.ec_connector
 
     def get_kv_event_publisher_config(self) -> KVEventsConfig | None:
-        return self.kv_event_publisher.get_publisher_config()
+        config = self.kv_event_publisher.get_publisher_config()
+        assert config is None or isinstance(config, KVEventsConfig)
+        return config
 
     def _connector_finished(
         self, request: Request
