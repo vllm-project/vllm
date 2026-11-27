@@ -295,7 +295,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             state_len=self.conv_size - 1
         )
         self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
-        if vllm_config.cache_config.mamba_cache_mode == "align":
+        if vllm_config.cache_config.enable_prefix_caching:
             self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
                 vllm_config,
                 self.local_num_heads,
@@ -340,7 +340,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
         )
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return kda_prefill_checkpoint_alignment("triton")
 
     def rearrange_mixed_qkv(

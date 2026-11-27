@@ -532,9 +532,9 @@ async def test_stop_string_workflow(client, tokenizer, messages):
     # stop_checker = StopChecker(
     #     max_model_len=1024, get_tokenizer_for_seq=lambda _: tokenizer
     # )
-    stop_str, truncate_to = check_stop_strings(
-        generate_res, len(generate_res), ["27 member"], False
-    )
+    stop = check_stop_strings(generate_res, len(generate_res), ["27 member"], False)
+    assert stop is not None
+    stop_str, truncate_to = stop
     assert stop_str == "27 member"
     # abort request that hit stop string (requires tokens-only mode)
     # res = await client.post("/abort_requests", json={"request_ids": ["generate-tokens-42"]}) # noqa: E501
@@ -558,10 +558,12 @@ async def test_stop_string_workflow(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
-async def test_stop_strings_rejected_when_tokens_only(client):
-    """--tokens-only forces detokenize=False after request validation, so
-    stop strings must be rejected explicitly rather than silently ignored."""
+@pytest.mark.parametrize(
+    "server", [["--tokens-only"], ["--skip-tokenizer-init"]], indirect=True
+)
+async def test_stop_strings_rejected_without_tokenizer(client):
+    """A server without a tokenizer (or with detokenization forced off) must
+    reject stop strings explicitly rather than silently ignore them."""
     sampling_params = {"max_tokens": 5, "stop": ["never"]}
     payload = {
         "model": MODEL_NAME,
@@ -612,8 +614,8 @@ async def test_bad_words_rejected_without_tokenizer(client):
         [
             "--enable-lora",
             "--lora-modules",
-            "Alice=vllm-project/self_cognition_Alice",
-            "Bob=vllm-project/self_cognition_Bob",
+            "Alice=vllm/self_cognition_Alice",
+            "Bob=vllm/self_cognition_Bob",
             "--max-lora-rank",
             "64",
             "--max-cpu-loras",

@@ -56,6 +56,7 @@ from vllm.model_executor.models.qwen2_5_omni_thinker import (
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
     Qwen3OmniMoeAudioEncoder,
+    Qwen3OmniMoeAudioEncoderCudaGraphMixin,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -393,6 +394,7 @@ class Qwen3ASRForConditionalGeneration(
     SupportsTranscription,
     SupportsLoRA,
     SupportsEagle3,
+    Qwen3OmniMoeAudioEncoderCudaGraphMixin,
 ):
     # LoRA support
     packed_modules_mapping = {

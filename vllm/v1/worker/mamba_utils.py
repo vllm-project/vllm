@@ -17,7 +17,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.core.kv_cache_utils import is_mamba_align_group, is_mamba_group
+from vllm.v1.core.kv_cache_utils import is_mamba_group, is_mamba_prefix_caching_group
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -587,7 +587,7 @@ def precopy_mamba_align_fused_kernel(
     # the 2D-grid contract; > 1 requires a 3D grid.
     TEMPORAL_TILES: tl.constexpr = 1,
 ):
-    """Pre-copy mamba "align" state across block boundaries.
+    """Pre-copy mamba state across block boundaries.
 
     Before the forward pass, copy each request's last SSM/conv state from its
     previous block column into the new window block column, so the kernels read
@@ -673,10 +673,10 @@ def get_mamba_group_params(
     groups."""
     groups = [kv_cache_config.kv_cache_groups[i] for i in mamba_group_ids]
     params = [cast(MambaManager.Params, g.manager_config.params) for g in groups]
-    assert (
-        len({g.block_size for g in groups}) == 1
-        and len({(p.num_speculative_blocks, p.mamba_cache_mode) for p in params}) == 1
-    ), "all mamba groups must share cache scheduling parameters"
+    scheduling = {(p.num_speculative_blocks, p.enable_prefix_caching) for p in params}
+    assert len({g.block_size for g in groups}) == 1 and len(scheduling) == 1, (
+        "all mamba groups must share cache scheduling parameters"
+    )
     return groups[0].block_size, params[0].num_speculative_blocks
 
 
@@ -1083,7 +1083,7 @@ class MambaSpecDecodeGPUContext:
             self.replayssm = ReplaySSMModelContext.create(
                 replayssm_groups,
                 self.num_accepted_tokens_snapshot.numel(),
-                materialize_prefixes=is_mamba_align_group(
+                materialize_prefixes=is_mamba_prefix_caching_group(
                     kv_cache_config.kv_cache_groups[self.mamba_group_ids[0]]
                 ),
             )

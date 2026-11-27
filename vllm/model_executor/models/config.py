@@ -712,19 +712,57 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         read straight from generation_config.json at sampler-build time
         (see DiffusionGemma's custom_sampler), not injected here.
         """
-        # Inherit Gemma4's attention backend selection (FA4 on Hopper,
-        # TRITON_ATTN fallback for heterogeneous head dims).
-        Gemma4Config.verify_and_update_config(vllm_config)
-
+        from vllm.platforms import current_platform
+        from vllm.utils.flashinfer import has_flashinfer, supports_trtllm_attention
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         attention_config = vllm_config.attention_config
-        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
-            raise ValueError(
-                "FlashInfer does not support DiffusionGemma's mixed "
-                "causal/bidirectional attention. Use --attention-backend "
-                "FLASH_ATTN or TRITON_ATTN instead."
+        mm_config = vllm_config.model_config.multimodal_config
+        if (
+            attention_config.backend is None
+            and attention_config.use_trtllm_attention is not False
+            and (mm_config is None or mm_config.language_model_only)
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+            and has_flashinfer()
+            and supports_trtllm_attention(is_prefill=True)
+        ):
+            attention_config.backend = AttentionBackendEnum.FLASHINFER
+            logger.info(
+                "DiffusionGemma: defaulting to FlashInfer TRTLLM-Gen attention "
+                "for text-only serving on an SM100-family GPU."
             )
+
+        Gemma4Config.verify_and_update_config(vllm_config)
+
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+            if attention_config.use_trtllm_attention is False or not (
+                has_flashinfer() and supports_trtllm_attention(is_prefill=True)
+            ):
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer requires the TRTLLM-Gen context "
+                    "kernel. Use --attention-backend TRITON_ATTN (or FLASH_ATTN on "
+                    "Hopper) instead."
+                )
+            if get_kv_quant_mode(vllm_config.cache_config.cache_dtype).is_nvfp4:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support an NVFP4 KV "
+                    "cache yet."
+                )
+            if vllm_config.compilation_config.pass_config.fuse_attn_quant:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support quantized "
+                    "attention output (fuse_attn_quant) yet."
+                )
+            if vllm_config.parallel_config.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support decode context "
+                    "parallelism yet."
+                )
+            attention_config.use_trtllm_attention = True
+
         if attention_config.backend is None and not attention_config.use_non_causal:
             # Only the sm_100 default backend order reads this flag (it puts
             # FlashInfer first for causal models). Elsewhere Gemma4Config above
@@ -1114,6 +1152,9 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 
         config.hidden_act = "geglu"
 
+        if getattr(config, "position_embedding_type", None) is None:
+            config.position_embedding_type = "rope"
+
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
         config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
@@ -1139,15 +1180,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         """
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
-
-
-class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        pooler_config = model_config.pooler_config
-        assert pooler_config is not None
-        if pooler_config.use_activation is None:
-            pooler_config.use_activation = False
 
 
 class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
@@ -1314,27 +1346,13 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.enable_prefix_caching:
-            if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = "align"
-                logger.info(
-                    "Mamba cache mode is set to '%s' for %s by default "
-                    "when prefix caching is enabled",
-                    cache_config.mamba_cache_mode,
-                    model_config.architecture,
-                )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = cache_config.block_size
-        else:
-            if cache_config.mamba_cache_mode != "none":
-                cache_config.mamba_cache_mode = "none"
-                logger.warning(
-                    "Mamba cache mode is set to 'none' when prefix caching is disabled"
-                )
-            if cache_config.mamba_block_size is None:
-                cache_config.mamba_block_size = model_config.max_model_len
+        elif cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
 
 class MiniMaxM3SparseForConditionalGenerationConfig(MiniMaxM3SparseConfig):
@@ -1403,6 +1421,17 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
         if mm_config is not None:
             video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
             video_kwargs.setdefault("video_backend", "nemotron_vl")
+
+        # Super VL stores its video frame sizing in the image processor config.
+        vision_config = model_config.hf_config.vision_config
+        if (
+            getattr(vision_config, "video_target_num_patches", None) is None
+            and getattr(vision_config, "video_target_img_size", None) is None
+        ):
+            for key in ("video_target_num_patches", "video_maintain_aspect_ratio"):
+                value = model_config.hf_image_processor_config.get(key)
+                if value is not None:
+                    setattr(vision_config, key, value)
 
 
 class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -1505,6 +1534,22 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         text_config.classifier_from_token = tokens
 
 
+class ShieldGemma2ForImageClassificationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        text_config = hf_config.get_text_config()
+        # A logit softcap would make the two-way softmax shortcut inexact.
+        if getattr(text_config, "final_logit_softcapping", None) is not None:
+            raise ValueError("ShieldGemma 2 does not support final_logit_softcapping")
+
+        # Same Yes/No ids as ShieldGemma2ForImageClassification in transformers.
+        text_config.method = "from_2_way_softmax"
+        text_config.classifier_from_token = ["No", "Yes"]
+        hf_config.num_labels = 1
+        text_config.num_labels = 1
+
+
 class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfig):
     pass
 
@@ -1550,24 +1595,12 @@ class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
             rope_parameters.pop("mrope_interleaved", None)
 
 
-def _strip_qwen4_exp_mrope(model_config: "ModelConfig") -> None:
-    configs = {
-        id(config): config
-        for config in (
-            getattr(model_config, "hf_config", None),
-            model_config.hf_text_config,
-        )
-        if config is not None
-    }
-    for config in configs.values():
-        rope_parameters = getattr(config, "rope_parameters", None)
-        if rope_parameters is not None:
-            rope_parameters.pop("mrope_section", None)
-            rope_parameters.pop("mrope_interleaved", None)
-
-
 class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConfig):
-    """Apply the Qwen3.5 hybrid-cache contract to Qwen4Exp."""
+    """Apply the Qwen3.5 hybrid-cache contract to Qwen4Exp.
+
+    M-RoPE is kept under `language_model_only` so the KV layout matches a
+    multimodal prefill.
+    """
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1595,9 +1628,6 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
             raise NotImplementedError(
                 "Qwen4Exp PLE/QSA does not support dual-batch overlap or microbatching"
             )
-        multimodal_config = vllm_config.model_config.multimodal_config
-        if multimodal_config is not None and multimodal_config.language_model_only:
-            _strip_qwen4_exp_mrope(vllm_config.model_config)
         spec_config = vllm_config.speculative_config
         if spec_config is not None and spec_config.method not in {
             "mtp",
@@ -1608,25 +1638,6 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
                 "Qwen4Exp speculative decoding supports only its native MTP "
                 "checkpoint and linear n-gram proposers"
             )
-
-
-class Qwen4ExpForCausalLMConfig(Qwen4ExpForConditionalGenerationConfig):
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-
-        _strip_qwen4_exp_mrope(vllm_config.model_config)
-
-
-class Qwen4ExpMTPConfig(Qwen4ExpForConditionalGenerationConfig):
-    """Preserve MRoPE for a VL target and use 1D RoPE for a text target."""
-
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-        if hasattr(vllm_config.model_config.hf_config, "vision_config"):
-            return
-        _strip_qwen4_exp_mrope(vllm_config.model_config)
 
 
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
@@ -1884,7 +1895,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
-    "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
@@ -1899,7 +1909,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteForSequenceClassification": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
-    "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
@@ -1913,7 +1922,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
-    "MambaForCausalLM": MambaModelConfig,
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
@@ -1942,10 +1950,30 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5ForSlotDecision": Qwen3_5ForSlotDecisionConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
-    "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
-    "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
-    "Qwen4ExpMTP": Qwen4ExpMTPConfig,
+    "Qwen4ExpForCausalLM": Qwen4ExpForConditionalGenerationConfig,
+    "Qwen4ExpForConditionalGeneration": Qwen4ExpForConditionalGenerationConfig,
+    "Qwen4ExpMTP": Qwen4ExpForConditionalGenerationConfig,
+    "ShieldGemma2ForImageClassification": (ShieldGemma2ForImageClassificationConfig),
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }
+
+
+def register_model_config(
+    architecture: str, config_cls: type[VerifyAndUpdateConfig]
+) -> None:
+    """Register the config hook of an architecture (e.g. from a plugin), as
+    `MODELS_CONFIG_MAP` does for in-tree models. Like
+    `ModelRegistry.register_model`, a later registration overwrites an earlier
+    one; replacing a different hook logs a warning."""
+    existing = MODELS_CONFIG_MAP.get(architecture)
+    if existing is not None and existing is not config_cls:
+        logger.warning(
+            "Architecture %s already has the config hook %s, and it will be "
+            "overwritten by %s.",
+            architecture,
+            existing.__name__,
+            config_cls.__name__,
+        )
+    MODELS_CONFIG_MAP[architecture] = config_cls

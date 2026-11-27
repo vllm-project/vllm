@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.gc_utils import untracked_list
@@ -13,10 +13,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
     BlockHashList,
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    get_block_hash,
     resolve_block_hashes,
     trim_null_head,
 )
@@ -32,11 +34,15 @@ from vllm.v1.kv_cache_interface import (
     get_reusable_prefix_length,
     is_mamba_prefill_checkpoint_valid,
 )
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
+
+# Sentinel value in `MambaManager._tips` marking a cached tip that has already
+# been extended once (retained as a one-turn rollback fallback).
+_FALLBACK_TIP: Final = BlockHash(b"")
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -178,7 +184,6 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_group_id: int,
         scheduler_block_size: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         needs_kv_cache_zeroing: bool = False,
         max_admission_blocks_per_request: int | None = None,
         retention_interval: int | None = None,
@@ -193,7 +198,6 @@ class SingleTypeKVCacheManager(ABC):
             scheduler_block_size: The scheduling granularity (LCM of all group
                 block sizes); a multiple of this manager's `block_size`.
             dcp_world_size: Decode context parallel world size.
-            pcp_world_size: Prefill context parallel world size.
             needs_kv_cache_zeroing: Whether worker-side KV cache zeroing needs
                 newly allocated block IDs from this manager.
             max_admission_blocks_per_request: Recycling-aware per-request
@@ -213,7 +217,6 @@ class SingleTypeKVCacheManager(ABC):
         self.cache_hit_alignment_tokens = scheduler_block_size
         # The block size for this manager; used for actual block allocation.
         self.dcp_world_size = dcp_world_size if kv_cache_group.dcp_sharded else 1
-        self.pcp_world_size = pcp_world_size if kv_cache_group.dcp_sharded else 1
         # The group's block size before DCP scaling.
         self.group_block_size = kv_cache_group.block_size
         self.block_size = kv_cache_group.block_size * self.dcp_world_size
@@ -244,19 +247,19 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
         # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
-        # by ``KVCacheManager``; only a Mamba "align" group ever gets it.
+        # by ``KVCacheManager``; only a prefix-caching Mamba group ever gets it.
         self.shared_prefix_checkpoint = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
-        # managers (full attention, mamba "align"); harmlessly empty elsewhere.
+        # managers (full attention, mamba); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
         self._pending_cow_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
         # Boundary-state offload hand-off for external KV connectors. A mamba
-        # "align" block table is not append-only (interior states are
+        # block table is not append-only (interior states are
         # nulled/freed and speculative blocks relocate in place), so a
         # connector cannot resolve its state blocks positionally. Record
         # (request, group, block, exact token boundary) for each committed
         # boundary state so a connector can offload the right block under the
-        # right hash. Populated only by mamba "align".
+        # right hash. Populated only by mamba.
         self._pending_boundary_state_offloads: list[
             tuple[str, int, KVCacheBlock, int]
         ] = []
@@ -565,7 +568,7 @@ class SingleTypeKVCacheManager(ABC):
 
         Entries are `(req_id, group_id, block, boundary_tokens)`.
 
-        Only mamba "align" populates this. The blocks are not kept alive by
+        Only mamba populates this. The blocks are not kept alive by
         the request block table for the whole request, so a caller that reads
         them asynchronously must pin them first.
         """
@@ -740,6 +743,10 @@ class SingleTypeKVCacheManager(ABC):
         """Cache blocks that are only retained once the request is freed."""
         return None
 
+    def reset_prefix_cache(self) -> None:
+        """Reset any per-manager prefix-cache metadata."""
+        return None
+
     @classmethod
     @abstractmethod
     def find_longest_cache_hit(
@@ -752,7 +759,6 @@ class SingleTypeKVCacheManager(ABC):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Get the longest cache hit prefix of the blocks that is not longer than
@@ -771,7 +777,6 @@ class SingleTypeKVCacheManager(ABC):
                 be a multiple of this value (in tokens). By default, it should
                 be set to the block_size.
             dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
             num_request_tokens: The length of the request being looked up, for
                 managers whose hit rule depends on where it ends. `None`
                 means `max_length`.
@@ -885,7 +890,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         if dcp_world_size > 1:
@@ -1077,11 +1081,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         must delay freeing/caching of blocks."""
         bounded_replay: bool = False
         """DeepSeek-V4.1: replay the window instead of prefix caching it."""
+        rebuilt_by_replay: bool = False
+        """Left out of prefix caching without a replay window of its own:
+        another group's bounded replay recomputes enough tokens to rebuild it
+        (e.g. the DeepSeek-V4 compressor states under the SWA replay)."""
 
     @classmethod
     def prefix_cacheable(cls, config: ManagerConfig) -> bool:
-        assert isinstance(config.params, SlidingWindowManager.Params)
-        return not config.params.bounded_replay
+        params = config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        return not (params.bounded_replay or params.rebuilt_by_replay)
 
     @classmethod
     def prefix_replay_tokens(cls, config: ManagerConfig) -> int:
@@ -1157,14 +1166,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(manager_config.params, SlidingWindowManager.Params), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
-        assert pcp_world_size == 1, "PCP not support sliding window attn now."
         # Sliding-window cache hits must stay at the group's physical block
         # granularity. resolve_block_hashes() converts finer-grained hashes to
         # that view when the hybrid-cache alignment is smaller than block_size.
@@ -1469,7 +1476,6 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Longest hit whose blocks in `[L - sliding_window + 1, hit)` are cached.
@@ -1479,7 +1485,7 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         Underestimating `L` only asks for more blocks than needed.
         """
         assert isinstance(manager_config.params, DFlashSlidingWindowManager.Params)
-        assert dcp_world_size == 1 and pcp_world_size == 1
+        assert dcp_world_size == 1
         assert alignment_tokens % block_size == 0
         block_hashes = resolve_block_hashes(
             block_hashes,
@@ -1640,7 +1646,6 @@ class CircularBufferManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         return tuple([] for _ in kv_cache_group_ids), 0
@@ -1715,7 +1720,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """For chunked local attention, we need to find the longest cache hit
@@ -1745,7 +1749,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             block_size: The groups' block size.
             manager_config: The groups' manager config.
             dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
             alignment_tokens: The returned cache hit length (in tokens) should
                 be a multiple of this value (in tokens).
             num_request_tokens: Unused; see the base class.
@@ -1760,7 +1763,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "chunked local attention groups"
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
-        assert pcp_world_size == 1, "PCP not support chunked local attn now."
         assert block_size == alignment_tokens, (
             "KV cache groups with different block sizes are not compatible with "
             "chunked local attention now"
@@ -1853,13 +1855,13 @@ class MambaManager(SingleTypeKVCacheManager):
 
     @property
     def has_positionally_stable_blocks(self) -> bool:
-        # Align-mode Mamba can null interior states and relocate speculative
-        # blocks in place. Other modes retain positional identity.
-        return self.mamba_cache_mode != "align"
+        # With prefix caching, Mamba can null interior states and relocate
+        # speculative blocks in place. Without it, blocks keep their positions.
+        return not self.prefix_caching
 
     @dataclass(frozen=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
-        mamba_cache_mode: str = "none"
+        enable_prefix_caching: bool = False
         num_speculative_blocks: int = 0
         num_prefill_checkpoint_blocks: int = 0
         prefill_checkpoint_alignment: int | None = None
@@ -1887,7 +1889,7 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> int:
         params = config.params
         assert isinstance(params, MambaManager.Params)
-        if params.mamba_cache_mode == "align":
+        if params.enable_prefix_caching:
             return (
                 2 + params.num_speculative_blocks + params.num_prefill_checkpoint_blocks
             )
@@ -1906,7 +1908,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # no CP scaling applies.
         params = config.params
         assert isinstance(params, MambaManager.Params)
-        if params.mamba_cache_mode == "align":
+        if params.enable_prefix_caching:
             # Block table rows are position-indexed over the full sequence
             # even though only 2 + num_speculative_blocks state blocks are
             # resident at a time (earlier states are nulled out by
@@ -1923,22 +1925,21 @@ class MambaManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_group, block_pool, **kwargs)
         params = self.manager_config.params
         assert isinstance(params, MambaManager.Params)
-        self.mamba_cache_mode = params.mamba_cache_mode
-        assert self.mamba_cache_mode == "align" or not self.enable_caching, (
-            "Mamba prefix caching requires mamba_cache_mode='align'"
+        assert params.enable_prefix_caching or not self.enable_caching, (
+            "Mamba prefix caching requires a group built with prefix caching"
         )
+        self.prefix_caching = params.enable_prefix_caching
         self.num_speculative_blocks: int = params.num_speculative_blocks
         self.prefill_checkpoint_alignment = params.prefill_checkpoint_alignment
         self.has_prefill_checkpoint_blocks = (
-            self.mamba_cache_mode == "align"
-            and params.num_prefill_checkpoint_blocks > 0
+            self.prefix_caching and params.num_prefill_checkpoint_blocks > 0
         )
         # Sparse retention caches the latest decode state when freed.
         self.keep_decode_resume_state = (
             self.enable_caching and self.retention_interval is not None
         )
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
-        if self.mamba_cache_mode == "align":
+        if self.prefix_caching:
             # Mapping from request ID to the index of the block
             # allocated in the previous step
             self.last_state_block_idx: dict[str, int] = {}
@@ -1960,6 +1961,34 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # Tracks Mamba tip chains (None = root tip, BlockHash = t-1
+            # fallback, _FALLBACK_TIP = already extended once). Shared
+            # junctions and fork points are popped to stay in normal LRU.
+            self._tips: dict[BlockHash, BlockHash | None] = {}
+            self._req_hit: dict[str, BlockHash] = {}
+            self._req_tip: dict[str, tuple[int, BlockHash]] = {}
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        super().add_local_computed_blocks(
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+        if (
+            self.enable_caching
+            and new_computed_blocks
+            and new_computed_blocks[-1].block_hash is not None
+        ):
+            self._req_hit[request_id] = get_block_hash(
+                new_computed_blocks[-1].block_hash
+            )
 
     @classmethod
     def find_longest_cache_hit(
@@ -1972,11 +2001,9 @@ class MambaManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert dcp_world_size == 1, "DCP not support mamba now."
-        assert pcp_world_size == 1, "PCP not support mamba now."
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -2096,7 +2123,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def _remove_blocks_in_range(
         self, request_id: str, first_block: int, last_block: int
     ) -> None:
-        if self.mamba_cache_mode != "align":
+        if not self.prefix_caching:
             return super()._remove_blocks_in_range(request_id, first_block, last_block)
         blocks = self.req_to_blocks.get(request_id, [])
         first_block = max(first_block, self._num_retired_blocks.get(request_id, 0))
@@ -2131,7 +2158,7 @@ class MambaManager(SingleTypeKVCacheManager):
         super().remove_skipped_blocks(
             request_id, processed_computed_tokens, num_prompt_tokens
         )
-        if self.mamba_cache_mode == "align":
+        if self.prefix_caching:
             # `last_state_block_idx` refers to the block index allocated two steps ago.
             # The block allocated in the previous step is used to copy Mamba states
             # into the block allocated in the current step; the earlier block is
@@ -2209,7 +2236,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # that kv_cache_manager will think there is no enough blocks to allocate now
             # and don't schedule it in the current step.
             return self.block_pool.num_gpu_blocks + 1
-        if self.mamba_cache_mode != "align":
+        if not self.prefix_caching:
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.num_speculative_blocks > 0:
@@ -2225,7 +2252,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 prefill_end=prefill_end,
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
+            # We don't allocate blocks for lookahead tokens with prefix caching: if
             # x * block_size tokens are scheduled, num_tokens is
             # x * block_size + num_lookahead_tokens and breaks the alignment.
             # We can ignore lookahead tokens because current draft models don't have
@@ -2294,7 +2321,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
-        if self.mamba_cache_mode != "align":
+        if not self.prefix_caching:
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.num_speculative_blocks > 0:
@@ -2303,7 +2330,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 request_id, num_tokens, num_tokens_main_model
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
+            # We don't allocate blocks for lookahead tokens with prefix caching: if
             # x * block_size tokens are scheduled, num_tokens is
             # x * block_size + num_lookahead_tokens and breaks the alignment.
             # We can ignore lookahead tokens because current draft models don't have
@@ -2435,7 +2462,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_computed_tokens: int,
         num_in_flight_tokens: int,
     ) -> tuple[int, KVCacheBlock, int] | None:
-        if self.mamba_cache_mode != "align":
+        if not self.prefix_caching:
             return None
         producer_tail = self._producer_partial_tail_reqs.pop(request_id, None)
         if producer_tail is None:
@@ -2446,7 +2473,7 @@ class MambaManager(SingleTypeKVCacheManager):
         return self.kv_cache_group_id, source_block, boundary_tokens
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
-        if self.mamba_cache_mode == "align":
+        if self.prefix_caching:
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)
@@ -2454,6 +2481,8 @@ class MambaManager(SingleTypeKVCacheManager):
             self._req_chunk_ranges.pop(request_id, None)
             self._mid_block_states.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._req_hit.pop(request_id, None)
+            self._req_tip.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
             # the pool now, so drop its not-yet-offered hand-offs rather than
@@ -2481,7 +2510,7 @@ class MambaManager(SingleTypeKVCacheManager):
         *,
         replay_boundaries: Sequence[int],
     ) -> None:
-        if self.mamba_cache_mode == "align":
+        if self.prefix_caching:
             chunk_range = self._req_chunk_ranges.pop(request.request_id, None)
             if chunk_range is not None:
                 query_start, query_end = chunk_range
@@ -2494,7 +2523,7 @@ class MambaManager(SingleTypeKVCacheManager):
             replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
-        if self.mamba_cache_mode == "align":
+        if self.prefix_caching:
             partial_hash = self._cache_partial_tail_block(
                 request, num_tokens, retention_interval=retention_interval
             )
@@ -2504,14 +2533,15 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
                 block = blocks[idx]
-                # Skip null blocks (align-mode skipped states) and blocks that
+                # Skip null blocks (skipped mamba states) and blocks that
                 # were not cached this step — with sparse retention
                 # (reachable_block_mask) the intermediate state snapshots carry
                 # no hash and must not be recorded as cached-this-step.
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
-                if self.mamba_cache_mode == "align":
+                if self.prefix_caching:
+                    self._record_tip(request.request_id, block)
                     assert block.block_hash_num_tokens is not None
                     # Offer every retained boundary with its exact block.
                     # The connector filters against its save window, which may
@@ -2533,43 +2563,110 @@ class MambaManager(SingleTypeKVCacheManager):
         idx = processed_tokens // self.block_size - 1
         if idx < num_prompt_tokens // self.block_size:
             return None
-        checkpoint = self._checkpoints.get(request_id)
-        if (
-            checkpoint is not None
-            and checkpoint[1] == idx
-            and checkpoint[0] != (idx + 1) * self.block_size
-        ):
-            # A resumed prefill exported an off-boundary checkpoint into it.
+        if idx in self._mid_block_states.get(request_id, {}):
+            # A resumed prefill left a state other than the block end in it.
             return None
         return idx
 
     def cache_blocks_on_free(self, request: Request) -> None:
-        """Cache the held latest decode-crossed boundary state, so a follow-up
-        turn resumes there."""
-        if not self.keep_decode_resume_state:
+        """Cache the held latest decode-crossed boundary state and deprioritize
+        superseded states."""
+        if self.keep_decode_resume_state:
+            blocks = self.req_to_blocks.get(request.request_id, [])
+            idx = self._decode_resume_block_idx(
+                request.request_id,
+                max(0, request.num_computed_tokens - request.num_in_flight_tokens),
+                request.num_prompt_tokens,
+            )
+            num_hashed_tokens = (
+                len(request.block_hashes) * self.block_pool.hash_block_size
+            )
+            if (
+                idx is not None
+                and idx < len(blocks)
+                and blocks[idx].block_hash is None
+                and num_hashed_tokens >= (idx + 1) * self.block_size
+            ):
+                self.block_pool.cache_full_blocks(
+                    request=request,
+                    blocks=blocks,
+                    num_cached_blocks=idx,
+                    num_full_blocks=idx + 1,
+                    block_size=self.block_size,
+                    kv_cache_group_id=self.kv_cache_group_id,
+                )
+                self._record_tip(request.request_id, blocks[idx])
+        if self.enable_caching:
+            self._deprioritize_superseded_state(request)
+
+    def _record_tip(self, request_id: str, block: KVCacheBlock) -> None:
+        if block.block_hash is None or block.block_hash_num_tokens is None:
             return
-        blocks = self.req_to_blocks.get(request.request_id, [])
-        idx = self._decode_resume_block_idx(
-            request.request_id,
-            max(0, request.num_computed_tokens - request.num_in_flight_tokens),
-            request.num_prompt_tokens,
-        )
-        num_hashed_tokens = len(request.block_hashes) * self.block_pool.hash_block_size
-        if (
-            idx is None
-            or idx >= len(blocks)
-            or blocks[idx].block_hash is not None
-            or num_hashed_tokens < (idx + 1) * self.block_size
+        prev = self._req_tip.get(request_id)
+        if prev is None or block.block_hash_num_tokens > prev[0]:
+            self._req_tip[request_id] = (
+                block.block_hash_num_tokens,
+                get_block_hash(block.block_hash),
+            )
+
+    def _deprioritize_superseded_state(self, request: Request) -> None:
+        hit_hash = self._req_hit.pop(request.request_id, None)
+        tip = self._req_tip.pop(request.request_id, None)
+        if request.status not in (
+            RequestStatus.FINISHED_STOPPED,
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            RequestStatus.FINISHED_REPETITION,
         ):
             return
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=blocks,
-            num_cached_blocks=idx,
-            num_full_blocks=idx + 1,
-            block_size=self.block_size,
-            kv_cache_group_id=self.kv_cache_group_id,
+
+        pool = self.block_pool
+        gids = [self.kv_cache_group_id]
+        tips = self._tips
+
+        align = self.cache_hit_alignment_tokens
+        j_idx = (
+            request.shared_prefix_boundary // align * align // pool.hash_block_size - 1
         )
+        junction_hash = (
+            request.block_hashes[j_idx]
+            if 0 <= j_idx < len(request.block_hashes)
+            else None
+        )
+        if junction_hash is not None:
+            tips.pop(junction_hash, None)
+
+        tip_hash = tip[1] if tip is not None else None
+        if tip_hash is None or tip_hash in (hit_hash, junction_hash):
+            return
+
+        if hit_hash is None or hit_hash not in tips:
+            tips[tip_hash] = None
+        elif (prev := tips[hit_hash]) == _FALLBACK_TIP:
+            # Shared fork point: stop tracking so it stays in normal LRU.
+            tips.pop(hit_hash)
+            tips[tip_hash] = None
+        else:
+            tips[hit_hash] = _FALLBACK_TIP
+            tips[tip_hash] = hit_hash
+            if (
+                prev is not None
+                and tips.pop(prev, None) is not None
+                and (stale := pool.get_cached_block(prev, gids))
+            ):
+                pool.deprioritize_blocks(stale)
+
+        if len(tips) > pool.num_gpu_blocks:
+            self._tips = {
+                h: v
+                for h, v in tips.items()
+                if pool.get_cached_block(h, gids) is not None
+            }
+
+    def reset_prefix_cache(self) -> None:
+        if self.prefix_caching:
+            self._tips.clear()
+            self._req_hit.clear()
+            self._req_tip.clear()
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
@@ -2619,7 +2716,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
-            return self.block_pool.cache_partial_block(
+            partial_hash = self.block_pool.cache_partial_block(
                 request=request,
                 block=checkpoint_block,
                 num_tokens=checkpoint_position,
@@ -2627,6 +2724,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 block_size=self.block_size,
                 replace_existing_hashes=True,
             )
+            if partial_hash is not None:
+                self._record_tip(request.request_id, checkpoint_block)
+            return partial_hash
         if num_tokens <= 0 or num_tokens % hash_block_size != 0:
             return None
         latest_prompt_hash_boundary = get_reusable_prefix_length(
@@ -2665,6 +2765,8 @@ class MambaManager(SingleTypeKVCacheManager):
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
+        if partial_hash is not None:
+            self._record_tip(request.request_id, source_block)
         if partial_hash is not None and num_tokens % self.block_size:
             self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
             self.num_cached_block[request.request_id] = block_idx
@@ -2795,7 +2897,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         # Cross-attention does not benefit from prefix caching since:
@@ -3010,7 +3111,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         return tuple([] for _ in kv_cache_group_ids), 0
@@ -3054,9 +3154,15 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         assert isinstance(self.manager_config.params, HiSparseHotManager.Params)
         self.blocks_per_request = self.manager_config.params.blocks_per_request
         self.hot_required: set[str] = set()
+        self.preallocated: dict[str, list[KVCacheBlock]] = {}
 
     def require_hot(self, request_id: str) -> None:
         self.hot_required.add(request_id)
+
+    def preallocate(self, request_id: str) -> None:
+        """Allocate Hot ahead of the step's allocation, which then reports it."""
+        self.require_hot(request_id)
+        self.preallocated[request_id] = self.allocate_new_blocks(request_id, 0, 0)
 
     def has_hot(self, request_id: str) -> bool:
         return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
@@ -3118,6 +3224,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
     ) -> list[KVCacheBlock]:
         # Cold admissions can bypass add_local_computed_blocks.
         self.num_cached_block[request_id] = 0
+        if (preallocated := self.preallocated.pop(request_id, None)) is not None:
+            return preallocated
         if request_id not in self.hot_required:
             return []
         req_blocks = self.req_to_blocks[request_id]
@@ -3130,6 +3238,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         self.hot_required.discard(request_id)
+        assert request_id not in self.preallocated
         return super().pop_blocks_for_free(request_id)
 
 

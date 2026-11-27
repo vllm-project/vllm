@@ -25,12 +25,14 @@ from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
+    HiSparseResidentManager,
     MambaManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiddenStateCacheSpec,
+    HiSparsePageSpec,
     KVCacheConfig,
     KVCacheGroup,
     KVCacheGroupRole,
@@ -47,6 +49,7 @@ from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 def _make_vllm_config(
     *,
     extra_config: dict[str, Any] | None = None,
+    use_mla: bool = False,
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     prefill_context_parallel_size: int = 1,
@@ -61,7 +64,7 @@ def _make_vllm_config(
     config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
     config.model_config.max_model_len = 4096
-    config.model_config.use_mla = False
+    config.model_config.use_mla = use_mla
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
     # requires the head shard to cover the model's KV heads exactly
     config.model_config.get_total_num_kv_heads.return_value = 4
@@ -252,7 +255,7 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
-_MAMBA_ALIGN = MambaManager.config(mamba_cache_mode="align")
+_MAMBA_ALIGN = MambaManager.config(enable_prefix_caching=True)
 
 
 def _mamba_spec() -> MambaSpec:
@@ -294,7 +297,7 @@ def _parallelism_agnostic(
     canonical: bool = False,
 ) -> bool:
     config = _make_vllm_config(
-        extra_config={"canonical_layout": True} if canonical else None
+        extra_config={"canonical_layout": True} if canonical else None,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
@@ -309,6 +312,7 @@ def _parallelism_agnostic(
 def _replicated_layout(
     kv_cache_config: KVCacheConfig,
     *,
+    extra_config: dict[str, Any] | None = None,
     tensor_parallel_size: int = 4,
     pipeline_parallel_size: int = 1,
     prefill_context_parallel_size: int = 1,
@@ -319,12 +323,13 @@ def _replicated_layout(
     world_size: int | None = None,
 ) -> bool:
     config = _make_vllm_config(
+        extra_config=extra_config,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         prefill_context_parallel_size=prefill_context_parallel_size,
         decode_context_parallel_size=decode_context_parallel_size,
+        use_mla=use_mla,
     )
-    config.model_config.use_mla = use_mla
     config.parallel_config.distributed_executor_backend = distributed_executor_backend
     config.parallel_config.nnodes = nnodes
     if world_size is not None:
@@ -554,6 +559,28 @@ def test_hisparse_offloads_only_indexer_group():
         (group.group_id, group.layer_names) for group in offloading_config.groups
     ] == [(1, ("indexer",))]
     assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
+
+
+def test_hisparse_indexer_tier_is_single_copy_under_tp():
+    """The resident groups' raw pages carry no TP metadata; they must not
+    force a copy of the replicated indexer per rank."""
+    source = make_kv_cache_group(["source"], _mla_spec(), host_resident=True)
+    indexer = make_kv_cache_group(
+        ["indexer"], _mla_spec(head_size=128), role=KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    resident = make_kv_cache_group(
+        ["source.hisparse_resident"],
+        HiSparsePageSpec(block_size=16, page_size=_MLA_PAGE),
+        manager_cls=HiSparseResidentManager,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer, resident],
+        hisparse_host_num_blocks=4,
+    )
+
+    assert _replicated_layout(kv_cache_config)
 
 
 def test_hisparse_partial_group_size_survives_scheduler_flattening():
@@ -1084,7 +1111,7 @@ def test_replicated_layout_for_dsa_style_groups(
         ({"distributed_executor_backend": "ray"}, "ray"),
         ({"distributed_executor_backend": "uni"}, "uni"),
         ({"distributed_executor_backend": type("DummyExecutor", (), {})}, "class"),
-        ({"nnodes": 2}, "multi-node"),
+        ({"nnodes": 4}, "one-rank-per-node"),
     ],
     ids=[
         "tp1",
@@ -1096,11 +1123,17 @@ def test_replicated_layout_for_dsa_style_groups(
         "ray",
         "uni",
         "class",
-        "multi-node",
+        "one-rank-per-node",
     ],
 )
 def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
     assert not _replicated_layout(_make_mla_kv_cache_config(), **kwargs), case
+
+
+def test_multi_node_mla_replication_is_independent_of_backend():
+    assert _replicated_layout(
+        _make_mla_kv_cache_config(), nnodes=2, extra_config={"spec_name": "CustomSpec"}
+    )
 
 
 _SWA_SPEC = SlidingWindowManager.layer_config(
@@ -1178,8 +1211,8 @@ def test_uncertifiable_canonical_layout_resets_replication(
         config = _make_vllm_config(
             tensor_parallel_size=2,
             extra_config={"canonical_layout": True} if canonical else None,
+            use_mla=True,
         )
-        config.model_config.use_mla = True
 
         group = make_kv_cache_group(["layer"], spec)
         PAGE = group.page_size_bytes

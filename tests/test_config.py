@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pydantic
 import pytest
 import torch
-from huggingface_hub import ResolvedRevision
+from huggingface_hub import ResolvedRevision, constants
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
@@ -59,6 +59,7 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
+    InvalidSentenceTransformersModulePath,
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
     try_get_dense_modules,
@@ -134,29 +135,61 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
-    ("mode", "input_dtype", "use_ubatching", "pp_size", "error"),
+    ("architecture", "field", "value"),
     [
-        ("align", torch.bfloat16, False, 1, None),
-        ("align", torch.float16, False, 1, "bfloat16 model inputs"),
-        ("none", torch.float16, False, 1, None),
-        ("align", torch.bfloat16, True, 1, "ReplaySSM does not support microbatching"),
-        ("align", torch.bfloat16, False, 2, "pipeline_parallel_size=1"),
+        ("MuseSparkDSparkModel", "draft_lm_head_quantization", "nvfp4"),
+        ("Qwen3DSparkModel", "draft_lm_head_quantization", "fp8"),
+        # Per-tensor FP8 is refused for the Muse Spark draft.
+        ("MuseSparkDSparkModel", "quantization", "fp8"),
+        ("MuseSparkDSparkModel", "quantization", "fp8_per_tensor"),
+    ],
+)
+def test_dspark_refuses_unsupported_draft_quantization(architecture, field, value):
+    """Draft quantizations no platform supports for the drafter fail at config
+    time instead of at load."""
+    hf_config = SimpleNamespace(model_type="dspark")
+    spec = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=hf_config,
+            architectures=[architecture],
+            dtype=torch.bfloat16,
+            head_dtype=torch.bfloat16,
+        ),
+        target_model_config=SimpleNamespace(hf_config=hf_config, architectures=[]),
+        dspark_draft_topk=None,
+        quantization=None,
+        draft_lm_head_quantization=None,
+        num_speculative_tokens=7,
+    )
+    setattr(spec, field, value)
+    with pytest.raises(ValueError, match=field):
+        DSparkSpeculatorConfig.apply_options(spec)
+
+
+@pytest.mark.parametrize(
+    ("enable_prefix_caching", "input_dtype", "use_ubatching", "pp_size", "error"),
+    [
+        (True, torch.bfloat16, False, 1, None),
+        (True, torch.float16, False, 1, "bfloat16 model inputs"),
+        (False, torch.float16, False, 1, None),
+        (True, torch.bfloat16, True, 1, "ReplaySSM does not support microbatching"),
+        (True, torch.bfloat16, False, 2, "pipeline_parallel_size=1"),
     ],
     ids=[
-        "align-bf16",
-        "align-fp16-rejected",
-        "none-fp16",
+        "prefix-caching-bf16",
+        "prefix-caching-fp16-rejected",
+        "no-prefix-caching-fp16",
         "microbatch-rejected",
         "pp-rejected",
     ],
 )
 def test_flashinfer_replayssm_validates_config(
-    mode, input_dtype, use_ubatching, pp_size, error
+    enable_prefix_caching, input_dtype, use_ubatching, pp_size, error
 ):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
-            mamba_cache_mode=mode,
+            enable_prefix_caching=enable_prefix_caching,
             mamba_ssm_cache_dtype="float16",
             replayssm_buffer_len=16,
         ),
@@ -195,7 +228,7 @@ def test_triton_replayssm_spec_decode_validates_config(
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
             replayssm_buffer_len=buffer_len,
         ),
         num_speculative_tokens=3,
@@ -218,6 +251,57 @@ def test_triton_replayssm_spec_decode_validates_config(
             VllmConfig.validate_mamba_cached_kernel(config)
     else:
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+@pytest.mark.parametrize(
+    (
+        "num_speculative_tokens",
+        "backend",
+        "stochastic_rounding",
+        "buffer_len",
+        "beta_scale",
+        "error",
+    ),
+    [
+        (0, MambaBackendEnum.TRITON, False, 32, 1.0, None),
+        (2, MambaBackendEnum.TRITON, False, 16, 1.0, "speculative decoding"),
+        (0, MambaBackendEnum.FLASHINFER, False, 16, 1.0, "--mamba-backend triton"),
+        (0, MambaBackendEnum.TRITON, True, 16, 1.0, "stochastic-rounding"),
+        (0, MambaBackendEnum.TRITON, False, 64, 1.0, "--replayssm-buffer-len <= 32"),
+        (0, MambaBackendEnum.TRITON, False, 16, 2.0, "scaled beta"),
+    ],
+    ids=[
+        "stp",
+        "spec",
+        "flashinfer",
+        "stochastic-rounding",
+        "long-buffer",
+        "scaled-beta",
+    ],
+)
+def test_gdn_replayssm_validates_config(
+    num_speculative_tokens, backend, stochastic_rounding, buffer_len, beta_scale, error
+):
+    """The Gated DeltaNet layer owns these limits, so every model built on it
+    (Qwen3.5, Qwen4Exp, and their subclasses) is checked, whatever its name."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+    )
+
+    config = SimpleNamespace(
+        num_speculative_tokens=num_speculative_tokens,
+        cache_config=SimpleNamespace(replayssm_buffer_len=buffer_len),
+        mamba_config=SimpleNamespace(
+            backend=backend, enable_stochastic_rounding=stochastic_rounding
+        ),
+    )
+    reason = QwenGatedDeltaNetAttention._replayssm_unsupported_reason(
+        config, beta_scale
+    )
+    if error:
+        assert reason is not None and error in reason
+    else:
+        assert reason is None
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -386,7 +470,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
         cache_config=SimpleNamespace(
             use_replayssm=True,
             use_kda_recoverssm=False,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
             replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
@@ -409,9 +493,9 @@ def test_kda_recoverssm_derivation_is_revalidated():
     assert config.cache_config.use_replayssm
     assert config.cache_config.use_kda_recoverssm
 
-    config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.enable_prefix_caching = True
     VllmConfig.validate_mamba_cached_kernel(config)
-    config.cache_config.mamba_cache_mode = "none"
+    config.cache_config.enable_prefix_caching = False
 
     config.model_config.architecture = "NemotronHForCausalLM"
     config.mamba_config.backend = MambaBackendEnum.FLASHINFER
@@ -469,12 +553,6 @@ def test_lora_allowed_for_drafter_without_lora_support():
     assert lora_config.lora_dtype == torch.bfloat16
 
 
-def test_mamba_cache_mode_all_is_rejected():
-    """The removed 'all' mode must fail validation instead of being ignored."""
-    with pytest.raises(ValidationError, match="mamba_cache_mode"):
-        CacheConfig(mamba_cache_mode="all")
-
-
 @pytest.mark.parametrize(
     ("cache_dtype", "model_dtype", "should_raise"),
     [
@@ -498,11 +576,10 @@ def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_
 
 
 @pytest.mark.parametrize("dcp_size", [1, 2])
-def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
-    # The nvfp4_ds_mla chunked-context gather is not validated under DCP, so
-    # the combination fails at startup instead of on the first request that
-    # carries cached context.
-    kwargs = dict(
+def test_nvfp4_ds_mla_accepts_decode_context_parallelism(dcp_size):
+    # The nvfp4_ds_mla chunked-context gather reads each rank's local context
+    # from its chunk start, as fp8_ds_mla does, so DCP is supported.
+    VllmConfig(
         cache_config=CacheConfig(cache_dtype="nvfp4_ds_mla"),
         device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(
@@ -511,11 +588,6 @@ def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
             distributed_executor_backend="mp",
         ),
     )
-    if dcp_size > 1:
-        with pytest.raises(ValueError, match="decode context parallelism"):
-            VllmConfig(**kwargs)
-    else:
-        VllmConfig(**kwargs)
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
@@ -667,7 +739,7 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=16,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=2,
@@ -1702,6 +1774,10 @@ def test_all2all_backend_has_portable_default():
 
 
 def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
+    # Import modules with import-time platform probes before faking CUDA, so
+    # they never query CUDA-only `_C` ops missing from non-CUDA builds.
+    import vllm.model_executor.layers.quantization.online.base  # noqa: F401
+
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
@@ -2281,12 +2357,18 @@ _PEER_GROUP = {
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA Only Test")
 @pytest.mark.parametrize(
     "options,parallel,error",
     [
         ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
         ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_transport='rdma'"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, None),
+        (
+            _PEER_GROUP | {"cpu_offload": True, "dp_shared_memory": True},
+            {},
+            "does not support dp_shared_memory",
+        ),
         (_PEER_GROUP | {"cpu_offload": True, "peer_group_transport": "rdma"}, {}, None),
         (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
         (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
@@ -2296,6 +2378,11 @@ _PEER_GROUP = {
 )
 def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        staticmethod(lambda device_id=0: DeviceCapability(8, 9)),
+    )
     config = ParallelConfig(
         **({"data_parallel_size": 2} | parallel), distributed_executor_backend="mp"
     )
@@ -2305,14 +2392,46 @@ def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "architecture,layer_field,supported",
+    "architecture,layer_field,options,error",
     [
-        ("DeepseekV41ForCausalLM", "engram_layer_ids", True),
-        ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
+        ("DeepseekV41ForCausalLM", "engram_layer_ids", {}, None),
+        ("Qwen4ExpForConditionalGeneration", "ple_layer_ids", {}, None),
+        (
+            "Qwen4ExpForConditionalGeneration",
+            "ple_layer_ids",
+            {"peer_group_transport": "rdma"},
+            None,
+        ),
+        (
+            "Qwen4ExpForConditionalGeneration",
+            "ple_layer_ids",
+            {"peer_group_transport": "rdma", "cpu_offload": True},
+            None,
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"peer_group_fetch": "async"},
+            "peer_group_fetch",
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"embedding_across_dp": True},
+            "embedding_across_dp",
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"disk_offload": True},
+            "incompatible with disk_offload",
+        ),
     ],
 )
-def test_engram_peer_group_requires_pool_support(architecture, layer_field, supported):
-    """Qwen4Exp's tables ignore peer groups, so they would not be split."""
+def test_engram_peer_group_model_options(
+    architecture, layer_field, options, error, monkeypatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     model = cast(
         ModelConfig,
         SimpleNamespace(
@@ -2320,10 +2439,41 @@ def test_engram_peer_group_requires_pool_support(architecture, layer_field, supp
             hf_text_config=SimpleNamespace(**{layer_field: [1]}),
         ),
     )
-    config = EngramConfig(**_PEER_GROUP)
-    rejects = pytest.raises(ValueError, match="pool support")
-    with nullcontext() if supported else rejects:
+    config = EngramConfig(**(_PEER_GROUP | options))
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
         config.verify_model_config(model)
+
+
+@pytest.mark.parametrize(
+    "parallel,load_format,transfer,error",
+    [
+        ({"enable_dbo": True}, "auto", None, "DBO"),
+        ({}, "ipc_cache", None, "ipc_cache"),
+        ({}, "sharded_state", None, "sharded_state"),
+        ({}, "auto", True, "weight transfer"),
+    ],
+)
+def test_qwen_ple_pool_rejects_unsupported_engine_options(
+    monkeypatch, parallel, load_format, transfer, error
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "has_device_capability", lambda _: True)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="Qwen4ExpForConditionalGeneration",
+                hf_text_config=SimpleNamespace(ple_layer_ids=[1]),
+            ),
+            speculative_config=None,
+            engram_config=EngramConfig(**_PEER_GROUP),
+            parallel_config=ParallelConfig(**parallel),
+            load_config=SimpleNamespace(load_format=load_format),
+            weight_transfer_config=transfer,
+        ),
+    )
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._resolve_and_verify_engram_config(config)
 
 
 @pytest.mark.skip_global_cleanup
@@ -2448,15 +2598,23 @@ def test_engram_config_defaults_to_none():
     assert hash_config(config)
 
 
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "DeepseekV41ForCausalLM",
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+    ],
+)
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("enable_dbo,ubatch_size", [(True, 0), (False, 2)])
-def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size):
+def test_engram_rejects_microbatching(architecture, explicit, enable_dbo, ubatch_size):
     """Reject overlapping Engram staging even without an explicit EngramConfig."""
     config = cast(
         VllmConfig,
         SimpleNamespace(
             model_config=SimpleNamespace(
-                architecture="DeepseekV41ForCausalLM",
+                architecture=architecture,
                 hf_text_config=SimpleNamespace(engram_layer_ids=[1]),
             ),
             speculative_config=None,
@@ -3329,7 +3487,7 @@ def test_parallel_drafting_is_deprecated(caplog_vllm):
         )
     assert "parallel_drafting is deprecated" in caplog_vllm.text
 
-    with pytest.raises(ValueError, match="only supported by the dflash and dspark"):
+    with pytest.raises(ValueError, match="not supported by method"):
         SpeculativeConfig(
             model="ngram", num_speculative_tokens=2, parallel_drafting=True
         )
@@ -3420,8 +3578,8 @@ def test_update_config():
     ("model_id", "expected_runner_type", "expected_convert_type"),
     [
         ("distilbert/distilgpt2", "generate", "none"),
-        ("vllm-project/multilingual-e5-small", "pooling", "none"),
-        ("vllm-project/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("vllm/multilingual-e5-small", "pooling", "none"),
+        ("vllm/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
         ("openai/whisper-small", "generate", "none"),
@@ -3438,8 +3596,8 @@ def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
     ("model_id", "expected_runner_type", "expected_convert_type"),
     [
         ("distilbert/distilgpt2", "pooling", "embed"),
-        ("vllm-project/multilingual-e5-small", "pooling", "none"),
-        ("vllm-project/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("vllm/multilingual-e5-small", "pooling", "none"),
+        ("vllm/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
         ("openai/whisper-small", "pooling", "embed"),
@@ -3586,6 +3744,86 @@ def test_get_dense_modules_supports_sentence_transformers_schemas(
     ]
 
 
+@pytest.mark.parametrize(
+    ("module_type", "reader"),
+    [
+        ("sentence_transformers.models.Dense", try_get_dense_modules),
+        ("sentence_transformers.models.Pooling", get_pooling_config),
+    ],
+)
+@pytest.mark.parametrize(
+    "escape",
+    ["absolute", "parent", "directory_symlink", "file_symlink", "non_string"],
+)
+def test_sentence_transformers_config_rejects_outside_model(
+    tmp_path, module_type, reader, escape
+):
+    model = tmp_path / "model"
+    model.mkdir()
+    victim = tmp_path / "victim"
+    _write_json(victim / "config.json", {"out_features": 4})
+
+    if escape == "absolute":
+        folder = str(victim)
+    elif escape == "parent":
+        folder = "../victim"
+    elif escape == "directory_symlink":
+        (model / "linked").symlink_to(victim, target_is_directory=True)
+        folder = "linked"
+    elif escape == "file_symlink":
+        (model / "module").mkdir()
+        (model / "module" / "config.json").symlink_to(victim / "config.json")
+        folder = "module"
+    else:
+        folder = 1
+
+    _write_json(model / "modules.json", [{"type": module_type, "path": folder}])
+
+    with pytest.raises(InvalidSentenceTransformersModulePath):
+        reader(str(model))
+
+
+@pytest.mark.parametrize(
+    ("module_type", "reader", "config", "expected"),
+    [
+        (
+            "sentence_transformers.models.Pooling",
+            get_pooling_config,
+            {"pooling_mode_mean_tokens": True},
+            {"seq_pooling_type": "MEAN", "use_activation": False},
+        ),
+        (
+            "sentence_transformers.models.Dense",
+            try_get_dense_modules,
+            {"out_features": 4},
+            [{"out_features": 4, "folder": "module"}],
+        ),
+    ],
+)
+@pytest.mark.parametrize("shared_blob", [False, True])
+def test_sentence_transformers_config_reads_hub_cache(
+    tmp_path, monkeypatch, module_type, reader, config, expected, shared_blob
+):
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    repo = tmp_path / "models--vllm-project--test-model"
+    model = repo / "snapshots" / ("a" * 40)
+    _write_json(model / "modules.json", [{"type": module_type, "path": "module"}])
+
+    blob = repo / "blobs" / "config-hash"
+    if shared_blob:
+        shared = tmp_path / "blobs" / "ab" / "abcdef"
+        _write_json(shared, config)
+        blob.parent.mkdir()
+        blob.symlink_to(os.path.relpath(shared, blob.parent))
+    else:
+        _write_json(blob, config)
+    config_file = model / "module" / "config.json"
+    config_file.parent.mkdir()
+    config_file.symlink_to(os.path.relpath(blob, config_file.parent))
+
+    assert reader(model) == expected
+
+
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     pooler_config = PoolerConfig(seq_pooling_type="CLS", use_activation=False)
@@ -3597,8 +3835,8 @@ def test_get_pooling_config_from_args():
 @pytest.mark.parametrize(
     ("model_id", "default_pooling_type", "pooling_type"),
     [
-        ("vllm-project/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
-        ("vllm-project/e5-small", "CLS", "MEAN"),  # BertModel
+        ("vllm/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
+        ("vllm/e5-small", "CLS", "MEAN"),  # BertModel
     ],
 )
 def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
@@ -4110,7 +4348,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
     [
         # pooling models
         (
-            "vllm-project/Qwen2.5-1.5B-apeach",
+            "vllm/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
             "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
@@ -4140,13 +4378,13 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/NeuroBERT-NER",
+            "vllm/NeuroBERT-NER",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/xlm-roberta-base-language-detection",
+            "vllm/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
@@ -4158,7 +4396,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
-            "vllm-project/e5-small",
+            "vllm/e5-small",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
@@ -4196,7 +4434,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
-            "state-spaces/mamba-130m-hf",
+            "vllm/mamba2-130m-hf",
             "attention_free",
             True,
             "Generative models support chunked prefill.",  # noqa: E501
@@ -4230,7 +4468,7 @@ def test_is_chunked_prefill_supported(
     [
         # pooling models
         (
-            "vllm-project/Qwen2.5-1.5B-apeach",
+            "vllm/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
             "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
@@ -4260,13 +4498,13 @@ def test_is_chunked_prefill_supported(
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/NeuroBERT-NER",
+            "vllm/NeuroBERT-NER",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/xlm-roberta-base-language-detection",
+            "vllm/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
@@ -4278,7 +4516,7 @@ def test_is_chunked_prefill_supported(
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
-            "vllm-project/e5-small",
+            "vllm/e5-small",
             "encoder_only",
             False,
             "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
@@ -4316,7 +4554,7 @@ def test_is_chunked_prefill_supported(
             "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
-            "state-spaces/mamba-130m-hf",
+            "vllm/mamba2-130m-hf",
             "attention_free",
             False,
             "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501
@@ -4427,12 +4665,13 @@ def test_vllm_config_defaults_are_none():
 
 
 def test_validate_mamba_align_subblock_prefill():
-    """Align mode permits configured prefill chunks smaller than a block."""
+    """Mamba prefix caching permits prefill chunks smaller than a block."""
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=11392,
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         ),
+        model_config=SimpleNamespace(is_hybrid=True),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
         ),
@@ -4936,11 +5175,37 @@ def test_renderer_num_workers_with_mm_cache():
     assert config.renderer_num_workers == 1
 
 
+def test_renderer_num_workers_default():
+    """Unset renderer_num_workers resolves to 4 for generate models (the async
+    renderer path) and to 1 for pooling runners, whose multimodal preprocessing
+    runs on the renderer workers and is incompatible with the cache when
+    multi-threaded."""
+    mm_model = "Qwen/Qwen2-VL-2B-Instruct"
+
+    assert ModelConfig(mm_model).renderer_num_workers == 4
+
+    # Pooling + default cache (cache_gb=4) must not trip the multi-worker check.
+    assert ModelConfig(mm_model, runner="pooling").renderer_num_workers == 1
+
+    # An explicit value is respected.
+    assert ModelConfig(mm_model, renderer_num_workers=8).renderer_num_workers == 8
+
+
+def test_renderer_num_workers_not_in_compile_factors():
+    """The renderer pool size resolves differently for `LLM` (1) and the async
+    server (4); it must not split the compile and FlashInfer autotune caches."""
+    model = "Qwen/Qwen3-0.6B"
+    assert (
+        ModelConfig(model, renderer_num_workers=1).compile_factors()
+        == ModelConfig(model, renderer_num_workers=4).compile_factors()
+    )
+
+
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
     speculative_config = SpeculativeConfig(
-        model="vllm-project/EAGLE-LLaMA3-Instruct-8B",
+        model="vllm/EAGLE-LLaMA3-Instruct-8B",
         num_speculative_tokens=1,
         target_model_config=target_model_config,
         target_parallel_config=ParallelConfig(),
@@ -5012,8 +5277,7 @@ def test_gemma4_assistant_needs_no_hash_lookahead(model_type):
         ),
     )
 
-    assert speculative_config.use_gemma4_mtp()
-    assert speculative_config.use_eagle()
+    assert isinstance(speculative_config.speculator_config, Gemma4MTPSpeculatorConfig)
     assert speculative_config.speculator_config.num_hash_lookahead_tokens == 0
 
 
@@ -5378,12 +5642,11 @@ def _make_qwen3_omni_dspark_configs():
     )
     target_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(
-            model_type="qwen3_omni_moe",
-            architectures=["Qwen3OmniMoeForConditionalGeneration"],
-            thinker_config=SimpleNamespace(text_config=text_config),
+            model_type="qwen3_omni_moe_thinker",
+            architectures=["Qwen3OmniMoeThinkerForConditionalGeneration"],
         ),
         hf_text_config=text_config,
-        architectures=["Qwen3OmniMoeForConditionalGeneration"],
+        architectures=["Qwen3OmniMoeThinkerForConditionalGeneration"],
         get_hidden_size=lambda: 2048,
         get_total_num_hidden_layers=lambda: 48,
         get_vocab_size=lambda: 152064,

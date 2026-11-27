@@ -222,7 +222,24 @@ class ZayaCCA(MambaBase, nn.Module):
         )
         conv_state[slot] = new_history.mT.to(conv_state.dtype)
         delayed_state[slot] = delayed[start + length - 1].to(delayed_state.dtype)
+
+        checkpoint = metadata.checkpoint
+        if checkpoint is not None:
+            # A checkpoint lies at least a block into its prefill, so its history
+            # is all prefill tokens. Rows without one write the null block.
+            assert checkpoint.offsets is not None
+            assert all(o == 0 or o >= n for o in checkpoint.offsets)
+            end = start[num_decodes:] + checkpoint.checkpoint_offsets
+            window = x[(end[:, None] - n + offset).clamp(min=0)]
+            conv_state[checkpoint.state_indices] = window.mT.to(conv_state.dtype)
+            delayed_state[checkpoint.state_indices] = delayed[
+                (end - 1).clamp(min=0)
+            ].to(delayed_state.dtype)
         return conv_out[:-1], delayed_prev
+
+    def get_cache_checkpoint_alignment(self) -> int | None:
+        # The state at a checkpoint is a copy of its last inputs.
+        return 1
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return _cca_state_shapes(self.config)

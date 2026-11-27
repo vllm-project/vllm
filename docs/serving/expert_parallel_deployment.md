@@ -267,9 +267,11 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
 | `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
-| `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
+| `use_async` | Use non-blocking EPLB with policy computation in a persistent CPU subprocess per worker | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
+
+Async EPLB (`"use_async": true`, the default) runs policy computation in one persistent CPU subprocess per worker to isolate it from the inference worker's Python GIL. The policy and its CPU inputs must be serializable. Load collection, device-to-host copies, and expert migration retain their existing execution paths. The child limits native CPU thread pools to one thread; CPU core contention still depends on the deployment's CPU allocation. A failed or timed-out child reports an async worker error. Policy state is copied at startup and subsequently owned by the child; synchronous EPLB (`"use_async": false`) and profiling calls continue using the original policy instance in the inference worker. The 60-second IPC timeout covers the handshake or a planning request from sending through the complete response. Engine shutdown explicitly stops and reaps the planner. Custom policies holding locks or other process-local resources need [serialization support](../design/plugin_system.md); existing plugins may require adaptation to this default. There is no separate planner-process switch or automatic thread fallback.
 
 For example:
 
@@ -443,7 +445,7 @@ except Exception as e:
 
 - To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation. Add `"kv_connector_extra_config":{"startup_fill":true}` to fill the whole KV cache once at startup instead of in the decode steps that admit new requests (see the connector docstring for its limitations).
 
-- **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
+- **CUDAGraph capture**: Use `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
 
 ## Fault tolerance and scale-down recovery
 

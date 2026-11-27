@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     )
 
 from vllm.v1.kv_hints import KvHintsEnvelope
-from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.config import OffloadAccessMode, OffloadingConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -205,6 +205,11 @@ class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
+    # Offered keys to offer again because the manager had no room. Within a
+    # group (get_offload_group_idx), they are the offered keys from the first
+    # one that did not fit on, by token position, including keys that are
+    # already stored. Disjoint from keys_to_store.
+    keys_to_retry: list[OffloadKey] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -422,7 +427,9 @@ class OffloadingManager(ABC):
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
             where to store them (LoadStoreSpec), and list of blocks that
-            were evicted as a result.
+            were evicted as a result. A manager short on room may store
+            only some of the keys and report the rest in keys_to_retry,
+            under the constraints documented on that field.
             None is returned if the blocks cannot be stored.
 
         """
@@ -819,6 +826,13 @@ class OffloadingSpec(ABC):
         # reasoning models that strip thinking).
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
+        )
+
+        # Direction(s) in which this connector's managers may transfer data.
+        # A read-only manager never accepts stores; a write-only manager never
+        # serves loads.
+        self.access_mode: OffloadAccessMode = OffloadAccessMode.from_config(
+            self.extra_config.get("access_mode")
         )
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
