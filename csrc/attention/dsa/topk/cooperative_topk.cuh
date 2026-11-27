@@ -151,7 +151,7 @@ __device__ __forceinline__ void dsmem_hist_reduce(uint32_t* histogram) {
   auto cluster = cooperative_groups::this_cluster();
   cluster.sync();
   const auto tx = threadIdx.x;
-  const auto rank = blockIdx.y;
+  const auto rank = cluster.block_rank();
   constexpr auto kLocal = NumBins / CS;
   const auto off = kLocal * rank;
 #pragma unroll
@@ -309,7 +309,9 @@ template <uint32_t TopK, uint32_t CS, typename SmemType, bool kFused,
 __device__ void large_topk(const InT* __restrict__ row_input,
                            int32_t* __restrict__ row_output, uint32_t seq_len,
                            uint32_t* phases, hist4096::Tie* tie_ws) {
-  const auto rank = blockIdx.y;  // this block's position in cluster
+  // This block's position in its cluster (blockIdx.y only when the grid is
+  // one cluster per row; the merged launch puts many clusters along y).
+  const auto rank = cooperative_groups::this_cluster().block_rank();
   const auto tx = threadIdx.x;
   const auto lane = tx % hist4096::kWarpSize;
 
@@ -547,12 +549,16 @@ __device__ void large_topk(const InT* __restrict__ row_input,
 // ============================================================================
 
 template <uint32_t TopK, uint32_t CS, typename InT>
-__device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params) {
-  const auto rank = blockIdx.y, row = blockIdx.x, tx = threadIdx.x;
+// row: the row this cluster selects; len: its length (params.lengths[row],
+// read once by the caller).
+__device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params,
+                                      uint32_t row, int32_t len) {
+  const auto rank = cooperative_groups::this_cluster().block_rank(),
+             tx = threadIdx.x;
   // Clamp at 0: `sl` is compared signed here but cast to uint32 below, so a
   // negative length would otherwise emit indices 0..TopK-1 as valid instead
   // of the -1 padding.
-  const int32_t sl = params.lengths[row] > 0 ? params.lengths[row] : 0;
+  const int32_t sl = len > 0 ? len : 0;
   int32_t* out = params.output + row * TopK;
   const InT* in = params.input + row * params.stride;
 
@@ -635,28 +641,32 @@ template <uint32_t TopK, typename InT>
 __global__ void __launch_bounds__(hist4096::kBlockSize, 1)
     __cluster_dims__(1, 2, 1)
         cooperative_topk_cs2(CooperativeTopKParams<TopK, InT> params) {
-  cooperative_topk_body<TopK, 2, InT>(params);
+  cooperative_topk_body<TopK, 2, InT>(params, blockIdx.x,
+                                      params.lengths[blockIdx.x]);
 }
 
 template <uint32_t TopK, typename InT>
 __global__ void __launch_bounds__(hist4096::kBlockSize, 1)
     __cluster_dims__(1, 4, 1)
         cooperative_topk_cs4(CooperativeTopKParams<TopK, InT> params) {
-  cooperative_topk_body<TopK, 4, InT>(params);
+  cooperative_topk_body<TopK, 4, InT>(params, blockIdx.x,
+                                      params.lengths[blockIdx.x]);
 }
 
 template <uint32_t TopK, typename InT>
 __global__ void __launch_bounds__(hist4096::kBlockSize, 1)
     __cluster_dims__(1, 8, 1)
         cooperative_topk_cs8(CooperativeTopKParams<TopK, InT> params) {
-  cooperative_topk_body<TopK, 8, InT>(params);
+  cooperative_topk_body<TopK, 8, InT>(params, blockIdx.x,
+                                      params.lengths[blockIdx.x]);
 }
 
 template <uint32_t TopK, typename InT>
 __global__ void __launch_bounds__(hist4096::kBlockSize, 1)
     __cluster_dims__(1, 16, 1)
         cooperative_topk_cs16(CooperativeTopKParams<TopK, InT> params) {
-  cooperative_topk_body<TopK, 16, InT>(params);
+  cooperative_topk_body<TopK, 16, InT>(params, blockIdx.x,
+                                       params.lengths[blockIdx.x]);
 }
 
 template <typename InT>

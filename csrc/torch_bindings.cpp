@@ -693,7 +693,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.def(
       "cooperative_topk(Tensor logits, Tensor lengths, Tensor! output, "
-      "Tensor workspace, int k, int max_seq_len) -> ()");
+      "Tensor workspace, int k, int max_seq_len, Tensor!? state=None) -> ()");
 #endif
 
   // Activation ops

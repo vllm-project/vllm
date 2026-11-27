@@ -617,7 +617,8 @@ void cooperative_topk(const torch::stable::Tensor& logits,
                       const torch::stable::Tensor& lengths,
                       torch::stable::Tensor& output,
                       torch::stable::Tensor& workspace, int64_t k,
-                      int64_t max_seq_len);
+                      int64_t max_seq_len,
+                      std::optional<torch::stable::Tensor> const& state);
 #endif
 
 void selective_scan_fwd(
