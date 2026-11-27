@@ -817,24 +817,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Post processing for GPTQ.
   ops.def("gptq_shuffle(Tensor! q_weight, int bit) -> ()");
 
-  // Mamba selective scan kernel
-  ops.def(
-      "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
-      "bool delta_softplus,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "Tensor! ssm_states,"
-      "int null_block_id,"
-      "int block_size,"
-      "Tensor? block_idx_first_scheduled_token,"
-      "Tensor? block_idx_last_scheduled_token,"
-      "Tensor? initial_state_idx,"
-      "Tensor? cu_chunk_seqlen,"
-      "Tensor? last_chunk_indices) -> ()");
-
 #ifndef USE_ROCM
   // GDN prefill: fused causal conv1d + post-conv prep
   ops.def(
@@ -1047,9 +1029,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // GPTQ kernels
   ops.impl("gptq_gemm", TORCH_BOX(&gptq_gemm));
   ops.impl("gptq_shuffle", TORCH_BOX(&gptq_shuffle));
-
-  // Mamba kernels
-  ops.impl("selective_scan_fwd", TORCH_BOX(&selective_scan_fwd));
 #ifndef USE_ROCM
   ops.impl("gdn_prefill_conv", TORCH_BOX(&gdn_prefill_conv));
 #endif  // USE_ROCM

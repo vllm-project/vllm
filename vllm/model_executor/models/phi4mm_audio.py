@@ -1174,13 +1174,11 @@ class AudioEmbedding(nn.Module):
             self.encoder = ConformerEncoder(**encoder_config)
 
             audio_dim_out = encoder_config["attention_dim"]
-            n_mels = encoder_config["input_size"]
         else:
             raise NotImplementedError("")
 
         assert audio_dim_out is not None, "Remember to set values for audio_dim_out"
         self.audio_dim_out = audio_dim_out
-        self.audio_dim_in = n_mels
 
         self.freeze_audio_processor = kwargs.get("freeze_audio_processor", False)
 
