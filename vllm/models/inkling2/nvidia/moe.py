@@ -110,7 +110,6 @@ class Inkling2Experts(nn.Module):
         self.prefix = prefix
         vllm_config = get_current_vllm_config_or_none()
         parallel_config = None if vllm_config is None else vllm_config.parallel_config
-        # Each data-parallel rank routes its own tokens.
         self.dp_ep = (
             parallel_config is not None
             and parallel_config.enable_expert_parallel
@@ -185,7 +184,6 @@ class Inkling2Experts(nn.Module):
             and vllm_config.kernel_config.moe_backend == "humming"
         )
         self.humming: HummingExperts | None = None
-        # NVFP4 experts on Hopper may run as one DeepGEMM MegaMoE launch.
         self.mega_vllm_config = None
         if (
             current_platform.is_device_capability(90)

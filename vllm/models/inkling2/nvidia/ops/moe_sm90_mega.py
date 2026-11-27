@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MegaMoEActivation,
 )
 from vllm.utils.deep_gemm import NVFP4Weights
+from vllm.utils.math_utils import cdiv
 
 
 @functools.cache
@@ -93,4 +94,4 @@ class Inkling2LocalMegaMoEExperts(Inkling2MegaMoEExperts):
 
     def _mean_num_tokens(self, num_tokens: int) -> int:
         # About 1 / tp of the tokens' slots land on this rank's experts.
-        return -(-num_tokens // get_tensor_model_parallel_world_size())
+        return cdiv(num_tokens, get_tensor_model_parallel_world_size())

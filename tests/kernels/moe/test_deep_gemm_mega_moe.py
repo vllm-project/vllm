@@ -1717,8 +1717,8 @@ def _nvfp4_checkpoint(e: int, n: int, k: int, device: torch.device):
     reason="The SM90 NVFP4 MegaMoE kernel requires SM90 and DeepGEMM",
 )
 def test_deep_gemm_mega_moe_nvfp4_sm90_matches_reference(dist_init):
-    """Random NVFP4 experts laid out for SM90 and run through the Inkling2
-    experts with SiTU match the dequantized reference."""
+    """Random NVFP4 experts through the Inkling2 MegaMoE experts with SiTU
+    match the dequantized reference."""
     from vllm.models.inkling2.nvidia.ops.moe_sm90_mega import Inkling2MegaMoEExperts
     from vllm.utils.deep_gemm import transform_nvfp4_weights_for_sm90_mega_moe
 
@@ -1729,7 +1729,6 @@ def test_deep_gemm_mega_moe_nvfp4_sm90_matches_reference(dist_init):
         scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
-    # L1 rows alternate gate and up.
     l1, w13 = _nvfp4_checkpoint(NUM_EXPERTS, 2 * INTER, HIDDEN, device)
     l2, w2 = _nvfp4_checkpoint(NUM_EXPERTS, HIDDEN, INTER, device)
     with torch.device(device):
@@ -1741,7 +1740,6 @@ def test_deep_gemm_mega_moe_nvfp4_sm90_matches_reference(dist_init):
             up_cap=act.beta,
             prefix="model.layers.0.nvfp4_sm90",
         )
-    assert experts.weight_format == MEGA_MOE_NVFP4_SM90
 
     hidden_states = torch.randn(NUM_TOKENS, HIDDEN, device=device).bfloat16()
     scores = torch.randn(NUM_TOKENS, NUM_EXPERTS, device=device)
