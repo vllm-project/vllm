@@ -34,6 +34,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import CompilationMode
+from vllm.lora.layers import MergedQKVParallelLinearWithLoRA
 from vllm.model_executor import model_loader
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -1214,14 +1215,15 @@ def test_converters_apply_to_renamed_weights():
 @pytest.mark.skipif(
     not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.20"
 )
-def test_split_into_vllm_fused_qkv(dist_init, default_vllm_config):
+@pytest.mark.parametrize("lora", [False, True])
+def test_split_into_vllm_fused_qkv(lora, dist_init, default_vllm_config):
     """`Split` sizes targets that vLLM fused into a `QKVParallelLinear` by its full
     head counts (here GQA), and each piece loads into its shard (Molmo2's
-    `att_proj`)."""
+    `att_proj`), also once LoRA wraps it (reloading weights in place)."""
     model = nn.Module()
     model.self_attn = nn.Module()
     qkv = QKVParallelLinear(8, head_size=2, total_num_heads=4, total_num_kv_heads=1)
-    model.self_attn.qkv_proj = qkv
+    model.self_attn.qkv_proj = MergedQKVParallelLinearWithLoRA(qkv) if lora else qkv
     split = WeightConverter(
         source_patterns="query_key_value",
         target_patterns=["q_proj", "k_proj", "v_proj"],

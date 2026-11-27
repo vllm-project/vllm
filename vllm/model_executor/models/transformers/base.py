@@ -48,6 +48,7 @@ from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
@@ -1072,9 +1073,13 @@ class Base(
             if is_pp_missing_parameter(fused, self):
                 return None
             try:
-                return self.get_submodule(fused.rpartition(".")[0]), shard_id
+                module = self.get_submodule(fused.rpartition(".")[0])
             except AttributeError:
                 return None
+            # A LoRA layer wraps it after the first load (e.g. reloading weights)
+            if isinstance(module, BaseLayerWithLoRA):
+                module = module.base_layer
+            return module, shard_id
 
         def get_parameter(name: str) -> torch.Tensor:
             """A tensor with the full output size of the linear that loads `name`,
