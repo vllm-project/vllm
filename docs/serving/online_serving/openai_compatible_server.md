@@ -204,6 +204,8 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
 
+The legacy `functions` and `function_call` request fields are not supported; requests that set them are rejected with HTTP 400. Use `tools` and `tool_choice` instead. Following OpenAI, `functions: []` and `function_call: null` are treated as omitted, and `function_call: "auto"` is accepted as the default. `function_call: "none"` is accepted only when `tools` is absent; with `tools` set it would mean "do not call tools", so use `tool_choice: "none"` instead.
+
 `/v1/chat/completions/batch` uses the same `VLLM_MAX_COMPLETION_PROMPTS`
 limit as `/v1/completions`. It accepts up to 1,024 conversations in the outer
 `messages` list by default. Set the variable to a positive integer before
