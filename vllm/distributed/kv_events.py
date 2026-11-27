@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from ipaddress import AddressValueError, IPv6Address
 from itertools import count
 from queue import Queue
 from typing import Any
@@ -453,6 +454,8 @@ class ZmqEventPublisher(EventPublisher):
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)
             assert self._endpoint is not None
+            if self._tcp_ipv6_address(self._endpoint) is not None:
+                self._pub.setsockopt(zmq.IPV6, 1)
             if self._is_bind_endpoint(self._endpoint):
                 self._endpoint = self._bind(self._pub, self._endpoint)
             else:
@@ -471,11 +474,21 @@ class ZmqEventPublisher(EventPublisher):
     @staticmethod
     def _is_bind_endpoint(endpoint: str) -> bool:
         """Bind wildcard and ipc/inproc endpoints; connect to the rest."""
-        return (
-            "*" in endpoint
-            or "::" in endpoint
-            or endpoint.startswith(("ipc://", "inproc://"))
-        )
+        if (address := ZmqEventPublisher._tcp_ipv6_address(endpoint)) is not None:
+            return address.is_unspecified
+        return "*" in endpoint or endpoint.startswith(("ipc://", "inproc://"))
+
+    @staticmethod
+    def _tcp_ipv6_address(endpoint: str) -> IPv6Address | None:
+        if not endpoint.startswith("tcp://["):
+            return None
+        host, ending, _ = endpoint[len("tcp://[") :].partition("]:")
+        if not ending:
+            return None
+        try:
+            return IPv6Address(host)
+        except AddressValueError:
+            return None
 
     @staticmethod
     def _bind(sock: zmq.Socket, endpoint: str) -> str:

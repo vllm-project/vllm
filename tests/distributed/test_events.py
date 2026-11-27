@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 import time
+from unittest.mock import Mock, call
 
 import msgspec
 import pytest
+import zmq
 
 from vllm.distributed.kv_events import (
     EventBatch,
@@ -38,6 +40,51 @@ def create_test_events(count: int) -> SampleBatch:
     """Create a batch of test events."""
     events = [EventSample(id=i, value=f"test-{i}") for i in range(count)]
     return SampleBatch(ts=time.time(), events=events)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "should_bind"),
+    [
+        ("tcp://[::1]:5557", False),
+        ("tcp://[0:0:0:0:0:0:0:1]:5557", False),
+        ("tcp://[::]:5557", True),
+        ("tcp://[0:0:0:0:0:0:0:0]:5557", True),
+        ("tcp://127.0.0.1:5557", False),
+        ("tcp://0.0.0.0:5557", False),
+        ("tcp://*:0", True),
+        ("ipc:///tmp/kv-events", True),
+        ("inproc://kv-events", True),
+    ],
+)
+def test_publisher_bind_endpoint(endpoint, should_bind):
+    assert ZmqEventPublisher._is_bind_endpoint(endpoint) is should_bind
+
+
+@pytest.mark.parametrize(
+    ("address", "operation"),
+    [
+        ("::1", "connect"),
+        ("0:0:0:0:0:0:0:1", "connect"),
+        ("::", "bind"),
+        ("0:0:0:0:0:0:0:0", "bind"),
+    ],
+)
+def test_publisher_enables_ipv6_before_socket_operation(address, operation):
+    publisher = ZmqEventPublisher.__new__(ZmqEventPublisher)
+    publisher._ctx = Mock()
+    publisher._pub = None
+    publisher._endpoint = f"tcp://[{address}]:5557"
+    publisher._hwm = 10
+    publisher._replay_endpoint = None
+
+    publisher._socket_setup()
+
+    publisher._ctx.socket.assert_called_once_with(zmq.PUB)
+    assert publisher._ctx.socket.return_value.method_calls == [
+        call.set_hwm(10),
+        call.setsockopt(zmq.IPV6, 1),
+        getattr(call, operation)(publisher._endpoint),
+    ]
 
 
 def test_basic_publishing(publisher, subscriber):

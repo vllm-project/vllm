@@ -19,6 +19,9 @@ class ECEventsConfig(PublisherConfig):
     endpoint: str = "tcp://*:6558"
     """The zmq endpoint for EC events.
 
+    Use brackets around IPv6 literals. A concrete address such as
+    `tcp://[::1]:6558` connects the publisher to a listening subscriber.
+
     Ports are offset by the data parallel rank like KV events. The block starts
     1000 ports above the 5557/5558 KV events block, so the two stay disjoint for
     up to 1000 DP ranks on one host, replay included.
