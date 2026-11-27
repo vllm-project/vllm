@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
+from vllm.device_allocator.alloc_conf import non_expandable_allocations
 from vllm.utils.math_utils import round_down, round_up
 
 # Default values for packed tensor transfer.
@@ -480,7 +481,10 @@ def packed_ipc_producer(
         end = _bytes_end(pieces)
         with torch.cuda.stream(caller_stream):
             if end:
-                buf = grow_buffer(buf, end, capacity, device, filled)
+                # The consumer opens this buffer over CUDA IPC, which for an
+                # expandable segment needs pidfd_getfd, i.e. ptrace permission.
+                with non_expandable_allocations():
+                    buf = grow_buffer(buf, end, capacity, device, filled)
                 filled = end
             dsts, srcs = _pack_copies(buf, pieces, tensors)
             if dsts:
