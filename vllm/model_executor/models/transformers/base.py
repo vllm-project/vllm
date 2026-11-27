@@ -1181,9 +1181,8 @@ class Base(
             quant_method = getattr(loader[0], "quant_method", None)
             # Online quantization loads unquantized weights and quantizes them after
             online = getattr(quant_method, "uses_meta_device", False)
-            # A split's other tensors are split above, a join's aren't. A tensor stored
-            # unquantized (e.g. one the quantization config ignores by its checkpoint
-            # name) doesn't load into a quantized module either
+            # A join's other tensors aren't converted, and a tensor in another dtype
+            # isn't quantized like the module (e.g. ignored by its checkpoint name)
             dtype = getattr(getattr(loader[0], "weight", None), "dtype", None)
             if (
                 not isinstance(quant_method, UNQUANTIZED_METHODS)
@@ -1192,8 +1191,8 @@ class Base(
             ):
                 raise ValueError(
                     f"Cannot convert {name!r} ({tensor.dtype}) into "
-                    f"{converter.target_patterns}: a quantized module only takes a "
-                    "split of a tensor stored quantized."
+                    f"{converter.target_patterns}: a quantized module (weight dtype "
+                    f"{dtype}) only takes a split of a tensor in that dtype."
                 )
             target = pending.setdefault(renamed, deepcopy(converter))
             target.add_tensor(renamed, name, converter_pattern, tensor)
