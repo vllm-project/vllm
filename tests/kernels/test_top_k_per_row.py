@@ -667,6 +667,27 @@ def test_top_k_per_row_decode_gfx950_k512_masked_graph_replay() -> None:
     _assert_exact_topk(logits, indices, lengths)
 
 
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_decode_split_work_strided_logits(top_k: int) -> None:
+    """Logits wide enough for the split-work path, with stride(1) != 1, still
+    return row-local indices."""
+    set_random_seed(0)
+    width = 262_144
+    row_ends = torch.tensor(
+        [top_k - 1, 3 * top_k, 100_003, width], dtype=torch.int32, device="cuda"
+    )
+    rows = row_ends.numel()
+    logits = torch.randn(rows, 2 * width, device="cuda")[:, ::2]
+    indices = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("top_k_per_row_decode", logits, row_ends, indices, top_k, width)
+    _assert_exact_topk(logits, indices, row_ends)
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
 def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:

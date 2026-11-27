@@ -808,8 +808,9 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
             indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
             static_cast<int>(next_n), seqLensIs2D);
-  } else if (numColumns < kSplitWorkThreshold) {
-    // From this threshold, use radix sort instead
+  } else if (numColumns < kSplitWorkThreshold || stride1 != 1) {
+    // From this threshold, use radix sort instead. Strided logits are not
+    // split because the split kernels assume stride1 == 1.
     vllm::topKPerRowDecode<kNumThreadsPerBlock, true>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
             logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
