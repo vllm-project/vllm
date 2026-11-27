@@ -40,12 +40,16 @@ def _ll_gemm_kernel(
     K_PER_SPLIT: tl.constexpr,
     SPLIT: tl.constexpr,
     MP: tl.constexpr,
+    EVICT_W: tl.constexpr,
+    EARLY_DEPENDENTS: tl.constexpr,
 ):
     """Program `(n, b, s)` computes column tile `n` of batch `b` over K range
     `s`. With `SPLIT > 1` it writes fp32 partials to `P` `[SPLIT, B, MP, N]`;
     the last of the tile's programs to finish (counted in `C`, reset to 0
     after) sums them in split order, so results are deterministic."""
     tl.extra.cuda.gdc_wait()
+    if EARLY_DEPENDENTS:
+        tl.extra.cuda.gdc_launch_dependents()
     pid_n = tl.program_id(0)
     b = tl.program_id(1)
     s = tl.program_id(2)
@@ -55,9 +59,15 @@ def _ll_gemm_kernel(
     x_ptrs = X + (b * SXB + rows[:, None] * SXM + ks[None, :])
     w_ptrs = W + (b * SWB + cols[None, :] * SWN + ks[:, None])
     acc = tl.zeros((MP, BN), tl.float32)
+    w_evict: tl.constexpr = "evict_first" if EVICT_W else ""
     for _ in range(0, tl.minimum(K - s * K_PER_SPLIT, K_PER_SPLIT), BK):
         # Issuing W's copies before X's measured faster.
-        w = tl.load(w_ptrs, (cols[None, :] < N) & (ks[:, None] < K), other=0)
+        w = tl.load(
+            w_ptrs,
+            (cols[None, :] < N) & (ks[:, None] < K),
+            other=0,
+            eviction_policy=w_evict,
+        )
         x = tl.load(x_ptrs, (rows[:, None] < M) & (ks[None, :] < K), other=0)
         acc += tl.dot(x, w)
         x_ptrs += BK
@@ -90,7 +100,8 @@ def _ll_gemm_kernel(
             acc.to(Y.dtype.element_ty),
             (rows[:, None] < M) & (cols[None, :] < N),
         )
-    tl.extra.cuda.gdc_launch_dependents()
+    if not EARLY_DEPENDENTS:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.jit
@@ -124,42 +135,63 @@ def _qkv_bmm_kernel(
     BN: tl.constexpr,
     BK: tl.constexpr,
     MP: tl.constexpr,
+    EVICT_W: tl.constexpr,
 ):
     """Columns `[0, S1)` of `Y` are `XQ @ W.T`, `[S1, S2)` `XK` and `[S2, N)`
-    `XV`. A tile spanning a boundary runs both inputs' dots and picks per
-    column (the second input's loads hit L2)."""
+    `XV`. Tiles that do not span a boundary run only one input's dot."""
     tl.extra.cuda.gdc_wait()
+    tl.extra.cuda.gdc_launch_dependents()
     n0 = tl.program_id(0) * BN
     n1 = tl.minimum(n0 + BN, N) - 1
     b_lo = (n0 >= S1).to(tl.int32) + (n0 >= S2).to(tl.int32)
     b_hi = (n1 >= S1).to(tl.int32) + (n1 >= S2).to(tl.int32)
     x_lo, sx_lo = _segment_input(b_lo, XQ, XK, XV, SXQ, SXK, SXV)
-    x_hi, sx_hi = _segment_input(b_hi, XQ, XK, XV, SXQ, SXK, SXV)
     rows = tl.arange(0, MP)
     cols = n0 + tl.arange(0, BN)
     ks = tl.arange(0, BK)
     x_lo += rows[:, None] * sx_lo + ks[None, :]
-    x_hi += rows[:, None] * sx_hi + ks[None, :]
     w_ptrs = W + (cols[None, :] * SWN + ks[:, None])
     acc_lo = tl.zeros((MP, BN), tl.float32)
-    acc_hi = tl.zeros((MP, BN), tl.float32)
-    for _ in range(0, K, BK):
-        x_mask = (rows[:, None] < M) & (ks[None, :] < K)
-        w = tl.load(w_ptrs, (cols[None, :] < N) & (ks[:, None] < K), other=0)
-        acc_lo += tl.dot(tl.load(x_lo, x_mask, other=0), w)
-        acc_hi += tl.dot(tl.load(x_hi, x_mask, other=0), w)
-        x_lo += BK
-        x_hi += BK
-        w_ptrs += BK
-        ks += BK
-    segment = (cols >= S1).to(tl.int32) + (cols >= S2).to(tl.int32)
-    acc = tl.where((segment == b_lo)[None, :], acc_lo, acc_hi)
+    w_evict: tl.constexpr = "evict_first" if EVICT_W else ""
+    if b_lo == b_hi:
+        for _ in range(0, K, BK):
+            x_mask = (rows[:, None] < M) & (ks[None, :] < K)
+            w = tl.load(
+                w_ptrs,
+                (cols[None, :] < N) & (ks[:, None] < K),
+                other=0,
+                eviction_policy=w_evict,
+            )
+            acc_lo += tl.dot(tl.load(x_lo, x_mask, other=0), w)
+            x_lo += BK
+            w_ptrs += BK
+            ks += BK
+        acc = acc_lo
+    else:
+        x_hi, sx_hi = _segment_input(b_hi, XQ, XK, XV, SXQ, SXK, SXV)
+        x_hi += rows[:, None] * sx_hi + ks[None, :]
+        acc_hi = tl.zeros((MP, BN), tl.float32)
+        for _ in range(0, K, BK):
+            x_mask = (rows[:, None] < M) & (ks[None, :] < K)
+            w = tl.load(
+                w_ptrs,
+                (cols[None, :] < N) & (ks[:, None] < K),
+                other=0,
+                eviction_policy=w_evict,
+            )
+            acc_lo += tl.dot(tl.load(x_lo, x_mask, other=0), w)
+            acc_hi += tl.dot(tl.load(x_hi, x_mask, other=0), w)
+            x_lo += BK
+            x_hi += BK
+            w_ptrs += BK
+            ks += BK
+        segment = (cols >= S1).to(tl.int32) + (cols >= S2).to(tl.int32)
+        acc = tl.where((segment == b_lo)[None, :], acc_lo, acc_hi)
     tl.store(
         Y + (rows[:, None] * SYM + cols[None, :]),
         acc.to(Y.dtype.element_ty),
         (rows[:, None] < M) & (cols[None, :] < N),
     )
-    tl.extra.cuda.gdc_launch_dependents()
 
 
 class _Config(NamedTuple):
@@ -174,8 +206,8 @@ class _Config(NamedTuple):
 @functools.cache
 def _config(nb: int, n: int, k: int) -> _Config:
     """Split K into about one wave of programs when that gives at least 3
-    splits, preferring 16-column tiles; otherwise one 32-column tile over all
-    of K."""
+    splits, preferring 16-column tiles; otherwise 64-column tiles for batched
+    low-K controllers and wide projections."""
     num_sms = num_compute_units()
     bk = min(128, max(16, triton.next_power_of_2(k)))
     k_tiles = triton.cdiv(k, bk)
@@ -184,7 +216,15 @@ def _config(nb: int, n: int, k: int) -> _Config:
         if split >= 3:
             tiles_per_split = triton.cdiv(k_tiles, split)
             split = triton.cdiv(k_tiles, tiles_per_split)
-            return _Config(bn, bk, split, tiles_per_split * bk, 4, 4)
+            num_warps = 2 if nb >= 1 and n <= 64 and k >= 2048 else 4
+            num_stages = 3 if num_warps == 2 else 4
+            return _Config(bn, bk, split, tiles_per_split * bk, num_warps, num_stages)
+    if nb >= 3 and k <= 128 and n >= 2048:
+        bk = min(128, max(16, triton.next_power_of_2(k)))
+        return _Config(64, bk, 1, triton.cdiv(k, bk) * bk, 4, 4)
+    if nb == 1 and 4096 <= n <= 16384 and k >= 2048:
+        # 135 CTAs fit in a single 188-SM wave, leaving SMs free for PDL overlap.
+        return _Config(64, 128, 1, triton.cdiv(k, 128) * 128, 4, 4)
     bk = min(256, max(16, triton.next_power_of_2(k)))
     return _Config(32, bk, 1, triton.cdiv(k, bk) * bk, 4, 3)
 
@@ -235,6 +275,8 @@ def _ll_gemm(
         K_PER_SPLIT=cfg.k_per_split,
         SPLIT=cfg.split,
         MP=_MP,
+        EVICT_W=(n * k >= 2304 * 2304),
+        EARLY_DEPENDENTS=(n_tiles * nb * cfg.split <= 512),
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
         launch_pdl=True,
@@ -272,14 +314,12 @@ def qkv_bmm(
     m, k = x_q.shape
     n = w.shape[0]
     s1, s2 = k_start, v_start
-    bn = 32
+    bn = 64 if s2 - s1 >= 64 else 32
     assert 0 < m <= MAX_M and w.shape == (n, k)
     assert all(x.shape == (m, k) and x.stride(1) == 1 for x in xs)
     assert w.stride(1) == 1 and s1 > 0 and s1 + bn <= s2 <= n  # one boundary per tile
     assert max(n * w.stride(0), *(m * x.stride(0) for x in xs)) < 2**31
     out = torch.empty((m, n), dtype=x_q.dtype, device=x_q.device)
-    # About 1.6 waves of 32-column tiles at Inkling's 8608 columns; wider
-    # tiles or split-K measured no faster.
     _qkv_bmm_kernel[(triton.cdiv(n, bn),)](
         x_q,
         x_k,
@@ -299,6 +339,7 @@ def qkv_bmm(
         BN=bn,
         BK=128,
         MP=_MP,
+        EVICT_W=True,
         num_warps=4,
         num_stages=4,
         launch_pdl=True,

@@ -252,6 +252,7 @@ def _conv(
         cached3 = _cached_tap(*taps, 0)
         if launch_pdl:
             tl.extra.cuda.gdc_wait()
+            tl.extra.cuda.gdc_launch_dependents()
 
     dtype = cache_ptr.dtype.element_ty
     cur = tl.load(x_ptr + toff[:, None] * stride_x + coff[None, :], mask=tc_mask)

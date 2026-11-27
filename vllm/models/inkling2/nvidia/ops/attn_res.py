@@ -78,6 +78,7 @@ def _attn_res_kernel(
 ):
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     # One program per (token, query).
     t = tl.program_id(1).to(tl.int64)
     q_off = tl.program_id(0) * D
@@ -194,6 +195,7 @@ def _attn_res_row_kernel(
 ):
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     # Small batches: one program per (token, query) holds the row in registers
     # as a power-of-2 head [0, BLOCK_A) and a masked tail [BLOCK_A, D), so the
     # sources are read twice instead of three times.

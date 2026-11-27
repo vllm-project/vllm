@@ -16,6 +16,7 @@ holds for every replay of a CUDA graph.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 # The query tile of tml_fa4 that shears the relative logits.
@@ -95,6 +96,8 @@ def _rel_attention_kernel(
     MODE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    launch_pdl: tl.constexpr,
+    LAUNCH_DEPENDENTS: tl.constexpr,
 ):
     TOKENS: tl.constexpr = BLOCK_M // G
     E_PAD: tl.constexpr = E + 256
@@ -105,6 +108,10 @@ def _rel_attention_kernel(
     req = tl.program_id(2)
     q_start = tl.load(CuSeqlensQ + req)
     q_len = tl.load(CuSeqlensQ + req + 1) - q_start
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+        if LAUNCH_DEPENDENTS:
+            tl.extra.cuda.gdc_launch_dependents()
     first_tok = m_tile * TOKENS
     if first_tok >= q_len:
         return
@@ -340,4 +347,6 @@ def rel_attention(
         BLOCK_N=64 if block_m >= 128 else 128 if block_m <= 32 else 64,
         num_warps=8 if block_m >= 128 else 4,
         num_stages=2,
+        launch_pdl=current_platform.is_arch_support_pdl(),
+        LAUNCH_DEPENDENTS=(num_tokens <= 256),
     )

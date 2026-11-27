@@ -774,3 +774,65 @@ def test_combine_supports_mini_hidden_width(hidden):
     torch.testing.assert_close(
         combine(down, rows, 8, torch.bfloat16), ref.bfloat16(), atol=0, rtol=0
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="SM120/121 decode tiling, prefetch, and PDL",
+)
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("tile,rows_total", [(8, 8), (16, 128)])
+@pytest.mark.parametrize("n,k,projection", [(2304, 2304, 0), (2304, 1152, 1)])
+def test_sm120_decode_bmm_cuda_graph_and_prefetch(
+    fmt: str, tile: int, rows_total: int, n: int, k: int, projection: int
+):
+    """Covers SM120 decode shapes (2304x2304 w13, 2304x1152 w2 prefetch) under
+    CUDA Graph capture/replay."""
+    torch.manual_seed(0)
+    nvfp4 = fmt == "nvfp4"
+    counts = [0] * 16
+    for i in range(rows_total):
+        counts[i % 16] += 1
+    random_q = random_nvfp4 if nvfp4 else random_mxfp8
+    weight, weight_scale = random_q(len(counts), n, k)
+    plan = trtllm_bmm.expert_plan(rows_total, 1, len(counts), nvfp4, ((n, k),), tile)
+    act, act_scale = random_q(plan.rows, k)
+    row_scale = torch.rand(plan.rows, device="cuda") if nvfp4 else None
+    experts, limits, rows, start = [], [], [], 0
+    for expert, count in enumerate(counts):
+        for t in range(-(-count // tile)):
+            experts.append(expert)
+            limits.append(min(start + (t + 1) * tile, start + count))
+        rows += [(start + i, expert) for i in range(count)]
+        start += -(-count // tile) * tile
+    num_tiles = len(experts)
+    pad = [0] * (plan.max_ctas - num_tiles)
+    tiles = torch.tensor(
+        experts + pad + limits + pad + [num_tiles, start],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    ones = torch.ones(len(counts), device="cuda")
+    swizzled = r8c4_block_scales(act_scale)
+
+    def run():
+        return moe_sm120.bmm(
+            act,
+            swizzled,
+            row_scale,
+            weight,
+            weight_scale,
+            ones,
+            tiles,
+            plan,
+            projection,
+        )
+
+    index = torch.tensor([r for r, _ in rows], device="cuda")
+    out_eager = run()[index].clone()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out_graph = run()
+    graph.replay()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out_graph[index], out_eager, atol=0, rtol=0)

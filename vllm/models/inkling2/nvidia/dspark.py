@@ -48,6 +48,7 @@ from .ops.dspark import (
     silu_and_mul,
 )
 from .ops.linear import linear
+from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 
 
 class _RMSNorm(nn.Module):
@@ -382,6 +383,8 @@ class Inkling2MarkovHead(nn.Module):
         weight = self.rnn_proj.weight[:, : 2 * self.markov_rank]
         raw = torch.addmm(context, inputs, weight.T, out_dtype=torch.float32)
         state, latent = markov_gate(raw, state)
+        if use_sm12x_bf16_ll_gemm(latent, self.fold_weight, self.fold_bias):
+            return state, sm12x_bf16_ll_gemm(latent, self.fold_weight, self.fold_bias)
         return state, torch.addmm(self.fold_bias, latent, self.fold_weight.T)
 
 

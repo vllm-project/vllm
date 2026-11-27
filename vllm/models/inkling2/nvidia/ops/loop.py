@@ -10,6 +10,7 @@ the sublayer's RMSNorm, applied in the same kernel.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 
 from .norm import rsqrt
@@ -25,7 +26,11 @@ def _pair_rms_norm_kernel(
     eps,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     s = tl.program_id(0).to(tl.int64)
     t = tl.program_id(1).to(tl.int64)
     cols = tl.arange(0, BLOCK)
@@ -58,6 +63,7 @@ def pair_rms_norm(dest: torch.Tensor, message: torch.Tensor) -> torch.Tensor:
             D=d,
             BLOCK=triton.next_power_of_2(d),
             num_warps=8,
+            launch_pdl=current_platform.is_arch_support_pdl(),
         )
     return out
 
@@ -75,22 +81,27 @@ def _blend_rms_norm_kernel(
     norm_eps,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     s = tl.program_id(0).to(tl.int64)
     t = tl.program_id(1).to(tl.int64)
     cols = tl.arange(0, BLOCK)
     mask = cols < D
     row = s * T + t
+    # Dest, Message, and NormW are ready before up finishes, so prefetch before wait.
+    norm_w = tl.load(NormW + s * stride_w_s + cols, mask, other=0).to(tl.float32)
     dest = tl.load(Dest + s * stride_dest_s + t * D + cols, mask, other=0)
     message = tl.load(Message + row * D + cols, mask, other=0)
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     gain = tldevice.tanh(tl.load(GainForget + row * (2 * D) + cols, mask, other=0))
     forget = tldevice.tanh(
         tl.load(GainForget + row * (2 * D) + D + cols, mask, other=0)
     )
     x = (1.0 - forget) * dest + gain * message
     rstd = rsqrt(tl.div_rn(tl.sum(x * x), D) + norm_eps)
-    y = x * rstd
-    y = y * tl.load(NormW + s * stride_w_s + cols, mask, other=0).to(tl.float32)
+    y = (x * rstd) * norm_w
     tl.store(Out + row * D + cols, y.to(Out.dtype.element_ty), mask)
 
 
@@ -128,5 +139,6 @@ def blend_rms_norm(
             num_warps=8,
             # The blend is unfused (no FMA), as the reference.
             enable_fp_fusion=False,
+            launch_pdl=current_platform.is_arch_support_pdl(),
         )
     return out
