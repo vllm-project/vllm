@@ -3,6 +3,9 @@
 
 #include <cuda_runtime.h>
 
+#include <atomic>
+#include <type_traits>
+
 #include "torch_utils.h"
 
 #ifndef USE_ROCM
@@ -49,6 +52,58 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK, InT>& params,
                   "cooperative_topk launch failed: ", cudaGetErrorString(err));
 }
 
+namespace {
+// Co-resident 8-CTA clusters per (device, TopK, dtype), cached as count + 1
+// (0 = not queried). Internal linkage keeps the cache private to this .so.
+constexpr int kMaxCs8Devices = 64;
+std::atomic<int> cs8_max_clusters_cache[kMaxCs8Devices][3][2];
+
+template <uint32_t TopK>
+constexpr int topk_slot() {
+  return TopK == 512 ? 0 : (TopK == 1024 ? 1 : 2);
+}
+}  // namespace
+
+// True if num_rows 8-CTA clusters fit on the device at once, so the CS8
+// kernel runs in a single wave.
+template <uint32_t TopK, typename InT>
+bool cs8_clusters_fit(int64_t num_rows) {
+  int device = 0;
+  if (cudaGetDevice(&device) != cudaSuccess || device < 0 ||
+      device >= kMaxCs8Devices) {
+    return false;
+  }
+  std::atomic<int>& slot =
+      cs8_max_clusters_cache[device][topk_slot<TopK>()]
+                            [std::is_same_v<InT, float> ? 1 : 0];
+  int cached = slot.load(std::memory_order_relaxed);
+  if (cached == 0) {
+    auto kernel = &ct::cooperative_topk_cs8<TopK, InT>;
+    constexpr size_t smem = ct::kSmemSize8<InT>;
+    int max_clusters = 0;
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(1, 8);
+    cfg.blockDim = dim3(hist4096::kBlockSize);
+    cfg.dynamicSmemBytes = smem;
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeClusterDimension;
+    attrs[0].val.clusterDim = {1, 8, 1};
+    cfg.numAttrs = 1;
+    cfg.attrs = attrs;
+    if (cudaFuncSetAttribute(kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             smem) != cudaSuccess ||
+        cudaOccupancyMaxActiveClusters(&max_clusters, kernel, &cfg) !=
+            cudaSuccess) {
+      (void)cudaGetLastError();  // Clear the error; fall back to CS4.
+      max_clusters = 0;
+    }
+    cached = max_clusters + 1;
+    slot.store(cached, std::memory_order_relaxed);
+  }
+  return num_rows <= cached - 1;
+}
+
 template <uint32_t TopK, typename InT>
 void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
                                   const torch::stable::Tensor& lengths,
@@ -93,7 +148,10 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
   const bool supports_cluster16 = get_device_prop()->major >= 10;
   if (num_rows <= 4 && supports_cluster16) {
     launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8<InT>, stream);
-  } else if (num_rows <= 8) {
+  } else if (num_rows <= 8 ||
+             (num_rows <= 33 && cs8_clusters_fit<TopK, InT>(num_rows))) {
+    // Above 8 rows, CS8 still beats CS4 while every cluster is resident at
+    // once (up to 15 rows on a 148-SM B300).
     launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8<InT>, stream);
   } else if (num_rows <= 33) {
     launch_cooperative_cluster<TopK, 4>(params, ct::kSmemSize4<InT>, stream);
