@@ -3192,6 +3192,113 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
     }
 }
 
+/// A Kimi K3 history whose `tool_call_id`s a gateway rewrote still renders:
+/// each tool result is named by the message's `name`, else by call order; an
+/// unresolvable tool message returns 400 with `param: "messages"`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_kimi_k3_names_tool_results_with_rewritten_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"kimi_k3"}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+    let files = vllm_text::backend::hf::ResolvedModelFiles::new(dir.path().to_str().unwrap(), None)
+        .await
+        .unwrap();
+    let mut tokenizer = TestTokenizer::new();
+    for (index, token) in
+        ["<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>"].into_iter().enumerate()
+    {
+        tokenizer = tokenizer.with_special_token(token, 256 + index as u32);
+    }
+    let backend = Arc::new(
+        vllm_chat::HfChatBackend::from_resolved_model_files(
+            files,
+            "kimi-test".into(),
+            vllm_chat::LoadModelBackendsOptions {
+                renderer: vllm_chat::RendererSelection::KimiK3,
+                tool_call_parser: ParserSelection::None,
+                reasoning_parser: ParserSelection::None,
+                language_model_only: true,
+                ..Default::default()
+            },
+            Arc::new(tokenizer.clone()),
+        )
+        .unwrap(),
+    );
+    let mut app = build_render_router(Arc::new(RenderState {
+        model: "kimi-test".into(),
+        served_model_names: ServedModelNames::new(vec!["kimi-test".into()]),
+        max_model_len: Some(4096),
+        text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
+        chat: ChatRequestProcessor::new(backend, None, None),
+        lora_modules: Vec::new(),
+    }));
+
+    let mut tool_messages = Vec::new();
+    for tool_results in [
+        json!([
+            {"role": "tool", "tool_call_id": "call_abc", "content": "Sunny"},
+            {"role": "tool", "tool_call_id": "call_def", "content": "noon"},
+        ]),
+        json!([
+            {"role": "tool", "tool_call_id": "call_abc", "name": "get_time", "content": "noon"},
+        ]),
+    ] {
+        let mut messages = json!([
+            {"role": "user", "content": "weather and time?"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "get_weather:0", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}},
+                {"id": "get_time:1", "type": "function", "function": {"name": "get_time", "arguments": "{}"}},
+            ]},
+        ]);
+        messages
+            .as_array_mut()
+            .unwrap()
+            .extend(tool_results.as_array().unwrap().clone());
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({"model": "kimi-test", "messages": messages}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let ids: Vec<u32> = serde_json::from_value(json["token_ids"].clone()).unwrap();
+        let prompt = tokenizer.decode(&ids, false).unwrap();
+        tool_messages.extend(
+            prompt
+                .split("<|end_of_msg|>")
+                .filter(|message| message.contains(r#"role="tool""#))
+                .map(str::to_string),
+        );
+    }
+
+    expect_test::expect![[r#"
+        <|open|>message role="tool" tool="get_weather" index="1"<|sep|>Sunny<|close|>message<|sep|>
+        <|open|>message role="tool" tool="get_time" index="2"<|sep|>noon<|close|>message<|sep|>
+        <|open|>message role="tool" tool="get_time" index="1"<|sep|>noon<|close|>message<|sep|>"#]]
+    .assert_eq(&tool_messages.join("\n"));
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions/render",
+        json!({
+            "model": "kimi-test",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "tool", "tool_call_id": "unknown", "content": "Sunny"},
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["type"], "BadRequestError", "{json}");
+    assert_eq!(json["error"]["param"], "messages", "{json}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn render_chat_response_can_be_submitted_to_generate_unchanged() {

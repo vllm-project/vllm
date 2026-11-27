@@ -485,6 +485,7 @@ fn to_template_message<'a>(
         ChatMessage::ToolResponse {
             content,
             tool_call_id,
+            ..
         } => TemplateMessage {
             role: "tool",
             content: to_template_tool_content(content, content_format, multimodal)?,

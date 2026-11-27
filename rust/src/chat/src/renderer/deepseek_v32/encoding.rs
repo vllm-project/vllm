@@ -298,6 +298,7 @@ fn render_tool_message(
         let ChatMessage::ToolResponse {
             content,
             tool_call_id,
+            ..
         } = message
         else {
             unreachable!("tool response block should only contain tool messages");

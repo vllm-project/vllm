@@ -416,6 +416,7 @@ impl ChatRenderer for InklingChatRenderer {
                 ChatMessage::ToolResponse {
                     content,
                     tool_call_id,
+                    ..
                 } => {
                     self.write_tool_response(
                         &mut out,

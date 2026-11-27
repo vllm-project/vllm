@@ -280,10 +280,13 @@ pub enum ChatMessage {
     User { content: ChatContent },
     /// Assistant history content assembled from structured assistant blocks.
     Assistant { content: Vec<AssistantContentBlock> },
-    /// Tool response content associated with one prior assistant tool call.
+    /// Tool response content associated with one prior assistant tool call,
+    /// plus the tool name when the client sent one.
     ToolResponse {
         content: ChatContent,
         tool_call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Message content under a role outside the standard set, passed to chat
     /// templates unchanged.
@@ -361,6 +364,20 @@ impl ChatMessage {
         Self::ToolResponse {
             content: content.into(),
             tool_call_id: tool_call_id.into(),
+            name: None,
+        }
+    }
+
+    /// Construct one tool-role message carrying the tool name sent with it.
+    pub fn tool_response_named(
+        content: impl Into<ChatContent>,
+        tool_call_id: impl Into<String>,
+        name: Option<String>,
+    ) -> Self {
+        Self::ToolResponse {
+            content: content.into(),
+            tool_call_id: tool_call_id.into(),
+            name,
         }
     }
 

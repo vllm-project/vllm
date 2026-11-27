@@ -312,6 +312,7 @@ fn to_harmony_message(
         ChatMessage::ToolResponse {
             content,
             tool_call_id,
+            ..
         } => {
             let name = tool_call_names.get(tool_call_id).ok_or_else(|| {
                 invalid_messages!(

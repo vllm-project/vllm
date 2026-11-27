@@ -325,9 +325,11 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
         ChatMessage::Tool {
             content,
             tool_call_id,
-        } => Ok(VllmChatMessage::tool_response(
+            name,
+        } => Ok(VllmChatMessage::tool_response_named(
             convert_content(content)?,
             tool_call_id,
+            name,
         )),
         ChatMessage::Function { .. } => {
             bail_invalid_request!("Function messages are not supported.")
@@ -510,7 +512,7 @@ mod tests {
     };
     use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
-    use super::prepare_chat_request;
+    use super::{convert_message, prepare_chat_request};
     use crate::lora::LoraModelResolution;
     use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::{
@@ -1702,6 +1704,7 @@ mod tests {
                 ChatMessage::Tool {
                     content: MessageContent::Text("Sunny".to_string()),
                     tool_call_id: "call_1".to_string(),
+                    name: None,
                 },
             ],
             tools: Some(vec![Tool {
@@ -1757,6 +1760,38 @@ mod tests {
             }]
         );
         assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
+    }
+
+    /// A tool message keeps the `name` sent with it. As in the Python frontend,
+    /// a `tool` key is not an alias for it.
+    #[test]
+    fn convert_tool_message_preserves_optional_name() {
+        let names = [
+            json!({"name": "get_weather"}),
+            json!({"tool": "get_weather"}),
+            json!({}),
+        ]
+        .map(|extra| {
+            let mut message = json!({"role": "tool", "tool_call_id": "call_1", "content": "Sunny"});
+            message.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let message: ChatMessage =
+                serde_json::from_value(message).expect("tool message parses");
+            match convert_message(message).expect("tool message converts") {
+                VllmChatMessage::ToolResponse { name, .. } => name,
+                other => panic!("expected a tool response, got {other:?}"),
+            }
+        });
+
+        expect![[r#"
+            [
+                Some(
+                    "get_weather",
+                ),
+                None,
+                None,
+            ]
+        "#]]
+        .assert_debug_eq(&names);
     }
 
     #[test]

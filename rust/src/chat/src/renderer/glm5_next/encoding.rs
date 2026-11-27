@@ -452,7 +452,7 @@ pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
         ChatMessage::System { content: value } | ChatMessage::Developer { content: value, .. } => json!({"role": "system", "content": content(value, index)}),
         ChatMessage::User { content: value } => json!({"role": "user", "content": content(value, index)}),
         ChatMessage::Custom { role, content: value } => json!({"role": role, "content": content(value, index)}),
-        ChatMessage::ToolResponse { content: value, tool_call_id } => {
+        ChatMessage::ToolResponse { content: value, tool_call_id, .. } => {
             json!({"role": "tool", "content": content(value, index), "tool_call_id": tool_call_id})
         }
         ChatMessage::Assistant { content } => {
