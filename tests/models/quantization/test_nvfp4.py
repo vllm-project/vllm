@@ -145,6 +145,18 @@ def test_nvfp4(vllm_runner, model, eager, backend):
     assert output[0][1] == "1 2 3 4 5 6"
 
 
+@pytest.mark.skipif(
+    not is_quant_method_supported("modelopt_fp4"),
+    reason="modelopt_fp4 is not supported on this GPU type.",
+)
+def test_nvfp4_confidential_compute(vllm_runner, monkeypatch):
+    """NVFP4 weight processing calls `.cuda()`, which CC mode patches."""
+    monkeypatch.setenv("VLLM_CONFIDENTIAL_COMPUTE", "1")
+    with vllm_runner("nvidia/Llama-3.1-8B-Instruct-NVFP4", enforce_eager=True) as llm:
+        output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
+    assert output[0][1] == "1 2 3 4 5 6"
+
+
 @pytest.mark.parametrize(
     "model",
     [

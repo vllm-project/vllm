@@ -279,7 +279,7 @@ def _cuda(
         if isinstance(device, int):
             device = torch.device("cuda", device)
         return _h2d(self, torch.device(device))
-    return _orig_cuda(self, device, non_blocking, memory_format)
+    return _orig_cuda(self, device, non_blocking, memory_format=memory_format)
 
 
 def _patch_event_methods(cls: Any) -> dict[str, Any]:

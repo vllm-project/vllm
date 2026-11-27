@@ -131,6 +131,14 @@ def test_join_on_pool_stream_after_d2h_stream(d2h_stream):
     torch.accelerator.synchronize()
 
 
+def test_cuda_outside_the_staged_copy(d2h_stream):
+    """`.cuda()` calls the staged H2D copy doesn't take fall back to torch."""
+    on_device = torch.arange(8, device=d2h_stream.device)
+    assert on_device.cuda() is on_device
+    host = torch.arange(8)
+    assert torch.equal(host.cuda().cpu(), host)
+
+
 def test_exported_functions_resolve_on_rocm():
     """`CudaRTLibrary()` resolves all of these on every platform, so one without
     a HIP name would break the library on ROCm."""
