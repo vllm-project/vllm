@@ -897,8 +897,11 @@ def test_object_evicted_after_lookup_follows_failure_policy(
     worker.shutdown()
 
 
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
 @pytest.mark.parametrize("load_fails", [False, True])
-def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, load_fails):
+def test_synchronous_load_blocks_skip_zeroing(
+    monkeypatch, socket_dir, load_fails, policy
+):
     """New blocks are zeroed on the forward stream, which a transfer is not
     ordered behind. Blocks a synchronous load fills must skip that zeroing, and
     blocks a failed load left unfilled must be zeroed when they are reused."""
@@ -923,7 +926,7 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, load_fail
             "lookup_dir": socket_dir,
             "load_async": False,
         },
-        kv_load_failure_policy="fail",
+        kv_load_failure_policy=policy,
     )
     scheduler = create_scheduler(
         vllm_config,
@@ -959,8 +962,9 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, load_fail
     assert output.new_block_ids_to_zero == block_ids[3:]
 
     if load_fails:
-        assert request.status == RequestStatus.FINISHED_ERROR
-        scheduler.add_request(create_request(num_tokens=num_tokens, max_tokens=1))
+        if policy == "fail":
+            assert request.status == RequestStatus.FINISHED_ERROR
+            scheduler.add_request(create_request(num_tokens=num_tokens, max_tokens=1))
         reused = _engine_step(scheduler, worker)
         (reused_ids,) = reused.scheduled_new_reqs[0].block_ids
         assert set(loaded) <= set(reused_ids)
