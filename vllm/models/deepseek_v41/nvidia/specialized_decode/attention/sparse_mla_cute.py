@@ -644,7 +644,9 @@ class SparseMlaDecodeCute:
                         Int32(peer),
                         recast_val(stat, Uint32),
                     )
-            cute.arch.mbarrier_wait(mbar_ml, 0)
+            # The peers' st.async complete-tx release at cluster scope, so the
+            # wait acquires at cluster scope before s_ml is read.
+            mbar_ops.wait_parity_acquire_cluster(mbar_ml, Int32(0))
         # 5. Merge factors, one thread a head: exp2(m_c - M) / L, L with the sink.
         if tid < HEADS:
             own = s_stat[tid, 0]
@@ -754,7 +756,10 @@ class SparseMlaDecodeCute:
                             Int32(owner),
                         )
             if owned > 0:
-                cute.arch.mbarrier_wait(mbar_o, 0)
+                # The senders' cp.async.bulk complete-tx release at cluster
+                # scope, so the wait acquires at cluster scope before the
+                # partials are summed.
+                mbar_ops.wait_parity_acquire_cluster(mbar_o, Int32(0))
                 # Owned block j (slot j // n): the sum, BF16 [slot][head][dim]
                 # in the query tile, then 16-byte stores.
                 for j in cutlass.range_constexpr(4):
