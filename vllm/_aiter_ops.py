@@ -3283,32 +3283,20 @@ class rocm_aiter_ops:
 
         return cls._AITER_ENABLED and on_gfx950()
 
-    @staticmethod
-    @functools.cache
-    def _gfx942_flydsl_decode_top_k_available() -> bool:
-        from vllm.platforms.rocm import get_cdna_version
-        from vllm.utils.platform_utils import num_compute_units
-
-        if (
-            get_cdna_version() != 3
-            or num_compute_units() != _GFX942_FLYDSL_TOP_K_CU_COUNT
-        ):
-            return False
-        try:
-            from aiter.ops.flydsl.topk.topk_per_row import (  # noqa: F401
-                flydsl_top_k_per_row_decode,
-            )
-        except ImportError:
-            return False
-        return True
-
     @classmethod
     @if_aiter_supported
     def is_gfx942_dsa_decode_top_k_enabled(cls) -> bool:
         """MI300X/MI325X (gfx942, 304 CUs) have one tuned AITER indexer top-k:
         FlyDSL's multi-block kernel, for the uncompressed DSA indexer's
         decode."""
-        return cls._AITER_ENABLED and cls._gfx942_flydsl_decode_top_k_available()
+        from vllm.platforms.rocm import get_cdna_version
+        from vllm.utils.platform_utils import num_compute_units
+
+        return (
+            cls._AITER_ENABLED
+            and get_cdna_version() == 3
+            and num_compute_units() == _GFX942_FLYDSL_TOP_K_CU_COUNT
+        )
 
     @classmethod
     def is_indexer_top_k_supported(
