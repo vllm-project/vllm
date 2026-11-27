@@ -831,7 +831,7 @@ def test_rust_frontend_receives_resolved_logging_config(
                 "api_key": "env-key",
             },
         ),
-        # Off values leave a feature the Rust frontend refuses disabled.
+        # Off values are passed too; unset values are left out.
         (
             [],
             {
@@ -841,7 +841,11 @@ def test_rust_frontend_receives_resolved_logging_config(
                 "VLLM_MAX_TOKENIZE_TOKENS": " ",
                 "VLLM_API_KEY": "",
             },
-            {},
+            {
+                "server_dev_mode": False,
+                "enable_cohere_api": False,
+                "enable_responses_api_store": False,
+            },
         ),
         # The CLI flag takes precedence over the environment variable.
         (

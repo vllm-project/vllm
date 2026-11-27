@@ -31,6 +31,39 @@ Remove this argument, or unset the environment variable bound to it, to continue
     }
 }
 
+/// Marker type for a Python switch that the Rust frontend implements only in
+/// one position, `ON`, such as following media URL redirects, which it always
+/// does. Parsing the other position fails, on the CLI and in JSON args alike.
+///
+/// Its CLI value parser is the switch's Python parser mapped through
+/// `try_from`, such as `parse_int_flag.try_map(Fixed::<true>::try_from)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fixed<const ON: bool>;
+
+impl<const ON: bool> TryFrom<bool> for Fixed<ON> {
+    type Error = String;
+
+    fn try_from(value: bool) -> Result<Self, Self::Error> {
+        let position = |on| if on { "on" } else { "off" };
+        (value == ON).then_some(Self).ok_or_else(|| {
+            format!(
+                "only {} is implemented in Rust frontend, not {}",
+                position(ON),
+                position(value)
+            )
+        })
+    }
+}
+
+impl<'de, const ON: bool> Deserialize<'de> for Fixed<ON> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(bool::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Marker type for no-op arguments that are accepted by the Rust frontend but
 /// have no effect.
 ///
@@ -456,15 +489,4 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_tokenizer_info_endpoint: Option<Unsupported>,
-
-    /// Expose the Cohere Chat v2 API at `/cohere/v2/chat`. Like Python, it is
-    /// set only through `VLLM_ENABLE_COHERE_API`.
-    #[arg(long, hide = true, env = "VLLM_ENABLE_COHERE_API")]
-    pub enable_cohere_api: Option<Unsupported>,
-
-    /// Keep Responses API responses in memory for retrieval, `background`, and
-    /// `previous_response_id`. Like Python, it is set only through
-    /// `VLLM_ENABLE_RESPONSES_API_STORE`.
-    #[arg(long, hide = true, env = "VLLM_ENABLE_RESPONSES_API_STORE")]
-    pub enable_responses_api_store: Option<Unsupported>,
 }

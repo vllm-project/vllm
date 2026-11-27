@@ -329,6 +329,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
+                        enable_cohere_api: None,
+                        enable_responses_api_store: None,
                         max_n_sequences: None,
                         decisions_read_strategy: None,
                         served_model_name: [],
@@ -2523,6 +2525,8 @@ fn frontend_args_accept_json() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
+                        enable_cohere_api: None,
+                        enable_responses_api_store: None,
                         max_n_sequences: None,
                         decisions_read_strategy: None,
                         served_model_name: [],
@@ -3321,68 +3325,80 @@ fn unsupported_args_fail_startup() {
     }
 }
 
-/// Python features that an environment variable turns on, and that Rust does
-/// not support yet, fail startup on both the `vllm-rs serve` path, where the
+/// Python settings that an environment variable sets, and that Rust does not
+/// support yet, fail startup on both the `vllm-rs serve` path, where the
 /// variable binds a flag, and the `--args-json` path, where Python passes the
 /// value it resolves from the variable.
 #[test]
-fn unsupported_env_switches_fail_startup() {
-    let serve = |flag: &str, value: &str| {
-        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
-            .map(drop)
-            .map_err(|error| error.to_string())
-    };
-
-    for (flag, key, name) in [
-        (
-            "--enable-cohere-api",
-            "enable_cohere_api",
-            "VLLM_ENABLE_COHERE_API",
-        ),
-        (
-            "--enable-responses-api-store",
-            "enable_responses_api_store",
-            "VLLM_ENABLE_RESPONSES_API_STORE",
-        ),
-        (
+fn unsupported_env_settings_fail_startup() {
+    let serve = |value: &str| {
+        Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
             "--max-tokenize-tokens",
-            "max_tokenize_tokens",
-            "VLLM_MAX_TOKENIZE_TOKENS",
-        ),
-    ] {
-        // Like any `Unsupported` argument, every value is refused, including
-        // the off value `0`.
-        for value in ["0", "1", "true"] {
-            let error = serve(flag, value).unwrap_err();
-            assert!(error.contains(flag), "{flag}={value}: {error}");
-        }
-        let args_json = serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B", key: 1 }).to_string();
-        let error = parse_runtime_args_json(&args_json).unwrap_err();
-        assert!(
-            error.contains(&format!("- {key} ({name})\n")),
-            "{key}: {error}"
-        );
+            value,
+        ])
+        .map(drop)
+        .map_err(|error| error.to_string())
+    };
+    // Like any `Unsupported` argument, every value is refused.
+    for value in ["0", "4096"] {
+        let error = serve(value).unwrap_err();
+        assert!(error.contains("--max-tokenize-tokens"), "{value}: {error}");
     }
 
     expect![[r#"
-        error: invalid value '0' for '--enable-cohere-api <ENABLE_COHERE_API>': argument is not implemented in Rust frontend yet
-
-        Remove this argument, or unset the environment variable bound to it, to continue.
-
-        For more information, try '--help'.
-    "#]].assert_eq(&serve("--enable-cohere-api", "0").unwrap_err());
-    expect![[r#"
         The following arguments are not implemented in Rust frontend yet:
-        - enable_cohere_api (VLLM_ENABLE_COHERE_API)
+        - max_tokenize_tokens (VLLM_MAX_TOKENIZE_TOKENS)
         - tool_server
 
         Remove these arguments, or unset the environment variables bound to them, to continue."#]]
     .assert_eq(
         &parse_runtime_args_json(
-            r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_cohere_api":true,"tool_server":"demo"}"#,
+            r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":4096,"tool_server":"demo"}"#,
         )
         .unwrap_err(),
     );
+}
+
+/// Python switches that the Rust frontend implements only when off, such as
+/// `VLLM_ENABLE_COHERE_API`, accept the off value and fail startup on, on
+/// both paths.
+#[test]
+fn env_switches_accept_only_the_implemented_position() {
+    let serve = |flag: &str, value: &str| {
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    let json = |key: &str, value: bool| {
+        parse_runtime_args_json(
+            &serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B", key: value }).to_string(),
+        )
+        .map(drop)
+    };
+
+    for (flag, key) in [
+        ("--enable-cohere-api", "enable_cohere_api"),
+        ("--enable-responses-api-store", "enable_responses_api_store"),
+    ] {
+        serve(flag, "0").unwrap();
+        json(key, false).unwrap();
+        // Python parses these as `bool(int(value))`.
+        for value in ["1", "2", "true"] {
+            serve(flag, value).unwrap_err();
+        }
+        let error = json(key, true).unwrap_err();
+        assert!(error.contains(key), "{key}: {error}");
+    }
+
+    expect![[r#"
+        error: invalid value '1' for '--enable-cohere-api <ENABLE_COHERE_API>': only off is implemented in Rust frontend, not on
+
+        For more information, try '--help'.
+    "#]].assert_eq(&serve("--enable-cohere-api", "1").unwrap_err());
+    expect!["invalid JSON arguments: enable_cohere_api: only off is implemented in Rust frontend, not on at line 1 column 56"].assert_eq(&json("enable_cohere_api", true).unwrap_err());
 }
 
 #[test]
@@ -3691,6 +3707,8 @@ fn serve_args_accept_handshake_aliases() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
+                        enable_cohere_api: None,
+                        enable_responses_api_store: None,
                         max_n_sequences: None,
                         decisions_read_strategy: None,
                         served_model_name: [],

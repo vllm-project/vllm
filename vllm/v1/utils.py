@@ -427,9 +427,10 @@ class RustFrontendProcessManager:
             if key in args_dict or not envs.is_set(name):
                 continue
             value = getattr(envs, name)
-            # Like a default, an off value is left out, so the Rust frontend
-            # does not refuse a disabled feature it does not implement.
-            if value is None or value is False or value == "":
+            # An unset value is left out. Every other value is passed as is,
+            # off values included: the Rust frontend's argument types decide
+            # which values it implements.
+            if value is None or value == "":
                 continue
             # JSON has no infinity; Rust reads a too long interval as never.
             if value == math.inf:

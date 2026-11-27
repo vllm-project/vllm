@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use clap::builder::TypedValueParser as _;
 use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
@@ -52,7 +53,7 @@ use vllm_tracing::{LogFormatter, LogLevel};
 use crate::cli::logging::LoggingConfig;
 use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
-use crate::cli::unsupported::UnsupportedArgs;
+use crate::cli::unsupported::{Fixed, UnsupportedArgs};
 
 /// Top-level parser for the `vllm-rs` binary.
 #[derive(Debug, Parser)]
@@ -783,6 +784,31 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub allow_runtime_lora_updating: bool,
+
+    /// Expose the Cohere Chat v2 API at `/cohere/v2/chat`. Like Python, it is
+    /// set only through `VLLM_ENABLE_COHERE_API`. The Rust frontend does not
+    /// serve it, so only off is accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ENABLE_COHERE_API",
+        value_parser = parse_int_flag.try_map(Fixed::<false>::try_from)
+    )]
+    #[serde(default)]
+    pub enable_cohere_api: Option<Fixed<false>>,
+
+    /// Keep Responses API responses in memory for retrieval, `background`, and
+    /// `previous_response_id`. Like Python, it is set only through
+    /// `VLLM_ENABLE_RESPONSES_API_STORE`. The Rust frontend has no response
+    /// store, so only off is accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ENABLE_RESPONSES_API_STORE",
+        value_parser = parse_int_flag.try_map(Fixed::<false>::try_from)
+    )]
+    #[serde(default)]
+    pub enable_responses_api_store: Option<Fixed<false>>,
 
     /// Upper bound on a request's `n` (default 16384). Like Python, it is set
     /// only through `VLLM_MAX_N_SEQUENCES`.
