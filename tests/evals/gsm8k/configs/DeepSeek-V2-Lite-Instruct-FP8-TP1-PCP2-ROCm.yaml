@@ -3,12 +3,12 @@ accuracy_threshold: 0.72
 num_questions: 1319
 num_fewshot: 5
 rocm_request_timeout_seconds: 1800
-# Dense MLA PCP on MI355; DP1/DCP1, eager execution, and Triton MoE.
+# Dense MLA PCP on MI355; DP1/DCP1, FULL_AND_PIECEWISE graphs, and Triton MoE.
 server_args: >-
   --revision efe1ced428db63e7ccbcf367334596f77e9af140
   --code-revision e434a23f91ba5b4923cf6c9d9a238eb4a08e3a11
   --dtype bfloat16
-  --enforce-eager
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
   --max-model-len 4096
   --max-num-seqs 8
   --max-num-batched-tokens 4096

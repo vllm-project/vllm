@@ -380,6 +380,33 @@ def test_rocm_resolves_the_mori_all2all_backend(monkeypatch, backend: str) -> No
     assert calls == expected
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+def test_rocm_keeps_decode_full_cudagraphs_under_pcp() -> None:
+    """PCPManager.validate_config gates full graphs under PCP, as on CUDA."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            worker_cls="test-worker",
+            all2all_backend="naive",
+        ),
+        model_config=None,
+        scheduler_config=SimpleNamespace(
+            is_multimodal_model=False, disable_chunked_mm_input=False
+        ),
+    )
+
+    RocmPlatform.check_and_update_config(config)
+
+    assert config.compilation_config.cudagraph_mode == (
+        CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+
+
 def _sampling_replay_config(
     *,
     return_sampling_mask: bool = True,

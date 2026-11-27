@@ -1436,6 +1436,37 @@ def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
     assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == 4
 
 
+def test_padding_only_decode_rebuilds_persistent_metadata(monkeypatch):
+    """A PCP rank that owns no decode request replays the FULL graph on padding
+    rows only. The schedule must still be rebuilt for those rows, otherwise the
+    replay runs the previous step's work plan against empty KV ranges."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(mtp_decode_qlen=1, has_full_cudagraphs=True),
+        block_table_tensor=torch.zeros((2, 8), dtype=torch.int32),
+        seq_lens_device=torch.zeros(2, dtype=torch.int32),
+        max_seq_len=0,
+        query_start_loc_cpu=torch.zeros(3, dtype=torch.int32),
+        query_start_loc_device=torch.zeros(3, dtype=torch.int32),
+        num_decode_tokens=2,
+        max_query_len=0,
+        dcp_tot_seq_lens_device=None,
+    )
+
+    assert metadata.max_qo_len == 1
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == 1
+
+
 def test_min_kv_seq_len_ignores_cudagraph_padding_rows(monkeypatch):
     """min_kv_seq_len must not be driven by padded dummy requests.
 

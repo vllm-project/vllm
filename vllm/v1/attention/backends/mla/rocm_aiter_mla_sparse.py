@@ -898,14 +898,20 @@ class ROCMAiterMLASparseMetadataBuilder(
         reduce_indptr = None
         reduce_final_map = None
         reduce_partial_map = None
+        # FULL-graph replay on a PCP rank that owns no request carries only
+        # padding rows. Plan one empty row so the replay does not read the
+        # previous step's work schedule.
+        num_planned_tokens = (
+            1 if num_tokens == 0 and num_decode_tokens > 0 else num_tokens
+        )
         if (
             self._use_persistent_metadata
             and not dcp
             and not use_triton_sparse
             and not _use_triton_long_bf16_prefill(self._mla_kv_dtype, metadata)
-            and num_tokens > 0
+            and num_planned_tokens > 0
             and _aiter_uses_persistent_mla_decode(
-                num_tokens,
+                num_planned_tokens,
                 self._num_attention_heads,
                 self._mla_q_dtype,
                 self._mla_kv_dtype,
@@ -922,7 +928,7 @@ class ROCMAiterMLASparseMetadataBuilder(
                 self.topk_tokens,
             )
             metadata_key = (
-                num_tokens,
+                num_planned_tokens,
                 int(common_attn_metadata.max_query_len),
                 self._num_attention_heads,
                 clamped_seq_lens.tobytes(),
@@ -936,9 +942,9 @@ class ROCMAiterMLASparseMetadataBuilder(
                     int(common_attn_metadata.max_seq_len)
                 )
                 get_mla_metadata_v1(
-                    qo_indptr,
-                    paged_kv_indptr,
-                    paged_kv_last_page_len,
+                    self.qo_indptr[: num_planned_tokens + 1],
+                    self.paged_kv_indptr[: num_planned_tokens + 1],
+                    self.paged_kv_last_page_len[:num_planned_tokens],
                     self._num_attention_heads,
                     1,
                     True,

@@ -928,3 +928,33 @@ def test_sparse_metadata_workload_length_dtype_matrix(
     else:
         assert result.work_meta_data is builder._mla_work_meta_data
         assert result.reduce_indptr is builder._mla_reduce_indptr
+
+
+def test_padding_only_batch_rebuilds_persistent_metadata(monkeypatch):
+    """A PCP rank that owns no decode request replays the FULL graph on padding
+    rows only. The schedule must still be rebuilt, as one empty row, otherwise
+    the replay runs the previous step's work plan."""
+    builder = _make_builder()
+    fake_aiter = _patch_build_deps(monkeypatch)
+    query_start_loc = torch.zeros(3, dtype=torch.int32)
+    seq_lens = torch.zeros(2, dtype=torch.int32)
+    common_metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
+        num_reqs=2,
+        num_actual_tokens=2,
+        max_query_len=0,
+        max_seq_len=0,
+        block_table_tensor=torch.zeros((2, 8), dtype=torch.int32),
+        slot_mapping=torch.full((2,), -1, dtype=torch.int64),
+    )
+
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common_metadata)
+
+    args = fake_aiter.get_mla_metadata_v1.call_args.args
+    assert args[0].tolist() == [0, 1]
+    assert args[1].tolist() == [0, 0]
+    assert args[2].tolist() == [1]
+    assert md.work_meta_data is builder._mla_work_meta_data
