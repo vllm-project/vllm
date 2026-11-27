@@ -738,6 +738,37 @@ def test_sliding_window_records_new_blocks_for_zeroing():
     assert manager.take_new_block_ids() == []
 
 
+def test_sliding_window_sink_keeps_the_sink_and_the_window():
+    """A sink group frees the middle, keeps the leading sink block and the
+    window. The sink block must not count as skipped, or the window would go."""
+    block_size = 4
+    spec = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
+        sliding_window=8,
+        sink_len=4,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=16, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(spec, block_pool, enable_caching=False)
+    manager.allocate_new_blocks("r", num_tokens=40, num_tokens_main_model=40)
+    blocks = list(manager.req_to_blocks["r"])
+    assert len(blocks) == 10
+
+    manager.remove_skipped_blocks("r", processed_computed_tokens=40)
+
+    kept = manager.req_to_blocks["r"]
+    # Sink (block 0) and the window (tokens 33..39 span blocks 8 and 9) stay.
+    assert kept[0] is blocks[0] and blocks[0].ref_cnt == 1
+    assert kept[8] is blocks[8] and kept[9] is blocks[9]
+    # Blocks 1..7 are the middle: freed and replaced by the null block.
+    for i in range(1, 8):
+        assert kept[i].is_null
+        assert blocks[i].ref_cnt == 0
+
+
 def test_chunked_local_attention_records_new_blocks_for_zeroing():
     block_size = 2
     spec = ChunkedLocalAttentionManager.layer_config(
