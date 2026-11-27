@@ -25,6 +25,8 @@ logger = init_logger(__name__)
 
 cudaError_t = ctypes.c_int
 cudaMemcpyKind = ctypes.c_int
+cudaLimit = ctypes.c_int
+cudaLimitStackSize = 0
 
 
 class cudaIpcMemHandle_t(ctypes.Structure):
@@ -90,6 +92,14 @@ class CudaRTLibrary:
         Function("cudaHostUnregister", cudaError_t, [ctypes.c_void_p]),
         # cudaError_t cudaGetLastError ( void )
         Function("cudaGetLastError", cudaError_t, []),
+        # cudaError_t cudaDeviceGetLimit ( size_t* pValue, cudaLimit limit )
+        Function(
+            "cudaDeviceGetLimit",
+            cudaError_t,
+            [ctypes.POINTER(ctypes.c_size_t), cudaLimit],
+        ),
+        # cudaError_t cudaDeviceSetLimit ( cudaLimit limit, size_t value )
+        Function("cudaDeviceSetLimit", cudaError_t, [cudaLimit, ctypes.c_size_t]),
     ]
 
     # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html
@@ -108,6 +118,8 @@ class CudaRTLibrary:
         "cudaHostRegister": "hipHostRegister",
         "cudaHostUnregister": "hipHostUnregister",
         "cudaGetLastError": "hipGetLastError",
+        "cudaDeviceGetLimit": "hipDeviceGetLimit",
+        "cudaDeviceSetLimit": "hipDeviceSetLimit",
     }
 
     # class attribute to store the mapping from the path to the library
@@ -232,3 +244,11 @@ class CudaRTLibrary:
     def cudaGetLastError(self) -> int:
         """Return and clear the error pending on this thread."""
         return self.funcs["cudaGetLastError"]()
+
+    def cudaDeviceGetLimit(self, limit: int) -> int:
+        value = ctypes.c_size_t()
+        self.CUDART_CHECK(self.funcs["cudaDeviceGetLimit"](ctypes.byref(value), limit))
+        return value.value
+
+    def cudaDeviceSetLimit(self, limit: int, value: int) -> None:
+        self.CUDART_CHECK(self.funcs["cudaDeviceSetLimit"](limit, value))

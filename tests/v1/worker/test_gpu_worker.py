@@ -12,6 +12,10 @@ import torch
 
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM
+from vllm.distributed.device_communicators.cuda_wrapper import (
+    CudaRTLibrary,
+    cudaLimitStackSize,
+)
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
@@ -271,6 +275,21 @@ def test_scoped_max_split_ignores_async_allocator(monkeypatch):
     set_settings.assert_not_called()
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not torch.cuda.is_available(),
+    reason="needs a CUDA device",
+)
+def test_scoped_cuda_stack_limit_restores_the_limit():
+    """A stack limit raised in the scope is back at its first value on exit."""
+    torch.zeros(1, device="cuda")  # the limit belongs to the CUDA context
+    cudart = CudaRTLibrary()
+    before = cudart.cudaDeviceGetLimit(cudaLimitStackSize)
+    with gpu_worker.Worker._scoped_cuda_stack_limit(SimpleNamespace()):
+        cudart.cudaDeviceSetLimit(cudaLimitStackSize, before + 1024)
+        assert cudart.cudaDeviceGetLimit(cudaLimitStackSize) > before
+    assert cudart.cudaDeviceGetLimit(cudaLimitStackSize) == before
+
+
 @pytest.mark.parametrize("kv_cache_memory_bytes", [None, 1])
 def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_bytes):
     """ROCm decode workspace uses max_num_seqs during startup profiling."""
@@ -299,6 +318,7 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
         model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
         init_snapshot=SimpleNamespace(free_memory=2),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _scoped_cuda_stack_limit=lambda: nullcontext(),
     )
     monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
     monkeypatch.setattr(
@@ -367,6 +387,7 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
         ),
         requested_memory=72 * GiB_bytes,
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _scoped_cuda_stack_limit=lambda: nullcontext(),
     )
     profile_result = SimpleNamespace(
         after_profile=SimpleNamespace(free_memory=60 * GiB_bytes),
