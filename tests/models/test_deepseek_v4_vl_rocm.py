@@ -184,18 +184,26 @@ def _preshuffled_fp8_linear(
     return layer
 
 
-@pytest.mark.parametrize("holder", ["quant_method", "scheme"])
-def test_rocm_wo_a_keeps_row_major_weights(holder: str, default_vllm_config) -> None:
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
+def test_rocm_wo_a_keeps_weight_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The attention reads wo_a's weight directly, so wo_a is built with a
+    copy of the quant config that keeps the checkpoint layout."""
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
 
-    layer = _preshuffled_fp8_linear(holder)
-    layer.is_bmm = True
-    original = layer.weight.detach().clone()
-    kernel = getattr(layer, holder).fp8_linear
-    kernel.process_weights_after_loading(layer)
+    seen = {}
 
-    actual = _get_cached_wo_a_bf16(layer, 2, 128, 128)
-    torch.testing.assert_close(actual, original.to(torch.bfloat16).view(2, 128, 128))
+    def fake_init(self, input_size, output_size, **kwargs):
+        nn.Module.__init__(self)
+        self.tp_size = 1
+        seen["quant_config"] = kwargs["quant_config"]
+
+    monkeypatch.setattr(ColumnParallelLinear, "__init__", fake_init)
+    quant_config = SimpleNamespace(keep_weight_layout=False)
+    DeepseekV4GroupedWoA(256, 1024, n_groups=2, quant_config=quant_config)
+
+    assert seen["quant_config"] is not quant_config
+    assert seen["quant_config"].keep_weight_layout
+    assert not quant_config.keep_weight_layout
 
 
 @pytest.mark.parametrize("holder", ["quant_method", "scheme"])

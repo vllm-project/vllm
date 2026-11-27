@@ -624,8 +624,7 @@ class AiterPreshuffledFp8BlockScaledMMKernel(AiterFp8BlockScaledMMKernel):
     """AITER CK FP8 block-scaled GEMM on a (16, 16) pre-shuffled weight.
 
     A layer whose weight other code reads directly is built with
-    `keep_weight_layout`, so selection gives it the parent kernel. A stack of
-    matrices (`is_bmm`) keeps the plain layout and runs the parent's CK GEMM.
+    `keep_weight_layout`, so selection gives it the parent kernel.
 
     TODO: fold the parent's gfx1250 Triton preshuffle (`use_bpreshuffle`) into
     this class.
@@ -635,8 +634,6 @@ class AiterPreshuffledFp8BlockScaledMMKernel(AiterFp8BlockScaledMMKernel):
         # can_implement rules out both parent Triton paths, so the parent
         # resolves to its CK `gemm_a8w8_blockscale`.
         super().__init__(config)
-        self.preshuffled = True
-        self._plain_quant_fp8 = self.quant_fp8
         # gemm_a8w8_blockscale_bpreshuffle reads the activation scale
         # column-major.
         act_scale_descriptor = config.activation_quant_key.scale
@@ -725,14 +722,6 @@ class AiterPreshuffledFp8BlockScaledMMKernel(AiterFp8BlockScaledMMKernel):
         # Block strategy and the e8m0 scale upcast.
         super().process_weights_after_loading(layer)
 
-        if getattr(layer, "is_bmm", False):
-            # A stack of matrices (wo_a) read as a batched GEMM, not by
-            # apply_weights.
-            # The kernel instance is per layer, so this layer alone stays plain.
-            self.preshuffled = False
-            self.quant_fp8 = self._plain_quant_fp8
-            return
-
         params = FP8BlockParams.from_layer(layer)
         weight = params.weight
         # runtime safety net
@@ -764,12 +753,9 @@ class AiterPreshuffledFp8BlockScaledMMKernel(AiterFp8BlockScaledMMKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        """`As` must be laid out as `quant_fp8` writes it: column-major when
-        the weight is preshuffled. A row-major one will not raise, it just
-        returns wrong numbers for M > 1.
+        """`As` must be column-major, as `quant_fp8` writes it. A row-major
+        one will not raise, it just returns wrong numbers for M > 1.
         """
-        if not self.preshuffled:
-            return super().apply_block_scaled_mm(A, B, As, Bs)
         return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
             A, B, As, Bs, output_dtype=self.config.out_dtype
         )

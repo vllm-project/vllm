@@ -596,9 +596,7 @@ def get_and_maybe_dequant_weights(
         # a layout that is not compatible with `scaled_dequantize`.
         and not layer.quant_method.use_deep_gemm
         # Neither is the weight AITER's preshuffled GEMM shuffles at load.
-        and not getattr(
-            getattr(layer.quant_method, "fp8_linear", None), "preshuffled", False
-        )
+        and not getattr(layer, "aiter_bpreshuffled", False)
     ):
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]

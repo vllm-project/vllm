@@ -88,12 +88,10 @@ def _fp8_weight(n: int, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     return w.to(fp8_dtype), ws
 
 
-def _layer(w: torch.Tensor, ws: torch.Tensor, **tags: bool) -> torch.nn.Module:
+def _layer(w: torch.Tensor, ws: torch.Tensor) -> torch.nn.Module:
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(w.clone(), requires_grad=False)
     layer.weight_scale_inv = torch.nn.Parameter(ws.clone(), requires_grad=False)
-    for name, value in tags.items():
-        setattr(layer, name, value)
     return layer
 
 
@@ -121,7 +119,6 @@ def test_preshuffled_gemm_matches_reference(m: int, n: int, k: int) -> None:
     layer = _layer(w, ws)
     kernel.process_weights_after_loading(layer)
 
-    assert kernel.preshuffled
     assert layer.aiter_bpreshuffled
     assert not torch.equal(layer.weight.view(torch.uint8), w.view(torch.uint8))
 
@@ -137,27 +134,6 @@ def test_preshuffled_gemm_matches_reference(m: int, n: int, k: int) -> None:
     assert _rel_diff(out, plain_out) < REL_TOL
 
 
-@pytest.mark.parametrize("m", [1, 256])
-def test_bmm_layer_keeps_plain_layout(m: int) -> None:
-    n, k = 2048, 4096
-    torch.manual_seed(0)
-    w, ws = _fp8_weight(n, k)
-    x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda")
-
-    kernel = AiterPreshuffledFp8BlockScaledMMKernel(_config(n, k))
-    layer = _layer(w, ws, is_bmm=True)
-    kernel.process_weights_after_loading(layer)
-
-    assert not kernel.preshuffled
-    assert kernel.quant_fp8 is kernel._plain_quant_fp8
-    assert not getattr(layer, "aiter_bpreshuffled", False)
-    assert torch.equal(layer.weight.view(torch.uint8), w.view(torch.uint8))
-
-    out = kernel.apply_weights(layer, x)
-
-    assert _rel_diff(out, _reference(x, w, ws)) < REL_TOL
-
-
 def test_dequant_reads_preshuffled_weight() -> None:
     # MLA reads kv_b_proj back through get_and_maybe_dequant_weights; for a
     # preshuffled weight it runs the layer on an identity matrix.
@@ -168,7 +144,7 @@ def test_dequant_reads_preshuffled_weight() -> None:
     kernel = AiterPreshuffledFp8BlockScaledMMKernel(_config(n, k))
     layer = _layer(w, ws)
     kernel.process_weights_after_loading(layer)
-    assert kernel.preshuffled
+    assert layer.aiter_bpreshuffled
 
     method = object.__new__(Fp8LinearMethod)
     method.use_marlin = False
