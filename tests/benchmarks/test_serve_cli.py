@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+import math
 import subprocess
 import tempfile
 import time
@@ -75,6 +77,13 @@ class RemoteOpenAIServerSSL(RemoteOpenAIServer):
 def server():
     args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "dummy"]
 
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="function")
+def pytorch_export_server():
+    args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "auto"]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
@@ -225,3 +234,55 @@ def test_bench_serve_chat(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+@pytest.mark.benchmark
+def test_bench_serve_pytorch_export(pytorch_export_server, tmp_path, monkeypatch):
+    monkeypatch.setenv("SAVE_TO_PYTORCH_BENCHMARK_FORMAT", "1")
+    command = [
+        "vllm",
+        "bench",
+        "serve",
+        "--host",
+        pytorch_export_server.host,
+        "--port",
+        str(pytorch_export_server.port),
+        "--input-len",
+        "32",
+        "--output-len",
+        "4",
+        "--num-prompts",
+        "5",
+        "--seed",
+        "0",
+        "--temperature",
+        "0",
+        # Non-positive rates disable probes but remain in the exported args.
+        "--probe-request-rate=-inf",
+        "--save-result",
+        "--result-dir",
+        str(tmp_path),
+        "--result-filename",
+        "nonfinite.json",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    def reject_constant(value):
+        pytest.fail(f"Invalid JSON constant in benchmark export: {value}")
+
+    records = json.loads(
+        (tmp_path / "nonfinite.pytorch.json").read_text(),
+        parse_constant=reject_constant,
+    )
+    assert records
+    for record in records:
+        args = record["benchmark"]["extra_info"]["args"]
+        assert args["probe_request_rate"] == "-inf"
+        assert args["request_rate"] == "inf"
+        assert record["metric"]["extra_info"]["completed"] == 5
+        assert record["metric"]["extra_info"]["failed"] == 0
+        values = record["metric"]["benchmark_values"]
+        assert values
+        assert all(isinstance(value, (int, float)) for value in values)
+        assert all(math.isfinite(value) for value in values)
