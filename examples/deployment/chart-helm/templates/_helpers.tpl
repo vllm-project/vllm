@@ -82,7 +82,8 @@ Define chart external ConfigMaps and Secrets
 
 
 {{/*
-Define liveness et readiness probes
+Define startup, readiness, and liveness probes.
+startupProbe is omitted when unset or null.
 */}}
 {{- define "chart.probes" -}}
 {{-   if .Values.readinessProbe  }}
@@ -94,6 +95,12 @@ readinessProbe:
 {{-   if .Values.livenessProbe  }}
 livenessProbe:
 {{-     with .Values.livenessProbe }}
+{{-       toYaml . | nindent 2 }}
+{{-     end }}
+{{-   end }}
+{{-   if .Values.startupProbe  }}
+startupProbe:
+{{-     with .Values.startupProbe }}
 {{-       toYaml . | nindent 2 }}
 {{-     end }}
 {{-   end }}
