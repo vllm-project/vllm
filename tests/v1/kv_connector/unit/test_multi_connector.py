@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
+    KVProvenance,
     SupportsHMA,
     supports_hma,
 )
@@ -288,6 +289,20 @@ def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
     assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
     assert mc.get_loaded_kv_cache_group_ids(request) == (chosen,)
     mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
+
+
+def test_kv_provenance_comes_from_the_first_declaring_connector(mc):
+    request = MagicMock(request_id="request")
+    first, second = mc._connectors
+    first.get_kv_provenance.return_value = None
+    second.get_kv_provenance.return_value = None
+    assert mc.get_kv_provenance(request) is None
+
+    second.get_kv_provenance.return_value = KVProvenance("b")
+    assert mc.get_kv_provenance(request) == KVProvenance("b")
+    # On a conflict (logged), the first connector's provenance keys the request.
+    first.get_kv_provenance.return_value = KVProvenance("a")
+    assert mc.get_kv_provenance(request) == KVProvenance("a")
 
 
 def test_multi_connector_mem_pool_context_none(mc: MultiConnector):

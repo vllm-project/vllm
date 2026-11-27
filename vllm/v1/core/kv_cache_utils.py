@@ -696,17 +696,18 @@ def generate_block_hash_extra_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
     lora_extra_keys = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[tuple[str, str]] = (
-        [("cache_salt", request.cache_salt)]
-        if (start_token_idx == 0 and request.cache_salt)
-        else []
-    )
+    first_block_keys: list[tuple[str, str]] = []
+    if start_token_idx == 0:
+        if request.cache_salt:
+            first_block_keys.append(("cache_salt", request.cache_salt))
+        if request.kv_provenance:
+            first_block_keys.append(("kv_provenance", request.kv_provenance))
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
 
     extra_keys: list[Any] = (
-        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+        lora_extra_keys + mm_extra_keys + first_block_keys + prompt_embeds_keys
     )
 
     if not extra_keys:
@@ -723,7 +724,8 @@ def to_event_extra_keys(
 
     External KV event consumers parse the pre-tagging shapes: bare LoRA names
     and cache salts, `(mm_identifier, offset)` pairs and bare prompt-embeds
-    digests. Events keep that format until consumers handle the tagged keys.
+    digests. Events keep that format until consumers handle the tagged keys,
+    and leave out the KV provenance, which only changes the block hashes.
 
     Args:
         extra_keys: One entry per block, each as returned by
@@ -738,7 +740,12 @@ def to_event_extra_keys(
     event_keys = [
         None
         if keys is None
-        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+        else tuple(
+            key[1:] if key[0] == "mm" else key[1]
+            for key in keys
+            if key[0] != "kv_provenance"
+        )
+        or None
         for keys in extra_keys
     ]
     return event_keys or None

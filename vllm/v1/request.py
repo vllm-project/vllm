@@ -195,6 +195,9 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
+        # Tag of the KV a connector supplies for this request when it is not
+        # the model's own (`KVProvenance`); part of the first block's hash.
+        self.kv_provenance: str | None = None
 
         # Multi-modal related
         self.mm_features = mm_features or []
