@@ -614,8 +614,8 @@ async def test_bad_words_rejected_without_tokenizer(client):
         [
             "--enable-lora",
             "--lora-modules",
-            "Alice=vllm-project/self_cognition_Alice",
-            "Bob=vllm-project/self_cognition_Bob",
+            "Alice=vllm/self_cognition_Alice",
+            "Bob=vllm/self_cognition_Bob",
             "--max-lora-rank",
             "64",
             "--max-cpu-loras",

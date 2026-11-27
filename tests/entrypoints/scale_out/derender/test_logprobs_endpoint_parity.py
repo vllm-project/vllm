@@ -37,7 +37,7 @@ from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
