@@ -1470,8 +1470,10 @@ def rocm_aiter_sparse_attn_indexer(
     cp_interleave: int = 1,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.sparse_attn_indexer import _merge_dcp_topk_global
-    from vllm.utils.math_utils import cdiv
+    from vllm.model_executor.layers.sparse_attn_indexer import (
+        _merge_dcp_topk_global,
+        dcp_decode_logits_width,
+    )
 
     if dcp_world_size > 1 and (compress_ratio != 1 or candidate_blocks is not None):
         raise NotImplementedError(
@@ -1479,10 +1481,8 @@ def rocm_aiter_sparse_attn_indexer(
         )
 
     # Decode scores only this rank's keys; keep the bound valid for graph replay.
-    decode_max_model_len = (
-        cdiv(max_model_len, dcp_world_size * cp_interleave) * cp_interleave
-        if dcp_world_size > 1
-        else max_model_len
+    decode_max_model_len = dcp_decode_logits_width(
+        max_model_len, dcp_world_size, cp_interleave
     )
 
     # careful! this will be None in dummy run

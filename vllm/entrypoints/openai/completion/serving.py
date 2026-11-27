@@ -409,6 +409,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         )
 
         last_res: RequestOutput | None = None
+        first_content_token_ts: float | None = None
         try:
             # Requests that can only emit plain delta chunks render them from a
             # per-stream template; everything else uses the model path below.
@@ -444,6 +445,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     i = output.index + prompt_idx * num_choices
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
+
+                    if (
+                        self.enable_per_request_metrics
+                        and num_prompts == 1
+                        and num_choices == 1
+                        and first_content_token_ts is None
+                        and request.max_tokens != 0
+                        and output.text
+                        and res.metrics is not None
+                        and res.metrics.last_token_ts > 0
+                    ):
+                        first_content_token_ts = res.metrics.last_token_ts
 
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
@@ -648,7 +661,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
-                            last_metrics, total_completion_tokens
+                            last_metrics,
+                            total_completion_tokens,
+                            first_content_token_ts=first_content_token_ts,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
@@ -908,24 +923,31 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # logprobs, as defined in the openai API
                 # (cf. https://github.com/openai/openai-openapi/blob/
                 # 893ba52242dbd5387a97b96444ee1c742cfce9bd/openapi.yaml#L7153)
-                out_top_logprobs.append(
-                    {
-                        # Convert float("-inf") to the
-                        # JSON-serializable float that OpenAI uses
-                        self._get_decoded_token(
-                            top_lp[1],
-                            top_lp[0],
-                            tokenizer,
-                            return_as_token_id=should_return_as_token_id,
-                        ): max(top_lp[1].logprob, -9999.0)
-                        for top_lp in itertools.islice(
-                            step_top_logprobs.items(),
-                            completion_top_logprobs_limit(
-                                num_output_top_logprobs, bool(logprob_token_ids)
-                            ),
-                        )
-                    }
-                )
+                step_out_top_logprobs: dict[str, float] = {}
+                for top_token_id, top_lp in itertools.islice(
+                    step_top_logprobs.items(),
+                    completion_top_logprobs_limit(
+                        num_output_top_logprobs, bool(logprob_token_ids)
+                    ),
+                ):
+                    top_token = self._get_decoded_token(
+                        top_lp,
+                        top_token_id,
+                        tokenizer,
+                        return_as_token_id=should_return_as_token_id,
+                    )
+                    # Convert float("-inf") to the
+                    # JSON-serializable float that OpenAI uses
+                    top_logprob = max(top_lp.logprob, -9999.0)
+                    # Byte fragments all decode to "", so keep the highest
+                    # logprob per string. On a tie the earlier candidate
+                    # stays, and the token at this position is always first.
+                    if (
+                        top_token not in step_out_top_logprobs
+                        or top_logprob > step_out_top_logprobs[top_token]
+                    ):
+                        step_out_top_logprobs[top_token] = top_logprob
+                out_top_logprobs.append(step_out_top_logprobs)
 
             if len(out_text_offset) == 0:
                 out_text_offset.append(initial_text_offset)

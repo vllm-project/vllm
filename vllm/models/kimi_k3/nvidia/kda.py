@@ -916,7 +916,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def forward(
