@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import errno
 import os
+import queue
 import signal
 import socket
 import subprocess
@@ -25,7 +26,14 @@ import zmq.asyncio
 from tests.v1.attention.utils import dense_kv_cache_views
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import envs
-from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.config import (
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_connector,
     mooncake_utils,
@@ -60,6 +68,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
+    MooncakeKVConnectorStats,
 )
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import (
@@ -1015,6 +1026,94 @@ async def test_register_worker_raises_after_max_attempts(monkeypatch):
         await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
 
     assert len(calls) == 3
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_bootstrap_http_clients_ignore_env_proxy(
+    monkeypatch, bootstrap_server: MooncakeBootstrapServer
+):
+    """HTTP_PROXY/ALL_PROXY env vars must not hijack Mooncake bootstrap HTTP."""
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_MAX_ATTEMPTS", 1)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("all_proxy", "http://127.0.0.1:1")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    # The full worker constructor needs a CUDA device and an attention backend,
+    # so build only the state the bootstrap register/query paths read.
+    producer = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    producer.vllm_config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "bootstrap_server_address": f"127.0.0.1:{bootstrap_server.port}"
+            },
+        ),
+    )
+    producer.hostname = "127.0.0.1"
+    producer.side_channel_port = 1234
+    producer.engine_id = "eng-1"
+    producer.dp_rank = 0
+    producer.tp_rank = 0
+    producer.pp_rank = 0
+
+    await producer.register_worker_with_bootstrap()
+
+    addr = f"http://127.0.0.1:{bootstrap_server.port}"
+    consumer = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    consumer._remote_agents = {}
+    consumer._tp_size = {}
+    consumer._pending_bootstrap_queries = {}
+    consumer.pp_rank = 0
+    consumer.pp_size = 1
+    consumer.transfer_topo = TransferTopology(
+        tp_rank=0,
+        tp_size=1,
+        block_size=16,
+        engine_id="eng-dec",
+        is_mla=False,
+        is_mamba=False,
+        total_num_kv_heads=2,
+        attn_backends=[],
+    )
+    consumer.xfer_stats = MooncakeKVConnectorStats()
+    consumer._is_hma_required = False
+    consumer._invalid_block_ids = queue.Queue()
+    consumer._failed_recv_reqs = queue.Queue()
+    consumer.finished_recving_reqs = set()
+
+    seen_addrs: list[str] = []
+    pulled = asyncio.Event()
+
+    async def _record_pull(worker_addr: str, pull_metas: dict[str, PullReqMeta]):
+        seen_addrs.append(worker_addr)
+        pulled.set()
+
+    pull_metas = {
+        "d-req-1": PullReqMeta(
+            d_req_id="d-req-1",
+            transfer_id="xfer-1",
+            local_block_ids=[[1]],
+            remote_engine_id="eng-1",
+            remote_bootstrap_addr=addr,
+        )
+    }
+    with patch.object(
+        consumer, "receive_kv_from_single_worker", side_effect=_record_pull
+    ):
+        await consumer.handle_new_engine_id("eng-1", pull_metas)
+        await asyncio.wait_for(pulled.wait(), timeout=5)
+
+    assert seen_addrs == ["tcp://127.0.0.1:1234"]
+    assert consumer._remote_agents == {"eng-1": {0: {0: "tcp://127.0.0.1:1234"}}}
+    assert consumer._tp_size == {"eng-1": 1}
+    assert consumer._failed_recv_reqs.empty()
 
 
 @pytest.mark.asyncio

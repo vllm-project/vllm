@@ -1663,7 +1663,9 @@ class MooncakeConnectorWorker:
         backoff = 1.0
         for attempt in range(1, max_attempts + 1):
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with httpx.AsyncClient(
+                    timeout=timeout, trust_env=False
+                ) as client:
                     response = await client.post(url, json=payload.model_dump())
                     response.raise_for_status()
                 logger.debug("Successfully registered with bootstrap server at %s", url)
@@ -2994,7 +2996,8 @@ class MooncakeConnectorWorker:
         max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
         try:
             async with httpx.AsyncClient(
-                timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+                timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT,
+                trust_env=False,
             ) as client:
                 retry_delay = 0.1
                 for attempt in range(1, max_attempts + 1):
