@@ -2290,60 +2290,46 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn grpc_llm_cancels_unpolled_streams_on_abort_and_drop() {
-    for explicit_abort in [true, false] {
-        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
-        let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
-            b"engine-grpc-llm-cancel-pending-output".to_vec(),
-            default_ready_response(),
-            Arc::new(FakeTextBackend::default()),
-            None,
-            move |dealer, _push| {
-                boxed_test_future(async move {
-                    let add = recv_engine_message(dealer).await;
-                    assert_eq!(add[0].as_ref(), &[0x00]);
-                    let request = decode_add_request(&add);
-                    submitted_tx.send(()).expect("signal submitted request");
+async fn grpc_llm_cancels_unpolled_stream_on_drop() {
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-llm-cancel-pending-output".to_vec(),
+        default_ready_response(),
+        Arc::new(FakeTextBackend::default()),
+        None,
+        move |dealer, _push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let request = decode_add_request(&add);
+                submitted_tx.send(()).expect("signal submitted request");
 
-                    // A queued request produces no output before cancellation.
-                    let abort = recv_engine_message(dealer).await;
-                    assert_eq!(abort[0].as_ref(), &[0x01]);
-                    let request_ids: Vec<String> =
-                        rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
-                    assert_eq!(request_ids, [request.request_id]);
-                })
-            },
-        )
-        .await;
-        let (channel, server_task) =
-            start_grpc_test_server(inference, control, health, Default::default()).await;
-        let llm = GrpcLlm::new(channel, "test-model".into(), 512);
-        let request = grpc_llm_request();
-        let request_id = request.request_id.clone();
-        let stream = llm.generate(request).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), submitted_rx)
-            .await
-            .expect("timed out waiting for engine submission")
-            .expect("engine submission signal");
-
-        let mut aborted_stream = if explicit_abort {
-            llm.abort(&[request_id]).await.unwrap();
-            Some(stream)
-        } else {
-            drop(stream);
-            None
-        };
-        tokio::time::timeout(Duration::from_secs(5), engine_task)
-            .await
-            .unwrap_or_else(|_| {
-                panic!("engine must receive cancellation (explicit_abort = {explicit_abort})")
+                // A queued request produces no output before cancellation.
+                let abort = recv_engine_message(dealer).await;
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+                let request_ids: Vec<String> =
+                    rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
+                assert_eq!(request_ids, [request.request_id]);
             })
-            .expect("mock engine task");
-        if let Some(stream) = &mut aborted_stream {
-            assert!(stream.next().await.unwrap().is_err());
-        }
-        server_task.abort();
-    }
+        },
+    )
+    .await;
+    let (channel, server_task) =
+        start_grpc_test_server(inference, control, health, Default::default()).await;
+    let llm = GrpcLlm::new(channel, "test-model".into(), 512);
+    let stream = llm.generate(grpc_llm_request()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+        .await
+        .expect("timed out waiting for engine submission")
+        .expect("engine submission signal");
+
+    drop(stream);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), engine_task).await;
+    server_task.abort();
+    result
+        .expect("dropping the stream must cancel the request")
+        .expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
