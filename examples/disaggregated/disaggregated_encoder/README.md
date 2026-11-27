@@ -115,8 +115,9 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 
 With `--enable-per-video-kwargs-slicing`, the proxy sends each encoder child its
 original position among the request's videos. Qwen3-VL selects that video's
-`fps` or `num_frames` from the effective processor kwargs. The flag defaults to
-off. Enable it only after updating all encoders to support positional requests,
+`fps` or `num_frames` from the effective processor kwargs. HYV4 and HYV4-Flash VL
+select `second_per_grid_ts` and require one interval per video. The flag defaults
+to off. Enable it only after updating all encoders to support positional requests,
 with `--trust-request-mm-kwargs` enabled and compatible video cache hashing on
 the EC consumer.
 

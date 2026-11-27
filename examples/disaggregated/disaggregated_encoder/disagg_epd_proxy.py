@@ -1667,7 +1667,7 @@ if __name__ == "__main__":
         action="store_true",
         help=(
             "Opt in to processor-side per-video kwargs slicing. Only enable "
-            "with updated Qwen3-VL encoders and compatible consumer hashing. "
+            "with updated encoders and compatible consumer hashing. "
             "For videos with audio, put "
             "per-video lists in mm_processor_kwargs.videos_kwargs. Off by default."
         ),
