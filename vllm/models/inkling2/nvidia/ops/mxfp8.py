@@ -8,10 +8,7 @@ import torch
 
 from vllm.triton_utils import tl, tldevice, triton
 
-from . import use_pdl
 from .block_scales import _scale_offsets
-from .e4m3 import e4m3_arg, to_e4m3
-from .pdl import gdc_wait
 
 
 @triton.jit
@@ -30,7 +27,7 @@ def _mxfp8_block(groups):
     values = tl.minimum(
         tl.maximum(values, -448.0), 448.0, propagate_nan=tl.PropagateNan.ALL
     )
-    return to_e4m3(values), exponent
+    return values.to(tl.float8e4nv), exponent
 
 
 @triton.jit
@@ -54,7 +51,7 @@ def _store_mxfp8_block(
 
 @triton.jit
 def _mxfp8_quantize_kernel(X, Y, S, M, N: tl.constexpr, BLOCK: tl.constexpr):
-    gdc_wait()
+    tl.extra.cuda.gdc_wait()
     for r in range(tl.program_id(0), M, tl.num_programs(0)):
         row = tl.cast(r, tl.int64)
         cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -77,12 +74,12 @@ def mxfp8_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     block = math.gcd(n, 1024)
     _mxfp8_quantize_kernel[(min(rows, 8192), n // block)](
         x,
-        e4m3_arg(values),
+        values,
         scales,
         rows,
         N=n,
         BLOCK=block,
         enable_fp_fusion=False,
-        launch_pdl=use_pdl(),
+        launch_pdl=True,
     )
     return values, scales

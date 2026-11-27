@@ -23,9 +23,8 @@ if not (
     current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(90)
     or current_platform.is_device_capability_family(120)
-    or current_platform.is_device_capability_family(80)
 ):
-    pytest.skip("Inkling2 requires Ampere or newer", allow_module_level=True)
+    pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
 
 TINY_CONFIG: dict[str, Any] = {
     "architectures": ["Inkling2ForConditionalGeneration"],
@@ -370,7 +369,7 @@ def test_tiny_model_routed_experts(tmp_path, enable_pickle, looped):
         load_format="dummy",
         skip_tokenizer_init=True,
         tokenizer_mode="hf",
-        gpu_memory_utilization=0.10 if looped else 0.035,
+        gpu_memory_utilization=0.035,
         max_model_len=2048,
         max_num_seqs=4,
         enforce_eager=True,

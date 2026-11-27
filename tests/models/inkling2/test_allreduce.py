@@ -12,8 +12,6 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from vllm.models.inkling2.nvidia.ops import use_native_conv_mix
-
 BLOCK, HEADS, OFFSET = 16, 2, 256
 
 
@@ -155,8 +153,6 @@ def _worker(rank: int, world: int, dim: int, port: int, queue) -> None:
 def test_fused_all_reduce_matches_unfused(world, dim):
     if torch.accelerator.device_count() < world:
         pytest.skip(f"needs {world} GPUs")
-    if not use_native_conv_mix():
-        pytest.skip("the fused kernels are built for Hopper and SM10x only")
     queue = mp.get_context("spawn").Queue()
     port = 29600 + world + dim // 256
     mp.spawn(_worker, args=(world, dim, port, queue), nprocs=world)
@@ -319,8 +315,6 @@ def test_seq_parallel_matches_unsharded(world, dim):
     later steps read."""
     if torch.accelerator.device_count() < world:
         pytest.skip(f"needs {world} GPUs")
-    if not use_native_conv_mix():
-        pytest.skip("the fused kernels are built for Hopper and SM10x only")
     queue = mp.get_context("spawn").Queue()
     port = 29640 + world + dim // 256
     mp.spawn(_seq_parallel_worker, args=(world, dim, port, queue), nprocs=world)

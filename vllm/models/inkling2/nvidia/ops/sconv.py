@@ -25,11 +25,8 @@ RMS-normalizes V per head and writes both to the paged KV cache.
 import torch
 
 from vllm.models.inkling2.nvidia.ops.norm import qr_clip_rel_tokens, rsqrt
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-
-from . import use_pdl
-from .e4m3 import cast_store, e4m3_arg
-from .pdl import gdc_launch_dependents, gdc_wait
 
 
 @triton.jit
@@ -218,6 +215,7 @@ def _conv(
     SKIP_IDLE_CACHE: tl.constexpr = False,
     CACHE_FIRST: tl.constexpr = False,
     tile_reads_cache=True,
+    launch_pdl: tl.constexpr = False,
 ):
     """Store the current inputs to the cache; return `y` in fp32.
 
@@ -252,7 +250,8 @@ def _conv(
         cached1 = _cached_tap(*taps, 2)
         cached2 = _cached_tap(*taps, 1)
         cached3 = _cached_tap(*taps, 0)
-        gdc_wait()
+        if launch_pdl:
+            tl.extra.cuda.gdc_wait()
 
     dtype = cache_ptr.dtype.element_ty
     cur = tl.load(x_ptr + toff[:, None] * stride_x + coff[None, :], mask=tc_mask)
@@ -335,17 +334,18 @@ def _sconv_kernel(
     BT: tl.constexpr,
     BLOCK_C: tl.constexpr,
     SKIP_IDLE_CACHE: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     first = tl.program_id(0) * BT
     tile_reads_cache = True
     if SKIP_IDLE_CACHE:
-        gdc_wait()
-        # Request starts are non-decreasing over real tokens, and padding
-        # tokens have start 0: no token of the tile is among the first W - 1
-        # of its request unless the largest start is after first - (W - 1).
-        rows = first + tl.arange(0, BT)
-        starts = tl.load(qstart_ptr + rows, mask=rows < T, other=0)
-        tile_reads_cache = tl.max(starts, axis=0) > first - (W - 1)
+        if launch_pdl:
+            tl.extra.cuda.gdc_wait()
+        # Request starts are non-decreasing: no token of the tile is among the
+        # first W - 1 of its request unless the last token's request starts
+        # after first - (W - 1).
+        last = tl.minimum(first + BT, T) - 1
+        tile_reads_cache = tl.load(qstart_ptr + last) > first - (W - 1)
     toff = first + tl.arange(0, BT)
     coff = tl.program_id(1) * BLOCK_C + tl.arange(0, BLOCK_C)
     C = H * WS
@@ -378,6 +378,7 @@ def _sconv_kernel(
         SKIP_IDLE_CACHE=SKIP_IDLE_CACHE,
         CACHE_FIRST=not SKIP_IDLE_CACHE,
         tile_reads_cache=tile_reads_cache,
+        launch_pdl=launch_pdl,
     ).to(out_ptr.dtype.element_ty)
     offs = toff[:, None] * C + coff[None, :]
     mask = t_mask[:, None] & c_mask[None, :]
@@ -463,7 +464,7 @@ def short_conv(
         SKIP_IDLE_CACHE=prefill,
         num_warps=4,
         enable_fp_fusion=False,
-        launch_pdl=use_pdl(),
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out
 
@@ -558,10 +559,13 @@ def _attn_prologue_kernel(
     BLOCK_E: tl.constexpr,
     QR_TOKENS: tl.constexpr,
     FUSE_QR: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
     # The decode attention kernel prefetches cached keys meanwhile.
-    gdc_launch_dependents()
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
     # Programs (tile, head, 0 | 1) run the K | V conv of one KV head; programs
     # (tile, head, 2) clip q of QR_TOKENS of the tile's tokens and programs
     # (tile, head, 3 + c) their r and column block c of the relative logits.
@@ -670,6 +674,7 @@ def _qr_rel_kernel(
     BLOCK_HQ: tl.constexpr,
     BLOCK_E: tl.constexpr,
     QR_TOKENS: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     # Runs alongside the K/V conv launch (`_attn_prologue_kernel` without
     # FUSE_QR), which started it after its own grid dependency wait; waiting
@@ -705,7 +710,8 @@ def _qr_rel_kernel(
         BLOCK_HQ,
         BLOCK_E,
     )
-    gdc_wait()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
 
 
 @triton.jit
@@ -815,7 +821,7 @@ def _kv_conv_tile(
         + head * stride_kv_h
         + d_idx[None, :]
     )
-    tl.store(dst, cast_store(y, cache.dtype.element_ty), mask=(kv_slot >= 0)[:, None])
+    tl.store(dst, y.to(cache.dtype.element_ty), mask=(kv_slot >= 0)[:, None])
 
 
 # From this many tokens, q/r run in their own launch (8 tokens per program)
@@ -929,8 +935,8 @@ def attention_prologue(
         k_dynamic if dynamic else k_weight,
         v_dynamic if dynamic else v_weight,
         cache,
-        e4m3_arg(key_cache),
-        e4m3_arg(value_cache),
+        key_cache,
+        value_cache,
         kv_slot_mapping,
         positions,
         seq_idx,
@@ -985,7 +991,7 @@ def attention_prologue(
         FUSE_QR=not qr_tokens,
         num_warps=4,
         enable_fp_fusion=False,
-        launch_pdl=use_pdl(),
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     if qr_tokens:
         _qr_rel_kernel[(triton.cdiv(num_tokens, qr_tokens), qr_blocks)](
@@ -1017,5 +1023,5 @@ def attention_prologue(
             QR_TOKENS=qr_tokens,
             num_warps=4,
             enable_fp_fusion=False,
-            launch_pdl=use_pdl(),
+            launch_pdl=current_platform.is_arch_support_pdl(),
         )

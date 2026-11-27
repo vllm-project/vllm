@@ -18,8 +18,6 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .e4m3 import _NATIVE_E4M3, _e4m3_f16, e4m3_arg
-
 # The query tile of tml_fa4 that shears the relative logits.
 _SHEAR_TILE = tl.constexpr(128)
 
@@ -47,18 +45,14 @@ def _load_fp8_kv(ptr, offsets, mask, dtype: tl.constexpr, D: tl.constexpr):
         mask=mask[:, None],
         other=0,
     )
-    if _NATIVE_E4M3:
-        lo, hi = tl.inline_asm_elementwise(
-            "{ .reg .b32 pair; cvt.rn.f16x2.e4m3x2 pair, $2; mov.b32 {$0, $1}, pair; }",
-            "=h,=h,h",
-            [pair],
-            dtype=(tl.float16, tl.float16),
-            is_pure=True,
-            pack=1,
-        )
-    else:
-        lo = _e4m3_f16(pair & 0xFF).to(tl.float16, bitcast=True)
-        hi = _e4m3_f16(pair >> 8).to(tl.float16, bitcast=True)
+    lo, hi = tl.inline_asm_elementwise(
+        "{ .reg .b32 pair; cvt.rn.f16x2.e4m3x2 pair, $2; mov.b32 {$0, $1}, pair; }",
+        "=h,=h,h",
+        [pair],
+        dtype=(tl.float16, tl.float16),
+        is_pure=True,
+        pack=1,
+    )
     return tl.interleave(lo, hi).to(dtype)
 
 
@@ -311,8 +305,8 @@ def rel_attention(
         out_strides = (0, 0, 0, 0)
     _rel_attention_kernel[grid](
         q,
-        e4m3_arg(key_cache),
-        e4m3_arg(value_cache),
+        key_cache,
+        value_cache,
         rel,
         block_table,
         cache_seqlens,

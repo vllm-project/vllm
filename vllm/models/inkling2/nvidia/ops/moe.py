@@ -7,15 +7,13 @@ top-k combine.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 
-from . import use_pdl
 from .block_scales import _scale_offsets
-from .e4m3 import e4m3_arg
 from .linear import _k_group_tile, _prefetch_k_group_tile, k_group_partials
 from .mxfp8 import _mxfp8_block, _store_mxfp8_block
 from .nvfp4 import FP32_MAX, _quantize_block, _quantize_columns, _store_block
-from .pdl import gdc_launch_dependents, gdc_wait
 from .seq_parallel import HALO_ROWS, SeqParallel
 from .trtllm_bmm import ExpertPlan, operand
 
@@ -626,7 +624,7 @@ def _fused_route_kernel(
     bias = _load_bias(Bias, E, E_POW2)
     lo = tl.load(ExpertBounds)
     hi = tl.load(ExpertBounds + 1)
-    gdc_wait()
+    tl.extra.cuda.gdc_wait()
     if pid < ROUTERS:
         _k_group_tile(
             X,
@@ -750,8 +748,8 @@ def _route_tokens_kernel(
     bias = _load_bias(Bias, E, E_POW2)
     lo = tl.load(ExpertBounds)
     hi = tl.load(ExpertBounds + 1)
-    gdc_wait()
-    gdc_launch_dependents()
+    tl.extra.cuda.gdc_wait()
+    tl.extra.cuda.gdc_launch_dependents()
     token = tl.full((1,), tl.program_id(0), tl.int64)
     padding = None
     if Padding is not None:
@@ -799,9 +797,9 @@ def _scatter_kernel(
     token = tl.program_id(0).to(tl.int64)
     # The tokens are complete before the routing kernel starts.
     quantized = _quantize_x(X, token, H, NVFP4, HEAD, TAIL)
-    gdc_wait()
+    tl.extra.cuda.gdc_wait()
     if LAUNCH_DEPENDENTS:
-        gdc_launch_dependents()
+        tl.extra.cuda.gdc_launch_dependents()
     dst, local = _place_rows(
         Starts, Ids, Ranks, Weights, Src2Dst, Gammas, Rows, token, TOPK, LOCAL_POW2
     )
@@ -846,7 +844,7 @@ def _scatter_nvfp4_kernel(
     x = X + token * H
     # The tokens are complete before the routing kernel starts.
     amax = _row_amax(x, H)
-    gdc_wait()
+    tl.extra.cuda.gdc_wait()
     dst, local = _place_rows(
         Starts, Ids, Ranks, Weights, Src2Dst, Gammas, Rows, token, TOPK, LOCAL_POW2
     )
@@ -951,7 +949,7 @@ def route(
             counters,
             counts,
             *outputs,
-            *map(e4m3_arg, quantized),
+            *quantized,
             weight_amax,
             weight_denominator,
             tokens,
@@ -974,7 +972,7 @@ def route(
             num_stages=4,
             enable_fp_fusion=False,
             launch_cooperative_grid=True,
-            launch_pdl=use_pdl(),
+            launch_pdl=True,
         )
         return outputs, quantized
 
@@ -1005,7 +1003,7 @@ def route(
         TILE=plan.tile,
         MAX_CTAS=plan.max_ctas,
         num_warps=4 if tokens <= 128 else 1,
-        launch_pdl=use_pdl(),
+        launch_pdl=True,
     )
     if nvfp4 and tokens >= NVFP4_SCATTER_MIN_TOKENS:
         _scatter_nvfp4_kernel[(tokens,)](
@@ -1017,7 +1015,7 @@ def route(
             src2dst,
             gammas,
             routed,
-            *map(e4m3_arg, quantized),
+            *quantized,
             weight_amax,
             weight_denominator,
             H=hidden,
@@ -1026,7 +1024,7 @@ def route(
             TILE=plan.tile,
             num_warps=1,
             enable_fp_fusion=False,
-            launch_pdl=use_pdl(),
+            launch_pdl=True,
         )
         return outputs, quantized
     _scatter_kernel[(tokens,)](
@@ -1038,7 +1036,7 @@ def route(
         src2dst,
         gammas,
         routed,
-        *map(e4m3_arg, quantized),
+        *quantized,
         weight_amax,
         weight_denominator,
         H=hidden,
@@ -1052,7 +1050,7 @@ def route(
         LAUNCH_DEPENDENTS=tokens <= LAUNCH_DEPENDENTS_MAX_TOKENS,
         num_warps=2,
         enable_fp_fusion=False,
-        launch_pdl=use_pdl(),
+        launch_pdl=True,
     )
     return outputs, quantized
 
@@ -1071,10 +1069,12 @@ def _combine_kernel(
     LAUNCH_DEPENDENTS: tl.constexpr,
     PUSH: tl.constexpr,
     HALO_ROWS: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
-    gdc_wait()
-    if LAUNCH_DEPENDENTS:
-        gdc_launch_dependents()
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+    if launch_pdl and LAUNCH_DEPENDENTS:
+        tl.extra.cuda.gdc_launch_dependents()
     token = tl.program_id(0).to(tl.int64)
     cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     acc = tl.zeros((BLOCK,), tl.float32)
@@ -1145,5 +1145,5 @@ def _combine(
         sp is not None,
         HALO_ROWS,
         num_warps=2,
-        launch_pdl=use_pdl(),
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
