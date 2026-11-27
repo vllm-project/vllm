@@ -1043,7 +1043,11 @@ class _StopBeforeWorkerStart(Exception):
 
 def _worker_start_mode(monkeypatch, vllm_config):
     """Run MultiprocExecutor._init_executor up to its choice of worker start
-    mode and return (concurrent, numa_bind seen by that choice)."""
+    mode and return (concurrent, numa_bind seen by that choice).
+
+    It stops at the start-mode branch by raising _StopBeforeWorkerStart. If
+    _init_executor starts using an executor attribute this helper does not set
+    before that branch, the test fails loudly with an AttributeError instead."""
     from vllm.v1.executor import multiproc_executor
     from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
