@@ -54,6 +54,7 @@ def test_drops_trailing_sentinel_columns():
 
     processor._update_sample_logprobs(LogprobsLists(token_ids, logprobs, ranks))
 
+    assert processor.logprobs is not None
     assert len(processor.logprobs) == 1
     pos = processor.logprobs[0]
     # Exactly sampled + 3 requested tokens; trailing sentinels dropped.
@@ -74,6 +75,7 @@ def test_accepts_exactly_sized_row():
 
     processor._update_sample_logprobs(LogprobsLists(token_ids, logprobs, ranks))
 
+    assert processor.logprobs is not None
     pos = processor.logprobs[0]
     assert set(pos.keys()) == {7, 11, 13}
 
@@ -203,6 +205,8 @@ def test_prompt_logprob_start_pads_unscored_positions(flat_logprobs):
     assert prompt_logprobs is not None
     assert len(prompt_logprobs) == 5
     assert not any(prompt_logprobs[i] for i in range(3))
+    assert prompt_logprobs[3] is not None
+    assert prompt_logprobs[4] is not None
     assert prompt_logprobs[3][7].logprob == -0.5
     assert prompt_logprobs[4][8].logprob == -1.5
 
@@ -259,8 +263,17 @@ def test_byte_fallback_context_spans_rows_and_batches(prompt, flat_logprobs, spl
             )
         start += size
 
-    stored = processor.prompt_logprobs[1:] if prompt else processor.logprobs
-    decoded = [[lp.decoded_token for lp in position.values()] for position in stored]
+    if prompt:
+        assert processor.prompt_logprobs is not None
+        stored = processor.prompt_logprobs[1:]
+    else:
+        assert processor.logprobs is not None
+        stored = processor.logprobs
+    decoded = [
+        [lp.decoded_token for lp in position.values()]
+        for position in stored
+        if position is not None
+    ]
     # 12 completes "é" only right after a sampled 11 (a row's own sampled
     # token is not its context); row 4 samples 12, also a candidate.
     assert decoded == [

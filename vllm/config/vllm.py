@@ -39,6 +39,7 @@ from .compilation import (
 )
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
+from .ec_events import ECEventsConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
@@ -112,6 +113,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Glm5NextMTPModel",
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
         "HYV4MTPModel",
         "HYV4DFlyModel",
         "InklingForCausalLM",
@@ -510,6 +513,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
+    ec_events_config: ECEventsConfig | None = None
+    """The configurations for encoder cache event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
     """The configurations for distributed EC cache transfer."""
     ec_manager_config: EncoderCacheManagerConfig = Field(
@@ -1540,12 +1545,18 @@ class VllmConfig:
             model_config = speculative_config.target_model_config
         if (
             model_config is not None
-            and model_config.architecture == "DeepseekV41ForCausalLM"
+            and model_config.architecture
+            in (
+                "DeepseekV41ForCausalLM",
+                "HYV4FlashForCausalLM",
+                "HYV4FlashVLForConditionalGeneration",
+            )
             and getattr(model_config.hf_text_config, "engram_layer_ids", None)
             and self.parallel_config.use_ubatching
         ):
             raise ValueError(
-                "DeepSeek V4.1 Engram does not support DBO or microbatching. "
+                f"{model_config.architecture} Engram does not support DBO or "
+                "microbatching. "
                 "Disable --enable-dbo and set --ubatch-size to 0."
             )
         if self.engram_config is None:
@@ -1555,6 +1566,28 @@ class VllmConfig:
         self.engram_config.verify_model_config(model_config)
         self.engram_config.resolve_dp_shared_memory(self.parallel_config, model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
+        if (
+            self.engram_config.peer_group_size
+            and model_config is not None
+            and model_config.architecture
+            in (
+                "Qwen4ExpForCausalLM",
+                "Qwen4ExpForConditionalGeneration",
+            )
+        ):
+            if self.parallel_config.use_ubatching:
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support DBO or microbatching"
+                )
+            if self.load_config.load_format in ("ipc_cache", "sharded_state"):
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support "
+                    f"{self.load_config.load_format} loading. Use a full checkpoint."
+                )
+            if self.weight_transfer_config:
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support weight transfer"
+                )
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def _reject_mismatched_float_kv_cache(self) -> None:
@@ -2016,19 +2049,8 @@ class VllmConfig:
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
 
-        from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
-
-        if HAS_OPAQUE_TYPE:
-            # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
-            # fast_moe_cold_start, so force it off.
-            self.compilation_config.fast_moe_cold_start = False
-        elif self.compilation_config.fast_moe_cold_start is None:
-            # resolve default behavior: try to be as safe as possible
-            # this config is unsafe if any spec decoding draft model has a MOE.
-            # We'll conservatively turn it off if we see spec decoding.
-            self.compilation_config.fast_moe_cold_start = (
-                self.speculative_config is None
-            )
+        # The hoisted OpaqueObject approach supersedes fast_moe_cold_start.
+        self.compilation_config.fast_moe_cold_start = False
 
         self._set_max_num_scheduled_tokens()
 
@@ -2147,6 +2169,17 @@ class VllmConfig:
                 "KV cache events are disabled, "
                 "but the scheduler is configured to publish them. "
                 "Modify KVEventsConfig.enable_kv_cache_events "
+                "to True to enable."
+            )
+        if (
+            self.ec_events_config is not None
+            and self.ec_events_config.publisher != "null"
+            and not self.ec_events_config.enable_ec_cache_events
+        ):
+            logger.warning_once(
+                "Encoder cache events are disabled, "
+                "but the scheduler is configured to publish them. "
+                "Modify ECEventsConfig.enable_ec_cache_events "
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
@@ -2364,7 +2397,7 @@ class VllmConfig:
                         "Turning off hybrid kv cache manager because "
                         "`--kv-transfer-config` selects a KV connector that "
                         "does not support it. Impact: hybrid SSM models "
-                        "(e.g. Jamba, Bamba) require HMA and will fail at "
+                        "(e.g. Zamba2, NemotronH) require HMA and will fail at "
                         "startup without it; models with sliding window "
                         "attention will run with reduced performance. "
                         "To add HMA support to a KV connector, subclass "
@@ -3760,16 +3793,6 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
-        if (
-            self.cache_config.cache_dtype == "nvfp4_ds_mla"
-            and self.parallel_config.decode_context_parallel_size > 1
-        ):
-            raise ValueError(
-                "nvfp4_ds_mla KV cache is not supported with decode context "
-                "parallelism: the chunked-context prefill gather is not "
-                "validated under DCP. Use decode_context_parallel_size=1 or a "
-                "different --kv-cache-dtype."
-            )
         if self.model_config is None:
             return self
         # The ds_mla layouts are MLA-only by construction; the plain nvfp4

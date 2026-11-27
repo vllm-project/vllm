@@ -209,9 +209,9 @@ class EPLBConfig:
     Interval for logging the balancedness.
     """
     use_async: bool = True
-    """
-    Whether to use non-blocking EPLB.
-    """
+    """Whether to use non-blocking EPLB. Async policy computation runs in a
+    persistent CPU subprocess per worker. The policy and its CPU inputs must
+    be serializable. Synchronous and profiling calls stay in the worker."""
 
     policy: EPLBPolicyOption | str | None = None
     """Built-in or platform-defined policy name. None selects the platform default
@@ -1151,6 +1151,8 @@ class ParallelConfig:
             "node_rank",
             "nnodes",
             "max_parallel_loading_workers",
+            "distributed_timeout_seconds",
+            "cpu_distributed_timeout_seconds",
             "disable_custom_all_reduce",
             "enable_shm_tensor_arena",
             "ray_workers_use_nsight",

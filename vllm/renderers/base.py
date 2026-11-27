@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Generic, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, cast, overload
 
 from typing_extensions import TypeVar
 
@@ -40,6 +40,7 @@ from vllm.multimodal.cache import (
     processor_only_cache_from_config,
 )
 from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalUUIDItems,
@@ -79,6 +80,14 @@ logger = init_logger(__name__)
 
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
+SERVER_OWNED_CHAT_TEMPLATE_KWARGS = frozenset(
+    {"tokenize", "padding", "max_length", "tokenizer_kwargs"}
+)
+HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS = SERVER_OWNED_CHAT_TEMPLATE_KWARGS | {
+    "return_dict",
+    "return_tensors",
+}
+
 
 class _SwappableExecutor(Executor):
     """Executor whose inner pool can be replaced without changing identity.
@@ -106,6 +115,24 @@ class _SwappableExecutor(Executor):
 
 
 class BaseRenderer(ABC, Generic[_T]):
+    _server_owned_chat_template_kwargs: ClassVar[frozenset[str]] = frozenset()
+
+    def validate_request_chat_template(self) -> None:
+        """Check whether this renderer accepts template source from a request."""
+
+    @classmethod
+    def validate_request_chat_template_kwargs(
+        cls, kwargs: Mapping[str, Any] | None
+    ) -> None:
+        if kwargs is None:
+            return
+        if reserved := cls._server_owned_chat_template_kwargs & kwargs.keys():
+            raise VLLMValidationError(
+                "chat_template_kwargs contains server-owned tokenizer options: "
+                f"{', '.join(sorted(reserved))}.",
+                parameter="chat_template_kwargs",
+            )
+
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 
@@ -147,6 +174,8 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal processor receives a deep-copied tokenizer (see #36557)
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
+        # Always resolved by `ModelConfig.__post_init__` (None means "auto" there).
+        assert pool_workers is not None
         self._executor = _SwappableExecutor(max_workers=pool_workers)
         self._resources.callback(self._executor.shutdown, wait=False)
 
@@ -226,9 +255,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # Pool last: multimodal processors may add tokens while they are
         # created, and the pooled copies only see tokens added before this.
         if isinstance(self.tokenizer, HfTokenizer):
-            maybe_make_thread_pool(
-                self.tokenizer, config.model_config.renderer_num_workers + 1
-            )
+            maybe_make_thread_pool(self.tokenizer, pool_workers + 1)
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
         """Modify the renderer's copy of an HF tokenizer before it is pooled.
@@ -571,9 +598,9 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> DictPrompt:
         if isinstance(prompt, bytes):
             embeds = safe_load_prompt_embeds(self.model_config, prompt)
-            prompt = EmbedsPrompt(prompt_embeds=embeds)
+            return EmbedsPrompt(prompt_embeds=embeds)
 
-        return prompt
+        return self._copy_prompt_dict(prompt)
 
     def render_prompts(
         self,
@@ -596,7 +623,7 @@ class BaseRenderer(ABC, Generic[_T]):
             )
             return EmbedsPrompt(prompt_embeds=embeds)
 
-        return prompt
+        return self._copy_prompt_dict(prompt)
 
     async def render_prompts_async(
         self,
@@ -751,11 +778,18 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = self._tokenize_prompt(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
+        token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
+        truncation = (
+            params._truncation_slice(self.tokenizer, len(token_ids))
+            if token_ids is not None
+            else None
+        )
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
-        # Detokenize after truncation so the text matches the tokens sent
-        # to the engine.
-        if params.needs_detokenization and "prompt" not in prompt:
+        # Rebuild cached text only for truncation, not padding alone.
+        if params.needs_detokenization and (
+            "prompt" not in prompt or truncation is not None
+        ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
@@ -795,11 +829,18 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = await self._tokenize_prompt_async(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
+        token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
+        truncation = (
+            params._truncation_slice(self.tokenizer, len(token_ids))
+            if token_ids is not None
+            else None
+        )
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
-        # Detokenize after truncation so the text matches the tokens sent
-        # to the engine.
-        if params.needs_detokenization and "prompt" not in prompt:
+        # Rebuild cached text only for truncation, not padding alone.
+        if params.needs_detokenization and (
+            "prompt" not in prompt or truncation is not None
+        ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
@@ -1033,7 +1074,7 @@ class BaseRenderer(ABC, Generic[_T]):
         else:
             engine_input = tokens_input(prompt_token_ids)
 
-        if prompt_text := prompt.get("prompt"):
+        if (prompt_text := prompt.get("prompt")) is not None:
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
@@ -1042,6 +1083,11 @@ class BaseRenderer(ABC, Generic[_T]):
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
             engine_input["prompt_token_offsets"] = offsets
+
+        if engine_input["type"] == "token" and (
+            (echo_mask := prompt.get("prompt_echo_mask")) is not None
+        ):
+            engine_input["prompt_echo_mask"] = echo_mask
 
         return engine_input
 
@@ -1100,7 +1146,7 @@ class BaseRenderer(ABC, Generic[_T]):
         else:
             engine_input = tokens_input(prompt_token_ids)
 
-        if prompt_text := prompt.get("prompt"):
+        if (prompt_text := prompt.get("prompt")) is not None:
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
@@ -1109,6 +1155,11 @@ class BaseRenderer(ABC, Generic[_T]):
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
             engine_input["prompt_token_offsets"] = offsets
+
+        if engine_input["type"] == "token" and (
+            (echo_mask := prompt.get("prompt_echo_mask")) is not None
+        ):
+            engine_input["prompt_echo_mask"] = echo_mask
 
         return engine_input
 
@@ -1246,6 +1297,80 @@ class BaseRenderer(ABC, Generic[_T]):
             skip_decoder_start_token=self._should_skip_decoder_start_token,
         )
 
+    @staticmethod
+    def _copy_prompt_dict(prompt: DictPrompt) -> DictPrompt:
+        # Copy top-level and nested dicts to avoid mutating caller arguments.
+        if "encoder_prompt" in prompt:
+            enc_dec_prompt = cast(EncoderDecoderDictPrompt, prompt)
+            copied = dict(enc_dec_prompt)
+            copied["encoder_prompt"] = dict(enc_dec_prompt["encoder_prompt"])
+            decoder_prompt = enc_dec_prompt["decoder_prompt"]
+            if decoder_prompt is not None:
+                copied["decoder_prompt"] = dict(decoder_prompt)
+            return copied  # type: ignore[return-value]
+
+        return dict(prompt)  # type: ignore[return-value]
+
+    def _iter_media_io_targets(
+        self,
+        prompts: Sequence[DictPrompt],
+    ):
+        for prompt in prompts:
+            if "encoder_prompt" in prompt:
+                enc_dec_prompt = cast(EncoderDecoderDictPrompt, prompt)
+                yield enc_dec_prompt["encoder_prompt"]
+                if (decoder_prompt := enc_dec_prompt["decoder_prompt"]) is not None:
+                    yield decoder_prompt
+            elif "prompt_embeds" in prompt:
+                continue
+            else:
+                yield prompt
+
+    def _apply_prompt_media_io_kwargs(
+        self,
+        prompts: Sequence[DictPrompt],
+        req_media_io_kwargs: dict[str, dict[str, Any]] | None,
+    ) -> None:
+        """Apply model defaults and request kwargs to prompts."""
+        default_media_io_kwargs = self._get_default_media_io_kwargs()
+        if not default_media_io_kwargs and not req_media_io_kwargs:
+            return
+
+        for target in self._iter_media_io_targets(prompts):
+            # Merge media_io_kwargs only when the target has multimodal data or UUIDs.
+            if "multi_modal_data" in target or "multi_modal_uuids" in target:
+                media_io_kwargs = merge_media_io_kwargs(
+                    default_media_io_kwargs,
+                    target.get("media_io_kwargs"),
+                )
+                if req_media_io_kwargs:
+                    media_io_kwargs = merge_media_io_kwargs(
+                        media_io_kwargs,
+                        req_media_io_kwargs,
+                    )
+                target["media_io_kwargs"] = media_io_kwargs
+
+    def _get_default_media_io_kwargs(self) -> dict[str, dict[str, Any]] | None:
+        model_config = getattr(self, "model_config", None)
+        mm_config = getattr(model_config, "multimodal_config", None)
+        return getattr(mm_config, "media_io_kwargs", None)
+
+    def _apply_chat_media_io_kwargs(
+        self,
+        prompts: Sequence[DictPrompt],
+        resolved_media_io_kwargs: dict[str, dict[str, Any]] | None,
+    ) -> None:
+        """Attach the fully-resolved chat `media_io_kwargs` to the prompts."""
+        if not resolved_media_io_kwargs:
+            return
+
+        for target in self._iter_media_io_targets(prompts):
+            if "multi_modal_data" in target or "multi_modal_uuids" in target:
+                target["media_io_kwargs"] = merge_media_io_kwargs(
+                    resolved_media_io_kwargs,
+                    target.get("media_io_kwargs"),
+                )
+
     async def _process_enc_dec_async(
         self,
         prompt: EncoderDecoderTokPrompt,
@@ -1330,7 +1455,12 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
+        prompt_extras = dict(prompt_extras or {})
+        req_media_io_kwargs = prompt_extras.pop("media_io_kwargs", None)
+
         dict_prompts = self.render_prompts(prompts)
+        self._apply_prompt_media_io_kwargs(dict_prompts, req_media_io_kwargs)
+
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
@@ -1355,7 +1485,12 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
+        prompt_extras = dict(prompt_extras or {})
+        req_media_io_kwargs = prompt_extras.pop("media_io_kwargs", None)
+
         dict_prompts = await self.render_prompts_async(prompts)
+        self._apply_prompt_media_io_kwargs(dict_prompts, req_media_io_kwargs)
+
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
@@ -1383,6 +1518,23 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
+        prompt_extras = dict(prompt_extras or {})
+        req_media_io_kwargs = prompt_extras.pop("media_io_kwargs", None)
+        default_media_io_kwargs = self._get_default_media_io_kwargs()
+        if default_media_io_kwargs:
+            chat_params = replace(
+                chat_params,
+                media_io_kwargs=merge_media_io_kwargs(
+                    default_media_io_kwargs,
+                    chat_params.media_io_kwargs,
+                ),
+            )
+        if req_media_io_kwargs:
+            merged_media_io_kwargs = merge_media_io_kwargs(
+                chat_params.media_io_kwargs, req_media_io_kwargs
+            )
+            chat_params = replace(chat_params, media_io_kwargs=merged_media_io_kwargs)
+
         rendered = [
             self.render_messages(conversation, chat_params)
             for conversation in conversations
@@ -1394,10 +1546,9 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
-        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
+        self._apply_chat_media_io_kwargs(dict_prompts, chat_params.media_io_kwargs)
 
-        prompt_extras = dict(prompt_extras or {})
-        prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
+        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = [
@@ -1423,6 +1574,23 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
+        prompt_extras = dict(prompt_extras or {})
+        req_media_io_kwargs = prompt_extras.pop("media_io_kwargs", None)
+        default_media_io_kwargs = self._get_default_media_io_kwargs()
+        if default_media_io_kwargs:
+            chat_params = replace(
+                chat_params,
+                media_io_kwargs=merge_media_io_kwargs(
+                    default_media_io_kwargs,
+                    chat_params.media_io_kwargs,
+                ),
+            )
+        if req_media_io_kwargs:
+            merged_media_io_kwargs = merge_media_io_kwargs(
+                chat_params.media_io_kwargs, req_media_io_kwargs
+            )
+            chat_params = replace(chat_params, media_io_kwargs=merged_media_io_kwargs)
+
         rendered = [
             self.render_messages_async(conversation, chat_params)
             for conversation in conversations
@@ -1434,10 +1602,10 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
+        self._apply_chat_media_io_kwargs(dict_prompts, chat_params.media_io_kwargs)
+
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
-        prompt_extras = dict(prompt_extras or {})
-        prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = await asyncio.gather(

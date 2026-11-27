@@ -116,7 +116,7 @@ th {
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
 | HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
-| SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
+| SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py \| python3 - --format raw` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
 | Custom Audio | ✅ | ✅ | Local file: `audio_data.jsonl` |
 | Custom Image | ✅ | ✅ | Local file: `image_data.jsonl` |
@@ -527,13 +527,14 @@ vllm bench serve \
 First, download the dataset to a folder, using this one liner:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -
+curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py | python3 - --format raw --config all
 ```
 
 The command supports also the following arguments:
 
-- `--config`: download only a subset of the dataset: `qualitative`, `throughput_1k`, `throughput_2k`, `throughput_8k`, `throughput_16k` and `throughput_32k`. By default, it will download all subsets.
-- `--output_dir`: download to a specified folder. By default, it will download to the current directory.
+- `--config`: download only a subset of the dataset: `qualitative`, `throughput_1k`, `throughput_2k`, `throughput_8k`, `throughput_16k`, `throughput_32k` and `throughput_100k`. By default, it will download all subsets.
+- `--output-dir`: download to a specified folder. By default, it will download to the current working directory under the `data/` folder.
+- `--format`: use the `raw` format for vllm bench support. Other formats are for Gym support and do not work with vllm bench.
 
 Start a server with speculative decoding:
 
@@ -1665,3 +1666,36 @@ to account for the extra prompt which is the query. The token accounting to repo
 throughput numbers correctly is also adjusted.
 
 </details>
+
+## Startup Benchmark
+
+By default, `vllm bench startup` times engine construction. To measure how
+long a new server takes to answer its first request, pass the full server
+command, including its engine arguments, to `--serve-cmd`.
+
+```bash
+vllm bench startup --serve-cmd 'vllm serve Qwen/Qwen3-0.6B --port 8100' \
+  --num-iters-cold 1 --num-iters-warmup 1 --num-iters-warm 3 \
+  --output-json startup.json
+```
+
+Each iteration launches a fresh server on the specified address, which must
+be idle. Both clocks start at launch. One stops at the first successful
+`/health` poll, the other at the first non-empty text in a streamed completion.
+A start verifies when the completion finishes normally and its text and token
+IDs (when returned) match the first completed start. A healthy server can
+fail verification if it returns only empty text or EOS, lacks the
+`/v1/completions` endpoint, or tunes kernels differently across starts and
+flips a near-tie between tokens. The benchmark then exits with status 1.
+The per-iteration JSON retains the observed timings. Only verified starts
+contribute to the summaries.
+
+Shutdown sends SIGTERM to the root process. If it fails to exit within 30
+seconds, the benchmark marks the iteration failed and skips later starts.
+It sends SIGKILL to the process group to clear any remaining workers.
+
+Cold starts use empty `VLLM_CACHE_ROOT`, TorchInductor and Triton caches.
+Other libraries' caches follow the environment. Warmup and warm starts reuse
+the caller's caches. `--server-ready-timeout` defaults to 1800 seconds to
+allow for a large model's first start. With `--output-json`, each iteration
+records the path to its server log. Otherwise the server writes to the terminal.
