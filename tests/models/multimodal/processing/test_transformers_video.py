@@ -4,6 +4,8 @@ import httpx
 import numpy as np
 import pytest
 import torch
+import transformers
+from packaging.version import Version
 from PIL import Image
 from transformers import Qwen3VLVideoProcessor
 
@@ -300,8 +302,12 @@ def test_dummy_video_has_the_most_tokens(model_id):
     assert max_tokens >= huge_frame_tokens
 
 
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.25.0.dev0"),
+    reason="The check needs Transformers 5.25 (huggingface/transformers#50706)",
+)
 @pytest.mark.parametrize(
-    ("model", "modality", "shape", "num_items", "max_model_len", "args"),
+    ("model", "modality", "shape", "num_items", "max_model_len", "args", "kwargs"),
     [
         # 2929 tokens per image
         (
@@ -311,6 +317,7 @@ def test_dummy_video_has_the_most_tokens(model_id):
             2,
             4096,
             [],
+            {},
         ),
         # 1569 tokens per video
         (
@@ -320,6 +327,7 @@ def test_dummy_video_has_the_most_tokens(model_id):
             3,
             4096,
             [],
+            {},
         ),
         # Qwen3-VL keeps 4 frames of these 30 fps clips, 392 tokens per video, where
         # all 32 frames would count 3136
@@ -330,11 +338,35 @@ def test_dummy_video_has_the_most_tokens(model_id):
             2,
             700,
             ["--media-io-kwargs", '{"video": {"do_sample_frames": true, "fps": 30}}'],
+            {},
+        ),
+        # 256 tokens per image with this `size` from the request or the server, where
+        # the default counts 4096
+        (
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            "image",
+            (1792, 1792, 3),
+            3,
+            600,
+            ["--trust-request-mm-kwargs"],
+            {"size": {"shortest_edge": 3136, "longest_edge": 200704}},
+        ),
+        (
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            "image",
+            (1792, 1792, 3),
+            3,
+            600,
+            [
+                "--mm-processor-kwargs",
+                '{"size": {"shortest_edge": 3136, "longest_edge": 200704}}',
+            ],
+            {},
         ),
     ],
 )
 def test_render_rejects_media_over_max_model_len(
-    model, modality, shape, num_items, max_model_len, args
+    model, modality, shape, num_items, max_model_len, args, kwargs
 ):
     """A prompt whose images or videos alone exceed `max_model_len` is rejected by
     their count before preprocessing, while one item fewer is processed."""
@@ -356,13 +388,14 @@ def test_render_rejects_media_over_max_model_len(
             *args,
         ],
     ) as server:
-        url = server.url_for("v1/chat/completions/render")
+        endpoint = server.url_for("v1/chat/completions/render")
         for count, status in ((num_items, 400), (num_items - 1, 200)):
             response = httpx.post(
-                url,
+                endpoint,
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": [item] * count}],
+                    "mm_processor_kwargs": kwargs,
                 },
                 timeout=120,
             )
