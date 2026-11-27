@@ -4,6 +4,7 @@
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -742,35 +743,66 @@ def test_sync_load_bad_blocks_skip_earlier_recurrent_state_checkpoints(dcp, expe
     assert KVCacheManager.get_block_ids_from_token(manager, "req", 32) == expected
 
 
+@dataclass
+class LostKVConnectorMetadata(ExampleConnectorMetadata):
+    # Request of each load in `requests`, in order.
+    load_req_ids: list[str] = field(default_factory=list)
+
+
 class LostKVConnector(ExampleConnector):
-    """Reports the blocks of a load whose stored KV is gone."""
+    """Reports a load whose stored KV is gone: its blocks, or the request
+    itself with `report_requests` in the extra config."""
+
+    def build_connector_meta(self, scheduler_output):
+        load_req_ids = [
+            new_req.req_id
+            for new_req in scheduler_output.scheduled_new_reqs
+            if new_req.req_id in self._requests_need_load
+        ]
+        metadata = super().build_connector_meta(scheduler_output)
+        assert isinstance(metadata, ExampleConnectorMetadata)
+        return LostKVConnectorMetadata(metadata.requests, load_req_ids)
 
     def start_load_kv(self, forward_context, **kwargs):
         metadata = self._get_connector_metadata()
-        assert isinstance(metadata, ExampleConnectorMetadata)
+        assert isinstance(metadata, LostKVConnectorMetadata)
         self._lost_block_ids: set[int] = set()
-        for request in [r for r in metadata.requests if not r.is_store]:
+        self._lost_req_ids: set[str] = set()
+        loads = [r for r in metadata.requests if not r.is_store]
+        for req_id, request in zip(metadata.load_req_ids, loads, strict=True):
             if os.listdir(
                 self._generate_foldername_debug(request.token_ids, request.mm_hashes)
             ):
                 continue
             metadata.requests.remove(request)
-            block_ids = request.slot_mapping[:: self._block_size] // self._block_size
-            self._lost_block_ids.update(block_ids.tolist())
+            if self._kv_transfer_config.get_from_extra_config("report_requests", False):
+                self._lost_req_ids.add(req_id)
+            else:
+                block_ids = (
+                    request.slot_mapping[:: self._block_size] // self._block_size
+                )
+                self._lost_block_ids.update(block_ids.tolist())
             Path(self._storage_path, "load_failed").touch()
         super().start_load_kv(forward_context, **kwargs)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         return self._lost_block_ids
 
+    def get_transfer_results(self, finished_req_ids):
+        results = super().get_transfer_results(finished_req_ids)
+        results.failed_sync_recving = self._lost_req_ids
+        return results
+
 
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("report_requests", [False, True])
 def test_recompute_after_failed_sync_load_matches_cold_run(
-    vllm_runner, tmp_path, async_scheduling
+    vllm_runner, tmp_path, async_scheduling, report_requests
 ):
     """A synchronous load fills blocks of a request that is already running.
-    When it fails, `recompute` must generate what the cold run generated."""
+    When it fails, `recompute` must generate what the cold run generated,
+    whether the connector reports the failed blocks or the failed request."""
     prompt = TokensPrompt(prompt_token_ids=[100 + i * 37 % 5000 for i in range(135)])
     params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
     with vllm_runner(
@@ -781,7 +813,10 @@ def test_recompute_after_failed_sync_load_matches_cold_run(
             kv_connector="LostKVConnector",
             kv_connector_module_path=__name__,
             kv_role="kv_both",
-            kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+            kv_connector_extra_config={
+                "shared_storage_path": str(tmp_path),
+                "report_requests": report_requests,
+            },
             kv_load_failure_policy="recompute",
         ),
         gpu_memory_utilization=0.5,
