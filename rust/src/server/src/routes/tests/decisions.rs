@@ -615,3 +615,35 @@ async fn systemone_refuses_what_python_refuses() {
         ]
     "#]].assert_debug_eq(&messages);
 }
+
+/// A decision read whose output stream fails after submission is classified
+/// like every other route's: a late rejection of the request is a 400, not a
+/// 500.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn decision_read_stream_errors_are_classified() {
+    let chat = ChatLlm::from_shared_backend(
+        StreamErrorLlm::new(|| vllm_llm::Error::RemoteInvalidRequest {
+            message: "the remote engine rejected the request".to_string(),
+        }),
+        chatml_backend(true),
+    );
+    let state = with_probed_decisions(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    ));
+    let (status, json) = post_decision(
+        &mut build_router(Arc::new(state)),
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "x",
+            "questions": [{"type": "predicate", "instructions": "Q?"}],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(
+        json["error"]["message"],
+        "the remote engine rejected the request"
+    );
+}
