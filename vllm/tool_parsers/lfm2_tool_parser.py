@@ -334,13 +334,16 @@ class Lfm2ToolParser(ToolParser):
         ):
             arguments = json.dumps(delta_text, ensure_ascii=False)[1:-1]
             self.streamed_args_for_tool[self.current_tool_index] += arguments
+            # The stream omits unset fields, and a full parse sets these to None.
             return DeltaMessage(
+                content=None,
                 tool_calls=[
                     DeltaToolCall(
+                        id=None,
                         index=self.current_tool_index,
                         function=DeltaFunctionCall(arguments=arguments),
                     )
-                ]
+                ],
             )
         self._in_string_arg = False
 

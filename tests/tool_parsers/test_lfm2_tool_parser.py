@@ -718,6 +718,31 @@ def test_streaming_long_string_argument_is_not_reparsed(
     assert parse_calls == 2  # Opening and closing deltas only.
 
 
+def test_streaming_string_delta_serializes_like_full_parse(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """The stream omits unset fields, so a delta sent without re-parsing must
+    set the same fields as one from a full parse."""
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    opening = f'{TOOL_CALL_START}[f(text="a'
+    tool_parser.extract_tool_calls_streaming("", opening, opening, [], [], [], request)
+
+    delta = tool_parser.extract_tool_calls_streaming(
+        opening, opening + " b", " b", [], [], [], request
+    )
+
+    assert delta is not None
+    assert delta.model_dump(exclude_unset=True) == {
+        "content": None,
+        "tool_calls": [{"id": None, "index": 0, "function": {"arguments": " b"}}],
+    }
+
+
 @pytest.mark.parametrize(
     ("deltas", "arguments"),
     [
