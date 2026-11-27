@@ -11,6 +11,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.lora.layers import FusedMoEWithLoRA
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -206,8 +207,13 @@ class PCPManager:
             raise NotImplementedError(
                 "MRV2 PCP does not support encoder-decoder models yet."
             )
-        if supports_mm_inputs:
-            raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
+        if supports_mm_inputs and not (
+            current_platform.is_cuda()
+            and model_config.architecture == "DeepseekV41ForCausalLM"
+        ):
+            raise NotImplementedError(
+                "MRV2 PCP supports MM inputs only for DeepSeek-V4.1 on CUDA."
+            )
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and (
             reason := speculative_config.speculator_config.pcp_unsupported_reason(
