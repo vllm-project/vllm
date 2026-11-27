@@ -5,9 +5,10 @@ import json
 
 import httpx
 import pytest
+import regex as re
 
 from tests.entrypoints.scale_out.derender.utils import stream_chat_derender
-from tests.utils import RemoteLaunchRenderServer
+from tests.utils import RemoteLaunchRenderServer, RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
 
 MODEL = "LiquidAI/LFM2.5-1.2B-Instruct"
@@ -84,3 +85,61 @@ async def test_lfm2_string_stream(
     call = result["tool_calls"][0]
     assert call["name"] == "f"
     assert call["arguments"] == arguments
+
+
+def test_lfm2_chat_stream_preserves_null_fields():
+    """Inspect raw SSE: derender and SDK defaults hide unset versus null."""
+    output = f'{START}[f(text="{BODY}")]{END}'
+    args = [
+        "--enforce-eager",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "lfm2",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "1",
+        "--gpu-memory-utilization",
+        "0.1",
+        "--stream-interval",
+        "1",
+    ]
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Call f with the text."}],
+        "tools": [{"type": "function", "function": {"name": "f"}}],
+        "tool_choice": "auto",
+        "temperature": 0,
+        "max_tokens": 1024,
+        "stream": True,
+        "structured_outputs": {"regex": re.escape(output, literal_spaces=True)},
+    }
+    arguments = ""
+    continuations = 0
+    with (
+        RemoteOpenAIServer(MODEL, args, max_wait_seconds=480) as chat_server,
+        httpx.stream(
+            "POST",
+            chat_server.url_for("v1/chat/completions"),
+            json=request,
+            timeout=60,
+        ) as response,
+    ):
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            chunk = json.loads(line.removeprefix("data: "))
+            assert "error" not in chunk, chunk
+            for choice in chunk["choices"]:
+                delta = choice["delta"]
+                for call in delta.get("tool_calls", []):
+                    function = call["function"]
+                    arguments += function.get("arguments") or ""
+                    # The regex fixes the text, not how the model splits it.
+                    if "name" not in function:
+                        continuations += 1
+                        assert delta["content"] is None
+                        assert call["id"] is None
+    assert continuations > 0
+    assert arguments == json.dumps({"text": BODY})
