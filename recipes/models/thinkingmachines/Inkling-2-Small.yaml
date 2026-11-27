@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Multimodal (text and image in, text out) MoE from Thinking Machines Lab with 594B total and 17B active parameters, up to 1M context, attention residuals, relative-bias attention, short convolutions, and a bundled DSpark speculator."
   date_added: 2026-11-12
-  date_updated: 2026-11-25
+  date_updated: 2026-11-20
   difficulty: intermediate
   tasks:
     - multimodal
@@ -17,7 +17,6 @@ meta:
   hardware:
     gb200: verified
     h200: verified
-    a100_4x: verified
 
 model:
   model_id: "thinkingmachines/Inkling-2-Small"
@@ -56,13 +55,12 @@ opt_in_features:
 variants:
   default:
     precision: nvfp4
-    # Hopper and Ampere run the NVFP4/MXFP8 experts as W4A16/W8A16 (Humming GEMMs).
+    # Hopper runs the NVFP4/MXFP8 experts as W4A16/W8A16 (Humming GEMMs).
     precision_hardware:
       brand: NVIDIA
     vram_minimum_gb: 473
     supported_hardware:
       - h200
-      - a100_4x
       - arch:sm100
       - arch:sm103
     description: "Routed experts in NVFP4 (layers 0-39) and MXFP8 (layers 40-47); attention, routers, attention-residual queries and the LM head in BF16/FP32. ~393 GB on disk including the 3.2 GB DSpark draft. Blackwell quantizes expert activations to the same format; Hopper keeps them in BF16 (W4A16/W8A16)."
@@ -71,11 +69,8 @@ compatible_strategies:
   - single_node_tp
   - multi_node_tp
 
-# H200 has no cross-node NVLink for pure multi-node TP. 4x A100 (320 GB) cannot
-# hold the ~370 GiB of weights on one node; two nodes run TP8 over the network.
+# H200 has no cross-node NVLink for pure multi-node TP.
 strategy_hardware:
-  single_node_tp:
-    a100_4x: unsupported
   multi_node_tp:
     hopper: unsupported
 
@@ -112,13 +107,6 @@ strategy_overrides:
           - "--max-model-len"
           - "1048576"
           - "--no-numa-bind"
-      # Two 4x A100 nodes: ~46 GiB of weights per GPU leaves a 52K-token KV
-      # cache with DSpark (69K without), so cap the context at 16,384 tokens.
-      a100_4x:
-        extra_args:
-          - "--max-model-len"
-          - "16384"
-          - "--no-numa-bind"
 
 troubleshooting:
   - title: "To serve at least one request with the model's max seq len (1048576), (64.47 GiB KV cache is needed, which is larger than the available KV cache memory"
@@ -129,10 +117,6 @@ troubleshooting:
     when:
       strategies: [multi_node_tp]
     body: "On the headless node of a multi-node launch, vLLM's default NUMA binding swaps the global multiprocessing executable while workers start from concurrent threads. Launch every node with `--no-numa-bind`."
-  - title: "OSError: [Errno 116] Stale file handle"
-    when:
-      strategies: [multi_node_tp]
-    body: "Seen during the first forward pass when the nodes share a home directory over NFS: the workers of every node compile Triton kernels into the same cache. Give each node a local cache, e.g. `export TRITON_CACHE_DIR=/tmp/$USER-triton VLLM_CACHE_ROOT=/tmp/$USER-vllm`."
 
 guide: |
   ## Overview
@@ -174,14 +158,6 @@ guide: |
   block-scaled tensor cores, so the experts run as W4A16 (NVFP4) and W8A16 (MXFP8) GEMMs
   with BF16 activations. With the command above (DSpark and the reasoning parser), GSM8K is
   0.977 (0-shot, chat) with a DSpark acceptance length of 4.5.
-
-  On Ampere, run TP8 across two 4x A100 80GB nodes with contexts up to 16,384 tokens; one
-  node (320 GB) cannot hold the ~370 GiB of weights. The experts run as W4A16/W8A16 GEMMs as
-  on Hopper, and the KV cache is BF16. There is no NVLink between the nodes, so the
-  all-reduce runs on NCCL over the network: decode is network-bound. Verified over a 50 Gb/s
-  link with the command above (DSpark and the reasoning parser): about 112 output tokens/s for
-  one stream (77 without DSpark, acceptance length 3.3-3.6) and 582 tokens/s at 32 concurrent
-  requests, where DSpark costs throughput (770 without it).
 
   An MXFP8 checkpoint is also available; see the
   [Inkling 2 Small MXFP8 recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Small-MXFP8).
