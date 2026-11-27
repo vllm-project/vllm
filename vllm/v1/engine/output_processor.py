@@ -423,7 +423,7 @@ class RequestState:
                 new_token_ids = self.detokenizer.output_token_ids[
                     self.sent_tokens_offset :
                 ]
-                self.sent_tokens_offset = self.detokenizer.num_output_tokens()
+            self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
         num_cached_tokens = self.num_cached_tokens
