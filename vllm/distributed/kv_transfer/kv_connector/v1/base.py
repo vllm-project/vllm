@@ -191,8 +191,9 @@ class KVConnectorBase_V1(ABC):
         """Whether the worker may call `get_transfer_results()` and
         `get_block_ids_with_load_errors()` between steps, as often as every
         fraction of a millisecond and with no finished request IDs, to report
-        finished transfers sooner. These calls are made on the thread that runs
-        the model, on its stream. Defaults to False.
+        finished transfers sooner, followed by `build_connector_worker_meta()`
+        when they find any. These calls are made on the thread that runs the
+        model, on its stream. Defaults to False.
         """
         return False
 

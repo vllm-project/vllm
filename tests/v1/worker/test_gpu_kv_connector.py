@@ -194,6 +194,39 @@ def test_held_results_go_to_next_output(monkeypatch: pytest.MonkeyPatch):
     assert later.kv_connector_output == KVConnectorOutput()
 
 
+def test_worker_meta_stays_with_transfer_results(monkeypatch: pytest.MonkeyPatch):
+    """A connector may also report a load's completion in its worker metadata
+    (e.g. OffloadingConnector's completed_jobs); the scheduler needs it in the
+    same output as the load's finished_recving."""
+    connector = _polling_connector(
+        monkeypatch,
+        KVConnectorTransferResults(),
+        KVConnectorTransferResults(finished_recving={"a"}),
+    )
+    backend = connector.kv_connector
+    assert isinstance(backend, Mock)
+    step_meta, poll_meta, merged_meta = Mock(), Mock(), Mock()
+    step_meta.aggregate.return_value = merged_meta
+    backend.build_connector_worker_meta.side_effect = [step_meta, poll_meta]
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
+    take = connector.transfer_results_taker()
+    assert take is not None
+    step_kv_output = connector.post_forward(set())
+    assert step_kv_output is not None
+    assert step_kv_output.kv_connector_worker_meta is None
+    connector.poll()
+    # Polls that find nothing leave worker metadata to the next step.
+    connector.poll()
+    assert backend.build_connector_worker_meta.call_count == 2
+
+    output = _empty_output()
+    output.kv_connector_output = step_kv_output
+    take(output)
+    assert step_kv_output.finished_recving == {"a"}
+    assert step_kv_output.kv_connector_worker_meta is merged_meta
+    step_meta.aggregate.assert_called_once_with(poll_meta)
+
+
 def test_held_failures_stay_with_completions(monkeypatch: pytest.MonkeyPatch):
     connector = _polling_connector(
         monkeypatch,

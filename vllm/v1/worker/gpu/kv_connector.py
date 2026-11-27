@@ -48,6 +48,11 @@ def _merge_transfer_results(dst: KVConnectorOutput, src: KVConnectorOutput) -> N
         dst.finished_recving = src.finished_recving | (dst.finished_recving or set())
     dst.failed_recving |= src.failed_recving
     dst.invalid_block_ids |= src.invalid_block_ids
+    if (src_meta := src.kv_connector_worker_meta) is not None:
+        dst_meta = dst.kv_connector_worker_meta
+        dst.kv_connector_worker_meta = (
+            src_meta if dst_meta is None else dst_meta.aggregate(src_meta)
+        )
 
 
 class KVConnector:
@@ -228,14 +233,14 @@ class ActiveKVConnector(KVConnector):
         if not defer_finalize:
             self.kv_connector.wait_for_save()
         output = self._get_transfer_results(finished_req_ids)
+        output.kv_connector_worker_meta = (
+            self.kv_connector.build_connector_worker_meta()
+        )
         if self._polls:
             self._hold_transfer_results(output)
             output = KVConnectorOutput()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
-        output.kv_connector_worker_meta = (
-            self.kv_connector.build_connector_worker_meta()
-        )
         if self._mrope_position_deltas:
             output.mrope_position_deltas = self._mrope_position_deltas
             self._mrope_position_deltas = {}
@@ -281,6 +286,12 @@ class ActiveKVConnector(KVConnector):
         try:
             with torch.inference_mode():
                 results = self._get_transfer_results(set())
+                if not results.is_empty():
+                    # Metadata may also record these completions; the scheduler
+                    # needs both in the same output.
+                    results.kv_connector_worker_meta = (
+                        self.kv_connector.build_connector_worker_meta()
+                    )
         except Exception as e:
             logger.exception("Polling for finished KV transfers failed")
             self._poll_error = e
