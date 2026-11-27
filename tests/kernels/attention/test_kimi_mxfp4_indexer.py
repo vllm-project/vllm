@@ -377,6 +377,76 @@ def test_prefill_geometry_reuse_keeps_layer_values_and_request_bounds_fresh():
             assert bool((reused < chunk.cu_seqlen_ke[:, None]).all())
 
 
+def test_prefill_shardq_rows_match_replicated(monkeypatch):
+    """Each ShardQ row selects what the replicated indexer selects for its
+    token. TP rank 1 owns the middle half of the prompt, so half its rows see
+    more keys than the top-k and depend on their own query."""
+    from types import SimpleNamespace
+
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.forward_context import set_forward_context
+    from vllm.models.kimi_k3.amd import dsa  # noqa: F401
+    from vllm.models.kimi_k3.amd.ops.fp4_indexer_prefill import prepare_prefill_metadata
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadataBuilder,
+    )
+    from vllm.v1.attention.ops import shardq
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    torch.manual_seed(7)
+    length, heads, topk = 4096, 32, 2048
+    config = create_vllm_config(max_model_len=length)
+    config.model_config.hf_text_config.index_topk = topk
+    monkeypatch.setattr(
+        shardq, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=1)
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[length], query_lens=[length]),
+        64,
+        torch.device("cuda"),
+        arange_block_indices=True,
+    )
+    q = torch.randn((length, heads, 128), device="cuda", dtype=torch.bfloat16)
+    keys = torch.randn((length, 128), device="cuda", dtype=torch.bfloat16)
+    weights = torch.rand((length, heads), device="cuda", dtype=torch.bfloat16)
+    cache = torch.empty((length // 64, 64, 68), device="cuda", dtype=torch.uint8)
+    outputs = []
+    for use_shardq in (False, True):
+        config.compilation_config.static_forward_context = {
+            "indexer": SimpleNamespace(use_shardq=use_shardq)
+        }
+        metadata = DeepseekV32IndexerMetadataBuilder(
+            kv_cache_spec=MLAAttentionSpec(
+                block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+            ),
+            layer_names=["indexer"],
+            vllm_config=config,
+            device=torch.device("cuda"),
+            block_table_width=length // 64,
+        ).build(0, common)
+        assert metadata.prefill is not None
+        indices = metadata.prefill.shardq_gather_indices
+        metadata.prefill = prepare_prefill_metadata(metadata.prefill, 1, 0, 1)
+        out = torch.empty((length, topk), device="cuda", dtype=torch.int32)
+        with set_forward_context({"indexer": metadata}, config):
+            torch.ops.vllm.kimi_fp4_indexer(
+                q, keys, weights, cache, out, "indexer", length
+            )
+        outputs.append(out)
+    assert indices is not None
+    replicated, local = outputs
+    torch.testing.assert_close(
+        local[: indices.numel()].sort(dim=1).values,
+        replicated[indices.long()].sort(dim=1).values,
+        rtol=0,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize("world,interleave", [(1, 1), (8, 1), (8, 64)])
 def test_prefill_workspace_covers_staged_keys(world, interleave):
     from types import SimpleNamespace

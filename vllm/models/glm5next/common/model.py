@@ -525,8 +525,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_use_nope,
                 # MTP draft steps reuse each token slot's top-k, which
-                # ShardQ's compact per-rank layout would break. The ROCm kpool
-                # indexer still scores every prefill token.
+                # ShardQ's compact per-rank layout would break.
                 shardq_eligible=not is_mtp_layer and not current_platform.is_rocm(),
             )
 

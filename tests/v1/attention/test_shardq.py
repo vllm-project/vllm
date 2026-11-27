@@ -292,6 +292,7 @@ def _check_builder_shardq_route(rank, world, port):
                     layer.get_kv_cache_config(config).spec, [prefix], config, device
                 )
                 assert layer.use_shardq == enabled
+                assert getattr(layer.impl, "use_shardq", None) == enabled
                 metadata = builder.build(0, common)
                 assert (metadata.shardq is not None) == enabled
                 assert metadata.prefill is not None

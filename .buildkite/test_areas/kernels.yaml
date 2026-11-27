@@ -600,6 +600,8 @@ steps:
       - vllm/models/kimi_k3/amd/dsa.py
       - vllm/models/kimi_k3/amd/ops/fp4_indexer_prefill.py
       - vllm/models/kimi_k3/common/dsa_cache.py
+      - vllm/v1/attention/backends/mla/indexer.py
+      - vllm/v1/attention/ops/shardq.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
       - vllm/model_executor/kernels/attention/dsa/dcp_indexer_rocm.py
       - vllm/model_executor/layers/sparse_attn_indexer.py

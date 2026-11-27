@@ -818,8 +818,6 @@ class KimiK3DSAAttention(nn.Module):
             prefix,
             shardq_eligible=True,
         )
-        # The FP4 indexer is not an indexer_op, so its cache follows the MLA
-        # layer's ShardQ split here.
         if self.mla_attn.mla_attn.use_shardq:
             self.dsa_indexer.k_cache.use_shardq = True
 

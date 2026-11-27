@@ -599,7 +599,7 @@ steps:
     tests/models/hy_v4/test_sequence_parallel.py
   mirror:
     amd:
-      label: ":amd: (MI355) HY4 Distributed"
+      label: ":amd: (MI355) HY4 and ShardQ Distributed"
       dind: false
       device: mi355_2
       num_devices: 2
@@ -611,6 +611,9 @@ steps:
       source_file_dependencies:
       - vllm/models/hy_v4/
       - vllm/models/hy_v4_flash/
+      - vllm/models/deepseek_v32/
+      - vllm/models/kimi_k3/amd/
+      - vllm/models/mistral/amd/
       - vllm/model_executor/layers/attention/
       - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
       - vllm/v1/attention/backends/mla/indexer.py
@@ -623,6 +626,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/utils.py
+      - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
       - tests/models/hy_v4/test_shardq_sinks.py
       - tests/models/hy_v4/test_sequence_parallel.py
       - tests/models/test_hyv4_rocm.py
@@ -630,6 +634,7 @@ steps:
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/hy_v4/test_shardq_sinks.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/hy_v4/test_sequence_parallel.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/deepseek_v32/test_shardq_sequence_parallel.py -k rocm
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300

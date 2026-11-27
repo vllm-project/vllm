@@ -639,6 +639,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.impl = impl  # type: ignore[assignment]
         # ShardQ (see vllm.v1.attention.ops.shardq), if the impl supports it.
         self.use_shardq = shardq_eligible and getattr(impl, "use_shardq", False)
+        if hasattr(impl, "use_shardq"):
+            impl.use_shardq = self.use_shardq
         # Indexer cache bytes per token, for DCP ShardQ (0: no indexer).
         self.shardq_index_entry_bytes = 0
         if self.use_shardq:
