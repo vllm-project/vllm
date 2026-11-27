@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from transformers import OPTConfig
 
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
@@ -46,6 +55,7 @@ class _FakeExecutor:
 
 def _run_engine_core_handshake(
     monkeypatch: pytest.MonkeyPatch,
+    model_path: Path,
     connector: KVConnectorBase_V1,
     *,
     handshake_metadata: (
@@ -89,27 +99,22 @@ def _run_engine_core_handshake(
     )
     monkeypatch.setattr(engine_core_module.kv_cache_utils, "_NONE_HASH_SEED", None)
 
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(data_parallel_rank_local=0),
-        scheduler_config=SimpleNamespace(
-            get_scheduler_cls=lambda: _FakeScheduler,
+    OPTConfig().save_pretrained(model_path)
+    model_config = ModelConfig(
+        model=str(model_path), dtype="float32", skip_tokenizer_init=True
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+            scheduler_cls=_FakeScheduler,
             enable_chunked_prefill=False,
             async_scheduling=False,
-            prefill_schedule_interval=1,
         ),
-        speculative_config=None,
-        ec_transfer_config=None,
-        is_mm_encoder_only=False,
-        max_concurrent_batches=1,
-        num_hash_lookahead_tokens=0,
-        model_config=SimpleNamespace(
-            runner_type="generate",
-            is_diffusion=False,
-            supports_multimodal_inputs=False,
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=False,
-            prefix_caching_hash_algo="sha256",
+        cache_config=CacheConfig(enable_prefix_caching=False),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="ExampleConnector", kv_role="kv_consumer"
         ),
     )
 
@@ -174,6 +179,7 @@ class _PPAwareConnector(_LegacyConnector):
 
 def test_engine_unwraps_handshake_metadata_for_legacy_connector(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Engine core always asks workers for `(pp_rank, tp_rank)`-keyed metadata,
     then unwraps to `{tp_rank: metadata}` for a connector that has not opted
@@ -184,6 +190,7 @@ def test_engine_unwraps_handshake_metadata_for_legacy_connector(
 
     executor = _run_engine_core_handshake(
         monkeypatch,
+        tmp_path,
         connector,
         handshake_metadata=[
             {(0, 0): metadata_0},
@@ -198,6 +205,7 @@ def test_engine_unwraps_handshake_metadata_for_legacy_connector(
 
 def test_engine_rejects_pp_producer_for_legacy_connector(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A connector that has not opted into PP-aware handshake must not silently
     drop metadata from `pp_rank > 0`; engine core init raises instead."""
@@ -206,6 +214,7 @@ def test_engine_rejects_pp_producer_for_legacy_connector(
     with pytest.raises(ValueError, match="does not support PP-disaggregated"):
         _run_engine_core_handshake(
             monkeypatch,
+            tmp_path,
             connector,
             handshake_metadata=[{(0, 0): _Metadata()}, {(1, 0): _Metadata()}],
         )
@@ -213,6 +222,7 @@ def test_engine_rejects_pp_producer_for_legacy_connector(
 
 def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A PP-aware connector receives the full `(pp_rank, tp_rank)`-keyed dict
     unchanged."""
@@ -222,6 +232,7 @@ def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
 
     executor = _run_engine_core_handshake(
         monkeypatch,
+        tmp_path,
         connector,
         handshake_metadata=[{(0, 0): metadata_0}, {(1, 0): metadata_1}],
     )

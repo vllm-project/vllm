@@ -1,15 +1,101 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import MagicMock
+
 import pytest
+import torch
 import torch.cuda
 
 from vllm import LLM, SamplingParams
+from vllm.config import (
+    KVTransferConfig,
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    MROPE_POSITION_DELTA_KEY,
+    get_mrope_position_limit,
+)
+from vllm.exceptions import VLLMValidationError
+from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 
 MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
+
+
+@pytest.mark.parametrize(
+    ("delta", "position_limit", "accepted"),
+    [
+        (-5, 12, False),
+        (-4, 12, True),
+        (0, 12, True),
+        (6.0, 12, True),
+        (7, 12, False),
+        (torch.iinfo(torch.int32).max - 5, None, True),
+        (torch.iinfo(torch.int32).max - 4, None, False),
+    ],
+)
+def test_transferred_mrope_delta_fits_decode_context(delta, position_limit, accepted):
+    core = object.__new__(EngineCore)
+    core.vllm_config = VllmConfig(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_consumer",
+        ),
+    )
+    core.vllm_config.model_config = MagicMock(
+        spec=ModelConfig, uses_mrope=True, max_model_len=8
+    )
+    core.mm_receiver_cache = None
+    core.request_block_hasher = None
+    core.prefix_hash_config = None
+    core._mrope_position_limit = position_limit
+    request = EngineCoreRequest(
+        request_id="test-request",
+        prompt_token_ids=[1, 2, 3, 4],
+        mm_features=None,
+        sampling_params=SamplingParams(
+            max_tokens=2,
+            extra_args={"kv_transfer_params": {MROPE_POSITION_DELTA_KEY: delta}},
+        ),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+    if not accepted:
+        with pytest.raises(VLLMValidationError, match=MROPE_POSITION_DELTA_KEY):
+            core.preprocess_add_request(request)
+        return
+
+    processed, _ = core.preprocess_add_request(request)
+    assert processed.kv_transfer_params == {MROPE_POSITION_DELTA_KEY: delta}
+
+
+def test_mrope_position_limit_uses_loaded_target_and_draft_tables():
+    def rope(positions_factor: int):
+        return MRotaryEmbedding(
+            head_size=6,
+            rotary_dim=6,
+            max_position_embeddings=8,
+            base=10_000,
+            is_neox_style=True,
+            dtype=torch.float32,
+            mrope_section=[1, 1, 1],
+            positions_factor=positions_factor,
+        )
+
+    worker = MagicMock()
+    with set_current_vllm_config(VllmConfig()):
+        worker.get_model.return_value = rope(4)
+        worker.model_runner.get_draft_model.return_value = rope(2)
+    assert get_mrope_position_limit(worker) == 16
 
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
