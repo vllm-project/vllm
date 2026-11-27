@@ -493,10 +493,17 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             rank=self.rank,
             tcp_store_group=self.tcp_store_group.store,
         )
+        layout_kwargs = {}
+        if hasattr(Buffer, "has_fixed_low_latency_layout"):
+            layout_kwargs["low_latency_layout"] = (
+                max_num_tokens_per_dp_rank,
+                token_hidden_size,
+            )
         buffer.update_memory_buffers(
             num_ranks=max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
             num_rdma_bytes=num_rdma_bytes,
+            **layout_kwargs,
         )
         ranks_to_connect = list(range(self.world_size))
         buffer.connect_ranks(ranks_to_connect)
