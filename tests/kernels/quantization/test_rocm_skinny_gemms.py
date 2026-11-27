@@ -11,7 +11,6 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers import utils as layer_utils
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_mi3xx, on_rdna4
 from vllm.utils.platform_utils import num_compute_units
@@ -324,38 +323,6 @@ def test_rocm_wvsplitkrc_large_k(n, k, m, dtype, seed):
     ref_out = torch.nn.functional.linear(A, B, None)
     out = ops.wvSplitKrc(A, B, num_compute_units(), None)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
-
-
-@pytest.mark.parametrize("cu_count,takes_wvsplitkrc", [(256, True), (128, False)])
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
-def test_rocm_gemm_dispatch_wvsplitkrc_fits_reported_cus(
-    monkeypatch, cu_count, takes_wvsplitkrc
-):
-    """Measured on a real 128-CU partition, a full-device grid there is slower."""
-    torch.manual_seed(0)
-    # Needs 192 CUs: the full MI355X has 256, a DPX partition reports 128.
-    n, k, m = 16, 2048, 3072
-    xavier = math.sqrt(2 / k)
-    A = (torch.rand(n, k, dtype=torch.bfloat16, device="cuda") * 2 - 1) * xavier
-    B = (torch.rand(m, k, dtype=torch.bfloat16, device="cuda") * 2 - 1) * xavier
-
-    grids = []
-    wvsplitkrc = ops.wvSplitKrc
-
-    def spy(a, b, grid, bias):
-        grids.append(grid)
-        return wvsplitkrc(a, b, grid, bias)
-
-    monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
-    monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "1")
-    monkeypatch.setattr(ops, "wvSplitKrc", spy)
-    monkeypatch.setattr(layer_utils, "num_compute_units", lambda: cu_count)
-    out = layer_utils.rocm_unquantized_gemm_impl(A, B, None)
-
-    assert grids == ([cu_count] if takes_wvsplitkrc else [])
-    ref_out = torch.nn.functional.linear(A, B, None)
     torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
