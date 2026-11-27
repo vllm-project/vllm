@@ -722,10 +722,14 @@ class Attention(nn.Module, AttentionLayerBase):
                 page_size_padded=shared_page,
             )
             spec_config = vllm_config.speculative_config
-            if (
-                self.is_draft_layer
-                and spec_config is not None
-                and spec_config.speculator_config.projects_context_kv
+            sink_len = int(getattr(self, "kv_sink_len", 0) or 0)
+            if uses_dflash_context_manager(
+                is_draft_layer=self.is_draft_layer,
+                projects_context_kv=(
+                    spec_config is not None
+                    and spec_config.speculator_config.projects_context_kv
+                ),
+                sink_len=sink_len,
             ):
                 # The DFlash context-KV writer skips null block-table entries.
                 return DFlashSlidingWindowManager.layer_config(
@@ -738,7 +742,7 @@ class Attention(nn.Module, AttentionLayerBase):
             return SlidingWindowManager.layer_config(
                 spec,
                 sliding_window=self.sliding_window,
-                sink_len=int(getattr(self, "kv_sink_len", 0) or 0),
+                sink_len=sink_len,
             )
         else:
             spec = AttentionSpec(
@@ -750,6 +754,18 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
             )
             return FullAttentionManager.layer_config(spec)
+
+
+def uses_dflash_context_manager(
+    *, is_draft_layer: bool, projects_context_kv: bool, sink_len: int
+) -> bool:
+    """Whether a draft layer takes the DFlash tail-only KV manager.
+
+    DSpark inherits `projects_context_kv` from DFlash, but the DFlash manager
+    has no attention sink. A windowed draft with a sink keeps the sink-aware
+    sliding-window manager.
+    """
+    return is_draft_layer and projects_context_kv and sink_len == 0
 
 
 def get_attention_context(
