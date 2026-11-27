@@ -117,9 +117,10 @@ class PoolingIOProcessor:
                 self.model_config, self.renderer.default_chat_tok_params
             )
             chat_params = request.build_chat_params(
-                self.chat_template, self.chat_template_content_format
-            ).with_defaults(
+                self.chat_template,
                 default_template_kwargs,
+                self.chat_template_content_format,
+            ).with_defaults(
                 default_media_io_kwargs=(
                     mm_config.media_io_kwargs if mm_config else None
                 ),

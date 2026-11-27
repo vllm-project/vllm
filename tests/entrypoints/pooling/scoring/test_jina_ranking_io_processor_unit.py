@@ -3,6 +3,7 @@
 """Unit tests for JinaRankingIOProcessor request building."""
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
@@ -53,12 +54,33 @@ def offline_processor_and_context():
                 "chat_template_kwargs": {"instruction": "Keep this instruction"}
             }
         ),
-        tokenization_kwargs=None,
-        chat_template=None,
-        lora_request=None,
-        priorities=None,
     )
     return proc, ctx
+
+
+def _make_jina_context(
+    *,
+    chat_template_kwargs: dict[str, Any] | None = None,
+    extra_kwargs: dict[str, Any] | None = None,
+) -> OfflineScoringInputsContext:
+    return OfflineScoringInputsContext(
+        pooling_task="token_embed",
+        scoring_data=ScoringData(
+            data_1=["query alpha beta"],
+            data_2=["document one two"],
+        ),
+        pooling_params=PoolingParams(extra_kwargs=extra_kwargs),
+        chat_template_kwargs=chat_template_kwargs,
+    )
+
+
+def _call_single_prompt(
+    proc: JinaRankingIOProcessor, ctx: OfflineScoringInputsContext
+) -> str:
+    factory, num_requests = proc.get_request_factory_offline(ctx)
+    assert num_requests == 1
+    request = cast(Any, next(iter(factory())))
+    return cast(str, request["prompts"]["prompt"])
 
 
 @pytest.mark.parametrize(
@@ -73,7 +95,8 @@ def test_offline_truncates_text_before_formatting(
     queries = ctx.scoring_data.data_1[:n_queries]
     docs = ctx.scoring_data.data_2
     ctx.scoring_data = ScoringData(data_1=queries, data_2=docs)
-    ctx.pooling_params.extra_kwargs.update(
+    base_extra = dict(ctx.pooling_params.extra_kwargs or {})
+    base_extra.update(
         {
             name: limit
             for name, limit in (
@@ -83,11 +106,13 @@ def test_offline_truncates_text_before_formatting(
             if limit is not None
         }
     )
+    ctx.pooling_params = PoolingParams(extra_kwargs=base_extra)
 
     factory, num_requests = proc.get_request_factory_offline(ctx)
     requests = list(factory())
     assert len(requests) == num_requests == n_queries
-    for i, request in enumerate(requests):
+    for i, raw_request in enumerate(requests):
+        request = cast(Any, raw_request)
         prompt = request["prompts"]["prompt"]
         query = " ".join(queries[i].split()[: query_limit or None])
         assert f"<query>\n{query}<|rerank_token|>\n</query>" in prompt
@@ -106,6 +131,118 @@ def test_offline_rejects_invalid_token_limits(
     offline_processor_and_context, name, limit
 ):
     proc, ctx = offline_processor_and_context
-    ctx.pooling_params.extra_kwargs[name] = limit
+    extra = dict(ctx.pooling_params.extra_kwargs or {})
+    extra[name] = limit
+    ctx.pooling_params = PoolingParams(extra_kwargs=extra)
     with pytest.raises(ValueError, match=name):
         proc.get_request_factory_offline(ctx)
+
+
+# =============================================================================
+# JinaRankingIOProcessor instruction resolution tests
+# =============================================================================
+
+
+class TestJinaRankingInstructionResolution:
+    """Instruction resolution order for offline Jina ranking:
+    `ctx.chat_template_kwargs["instruction"]`
+    > `pooling_params.extra_kwargs["chat_template_kwargs"]["instruction"]`
+    > `pooling_params.extra_kwargs["instruction"]`."""
+
+    @pytest.mark.parametrize(
+        ("ctx_kwargs", "extra_kwargs", "expected_instruction"),
+        [
+            # Direct `ctx.chat_template_kwargs` works when no nested/legacy key is set.
+            (
+                {"instruction": "From ctx kwargs"},
+                None,
+                "From ctx kwargs",
+            ),
+            # Nested `extra_kwargs["chat_template_kwargs"]` works when `ctx.chat_template_kwargs` is unset. # noqa: E501
+            (
+                None,
+                {"chat_template_kwargs": {"instruction": "From nested extra_kwargs"}},
+                "From nested extra_kwargs",
+            ),
+            # Legacy top-level `extra_kwargs["instruction"]` still works as fallback.
+            (
+                None,
+                {"instruction": "From top-level extra_kwargs"},
+                "From top-level extra_kwargs",
+            ),
+            # `ctx.chat_template_kwargs` beats both nested and top-level `extra_kwargs`.
+            (
+                {"instruction": "Winner ctx"},
+                {
+                    "chat_template_kwargs": {"instruction": "Loser nested"},
+                    "instruction": "Loser top-level",
+                },
+                "Winner ctx",
+            ),
+            # Nested `extra_kwargs["chat_template_kwargs"]` beats top-level `extra_kwargs["instruction"]`. # noqa: E501
+            (
+                None,
+                {
+                    "chat_template_kwargs": {"instruction": "Winner nested"},
+                    "instruction": "Loser top-level",
+                },
+                "Winner nested",
+            ),
+        ],
+    )
+    def test_instruction_sources_and_precedence(
+        self,
+        offline_processor_and_context,
+        ctx_kwargs: dict[str, Any] | None,
+        extra_kwargs: dict[str, Any] | None,
+        expected_instruction: str,
+    ):
+        proc, _ = offline_processor_and_context
+        ctx = _make_jina_context(
+            chat_template_kwargs=ctx_kwargs,
+            extra_kwargs=extra_kwargs,
+        )
+
+        prompt = _call_single_prompt(proc, ctx)
+
+        assert f"<instruct>\n{expected_instruction}\n</instruct>" in prompt
+
+    @pytest.mark.parametrize(
+        ("ctx_kwargs", "extra_kwargs"),
+        [
+            (None, None),
+            ({"instruction": None}, None),
+            (None, {"chat_template_kwargs": {"instruction": None}}),
+            (None, {"instruction": None}),
+            ({"instruction": ""}, None),
+        ],
+    )
+    def test_missing_or_empty_instruction_omits_instruct_block(
+        self,
+        offline_processor_and_context,
+        ctx_kwargs: dict[str, Any] | None,
+        extra_kwargs: dict[str, Any] | None,
+    ):
+        proc, _ = offline_processor_and_context
+        ctx = _make_jina_context(
+            chat_template_kwargs=ctx_kwargs,
+            extra_kwargs=extra_kwargs,
+        )
+
+        prompt = _call_single_prompt(proc, ctx)
+
+        assert "<instruct>" not in prompt
+        assert "</instruct>" not in prompt
+
+    def test_none_instruction_in_ctx_kwargs_falls_back_to_extra_kwargs(
+        self, offline_processor_and_context
+    ):
+        proc, _ = offline_processor_and_context
+        ctx = _make_jina_context(
+            chat_template_kwargs={"instruction": None},
+            extra_kwargs={"instruction": "Fallback instruction"},
+        )
+
+        prompt = _call_single_prompt(proc, ctx)
+
+        assert "<instruct>\nFallback instruction\n</instruct>" in prompt
