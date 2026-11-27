@@ -14,9 +14,11 @@ from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MAX,
     PRIORITY_MIN,
     AnyResponseFormat,
+    BadWordsParam,
     MMPayload,
     PerRequestMetrics,
     StopParam,
+    StopTokenIdsParam,
     StreamOptions,
     resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
@@ -82,7 +84,7 @@ class CompletionRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     watermarking: bool | None = None
     length_penalty: float = 1.0
-    stop_token_ids: list[int] | None = []
+    stop_token_ids: StopTokenIdsParam = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -112,7 +114,7 @@ class CompletionRequest(OpenAIBaseModel):
             "set."
         ),
     )
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: BadWordsParam = Field(default_factory=list)
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -674,7 +676,18 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)
     token_logprobs: list[float | None] = Field(default_factory=list)
     tokens: list[str] = Field(default_factory=list)
-    top_logprobs: list[dict[str, float] | None] = Field(default_factory=list)
+    top_logprobs: list[dict[str, float] | None] = Field(
+        default_factory=list,
+        description=(
+            "Per position, the returned candidates keyed by their decoded text. "
+            "Candidates that decode to the same string share one entry, e.g. "
+            "byte-fallback tokens that each hold part of a multi-byte character "
+            '(Thai, CJK or emoji text) all decode to "". The entry keeps the '
+            "highest logprob among them (on a tie, the token at that position). "
+            "Set `return_tokens_as_token_ids` to get one entry per candidate, "
+            "keyed by `token_id:{id}`."
+        ),
+    )
 
 
 class CompletionResponseChoice(OpenAIBaseModel):

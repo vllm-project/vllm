@@ -115,6 +115,10 @@ class EncoderCudaGraphConfig:
     the minimum are never selected for that combination and are not
     captured. Combinations that are not listed have no minimum."""
 
+    eager_fallback_fast_path: bool = False
+    """Opt in to skip full-fallback staging when eager accepts unsorted inputs.
+    Oversized output views are compacted in a batch."""
+
 
 @dataclass(slots=True)
 class EncoderCudaGraphCaptureInputs:

@@ -8,7 +8,7 @@ FROM stack AS dev
 # Build tools plus the runtime system packages (RDMA userspace, FFmpeg for torchcodec).
 # mold is installed but not the default linker: some packages JIT-compile at runtime
 # with flags mold does not support. Build stages opt in via LDFLAGS="-fuse-ld=mold".
-RUN apt-get update -q -y -o Acquire::Retries=3 && apt-get install -q -y -o Acquire::Retries=3 \
+RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl libnuma-dev ccache mold \
     librdmacm1 libibverbs1 ibverbs-providers ibverbs-utils util-linux unzip libsodium23 \
