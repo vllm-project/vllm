@@ -147,6 +147,12 @@ def gate_act(x: torch.Tensor, w_gate: torch.Tensor, pli: torch.Tensor) -> torch.
 def proj(h: torch.Tensor, w_proj: torch.Tensor) -> torch.Tensor:
     cfg = _pick(_PROJ_CONFIGS, h.shape[0])
     if cfg is None:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if rocm_aiter_ops.is_tgemm_enabled():
+            from aiter.tuned_gemm import tgemm
+
+            return tgemm.mm(h, w_proj)
         return torch.nn.functional.linear(h, w_proj)
     return _launch(h, w_proj, None, False, cfg)
 
