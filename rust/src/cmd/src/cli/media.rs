@@ -46,6 +46,19 @@ pub struct MediaArgs {
     #[serde(default)]
     pub media_url_allow_redirects: Option<Fixed<true>>,
 
+    /// Per-prompt budget, in bytes, for the tensors a multimodal processor
+    /// produces and its scratch space; zero or less disables it. The Rust
+    /// frontend has no such budget, so only zero or less is accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_MAX_MEDIA_PREPROCESSING_BYTES",
+        value_parser = parse_int.try_map(AtMost::<0>::try_from),
+        allow_negative_numbers = true
+    )]
+    #[serde(default)]
+    pub max_media_preprocessing_bytes: Option<AtMost<0>>,
+
     /// Maximum decoded pixels of an image or a video frame. llm-multimodal
     /// applies its own decode limits, so no value is accepted.
     #[arg(long, hide = true, env = "VLLM_MAX_IMAGE_PIXELS")]

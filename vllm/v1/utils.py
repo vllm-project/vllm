@@ -308,6 +308,7 @@ _RUST_FRONTEND_ENV_ARGS = {
     "max_audio_decode_bytes": "VLLM_MAX_AUDIO_DECODE_BYTES",
     "video_loader_backend": "VLLM_VIDEO_LOADER_BACKEND",
     "media_connector": "VLLM_MEDIA_CONNECTOR",
+    "max_media_preprocessing_bytes": "VLLM_MAX_MEDIA_PREPROCESSING_BYTES",
 }
 
 

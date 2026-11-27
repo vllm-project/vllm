@@ -306,6 +306,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             media_cache: None,
                             media_fetch_max_retries: None,
                             media_url_allow_redirects: None,
+                            max_media_preprocessing_bytes: None,
                             max_image_pixels: None,
                             max_audio_decode_duration_s: None,
                             max_audio_decode_bytes: None,
@@ -2554,6 +2555,7 @@ fn frontend_args_accept_json() {
                             media_cache: None,
                             media_fetch_max_retries: None,
                             media_url_allow_redirects: None,
+                            max_media_preprocessing_bytes: None,
                             max_image_pixels: None,
                             max_audio_decode_duration_s: None,
                             max_audio_decode_bytes: None,
@@ -3542,6 +3544,8 @@ fn media_settings_fail_startup_unless_rust_matches_them() {
         ["--media-url-allow-redirects", "1"],
         ["--video-loader-backend", "opencv"],
         ["--media-connector", "http"],
+        ["--max-media-preprocessing-bytes", "0"],
+        ["--max-media-preprocessing-bytes", "-1"],
         // Python's off value.
         ["--media-cache", ""],
     ] {
@@ -3558,6 +3562,7 @@ fn media_settings_fail_startup_unless_rust_matches_them() {
         ["--max-audio-decode-bytes", "0"],
         ["--video-loader-backend", "opencv_dynamic"],
         ["--media-connector", "custom"],
+        ["--max-media-preprocessing-bytes", "715827880"],
     ] {
         let error = serve(&flags).unwrap_err();
         assert!(error.contains(flags[0]), "{flags:?}: {error}");
@@ -3887,6 +3892,7 @@ fn serve_args_accept_handshake_aliases() {
                             media_cache: None,
                             media_fetch_max_retries: None,
                             media_url_allow_redirects: None,
+                            max_media_preprocessing_bytes: None,
                             max_image_pixels: None,
                             max_audio_decode_duration_s: None,
                             max_audio_decode_bytes: None,
