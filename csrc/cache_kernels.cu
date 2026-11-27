@@ -1262,13 +1262,14 @@ namespace vllm {
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
                                    Tout* __restrict__ dst_cache,
-                                   const float scale,
-                                   const int64_t block_stride) {
+                                   const float scale, const int64_t row_size,
+                                   const int64_t src_stride,
+                                   const int64_t dst_stride) {
   const int64_t block_idx = blockIdx.x;
-  for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
-    int64_t idx = block_idx * block_stride + i;
-    dst_cache[idx] =
-        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], scale);
+  const Tin* src = src_cache + block_idx * src_stride;
+  Tout* dst = dst_cache + block_idx * dst_stride;
+  for (int64_t i = threadIdx.x; i < row_size; i += blockDim.x) {
+    dst[i] = fp8::scaled_convert<Tout, Tin, kv_dt>(src[i], scale);
   }
 }
 
@@ -1277,7 +1278,8 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
 #define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)                                \
   vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE><<<grid, block, 0, stream>>>( \
       reinterpret_cast<Tin*>(src_cache.data_ptr()),                          \
-      reinterpret_cast<Tout*>(dst_cache.data_ptr()), scale, block_stride);
+      reinterpret_cast<Tout*>(dst_cache.data_ptr()), scale, row_size,        \
+      src_stride, dst_stride);
 
 // Only for testing.
 void convert_fp8(torch::stable::Tensor& dst_cache,
@@ -1291,11 +1293,31 @@ void convert_fp8(torch::stable::Tensor& dst_cache,
                   "src and dst must be on the same GPU");
   torch::stable::accelerator::DeviceGuard device_guard(src_device.index());
 
-  int64_t num_blocks = src_cache.size(0);
-  int64_t block_stride = src_cache.stride(0);
+  const int64_t num_blocks = src_cache.size(0);
+  if (num_blocks == 0) {
+    return;
+  }
+  const int64_t row_size = src_cache.numel() / num_blocks;
+  STD_TORCH_CHECK(dst_cache.numel() == src_cache.numel(),
+                  "src and dst must have the same number of elements");
+  STD_TORCH_CHECK(dst_cache.size(0) == num_blocks,
+                  "src and dst must have the same number of rows");
+  const bool src_row_slice = src_cache.dim() == 2 && src_cache.stride(1) == 1;
+  const bool dst_row_slice = dst_cache.dim() == 2 && dst_cache.stride(1) == 1;
+  STD_TORCH_CHECK(src_cache.is_contiguous() || src_row_slice,
+                  "src must be contiguous or a 2-D row slice");
+  STD_TORCH_CHECK(dst_cache.is_contiguous() || dst_row_slice,
+                  "dst must be contiguous or a 2-D row slice");
+  if (row_size == 0) {
+    return;
+  }
+  const int64_t src_stride = src_cache.stride(0);
+  const int64_t dst_stride = dst_cache.stride(0);
+  STD_TORCH_CHECK(src_stride >= row_size && dst_stride >= row_size,
+                  "src and dst rows must not overlap");
 
   dim3 grid(num_blocks);
-  dim3 block(std::min(block_stride, int64_t(512)));
+  dim3 block(std::min(row_size, int64_t(512)));
   const cudaStream_t stream = get_current_cuda_stream();
 
   if (kv_cache_dtype == "auto") {
