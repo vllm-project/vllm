@@ -122,6 +122,9 @@ class INCConfig(QuantizationConfig):
         self.backend = backend
         self.pack_factor = Fraction(32, weight_bits)
         self.config_parser = INCConfigParser(self)
+        # Modules the checkpoint stores only as a floating-point `weight`;
+        # filled by maybe_update_config().
+        self.checkpoint_unquantized_modules: set[str] = set()
 
         self._validate_supported_quantization()
 
@@ -318,6 +321,48 @@ class INCConfig(QuantizationConfig):
             )
         if self.extra_config is not None:
             self.extra_config = hf_to_vllm_mapper.apply_dict(self.extra_config)
+        if self.checkpoint_unquantized_modules:
+            self.checkpoint_unquantized_modules = set(
+                hf_to_vllm_mapper.apply_list(
+                    sorted(self.checkpoint_unquantized_modules)
+                )
+            )
+
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: Any = None,
+        revision: str | None = None,
+    ):
+        """Record linear modules that the checkpoint keeps in 16 bit.
+
+        AutoRound can leave a module inside a quantized block unquantized
+        without listing it in `extra_config` (for example the routed MoE gate
+        of Intel/Qwen3.5-35B-A3B-int4-AutoRound), while other exports quantize
+        the same module (Intel/Qwen3-Coder-Next-int4-AutoRound). Only the
+        safetensors headers say which one applies.
+        """
+        from vllm.transformers_utils.config import get_safetensors_params_metadata
+
+        try:
+            metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        except Exception as e:  # metadata is an optimization hint only
+            logger.debug("INC: could not read safetensors metadata: %s", e)
+            return
+        float_dtypes = ("F16", "BF16", "F32")
+        float_weight_modules: set[str] = set()
+        packed_modules: set[str] = set()
+        for param_name, info in metadata.items():
+            module, _, param = param_name.rpartition(".")
+            if param == "qweight":
+                packed_modules.add(module)
+            elif param == "weight" and info.get("dtype") in float_dtypes:
+                float_weight_modules.add(module)
+        self.checkpoint_unquantized_modules = float_weight_modules - packed_modules
+
+    def _is_checkpoint_unquantized(self, prefix: str) -> bool:
+        modules = self.checkpoint_unquantized_modules
+        return bool(modules) and (prefix in modules or f"model.{prefix}" in modules)
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         from .schemes.factory import resolve_scheme
@@ -332,6 +377,13 @@ class INCConfig(QuantizationConfig):
                     if isinstance(layer, RoutedExperts):
                         return UnquantizedFusedMoEMethod(layer.moe_config)
                     return None
+
+        if (
+            prefix
+            and isinstance(layer, LinearBase)
+            and self._is_checkpoint_unquantized(prefix)
+        ):
+            return UnquantizedLinearMethod()
 
         layer_config = self.config_parser.resolve(layer, prefix)
         if not layer_config.quantized:

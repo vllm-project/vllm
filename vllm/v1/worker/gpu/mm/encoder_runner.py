@@ -258,6 +258,9 @@ class EncoderRunner:
 
             cur_query_start = query_start[i]
             cur_query_end = query_end[i]
+            # An idle PCP rank can retain a request with no local tokens.
+            if cur_query_start == cur_query_end:
+                continue
 
             mm_features = self.encoder_cache.mm_features[req_id]
             lo, hi = get_mm_features_in_window(
@@ -296,10 +299,13 @@ class EncoderRunner:
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
-                # Attach modality for Omni interleaved merge (collected on demand).
-                set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
-
-                req_start_pos = query_start_loc[i] + start_pos - cur_query_start
+                req_start_pos = int(query_start_loc[i]) + start_pos - cur_query_start
+                # Attach modality and placement for the Omni interleaved merge.
+                set_mm_embedding_modality(
+                    mm_embeds_item,
+                    mm_feature.modality,
+                    (req_start_pos + start_idx, req_start_pos + end_idx, is_embed),
+                )
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (
                     True if is_embed is None else is_embed
                 )

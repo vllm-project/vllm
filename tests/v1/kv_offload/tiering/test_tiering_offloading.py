@@ -38,13 +38,13 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     OffloadPolicy,
     ReqContext,
-    RequestOffloadingContext,
     ScheduleEndContext,
     StoreTrigger,
     TierFilter,
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.tiering import spec as tiering_spec_module
@@ -52,6 +52,7 @@ from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TieringOffloadingMetrics,
     TransferJob,
 )
@@ -157,8 +158,8 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
     def drain_jobs(self) -> None:
         return
 
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
+        return SecondaryTierRequestContext()
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self.stats
@@ -308,6 +309,22 @@ def test_every_lookup_result_has_a_declared_cascade_behavior():
     """A new LookupResult must state what the cascade does with it, rather
     than falling into whichever branch happens to catch it."""
     assert set(_CASCADE_SUPPLY_BEHAVIOR) == set(LookupResult)
+
+
+def test_factory_forwards_access_mode_to_example_tier():
+    """Every built-in secondary tier accepts access_mode, not just fs/obj."""
+    region = _mock_mmap_region(1)
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {"type": "example", "access_mode": "read"},
+        region.create_kv_memoryview(),
+        _MOCK_OFFLOADING_SPEC,
+    )
+    try:
+        assert isinstance(tier, ExampleSecondaryTierManager)
+        assert tier.access_mode is OffloadAccessMode.READ
+        assert not tier.access_mode.can_write
+    finally:
+        tier.shutdown()
 
 
 class TestTieringOffloadingManager:
@@ -483,6 +500,47 @@ class TestTieringOffloadingManager:
         assert all(
             self.secondary_tier2.lookup(c, _CTX) is LookupResult.HIT for c in chunks
         )
+
+    def test_read_only_tier_is_never_stored_to(self, manager_setup, monkeypatch):
+        """A tier that cannot write gets no store job, so no primary chunk is
+        pinned for a transfer that would never complete."""
+        self.secondary_tier1.access_mode = OffloadAccessMode.READ
+        tier1_submit_store = MagicMock(wraps=self.secondary_tier1.submit_store)
+        monkeypatch.setattr(self.secondary_tier1, "submit_store", tier1_submit_store)
+        chunks = to_keys(range(3))
+
+        self._start_request()
+        result = self.manager.prepare_store(
+            chunks, _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        assert result is not None
+        self.manager.complete_store(
+            chunks, _CTX, trigger=StoreTrigger.ON_COMPUTE, success=True
+        )
+
+        tier1_submit_store.assert_not_called()
+        assert self.secondary_tier1.get_num_chunks() == 0
+        assert self.secondary_tier2.get_num_chunks() == 3
+        # Only the writable tier pins the chunks.
+        for key in chunks:
+            chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
+            assert chunk.ref_cnt == 1
+
+    def test_write_only_tier_is_never_looked_up(self, manager_setup, monkeypatch):
+        """The manager does not query a tier that cannot read, so a write-only
+        tier never serves a load."""
+        chunk = to_keys([1])[0]
+        self.secondary_tier1.access_mode = OffloadAccessMode.WRITE
+        self.secondary_tier1.chunks[chunk] = True
+        tier1_lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+        monkeypatch.setattr(self.secondary_tier1, "lookup", tier1_lookup)
+
+        self._start_request()
+        result = self.manager.lookup(chunk, _CTX)
+
+        tier1_lookup.assert_not_called()
+        assert result is LookupResult.MISS
 
     def test_ref_cnt_protection_during_cascade(self, manager_setup):
         """Test that ref_cnt protects chunks during cascade."""
@@ -1000,6 +1058,38 @@ class TestTieringOffloadingManager:
         assert len(result.evicted_keys) == 2
         assert len(result.keys_to_store) == 2
 
+    def test_partial_primary_store_cascades_each_resident_key_once(
+        self, manager_setup, monkeypatch
+    ):
+        """Resident keys after the cut are retried, not cascaded, so that the
+        retry, which offers them again, does not cascade them twice."""
+        trigger = StoreTrigger.ON_COMPUTE
+        self._start_request()
+        self.manager.prepare_store(to_keys(range(3)), _CTX, trigger=trigger)
+        self.manager.complete_store(to_keys(range(3)), _CTX, trigger=trigger)
+        self._simulate_on_schedule_end()
+        ctx = self._make_request_level_request(monkeypatch, "req_partial")
+        offer = to_keys([0, 3, 4, 5, 1, 2])
+        for position, key in enumerate(offer, start=1):
+            ctx.set_offload_key_position(key, position * 16)
+
+        # 2 free chunks, and the offered resident chunks are not evicted.
+        result = self.manager.prepare_store(offer, ctx, trigger=trigger)
+
+        assert result is not None
+        assert result.keys_to_store == to_keys([3, 4])
+        assert result.keys_to_retry == to_keys([5, 1, 2])
+        assert self._cascaded_keys_for("req_partial") == [set(to_keys([0]))]
+
+        self.manager.complete_store(result.keys_to_store, ctx, trigger=trigger)
+        result = self.manager.prepare_store(to_keys([5, 1, 2]), ctx, trigger=trigger)
+
+        assert result is not None
+        assert result.keys_to_store == to_keys([5])
+        assert not result.keys_to_retry
+        cascaded = [k for keys in self._cascaded_keys_for("req_partial") for k in keys]
+        assert sorted(cascaded) == sorted(to_keys([0, 1, 2, 3, 4]))
+
     def test_request_order_survives_late_cascade_completion(self, manager_setup):
         """Cascade completion must not replace request order with I/O order."""
         chunks = to_keys(range(5))
@@ -1437,7 +1527,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
+            lambda req_context: SecondaryTierRequestContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
@@ -1479,7 +1569,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
+            lambda req_context: SecondaryTierRequestContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
@@ -1519,7 +1609,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
+            lambda req_context: SecondaryTierRequestContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
@@ -1680,7 +1770,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
+            lambda req_context: SecondaryTierRequestContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
@@ -2087,6 +2177,37 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+def test_spec_parses_access_mode_from_extra_config():
+    """OffloadingSpec.__init__ parses the connector-level access_mode, so its
+    managers can see which directions this instance may transfer."""
+    spec = TieringOffloadingSpec(
+        make_offloading_config(
+            spec_name="TieringOffloadingSpec",
+            extra_config={"access_mode": "read"},
+        )
+    )
+    assert spec.access_mode is OffloadAccessMode.READ
+    assert spec.access_mode.can_read
+    assert not spec.access_mode.can_write
+
+
+def test_spec_access_mode_defaults_to_readwrite():
+    spec = TieringOffloadingSpec(
+        make_offloading_config(spec_name="TieringOffloadingSpec")
+    )
+    assert spec.access_mode is OffloadAccessMode.READWRITE
+
+
+def test_spec_rejects_invalid_access_mode():
+    with pytest.raises(ValueError, match="Invalid access_mode"):
+        TieringOffloadingSpec(
+            make_offloading_config(
+                spec_name="TieringOffloadingSpec",
+                extra_config={"access_mode": "both"},
+            )
+        )
 
 
 def test_tiering_spec_segments_region_and_skips_scheduler_prefault(monkeypatch):

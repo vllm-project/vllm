@@ -1438,7 +1438,7 @@ class TestLayerwiseGroups:
             "language_model.layers.",  # Kimi-K2.5, Nemotron-VL
             "thinker.model.layers.",  # Qwen2.5/3-Omni
             "transformer.h.",  # GPT-2, GPT-J, Bloom, Falcon
-            "transformer.blocks.",  # MPT, DBRX
+            "transformer.blocks.",  # MPT
             "transformer.encoder.layers.",  # ChatGLM
             "backbone.layers.",  # Mamba, Mamba2
             "gpt_neox.layers.",  # GPT-NeoX
@@ -2958,6 +2958,70 @@ def test_a_layers_kernel_copy_is_not_overwritten_by_the_next_layer():
         "the kernel tensor holds the next layer's bytes: its source was reused "
         f"before the quant stream's copy read it (memory reused: {reused})"
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires Engram GPU lookup")
+def test_replay_updates_cpu_offloaded_engram_in_place(dist_init):
+    """Replay checkpoint slices into the host table used by repeated lookups."""
+    from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+    from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
+
+    class EngramModel(torch.nn.Sequential):
+        def load_weights(self, weights):
+            return AutoWeightsLoader(self).load_weights(weights)
+
+    device = torch.device("cuda", torch.accelerator.current_device_index())
+    table = ParallelEngramEmbedding(36, 64, (17, 19), cpu_offload=True)
+    model = EngramModel(table)
+    record_metadata_for_reloading(model)
+    weight_name, scale_name = "0.weight", "0.weight_scale_inv"
+    info = ShardedRDTWeightTransferInitInfo(
+        names=[weight_name, scale_name],
+        dtype_names=["float8_e4m3fn", "float8_e8m0fnu"],
+        shapes=[[36, 64], [36, 2]],
+        group_lens=[2],
+    )
+    engine = consumer_engine(device=device, model=model)
+    engine._router = RdtRouter(1, 1, names=info.names, group_lens=info.group_lens)
+    engine._bake(info)
+    (chunk,) = engine._build_static_plan(info).chunks
+    originals = dict(table.named_parameters())
+    pointers = {name: param.data_ptr() for name, param in originals.items()}
+    ids = torch.tensor([[0, 17], [16, 35]], dtype=torch.int32, device=device)
+    out = torch.empty(2, 2, 64, dtype=torch.bfloat16, device=device)
+
+    engine._ensure_proc_worker()
+    try:
+        for value in (1, 2, 1):
+            weight = torch.full((36, 64), value, dtype=torch.float32).to(
+                torch.float8_e4m3fn
+            )
+            scales = torch.full((36, 2), 127 + value, dtype=torch.uint8)
+            checkpoint = {
+                weight_name: weight,
+                scale_name: scales.view(torch.float8_e8m0fnu),
+            }
+            results = {}
+            for key in chunk.keys:
+                name, ops = key
+                tensor = checkpoint[name]
+                for op, args, kwargs in ops:
+                    tensor = getattr(tensor, op)(*args, **dict(kwargs))
+                results[key] = tensor.to(device)
+
+            engine.start_weight_update()
+            engine._dispatch_item(_ProcItem(chunk=chunk, results=results, slot=0))
+            engine.finish_weight_update()
+
+            for name, expected in (("weight", weight), ("weight_scale_inv", scales)):
+                param = getattr(table, name)
+                assert param is originals[name] and param.data_ptr() == pointers[name]
+                assert torch.equal(param.view(torch.uint8), expected.view(torch.uint8))
+            table.lookup(ids, out)
+            assert torch.equal(out, torch.full_like(out, value * 2**value))
+    finally:
+        engine.shutdown()
 
 
 @pytest.mark.skipif(

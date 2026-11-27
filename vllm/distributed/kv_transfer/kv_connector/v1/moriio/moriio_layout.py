@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    group_kernel_blocks,
 )
 
 
@@ -272,21 +273,79 @@ def get_layer_transfer_geometry(
     if (
         isinstance(spec, AttentionSpec)
         and len(shape) == 4
+        and shape[0] > 0
         and shape[1] == spec.num_heads
-        and shape[2] == spec.num_states
+        and 0 < shape[2] <= spec.num_states
+        and spec.num_states % shape[2] == 0
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
-        num_blocks, num_heads, num_states, content_dim = shape
-        slot_size_bytes = num_heads * content_dim * element_size
-        block_len = 1 + sum((s - 1) * st for s, st in zip(shape[1:], stride[1:]))
+        kernel_blocks_per_block = spec.num_states // shape[2]
+        if shape[0] % kernel_blocks_per_block:
+            raise ValueError(
+                f"Unsupported MoRIIO cache shape for layer {layer_name}: "
+                f"{tuple(shape)} does not form complete groups of "
+                f"{kernel_blocks_per_block} kernel blocks"
+            )
+        num_blocks = shape[0] // kernel_blocks_per_block
+        if spec.num_head_slots == 2 and stride[1] >= stride[0]:
+            # LHBNC stores all K blocks before all V blocks. Each plane's
+            # base depends on its own pool size, so transfer them separately.
+            plane_block_size = shape[2] * shape[3]
+            expected_stride = (
+                plane_block_size,
+                num_blocks * plane_block_size,
+                shape[3],
+                1,
+            )
+            block_len = plane_block_size * element_size
+            if kernel_blocks_per_block != 1 or stride != expected_stride:
+                raise ValueError(
+                    f"MoRIIO K/V planes for layer {layer_name} must be dense "
+                    "with unsplit blocks"
+                )
+            return LayerTransferGeometry(
+                num_blocks=num_blocks,
+                block_size=spec.block_size,
+                block_len=block_len,
+                slot_size_bytes=shape[3] * element_size,
+                block_stride=stride[0],
+                local_kv_stride=stride[1],
+                remote_kv_stride=stride[0] * (remote_num_blocks or num_blocks),
+                transfers_per_block=2,
+                regions_per_block=2,
+                split_kv_regions=False,
+            )
+        grouped = group_kernel_blocks(kv_cache, num_blocks)
+        block_stride = grouped.stride(0)
+        slot_size_bytes = shape[1] * shape[3] * element_size
+        # Include padding between kernel pages, but not after the last page.
+        block_len = 1 + sum(
+            (s - 1) * st for s, st in zip(grouped.shape[1:], grouped.stride()[1:])
+        )
         block_len *= element_size
+        if kernel_blocks_per_block > 1:
+            stride_bytes = block_stride * element_size
+            last_block_end = (num_blocks - 1) * stride_bytes + block_len
+            available_bytes = (
+                kv_cache.untyped_storage().nbytes()
+                - kv_cache.storage_offset() * element_size
+            )
+            if (
+                stride_bytes != spec.page_size_bytes
+                or block_len > stride_bytes
+                or last_block_end > available_bytes
+            ):
+                raise ValueError(
+                    f"MoRIIO kernel blocks for layer {layer_name} must form "
+                    "non-overlapping manager pages within the registered storage"
+                )
         return LayerTransferGeometry(
             num_blocks=num_blocks,
             block_size=spec.block_size,
             block_len=block_len,
             slot_size_bytes=slot_size_bytes,
-            block_stride=stride[0],
+            block_stride=block_stride,
             local_kv_stride=None,
             remote_kv_stride=None,
             transfers_per_block=1,
@@ -679,6 +738,11 @@ def get_layer_head_layout(
         and shape[2] == spec.num_states
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
+        if spec.num_head_slots == 2 and shape[3] == spec.num_kv_heads * spec.head_size:
+            raise ValueError(
+                f"MoRIIO cannot slice KV heads of layer {layer_name}: "
+                "packed K/V planes do not expose per-head strides"
+            )
         return HeadLayout(
             num_heads=shape[1],
             num_tokens=shape[2],
@@ -732,6 +796,72 @@ def _element_runs(
     ]
 
 
+class Nvfp4PageSplit(NamedTuple):
+    """Bytes per token of one KV head in the data and scale parts of a side."""
+
+    data_bytes: int
+    scale_bytes: int
+
+
+def get_nvfp4_page_split(spec: KVCacheSpec | None) -> Nvfp4PageSplit | None:
+    """How a packed NVFP4 page splits its K/V sides, None for other caches.
+
+    The page is `[K side | V side]`, and each side stores every KV head's FP4
+    data (two values a byte) before every KV head's block scales (one byte per
+    16 values). Its `2 * num_kv_heads` head slots of data + scale bytes are
+    therefore not per-head rows: a KV head is one data run and one scale run
+    per side.
+    """
+    if not (
+        isinstance(spec, AttentionSpec)
+        and spec.kv_quant_mode.is_nvfp4
+        and spec.state_content_bytes is not None
+    ):
+        return None
+    split = Nvfp4PageSplit(spec.head_size // 2, spec.head_size // 16)
+    if (
+        spec.kv_head_major_slots
+        or spec.head_size_v != spec.head_size
+        or spec.num_heads != 2 * spec.num_kv_heads
+        or spec.state_content_bytes != sum(split)
+    ):
+        raise ValueError(
+            "MoRIIO cannot slice KV heads of this packed NVFP4 page: "
+            f"num_head_slots={spec.num_head_slots}, "
+            f"state_content_bytes={spec.state_content_bytes}, "
+            f"kv_head_major_slots={spec.kv_head_major_slots}"
+        )
+    return split
+
+
+def _nvfp4_head_runs(
+    layout: HeadLayout, split: Nvfp4PageSplit, first_head: int, num_heads: int
+) -> list[tuple[int, int]]:
+    """(offset in block, size) runs of KV heads of a split NVFP4 page.
+
+    A data run and a scale run per side, K side first. The page must be
+    head-major, as the kernels writing it require.
+    """
+    hb = layout.head_bytes
+    if not (
+        layout.plane_offsets == (0,)
+        and layout.num_heads % 2 == 0
+        and hb == sum(split)
+        and layout.token_stride == hb
+        and layout.head_stride == layout.num_tokens * hb
+    ):
+        raise ValueError(f"Not a head-major NVFP4 page: {layout}")
+    num_kv_heads = layout.num_heads // 2
+    data = layout.num_tokens * split.data_bytes
+    scale = layout.num_tokens * split.scale_bytes
+    runs: list[tuple[int, int]] = []
+    for side in (0, num_kv_heads * layout.head_stride):
+        runs.append((side + first_head * data, num_heads * data))
+        scales = side + num_kv_heads * data
+        runs.append((scales + first_head * scale, num_heads * scale))
+    return runs
+
+
 def compute_head_slice_offsets(
     local: HeadLayout,
     remote: HeadLayout,
@@ -743,12 +873,15 @@ def compute_head_slice_offsets(
     merge_fn: Callable[
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
+    nvfp4_split: Nvfp4PageSplit | None = None,
 ) -> tuple[list[int], list[int], list[int]]:
     """Offsets copying `num_heads` heads of each local block into a remote one.
 
     Local heads `[local_head, local_head + num_heads)` land on remote heads
     `[remote_head, remote_head + num_heads)`; every other remote head is
-    left for the producer rank that holds it.
+    left for the producer rank that holds it. With `nvfp4_split` the heads
+    are the KV heads of a packed NVFP4 page (see `get_nvfp4_page_split`),
+    not its head slots.
     """
     if (
         local.num_tokens != remote.num_tokens
@@ -759,29 +892,37 @@ def compute_head_slice_offsets(
             "MoRIIO head slicing needs the same block size, head size and K/V "
             f"planes on both sides, got local {local} and remote {remote}"
         )
+    slots_per_head = 1 if nvfp4_split is None else 2
+    local_heads = local.num_heads // slots_per_head
+    remote_heads = remote.num_heads // slots_per_head
     if not (
         local_head >= 0
-        and local_head + num_heads <= local.num_heads
+        and local_head + num_heads <= local_heads
         and remote_head >= 0
-        and remote_head + num_heads <= remote.num_heads
+        and remote_head + num_heads <= remote_heads
     ):
         raise ValueError(
             f"Head slice local [{local_head}, {local_head + num_heads}) / remote "
             f"[{remote_head}, {remote_head + num_heads}) is outside "
-            f"{local.num_heads} / {remote.num_heads} heads"
+            f"{local_heads} / {remote_heads} heads"
         )
     if len(local_block_ids) > len(remote_block_ids):
         raise ValueError(
             "local_block_ids longer than remote_block_ids: "
             f"{len(local_block_ids)} > {len(remote_block_ids)}"
         )
-    local_kind, local_runs = _head_runs(local, local_head, num_heads)
-    remote_kind, remote_runs = _head_runs(remote, remote_head, num_heads)
-    if local_kind != remote_kind:
-        # The two sides order heads and tokens differently: pair single
-        # (token, head) runs, which merge_fn coalesces where both are adjacent.
-        local_runs = _element_runs(local, local_head, num_heads)
-        remote_runs = _element_runs(remote, remote_head, num_heads)
+    if nvfp4_split is not None:
+        local_runs = _nvfp4_head_runs(local, nvfp4_split, local_head, num_heads)
+        remote_runs = _nvfp4_head_runs(remote, nvfp4_split, remote_head, num_heads)
+    else:
+        local_kind, local_runs = _head_runs(local, local_head, num_heads)
+        remote_kind, remote_runs = _head_runs(remote, remote_head, num_heads)
+        if local_kind != remote_kind:
+            # The two sides order heads and tokens differently: pair single
+            # (token, head) runs, which merge_fn coalesces where both are
+            # adjacent.
+            local_runs = _element_runs(local, local_head, num_heads)
+            remote_runs = _element_runs(remote, remote_head, num_heads)
 
     offset_local: list[int] = []
     offset_remote: list[int] = []
