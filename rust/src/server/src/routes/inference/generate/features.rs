@@ -28,8 +28,8 @@ use crate::mm_wire;
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiModalFeatures {
-    /// Item identifiers: the request's `uuid` for the item, else its content
-    /// hash.
+    /// Item identifiers: the request's `uuid` for the item tagged `uuid:`,
+    /// else its content hash tagged `content:`.
     pub mm_hashes: HashMap<MmModality, Vec<String>>,
     pub mm_placeholders: HashMap<MmModality, Vec<PlaceholderRangeInfo>>,
     /// Base64-encoded MessagePack `MultiModalKwargsItem`s. Unset when render

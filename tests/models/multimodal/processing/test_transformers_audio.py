@@ -9,7 +9,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.model_executor.model_loader import get_model_cls
-from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces import (
+    StreamingDiarizedTranscriptParser,
+    supports_transcription,
+)
 from vllm.model_executor.models.transformers.multimodal import (
     MultiModalProcessor as TransformersMultiModalProcessor,
 )
@@ -362,3 +365,36 @@ def test_transcription_output_parsing(vibevoice):
         (1.62, 3.0, "1", "Hi!"),
     ]
     assert model_cls.parse_diarized_transcript("Hello.", model_config) == []
+
+
+@pytest.mark.parametrize("chunk_size", [1, 8])
+@pytest.mark.parametrize("empty_final", [False, True])
+def test_diarized_stream_parser_buffers_transformers_output(
+    vibevoice, chunk_size, empty_final
+):
+    """The fallback must preserve raw text and parse only at the final delta."""
+    model_cls, model_config = vibevoice
+    parser = StreamingDiarizedTranscriptParser(model_cls, model_config)
+    text = VIBEVOICE_OUTPUT.replace("Hello there.", "你好 café.").rstrip()
+    deltas = [text[pos : pos + chunk_size] for pos in range(0, len(text), chunk_size)]
+    if empty_final:
+        deltas.append("")
+    for delta in deltas[:-1]:
+        assert list(parser.process_delta(delta, finished=False)) == []
+        assert list(parser.process_delta("", finished=False)) == []
+
+    segments = list(parser.process_delta(deltas[-1], finished=True))
+    assert [(s.start, s.end, s.speaker, s.text) for s in segments] == [
+        (0.0, 1.5, "0", "你好 café."),
+        (1.62, 3.0, "1", "Hi!"),
+    ]
+
+
+@pytest.mark.parametrize("text", ["assistant\n[]", "Hello."])
+def test_diarized_stream_parser_rejects_unparsable_transformers_output(vibevoice, text):
+    model_cls, model_config = vibevoice
+    parser = StreamingDiarizedTranscriptParser(model_cls, model_config)
+    for char in text:
+        assert list(parser.process_delta(char, finished=False)) == []
+    with pytest.raises(ValueError, match="valid diarized transcript"):
+        list(parser.process_delta("", finished=True))

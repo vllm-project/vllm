@@ -9,8 +9,7 @@ EP is typically coupled with Data Parallelism (DP). While DP can be used indepen
 Before using EP, you need to install the necessary dependencies. We are actively working on making this easier in the future:
 
 1. **Install DeepEP**: Set up host environment following vLLM's guide for EP kernels [here](../../tools/ep_kernels).
-2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
-3. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
+2. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
 
 !!! note "NCCL version (CUDA 13+)"
     The `deepep_v2` backend requires NCCL >= 2.30.4. PyTorch ships an older
@@ -36,13 +35,36 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 
 | Backend | Use Case | Features | Best For |
 | ------- | -------- | -------- | -------- |
-| `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
+| `auto` | Default | Picks `flashinfer_nvlink_one_sided` for EP without elastic EP, on any GB200/GB300/VR200 topology or on a single HGX B200/B300 node launched by vLLM (serving fits on that one node, any parallel layout), for BF16/FP16, ModelOpt NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend; `allgather_reducescatter` otherwise | Most deployments |
+| `allgather_reducescatter` | General purpose | Standard all2all using allgather/reducescatter primitives | Works with any EP+DP configuration |
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
-| `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
+| `mooncake_ep` | CUDA decode | Mooncake EP low-latency kernels, elastic buffers, BF16 and blockwise FP8 dispatch | Decode workloads on NVLink or RDMA |
+| `flashinfer_nvlink_one_sided` | MNNVL systems, single-node NVSwitch | FlashInfer's one-sided A2A strategy over NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
+
+### Mooncake EP
+
+Install a Mooncake package built with EP support, including the elastic legacy
+`Buffer.create_elastic()` API (Mooncake 0.3.14 or later). For CUDA 13:
+
+```bash
+uv pip install mooncake-transfer-engine-cuda13
+```
+
+Select `--all2all-backend mooncake_ep` with `--enable-expert-parallel` and
+`--data-parallel-size`. The backend uses elastic buffers for both fixed-size and
+elastic deployments, with native NVLink peer access within a node and IBGDA for
+RDMA peers. Dispatch supports BF16 and blockwise FP8 activations. The existing
+vLLM elastic EP lifecycle stages connections before activating new ranks and
+reserves capacity using `--elastic-ep-max-dp-size`.
+
+For elastic scaling, also set `--enable-elastic-ep`, `--enable-eplb`,
+`--data-parallel-backend ray`, and `--elastic-ep-max-dp-size` to the largest
+intended DP size. See [Elastic Expert Parallelism](online_serving/README.md#elastic-expert-parallelism-eep)
+for the scaling API.
 
 ## Single Node Deployment
 
@@ -138,19 +160,20 @@ EPv2 limitations:
 
 ### FlashInfer MegaMoE on SM107
 
-`--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` runs FlashInfer's CuTeDSL MegaMoE on SM107 (compute capability 10.7, NVIDIA Rubin) GPUs for NVFP4 expert checkpoints. ModelOpt NVFP4 is the validated format; compressed-tensors NVFP4 checkpoints have not yet been tested on SM107. It is never selected automatically.
+`--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` runs FlashInfer's CuTeDSL MegaMoE on SM107 (compute capability 10.7, NVIDIA Rubin) GPUs for NVFP4 and MXFP4 expert checkpoints. MXFP4 weights are used as stored and run with MXFP8 activations, whatever activation scheme the checkpoint declares. ModelOpt NVFP4 and the MXFP4 experts of DeepSeek-V4.1 are validated; other checkpoints, for example compressed-tensors, have not yet been tested on SM107. It is never selected automatically.
 
 Requirements:
 
 - The `nvshmem4py-cu13` package (`uv pip install nvshmem4py-cu13`).
 - `CUTE_DSL_ARCH=sm_107a` exported before vLLM starts.
-- `NVSHMEM_SYMMETRIC_SIZE`: `(2 * top_k + 1) * hidden_size * max_num_batched_tokens` bytes is enough; set it only if that exceeds NVSHMEM's default heap size.
+- `NVSHMEM_SYMMETRIC_SIZE`: the backend needs about `(2 * top_k + 2) * hidden_size * max_num_batched_tokens` bytes for each distinct MoE layer shape and weight format, summed. With speculative decoding the draft model's MoE layers count separately. Set it only if the sum exceeds NVSHMEM's default heap size.
 
 Behavior:
 
-- The checkpoint's activation input scales (the layer maximum over the EP group) set the activation and FC1-output quantization. A non-finite scale, or a layer whose scales are all zero, fails at load.
+- For NVFP4 experts, the checkpoint's activation input scales (the layer maximum over the EP group) set the activation and FC1-output quantization. A non-finite scale, or a layer whose scales are all zero, fails at load. MXFP4 experts have no such scales.
 - For DeepSeek-V4 routing (DeepSeek-V4 and V4.1 checkpoints), vLLM sets `FLASHINFER_SM107_MEGA_CHECK_ROUTES=0` unless it is already set, because that router can return non-finite scores on valid routes and a failed check stops the worker. This disables all of FlashInfer's SM107 route checks in the process (non-finite scores, expert ids out of range, duplicate ids), so a router bug is not caught on the device. Export `FLASHINFER_SM107_MEGA_CHECK_ROUTES=1` to enable them. Other models keep FlashInfer's default.
-- Not supported on SM107 with this backend: MXFP4 expert layers, including MXFP4 draft or MTP experts under speculative decoding; EPLB; and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
+- Draft and MTP expert layers use the target's `--moe-backend` unless `--speculative-config` sets `moe_backend` and the speculative method applies it; DSpark does not, so its drafts always use the target's. For example, with DeepSeek-V4.1-Flash-NVFP4 and `--speculative-config '{"method": "dspark", ...}'`, both the target's NVFP4 experts and the draft's MXFP4 experts run on this backend.
+- Not supported on SM107 with this backend: EPLB, and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
 
 ## Multi-Node Deployment
 
@@ -266,9 +289,11 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
 | `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
-| `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
+| `use_async` | Use non-blocking EPLB with policy computation in a persistent CPU subprocess per worker | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
+
+Async EPLB (`"use_async": true`, the default) runs policy computation in one persistent CPU subprocess per worker to isolate it from the inference worker's Python GIL. The policy and its CPU inputs must be serializable. Load collection, device-to-host copies, and expert migration retain their existing execution paths. The child limits native CPU thread pools to one thread; CPU core contention still depends on the deployment's CPU allocation. A failed or timed-out child reports an async worker error. Policy state is copied at startup and subsequently owned by the child; synchronous EPLB (`"use_async": false`) and profiling calls continue using the original policy instance in the inference worker. The 60-second IPC timeout covers the handshake or a planning request from sending through the complete response. Engine shutdown explicitly stops and reaps the planner. Custom policies holding locks or other process-local resources need [serialization support](../design/plugin_system.md); existing plugins may require adaptation to this default. There is no separate planner-process switch or automatic thread fallback.
 
 For example:
 
@@ -442,7 +467,7 @@ except Exception as e:
 
 - To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation. Add `"kv_connector_extra_config":{"startup_fill":true}` to fill the whole KV cache once at startup instead of in the decode steps that admit new requests (see the connector docstring for its limitations).
 
-- **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
+- **CUDAGraph capture**: Use `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
 
 ## Fault tolerance and scale-down recovery
 

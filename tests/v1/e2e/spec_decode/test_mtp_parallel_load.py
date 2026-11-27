@@ -19,8 +19,8 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.reader import Counter, Metric
 
-DEEPSEEK_MTP_MAIN_RANDOM = "vllm-project/deepseek_mtp_main_random"
-DEEPSEEK_MTP_DRAFT_RANDOM = "vllm-project/deepseek_mtp_draft_random"
+DEEPSEEK_MTP_MAIN_RANDOM = "vllm/deepseek_mtp_main_random"
+DEEPSEEK_MTP_DRAFT_RANDOM = "vllm/deepseek_mtp_draft_random"
 QWEN3_NEXT = "Qwen/Qwen3-Next-80B-A3B-Instruct"
 
 PROMPT = "The capital of France is"
@@ -70,7 +70,6 @@ def _inline_kwargs(config: InlineConfig, *, with_spec: bool) -> dict[str, Any]:
         "max_model_len": MAX_MODEL_LEN,
         "gpu_memory_utilization": GPU_MEM_UTIL,
         "enforce_eager": True,
-        "trust_remote_code": True,
         "disable_log_stats": False,
         # MLA + batch invariance currently disables prefix caching at runtime
         # (see vllm/v1/attention/backends/mla/common.py); set explicitly so the
@@ -213,7 +212,6 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: in
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=GPU_MEM_UTIL,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_prefix_caching=False,
     )
     spec_args = replace(
@@ -294,7 +292,6 @@ def test_mtp_drafter_runs_as_one_pp_stage(vllm_runner):
         enforce_eager=True,
         enable_prefix_caching=False,
         disable_log_stats=False,
-        trust_remote_code=False,
     ) as runner:
         _generate_token_ids_inline(runner.llm)
         assert _spec_decode_num_drafts(runner.llm.get_metrics()) > 0

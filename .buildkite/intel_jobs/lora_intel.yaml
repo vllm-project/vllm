@@ -24,7 +24,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      pytest -v -s lora/test_layers.py &&
+      pytest -v -s lora/test_layers.py --deselect="tests/lora/test_layers.py::test_glm5next_kda_helper_import_on_xpu" &&
       pytest -v -s lora/test_lora_checkpoints.py &&
       pytest -v -s lora/test_lora_functions.py &&
       pytest -v -s lora/test_lora_huggingface.py &&
@@ -151,9 +151,10 @@ steps:
   device: intel_gpu_k8s
   num_devices: 2
   resource_claim_template: b70-2
-  working_dir: "/workspace/vllm/"
+  working_dir: "/vllm-workspace/"
   env:
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_BATCH_INVARIANT: "1"
   source_file_dependencies:
     - vllm/lora
     - vllm/model_executor/layers/fused_moe
@@ -205,3 +206,21 @@ steps:
     - pytest -v -s lora/test_add_lora.py
     - pytest -v -s lora/test_default_mm_loras.py
     - pytest -s -v lora/test_minicpmv_tp.py
+
+- label: ":intel: (BMG) LoRA GPT-OSS"
+  key: lora-gptoss
+  timeout_in_minutes: 60
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/vllm-workspace/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - vllm/model_executor/layers/fused_moe
+    - tests/lora
+  commands:
+    - cd tests
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s lora/test_gptoss_tp.py

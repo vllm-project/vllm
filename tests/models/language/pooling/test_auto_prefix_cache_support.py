@@ -9,7 +9,7 @@ from tests.models.language.pooling.embed_utils import run_embedding_correctness_
 
 @pytest.mark.parametrize(
     "model",
-    ["vllm-project/Qwen2.5-1.5B-apeach"],
+    ["vllm/Qwen2.5-1.5B-apeach"],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models(
@@ -98,18 +98,16 @@ def test_embed_models(
 @pytest.mark.parametrize(
     "model",
     [
-        "vllm-project/e5-small",
+        "vllm/e5-small",
         "Alibaba-NLP/gte-Qwen2-1.5B-instruct",  # is_causal == False
-        "vllm-project/xlm-roberta-base-language-detection",
+        "vllm/xlm-roberta-base-language-detection",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_non_causal_models(
     hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
-    with vllm_runner(
-        model, max_model_len=512, dtype=dtype, trust_remote_code=False
-    ) as vllm_model:
+    with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         vllm_config = vllm_model.llm.llm_engine.vllm_config
         cache_config = vllm_config.cache_config
         assert not cache_config.enable_prefix_caching

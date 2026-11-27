@@ -13,7 +13,7 @@ from vllm.outputs import PoolingOutput
 from vllm.pooling_params import LateChunkingParams
 from vllm.tasks import PoolingTask
 
-MODEL_NAME = "vllm-project/multilingual-e5-small"
+MODEL_NAME = "vllm/multilingual-e5-small"
 
 prompt = "The chef prepared a delicious meal."
 prompt_token_ids = [0, 581, 21861, 133888, 10, 8, 150, 60744, 109911, 5, 2]
@@ -124,7 +124,6 @@ def test_nomic_late_chunking_without_special_tokens(vllm_runner):
     with vllm_runner(
         "nomic-ai/nomic-embed-text-v1",
         revision="720244025c1a7e15661a174c63cce63c8218e52b",
-        trust_remote_code=True,
         runner="pooling",
         pooler_config=PoolerConfig(task="token_embed"),
         dtype="float32",

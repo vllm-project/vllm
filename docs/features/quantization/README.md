@@ -5,6 +5,8 @@ Quantization trades off model precision for smaller memory footprint, allowing l
 !!! tip
     To get started with quantization, see [LLM Compressor](llm_compressor/README.md), a library for optimizing models for deployment with vLLM that supports FP8, INT8, INT4, and other quantization formats.
 
+    For the names vLLM accepts for methods and schemes, see [Methods and Schemes](formats.md). For the kernel backends of quantized linear layers, see [Kernel Backends](kernels.md).
+
 The following are the supported quantization formats for vLLM:
 
 - [AutoAWQ](auto_awq.md)
@@ -20,25 +22,14 @@ The following are the supported quantization formats for vLLM:
 - [Online Quantization](online.md)
 - [AMD Quark](quark.md)
 - [Quantized KV Cache](quantized_kvcache.md)
-- [TorchAO](torchao.md)
+- [TorchAO](torchao.md) (deprecated)
 - [FP8 ViT Encoder Attention](fp8_vit_attn.md)
 
-## Selecting Linear Backends per Quantization
+## Selecting Linear Backends
 
-`--linear-backend` selects one backend for all quantized linear layers. For
-mixed-precision models that use more than one linear quantization scheme, use
-`linear_backend_per_quant` to override the backend for individual schemes:
-
-```bash
-vllm serve <model> \
-  --linear-backend cutlass \
-  --kernel-config '{"linear_backend_per_quant":{"nvfp4_w4a16":"humming"}}'
-```
-
-Here, NVFP4 W4A16 linear layers use Humming, while all other quantized linear
-layers use CUTLASS. Per-quantization overrides take precedence over
-`--linear-backend`; schemes without an override continue to use the global
-setting, including automatic selection when it is `auto`.
+To choose the kernel backend of quantized linear layers, for all of them with
+`--linear-backend` or per quantization type with `linear_backend_per_quant`,
+see [Kernel Backends](kernels.md#selecting-a-backend).
 
 ## Hadamard Input Transforms (QuIP)
 

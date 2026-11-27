@@ -23,6 +23,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
 )
@@ -39,6 +40,14 @@ if TYPE_CHECKING:
 JobId = int
 
 TIER_LABEL = "tier"
+
+
+@dataclass(slots=True)
+class SecondaryTierRequestContext(RequestOffloadingContext):
+    """Per-request offloading preferences of a secondary tier."""
+
+    # Whether newly stored primary chunks are cascaded to this tier.
+    receives_stores: bool = True
 
 
 class TieringOffloadingMetrics:
@@ -184,12 +193,18 @@ class SecondaryTierManager(ABC):
     # the tier tolerates those calls off the scheduler thread.
     tolerates_off_thread_polling: ClassVar[bool] = False
 
+    # Direction(s) in which this tier may transfer data. The default keeps an
+    # instance built without __init__ (a stub, a test double) readable as
+    # readwrite instead of raising; __init__ overrides it from config.
+    access_mode: OffloadAccessMode = OffloadAccessMode.READWRITE
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
         backpressure_detector: BackpressureDetector | None = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ) -> None:
         """Args:
         offloading_spec: Offloading configuration.
@@ -197,6 +212,9 @@ class SecondaryTierManager(ABC):
         tier_type: Tier type identifier, set by SecondaryTierFactory
             from the registered tier type.
         backpressure_detector: Optional `BackpressureDetector`.
+        access_mode: Direction(s) in which this tier may transfer data. The
+            tiering manager skips stores to a tier whose access_mode cannot
+            write, and lookups of a tier whose access_mode cannot read.
 
         """
         self._offloading_spec = offloading_spec
@@ -208,6 +226,7 @@ class SecondaryTierManager(ABC):
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self._bp_detector = backpressure_detector
+        self.access_mode: OffloadAccessMode = OffloadAccessMode.from_config(access_mode)
 
     @property
     def block_size_bytes(self) -> int:
@@ -312,18 +331,17 @@ class SecondaryTierManager(ABC):
         """Take KV events for storage state owned by this tier."""
         return ()
 
-    @abstractmethod
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         """Called when a new request is first seen by the scheduler.
 
-        Returns a RequestOffloadingContext expressing this tier's preference
+        Returns a SecondaryTierRequestContext expressing this tier's preference
         for how chunks should be offloaded for this request.
 
         Args:
             req_context: Per-request context.
 
         """
-        pass
+        return SecondaryTierRequestContext()
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Called when a request has finished.

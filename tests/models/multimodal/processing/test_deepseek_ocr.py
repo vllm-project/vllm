@@ -24,10 +24,16 @@ from vllm.model_executor.models.deepseek_ocr import (
     DeepseekOCRImagePixelInputs,
 )
 from vllm.model_executor.models.deepseek_ocr2 import DeepseekOCR2ForCausalLM
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import get_mm_max_toks_per_item
 from vllm.transformers_utils.processors.deepseek_ocr import (
+    MIN_CROPS,
     DeepseekOCRProcessor,
     ImageTransform,
+    calculate_aspect_ratios,
 )
+
+from ...utils import build_model_context
 
 MODEL_ID = "deepseek-ai/DeepSeek-OCR"
 
@@ -242,3 +248,63 @@ class TestDeepseekOCRZeroSumPixelsAccepted:
         )
         assert image_input is not None
         assert torch.equal(image_input.data, pixel_values)
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("model_id", [MODEL_ID, "deepseek-ai/DeepSeek-OCR-2"])
+@pytest.mark.parametrize("kwargs", [{}, {"crop_mode": False}, {"max_crops": 1}])
+@pytest.mark.parametrize("prompt_as_tokens", [False, True])
+def test_crop_kwargs_match_processed_image_tokens(model_id, kwargs, prompt_as_tokens):
+    """Crop overrides must reserve the tokens actually emitted by the processor."""
+    images = [Image.new("RGB", (1600, 1200)), Image.new("RGB", (400, 300))]
+    results = []
+    for on_engine in (False, True):
+        ctx = build_model_context(
+            model_id,
+            mm_processor_kwargs=kwargs if on_engine else None,
+            limit_mm_per_prompt={"image": 2},
+            mm_processor_cache_gb=0.01,
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        hf = processor.info.get_hf_processor(**kwargs)
+        prompt = "<image>\n<image>\nRead the text."
+        expected = hf(prompt=prompt, images=images, **kwargs)[
+            "num_image_tokens"
+        ].tolist()
+        if prompt_as_tokens:
+            prompt = ctx.get_tokenizer().encode(prompt)
+        for _ in range(2):
+            result = processor(
+                prompt,
+                mm_items=processor.info.parse_mm_data({"image": images}),
+                hf_processor_mm_kwargs={} if on_engine else kwargs,
+            )
+            assert [p.length for p in result["mm_placeholders"]["image"]] == expected
+        results.append(result["prompt_token_ids"])
+    assert results[0] == results[1]
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("model_id", [MODEL_ID, "deepseek-ai/DeepSeek-OCR-2"])
+@pytest.mark.parametrize("kwargs", [None, {"max_crops": 9}])
+def test_image_budget_covers_every_tile_layout(model_id, kwargs):
+    ctx = build_model_context(
+        model_id, mm_processor_kwargs=kwargs, limit_mm_per_prompt={"image": 32}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf = processor.info.get_hf_processor()
+    tile = hf.image_size
+    images = [
+        Image.new("RGB", (tile * width, tile * height))
+        for width, height in calculate_aspect_ratios(MIN_CROPS, hf.max_crops)
+    ]
+    lengths = [
+        processor(
+            "<image>",
+            mm_items=processor.info.parse_mm_data({"image": [image]}),
+            hf_processor_mm_kwargs={},
+        )["mm_placeholders"]["image"][0].length
+        for image in images
+    ]
+    budget = get_mm_max_toks_per_item(processor, {"image": 1}, None)["image"]
+    assert budget == max(lengths)

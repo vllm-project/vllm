@@ -78,24 +78,22 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
 
 
 def test_logging_config_cli_args(serve_parser):
-    with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
-        args = serve_parser.parse_args(
-            [
-                "--logging-config",
-                '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
-                "--logging-config.formatter",
-                "json",
-                "--log-level",
-                "DEBUG",
-                "--log-config-file",
-                "/tmp/flat.json",
-            ]
-        )
+    args = serve_parser.parse_args(
+        [
+            "--logging-config",
+            (
+                '{"log_level":"WARNING","formatter":"json",'
+                '"pylogging_config_file":"/tmp/json.json"}'
+            ),
+            "--log-level",
+            "DEBUG",
+        ]
+    )
 
     config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
     assert config.log_level == "DEBUG"
     assert config.formatter == "json"
-    assert config.pylogging_config_file == "/tmp/flat.json"
+    assert config.pylogging_config_file == "/tmp/json.json"
 
 
 ### Tests for LoRA module parsing
@@ -247,6 +245,30 @@ def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
     args = parser.parse_args(["--grpc-port", "50051"])
     with pytest.raises(ValueError, match="--grpc-port requires"):
         validate_parsed_serve_args(args)
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "ok"),
+    [
+        (["--no-enable-scale-out"], False),
+        (["--enable-scale-out"], True),
+        (["--no-enable-scale-out", "--tokens-only"], True),
+    ],
+)
+def test_mm_tensor_refs_config_requires_generate_endpoint(serve_parser, extra_args, ok):
+    """The config only does anything where /inference/v1/generate is served."""
+    args = serve_parser.parse_args(
+        [
+            "--mm-tensor-refs-config",
+            '{"s3_allowed_uri_prefix": "s3://bucket/prefix"}',
+            *extra_args,
+        ]
+    )
+    if ok:
+        validate_parsed_serve_args(args)
+    else:
+        with pytest.raises(ValueError, match="--mm-tensor-refs-config requires"):
+            validate_parsed_serve_args(args)
 
 
 def test_enable_auto_choice_fails_without_tool_call_parser(serve_parser):
@@ -473,23 +495,37 @@ def test_default_chat_template_kwargs_default_none(serve_parser):
 
 
 @pytest.mark.parametrize(
-    "default_kwargs,cohere_format,expected",
+    "default_kwargs,cohere_format,tokenizer_mode,expected",
     [
-        (None, "cmd3", {"cohere_format": "cmd3"}),
+        (None, "cmd3", "cohere", {"cohere_format": "cmd3"}),
+        (None, "cmd4", "cohere", {"cohere_format": "cmd4"}),
+        (None, "cmd4", "mistral", {}),
+        (None, "cmd4", "hf", {}),
+        (None, "cmd4", "auto", {}),
+        (None, "cmd4", None, {}),
         (
             {"cohere_format": "cmd4", "custom": True},
             "cmd3",
+            "cohere",
             {"cohere_format": "cmd4", "custom": True},
         ),
+        ({"custom": True}, "cmd3", "mistral", {"custom": True}),
     ],
 )
-def test_resolve_default_chat_template_kwargs(default_kwargs, cohere_format, expected):
+def test_resolve_default_chat_template_kwargs(
+    default_kwargs, cohere_format, tokenizer_mode, expected
+):
     args = SimpleNamespace(
         default_chat_template_kwargs=default_kwargs,
         cohere_format=cohere_format,
     )
 
-    assert cli_args_module.resolve_default_chat_template_kwargs(args) == expected
+    assert (
+        cli_args_module.resolve_default_chat_template_kwargs(
+            args, tokenizer_mode=tokenizer_mode
+        )
+        == expected
+    )
 
 
 def test_default_chat_template_kwargs_invalid_json(serve_parser):

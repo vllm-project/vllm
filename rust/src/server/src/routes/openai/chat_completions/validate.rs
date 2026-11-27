@@ -3,17 +3,14 @@
 
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
-use crate::model_names::ServedModelNames;
-use crate::routes::openai::utils::types::{ChatMessage, Tool};
-use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
-/// Enforce the minimal compatibility contract for the Rust OpenAI server.
-pub(super) fn validate_request_compat(
-    request: &ChatCompletionRequest,
-    served_model_names: &ServedModelNames,
-) -> Result<(), ApiError> {
-    served_model_names.check(request.model.as_deref())?;
-
+/// Validate OpenAI chat-completions protocol invariants and reject
+/// unimplemented request fields.
+///
+/// Cross-route domain rules (sampling bounds, `max_tokens`, logprobs, token
+/// IDs, `cache_salt`, chat messages/tools) belong in `vllm-text` or
+/// `vllm-chat`, not here.
+pub(super) fn validate_request(request: &ChatCompletionRequest) -> Result<(), ApiError> {
     if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
     {
         bail_invalid_request!(
@@ -36,35 +33,21 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if let Some(prompt_logprobs) = request.prompt_logprobs {
-        if prompt_logprobs < 0 && prompt_logprobs != -1 {
-            bail_invalid_request!(
-                param = "prompt_logprobs",
-                "prompt_logprobs must be a non-negative value or -1."
-            );
-        }
-
-        if request.stream && (prompt_logprobs > 0 || prompt_logprobs == -1) {
-            bail_invalid_request!(
-                param = "prompt_logprobs",
-                "prompt_logprobs are not available when stream=true."
-            );
-        }
+    if request.stream && request.prompt_logprobs.is_some_and(|n| n > 0 || n == -1) {
+        bail_invalid_request!(
+            param = "prompt_logprobs",
+            "prompt_logprobs are not available when stream=true."
+        );
     }
 
-    if let Some(tools) = request.tools.as_ref() {
-        validate_function_tools(tools, "tools")?;
-    }
+    reject_unsupported_fields(request)?;
 
-    for message in &request.messages {
-        if let ChatMessage::Developer {
-            tools: Some(tools), ..
-        } = message
-        {
-            validate_function_tools(tools, "messages[].tools")?;
-        }
-    }
+    Ok(())
+}
 
+/// Reject request fields that are accepted for deserialization but not yet
+/// implemented in the Rust frontend.
+fn reject_unsupported_fields(request: &ChatCompletionRequest) -> Result<(), ApiError> {
     if request.use_beam_search {
         bail_invalid_request!(
             param = "use_beam_search",
@@ -72,48 +55,23 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    // ---- Reject parameters that are accepted for deserialization but not yet
-    // implemented ----
-
     // Python's default is 1.0, which SDKs may send explicitly.
-    reject_non_default(
-        request.length_penalty.filter(|penalty| *penalty != 1.0).as_ref(),
-        "length_penalty",
-        "length_penalty is not supported.",
-    )?;
-    validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
-    reject_non_default(
-        request.media_io_kwargs.as_ref(),
-        "media_io_kwargs",
-        "media_io_kwargs is not supported.",
-    )?;
-    reject_non_default(
-        request.mm_processor_kwargs.as_ref(),
-        "mm_processor_kwargs",
-        "mm_processor_kwargs is not supported.",
-    )?;
-
-    Ok(())
-}
-
-/// Reject one option unless it is entirely absent.
-fn reject_non_default<T>(
-    value: Option<&T>,
-    param: &'static str,
-    message: &str,
-) -> Result<(), ApiError> {
-    if value.is_some() {
-        bail_invalid_request!(param = param, "{}", message);
+    if request.length_penalty.is_some_and(|penalty| penalty != 1.0) {
+        bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
     }
-    Ok(())
-}
-
-fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), ApiError> {
-    for tool in tools {
-        if tool.tool_type != "function" {
-            bail_invalid_request!(param = param, "Only function tools are supported.");
-        }
+    if request.media_io_kwargs.is_some() {
+        bail_invalid_request!(
+            param = "media_io_kwargs",
+            "media_io_kwargs is not supported."
+        );
     }
+    if request.mm_processor_kwargs.is_some() {
+        bail_invalid_request!(
+            param = "mm_processor_kwargs",
+            "mm_processor_kwargs is not supported."
+        );
+    }
+
     Ok(())
 }
 
@@ -121,21 +79,15 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
 mod tests {
     use std::collections::HashMap;
 
-    use crate::routes::openai::utils::types::ReasoningEffort;
     use serde_json::json;
-    use validator::Validate as _;
 
-    use super::validate_request_compat;
-    use crate::model_names::ServedModelNames;
+    use super::validate_request;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
-        ChatMessage, Function, MessageContent, StringOrArray, Tool, ToolChoice, ToolChoiceValue,
+        ChatMessage, Function, MessageContent, ReasoningEffort, StringOrArray, Tool, ToolChoice,
+        ToolChoiceValue,
     };
-
-    fn served(names: &[&str]) -> ServedModelNames {
-        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect())
-    }
 
     fn non_streaming_request(stream_options: serde_json::Value) -> ChatCompletionRequest {
         serde_json::from_value(json!({
@@ -160,54 +112,35 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_accepts_empty_stream_options_without_streaming() {
+    fn validate_request_accepts_empty_stream_options_without_streaming() {
         let request = non_streaming_request(json!({}));
-        request.validate().expect("schema validation accepts empty stream_options");
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("empty stream_options sets nothing");
+        validate_request(&request).expect("empty stream_options sets nothing");
     }
 
     #[test]
-    fn validate_request_compat_rejects_stream_options_without_streaming() {
+    fn validate_request_rejects_stream_options_without_streaming() {
         let cases = [
             json!({"include_usage": false}),
             json!({"continuous_usage_stats": true}),
         ];
         for stream_options in cases {
             let request = non_streaming_request(stream_options.clone());
-            assert!(request.validate().is_err(), "{stream_options}");
-            assert!(
-                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
-                "{stream_options}"
-            );
+            assert!(validate_request(&request).is_err(), "{stream_options}");
         }
     }
 
     #[test]
-    fn validate_request_compat_accepts_stop() {
+    fn validate_request_accepts_stop() {
         let request = ChatCompletionRequest {
             stop: Some(StringOrArray::String("stop".to_string())),
             ..base_request()
         };
 
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("stop strings should be accepted");
+        validate_request(&request).expect("stop strings should be accepted");
     }
 
     #[test]
-    fn validate_request_compat_accepts_default_model_inputs() {
-        for model in [None, Some(String::new())] {
-            let request = ChatCompletionRequest {
-                model,
-                ..base_request()
-            };
-            validate_request_compat(&request, &served(&["served-model"]))
-                .expect("default model input should select the primary served model");
-        }
-    }
-
-    #[test]
-    fn validate_request_compat_accepts_non_zero_penalties_and_function_tools() {
+    fn validate_request_accepts_non_zero_penalties_and_function_tools() {
         let request = ChatCompletionRequest {
             frequency_penalty: Some(0.5),
             presence_penalty: Some(0.25),
@@ -216,8 +149,7 @@ mod tests {
             seed: Some(7),
             ..base_request()
         };
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("sampling fields should be accepted");
+        validate_request(&request).expect("sampling fields should be accepted");
 
         let request = ChatCompletionRequest {
             tools: Some(vec![Tool {
@@ -225,7 +157,7 @@ mod tests {
                 function: Function {
                     name: "tool".to_string(),
                     description: None,
-                    parameters: json!({}),
+                    parameters: Some(serde_json::Map::new()),
                     strict: None,
                     defer_loading: None,
                 },
@@ -233,8 +165,7 @@ mod tests {
             }]),
             ..base_request()
         };
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("function tools should be accepted");
+        validate_request(&request).expect("function tools should be accepted");
 
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::Developer {
@@ -244,7 +175,7 @@ mod tests {
                     function: Function {
                         name: "tool".to_string(),
                         description: None,
-                        parameters: json!({}),
+                        parameters: Some(serde_json::Map::new()),
                         strict: None,
                         defer_loading: None,
                     },
@@ -254,62 +185,35 @@ mod tests {
             }],
             ..base_request()
         };
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("developer function tools should be accepted");
+        validate_request(&request).expect("developer function tools should be accepted");
     }
 
     #[test]
-    fn validate_request_compat_rejects_non_function_developer_tools() {
-        let request = ChatCompletionRequest {
-            messages: vec![ChatMessage::Developer {
-                content: MessageContent::Text("policy".to_string()),
-                tools: Some(vec![Tool {
-                    tool_type: "mcp".to_string(),
-                    function: Function {
-                        name: "tool".to_string(),
-                        description: None,
-                        parameters: json!({}),
-                        strict: None,
-                        defer_loading: None,
-                    },
-                    defer_loading: None,
-                }]),
-                name: None,
-            }],
-            ..base_request()
-        };
-
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_only_non_default_length_penalty() {
+    fn validate_request_rejects_only_non_default_length_penalty() {
         let request = ChatCompletionRequest {
             length_penalty: Some(1.0),
             ..base_request()
         };
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("the default length_penalty should be accepted");
+        validate_request(&request).expect("the default length_penalty should be accepted");
 
         let request = ChatCompletionRequest {
             length_penalty: Some(2.0),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        assert!(validate_request(&request).is_err());
     }
 
     #[test]
-    fn validate_request_compat_accepts_output_logprobs() {
+    fn validate_request_accepts_output_logprobs() {
         let request = ChatCompletionRequest {
             logprobs: true,
             ..base_request()
         };
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("logprobs should be accepted");
+        validate_request(&request).expect("logprobs should be accepted");
     }
 
     #[test]
-    fn validate_request_compat_accepts_reasoning_effort() {
+    fn validate_request_accepts_reasoning_effort() {
         let request = ChatCompletionRequest {
             reasoning_effort: Some(ReasoningEffort::Max),
             chat_template_kwargs: Some(HashMap::from([(
@@ -319,108 +223,86 @@ mod tests {
             ..base_request()
         };
 
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("reasoning_effort should be accepted");
+        validate_request(&request).expect("reasoning_effort should be accepted");
     }
 
     #[test]
-    fn validate_request_compat_accepts_spaces_between_special_tokens_false() {
+    fn validate_request_accepts_spaces_between_special_tokens_false() {
         let request = ChatCompletionRequest {
             spaces_between_special_tokens: false,
             ..base_request()
         };
 
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("spaces_between_special_tokens=false should be accepted");
+        validate_request(&request).expect("spaces_between_special_tokens=false should be accepted");
     }
 
     #[test]
-    fn validate_request_compat_accepts_include_reasoning_false() {
+    fn validate_request_accepts_include_reasoning_false() {
         let request = ChatCompletionRequest {
             include_reasoning: false,
             ..base_request()
         };
 
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("include_reasoning=false should be accepted");
+        validate_request(&request).expect("include_reasoning=false should be accepted");
     }
 
     #[test]
-    fn validate_request_compat_rejects_top_logprobs_without_logprobs() {
+    fn validate_request_rejects_top_logprobs_without_logprobs() {
         for top_logprobs in [-1, 1] {
             let request = ChatCompletionRequest {
                 top_logprobs: Some(top_logprobs),
                 ..base_request()
             };
-            assert!(request.validate().is_err(), "{top_logprobs}");
-            assert!(
-                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
-                "{top_logprobs}"
-            );
+            assert!(validate_request(&request).is_err(), "{top_logprobs}");
         }
     }
 
     #[test]
-    fn validate_request_compat_accepts_zero_top_logprobs_without_logprobs() {
+    fn validate_request_accepts_zero_top_logprobs_without_logprobs() {
         let request = ChatCompletionRequest {
             top_logprobs: Some(0),
             ..base_request()
         };
-        request.validate().expect("schema validation accepts top_logprobs=0");
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("top_logprobs=0 does not request alternatives");
+        validate_request(&request).expect("top_logprobs=0 does not request alternatives");
     }
 
     #[test]
-    fn validate_request_compat_rejects_streaming_prompt_logprobs_requests() {
+    fn validate_request_rejects_streaming_prompt_logprobs_requests() {
         let request = ChatCompletionRequest {
             prompt_logprobs: Some(1),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        assert!(validate_request(&request).is_err());
 
         let request = ChatCompletionRequest {
             prompt_logprobs: Some(-1),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        assert!(validate_request(&request).is_err());
     }
 
     #[test]
-    fn validate_request_compat_rejects_invalid_prompt_logprobs_value() {
-        let request = ChatCompletionRequest {
-            stream: false,
-            prompt_logprobs: Some(-2),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-    }
-
-    #[test]
-    fn validate_request_compat_accepts_response_format() {
+    fn validate_request_accepts_response_format() {
         let request = ChatCompletionRequest {
             response_format: Some(ResponseFormat::Text),
             ..base_request()
         };
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("response_format=text should be accepted");
+        validate_request(&request).expect("response_format=text should be accepted");
 
         let request = ChatCompletionRequest {
             response_format: Some(ResponseFormat::JsonObject),
             ..base_request()
         };
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("response_format=json_object should be accepted");
+        validate_request(&request).expect("response_format=json_object should be accepted");
     }
 
     #[test]
-    fn validate_request_compat_accepts_noop_tool_choice_none() {
+    fn validate_request_accepts_noop_tool_choice_none() {
         let request = ChatCompletionRequest {
             tool_choice: Some(ToolChoice::Value(ToolChoiceValue::None)),
             ..base_request()
         };
 
-        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-            .expect("tool_choice=none is ok");
+        validate_request(&request).expect("tool_choice=none is ok");
     }
 }

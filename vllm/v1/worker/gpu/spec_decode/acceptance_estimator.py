@@ -131,8 +131,11 @@ def _refit_kernel(
     # total sample count.
     total_n = tl.sum(n, axis=0)
     step_w *= total_n / (total_n + DAMPING)
-    # Mask out NaNs and steps that would drive the slope negative.
-    step_w = tl.where((step_w == step_w) & (w + step_w >= 0.0), step_w, 0.0)
+    # Mask out non-finite steps and steps that would drive the slope negative.
+    # A NaN check alone would let +inf through, as w + inf >= 0.
+    step_w = tl.where(
+        (tl.abs(step_w) < float("inf")) & (w + step_w >= 0.0), step_w, 0.0
+    )
     # Update the shared slope.
     new_w = w + step_w
 
@@ -140,8 +143,8 @@ def _refit_kernel(
     step_bias = (g1_k - b_k * step_w) / c_k
     # Damp by the position's sample count.
     step_bias *= n / (n + DAMPING)
-    # Mask out NaNs.
-    step_bias = tl.where(step_bias == step_bias, step_bias, 0.0)
+    # Mask out non-finite steps.
+    step_bias = tl.where(tl.abs(step_bias) < float("inf"), step_bias, 0.0)
     # Update the per-position intercepts.
     new_bias = bias + step_bias
 

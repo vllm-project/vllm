@@ -60,11 +60,14 @@ def get_memory_info(*args: Any, **kwargs: Any) -> tuple[int, int]:
 
 
 torch.Event = _EventPlaceholder
+torch.Stream = _StreamPlaceholder
 torch.cuda.Event = _EventPlaceholder
 torch.cuda.Stream = _StreamPlaceholder
 torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.cuda.stream = lambda *args, **kwargs: _StreamPlaceholder()
+torch.accelerator.set_stream = noop
+torch.accelerator.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop
 torch.accelerator.empty_cache = empty_cache_noop
 torch.Tensor.pin_memory = fake_pin_memory
@@ -83,6 +86,11 @@ def async_tensor_h2d(
 ) -> torch.Tensor:
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
+        if out is None:
+            # Triton specializes on pointer alignment, so a tensor aliasing a
+            # numpy view recompiles the first time a batch arrives unaligned.
+            # Torch allocations are always aligned, so warmup stays valid.
+            return data.to(dtype=dtype, copy=True)
     if not isinstance(data, torch.Tensor):
         data = torch.tensor(data, dtype=dtype, device="cpu")
     elif out is None:

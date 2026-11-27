@@ -7,11 +7,17 @@ from typing import Annotated, Literal, Protocol, TypeAlias, TypedDict
 
 import torch
 import torch.nn as nn
+import transformers
+from packaging.version import Version
 from transformers import BatchFeature, LlavaOnevisionConfig, LlavaOnevisionProcessor
+from transformers.image_processing_utils import get_size_dict
+from transformers.image_transforms import get_size_with_aspect_ratio
+from transformers.image_utils import get_image_size_for_max_height_width
 from transformers.models.llava_onevision.modeling_llava_onevision import (
     get_anyres_image_grid_shape,
     unpad_image,
 )
+from transformers.video_utils import make_batched_metadata
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -30,6 +36,11 @@ from vllm.multimodal.parse import (
     VideoProcessorItems,
 )
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing.context import (
+    estimate_video_pixel_element_size,
+    get_video_frame_dimensions,
+    validate_video_preprocessing_budget,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -51,6 +62,10 @@ from .utils import (
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
+
+# Before 5.18, Transformers sampled an explicit frame count with a float-step
+# `arange`, which can return one more index than requested.
+_FLOAT_STEP_FRAME_SAMPLING = Version(transformers.__version__) < Version("5.18.0.dev0")
 
 
 class LlavaOnevisionVideoPixelInputs(TensorSchema):
@@ -126,6 +141,8 @@ class LlavaOnevisionInputsByModality(TypedDict, total=False):
 
 
 class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
+    default_mm_limits = {"video": 32}
+
     def get_hf_config(self) -> LlavaOnevisionLikeConfig:
         return self.ctx.get_hf_config(LlavaOnevisionConfig)
 
@@ -317,6 +334,22 @@ class LlavaOnevisionMultiModalProcessor(
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
+    @staticmethod
+    def _get_video_resize_shape(
+        height: int, width: int, size: Mapping[str, int]
+    ) -> tuple[int, int]:
+        if shortest_edge := size.get("shortest_edge"):
+            return get_size_with_aspect_ratio(
+                (height, width), shortest_edge, size.get("longest_edge")
+            )
+        if size.get("max_height") and size.get("max_width"):
+            return get_image_size_for_max_height_width(
+                (height, width), size["max_height"], size["max_width"]
+            )
+        if size.get("height") and size.get("width"):
+            return size["height"], size["width"]
+        raise ValueError(f"Invalid video resize size: {size}")
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
@@ -370,14 +403,82 @@ class LlavaOnevisionMultiModalProcessor(
             image_outputs = {}
 
         pixel_values_videos = []
+        video_tensor_bytes = 0
+        processor = self.info.get_hf_processor(**hf_kwargs)
+        video_processor = processor.video_processor
+        video_kwargs = self.info.ctx.get_hf_processor_kwargs(
+            processor, hf_kwargs, scope="videos_kwargs"
+        )
+        size = None
+        if video_kwargs.get("do_resize", video_processor.do_resize):
+            size = get_size_dict(
+                size=video_kwargs.get("size", video_processor.size),
+                default_to_square=video_kwargs.get(
+                    "default_to_square", video_processor.default_to_square
+                ),
+            )
+        crop_size = None
+        if video_kwargs.get("do_center_crop", video_processor.do_center_crop):
+            crop_size = get_size_dict(
+                video_kwargs.get("crop_size", video_processor.crop_size),
+                param_name="crop_size",
+            )
+            if "height" not in crop_size or "width" not in crop_size:
+                raise ValueError(f"Invalid video crop size: {crop_size}")
+
         for video in videos:
+            frame_count = len(video)
+            if video_kwargs.get("do_sample_frames", video_processor.do_sample_frames):
+                try:
+                    metadata = make_batched_metadata(
+                        [video], video_kwargs.get("video_metadata")
+                    )[0]
+                    # Length of HF's `sample_frames` output, without allocating
+                    # the indices. HF rejects invalid settings before sampling.
+                    num_frames = video_kwargs.get(
+                        "num_frames", video_processor.num_frames
+                    )
+                    fps = video_kwargs.get("fps", video_processor.fps)
+                    frame_count = metadata.total_num_frames
+                    if None not in (fps, metadata.fps) and num_frames is None:
+                        num_frames = max(1, int(frame_count / metadata.fps * fps))
+                    if num_frames is not None:
+                        if _FLOAT_STEP_FRAME_SAMPLING and 0 < num_frames <= frame_count:
+                            # Length of `torch.arange(0, total, total / num_frames)`.
+                            num_frames = math.ceil(
+                                frame_count / (frame_count / num_frames)
+                            )
+                        frame_count = min(num_frames, frame_count)
+                except (ArithmeticError, AttributeError, IndexError, TypeError) as exc:
+                    raise ValueError("Invalid video sampling settings.") from exc
+            height, width, channels = get_video_frame_dimensions(video)
+            if size is not None:
+                height, width = self._get_video_resize_shape(height, width, size)
+            if crop_size is not None:
+                height = max(height, crop_size["height"])
+                width = max(width, crop_size["width"])
+            estimated_bytes = (
+                frame_count
+                * height
+                * width
+                * channels
+                * estimate_video_pixel_element_size(
+                    video,
+                    video_processor,
+                    video_kwargs,
+                )
+            )
+            validate_video_preprocessing_budget(video_tensor_bytes + estimated_bytes)
             item_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_kwargs),
+                processor,
                 dict(text=video_token, **{"videos": video}),
                 hf_kwargs,
             )
 
-            pixel_values_videos.append(item_outputs["pixel_values_videos"][0])
+            video_pixels = item_outputs["pixel_values_videos"][0]
+            video_tensor_bytes += video_pixels.untyped_storage().nbytes()
+            validate_video_preprocessing_budget(video_tensor_bytes)
+            pixel_values_videos.append(video_pixels)
 
         video_outputs = {"pixel_values_videos": pixel_values_videos}
 
@@ -415,11 +516,14 @@ class LlavaOnevisionMultiModalProcessor(
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
                 assert isinstance(videos, VideoProcessorItems)
-                image_size = videos.get_frame_size(item_idx)
+                pixel_values = out_mm_kwargs["video"][item_idx][
+                    "pixel_values_videos"
+                ].data
+                assert isinstance(pixel_values, torch.Tensor)
                 num_video_tokens = self.info.get_num_video_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    num_frames=videos.get_num_frames(item_idx),
+                    image_width=pixel_values.shape[-1],
+                    image_height=pixel_values.shape[-2],
+                    num_frames=pixel_values.shape[0],
                 )
 
             return [video_token_id] * num_video_tokens
@@ -819,15 +923,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             self.vision_tower, video_pixels_flat
         )
 
-        image_newline = self.image_newline[None, None, :]
+        image_newline = self.image_newline[None, :]
 
         return [
             torch.cat(
                 (
-                    embeds.reshape(1, num_frame * embeddings_flat.shape[1], -1),
+                    embeds.reshape(num_frame * embeddings_flat.shape[1], -1),
                     image_newline,
                 ),
-                dim=1,
+                dim=0,
             )
             for num_frame, embeds in zip(
                 frames_per_video,

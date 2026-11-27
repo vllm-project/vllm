@@ -21,7 +21,7 @@ This enables a unit test that loads dummy weights to ensure that the model can b
 
 !!! note
     CI should not depend on checkpoints hosted on personal Hugging Face accounts, which can be changed or deleted at any time.
-    If a test needs such a checkpoint (e.g. a tiny random model or LoRA you created), ask a maintainer to transfer or copy it into the [vllm-project](https://hf.co/vllm-project) organization and add it to the [CI collection](https://hf.co/collections/vllm-project/ci-69cbfc30455b12ac0c6b9b91).
+    If a test needs such a checkpoint (e.g. a tiny random model or LoRA you created), ask a maintainer to transfer or copy it into the [vllm-project](https://hf.co/vllm) organization and add it to the [CI collection](https://hf.co/collections/vllm/ci-69cbfc30455b12ac0c6b9b91).
 
 ## Optional Tests
 

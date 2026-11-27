@@ -15,7 +15,7 @@ from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 
 MODELS = [
-    EmbedModelInfo("vllm-project/multilingual-e5-small", is_matryoshka=False),
+    EmbedModelInfo("vllm/multilingual-e5-small", is_matryoshka=False),
     EmbedModelInfo(
         "Snowflake/snowflake-arctic-embed-m-v1.5",
         is_matryoshka=True,
@@ -53,9 +53,7 @@ def server(model_info, dtype: str):
 
     if model_info.name == "Snowflake/snowflake-arctic-embed-m-v1.5":
         # Manually enable Matryoshka Embeddings
-        args.extend(
-            ["--trust_remote_code", "--hf_overrides", '{"matryoshka_dimensions":[256]}']
-        )
+        args.extend(["--hf_overrides", '{"matryoshka_dimensions":[256]}'])
 
     with RemoteOpenAIServer(model_info.name, args) as remote_server:
         yield remote_server

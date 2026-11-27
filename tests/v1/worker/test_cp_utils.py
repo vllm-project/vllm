@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.worker.cp_utils import should_skip_dcp_context_attention
+from vllm.v1.worker.cp_utils import (
+    should_skip_dcp_context_attention,
+    should_split_fa2_dcp_context_attention,
+    split_dcp_context_queries,
+)
 
 
 def test_cp_checks_allow_a_replicated_draft_backend_without_dcp(monkeypatch):
@@ -77,3 +82,32 @@ def test_skip_gate_rank_invariant_with_divergent_local_context(
     assert max(local_maxes) > 0
     # The batch still has context globally, so no rank may skip.
     assert not should_skip_dcp_context_attention(context_kv_lens)
+
+
+def _dcp_split(seq_lens, query_lens, max_query_len=None):
+    query_start_loc = torch.tensor(
+        [0] + list(itertools.accumulate(query_lens)), dtype=torch.int32
+    )
+    return split_dcp_context_queries(
+        query_start_loc,
+        torch.tensor(seq_lens, dtype=torch.int32),
+        max_query_len if max_query_len is not None else max(query_lens),
+        sum(query_lens),
+    )
+
+
+def test_split_dcp_context_queries_counts_a_stale_max_query_len_batch():
+    """A stale max_query_len must not misreport an all-decode batch as extends."""
+    num_decodes, num_extends, num_decode_tokens, num_extend_tokens = _dcp_split(
+        [50, 60, 70], [1, 1, 1], max_query_len=4
+    )
+    assert (num_decodes, num_extends) == (3, 0)
+    assert (num_decode_tokens, num_extend_tokens) == (3, 0)
+    # The gate must not arm: there are no prefills to carve away.
+    assert not should_split_fa2_dcp_context_attention(
+        fa_version=2,
+        max_query_len=4,
+        num_reqs=3,
+        num_decode_reqs=num_decodes,
+        num_context_prefill_reqs=num_extends,
+    )
