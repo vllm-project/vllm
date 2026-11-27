@@ -364,6 +364,7 @@ if TYPE_CHECKING:
     VLLM_USE_SIMPLE_KV_OFFLOAD: bool = False
     VLLM_USE_SPINLOOP_EXT: bool = False
     VLLM_SKIP_VERSION_SUFFIX: bool = False
+    VLLM_ROCM_GEMMA4_FUSED_QKV_GLUE: bool = True
 
 
 def get_default_cache_root():
@@ -2459,6 +2460,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REQUEST_BODY_LOG_LEVEL": lambda: os.getenv(
         "VLLM_REQUEST_BODY_LOG_LEVEL", "DEBUG"
     ).upper(),
+    # Gemma4 attention input glue in one Triton kernel (ROCm unified attention,
+    # fp8 KV cache): q/k/v RMSNorm + RoPE + FP8 q quant + FP8 KV cache write
+    "VLLM_ROCM_GEMMA4_FUSED_QKV_GLUE": lambda: bool(
+        int(os.getenv("VLLM_ROCM_GEMMA4_FUSED_QKV_GLUE", "1"))
+    ),
 }
 
 
