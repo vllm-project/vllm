@@ -9,6 +9,10 @@ from collections.abc import Sequence
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import get_max_offload_tokens
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVLoadRange,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     MooncakeStoreCoordinator,
 )
@@ -34,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     get_reusable_prefix_length,
@@ -161,6 +166,13 @@ class MooncakeStoreScheduler:
         ):
             # Decode checkpoints become reusable Store boundaries.
             kv_cache_config.prefix_cache_retention_interval = self._block_size
+        self._range_load_group_ids = tuple(
+            store_idx
+            for store_idx, group_id in enumerate(self._store_group_ids)
+            if issubclass(
+                kv_cache_config.kv_cache_groups[group_id].manager_cls, FullAttentionManager
+            )
+        )
 
         # Mirrors MooncakeStoreConnector._capacity_only.
         self._capacity_only = (
@@ -314,6 +326,33 @@ class MooncakeStoreScheduler:
         )
 
         self.load_specs[request.request_id].can_load = True
+
+    @property
+    def supports_load_range(self) -> bool:
+        return bool(self._range_load_group_ids) and not self._boundary_state_group_ids
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        load_range: KVLoadRange,
+    ) -> None:
+        load_spec = self.load_specs[request.request_id]
+        load_spec.vllm_cached_tokens = load_range.start_token
+        if load_range.end_token < load_spec.kvpool_cached_tokens:
+            # Keep a tail key only while loading part of that same chunk.
+            groups = self.kv_cache_config.prefix_cacheable_groups
+            boundaries = []
+            for boundary in load_spec.tail_key_boundaries:
+                block_size = groups[boundary.group_id].block_size
+                if cdiv(load_range.end_token, block_size) == cdiv(
+                    load_spec.kvpool_cached_tokens, block_size
+                ):
+                    boundaries.append(boundary)
+            load_spec.tail_key_boundaries = tuple(boundaries)
+        load_spec.kvpool_cached_tokens = load_range.end_token
+        load_spec.load_group_ids = self._range_load_group_ids
+        self.update_state_after_alloc(request, blocks, load_range.num_tokens)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -512,7 +551,11 @@ class MooncakeStoreScheduler:
         meta: MooncakeStoreConnectorMetadata,
         scheduler_output: SchedulerOutput,
     ) -> None:
-        """Replace append-only mirrors with the core's current block tables."""
+        """Refresh save metadata from the current scheduler-owned block tables.
+
+        Core exposes every scheduled request, including decode steps without
+        new allocations. Save jobs must not use stale tracker block tables.
+        """
         save_metas = [req_meta for req_meta in meta.requests if req_meta.can_save]
         if not save_metas:
             return

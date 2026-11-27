@@ -390,7 +390,6 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
-    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
@@ -420,6 +419,21 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
+
+- label: ":nvidia: (H200 MIG 18GB) KV Load Failure Recovery"
+  key: kv-load-failure-recovery
+  timeout_in_minutes: 15
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/
+    - vllm/v1/core/sched/
+    - tests/v1/kv_connector/unit/test_multi_connector.py
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - >-
+      pytest -v -s
+      v1/kv_connector/unit/test_multi_connector.py::test_failed_load_model_recomputes
+      v1/kv_connector/unit/test_multi_connector.py::test_async_lookup_model_makes_progress
 
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
