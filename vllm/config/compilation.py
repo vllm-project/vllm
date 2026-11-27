@@ -235,7 +235,7 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
     100: {
         2: 64,  # 64MB
         4: 32,  # 32MB
-        8: 1,  # 1MB
+        8: 16,  # 16MB
         16: 64,  # 64MB (mnnvl multi-node)
     },
     103: {
