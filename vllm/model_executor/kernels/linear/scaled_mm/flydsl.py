@@ -288,6 +288,61 @@ direct_register_custom_op(
 )
 
 
+def _flydsl_gate_up_gelu_bf16_impl(
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    w1: torch.Tensor,
+    w1_shuffled: torch.Tensor,
+    w1_s: torch.Tensor,
+    w1_il: torch.Tensor,
+    w1_s_il: torch.Tensor,
+    w1_il_dec: torch.Tensor,
+    w1_s_il_dec: torch.Tensor,
+) -> torch.Tensor:
+    m = x_q.shape[0]
+    inter = w1_il.shape[0] // 2
+    dec_min = envs.VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS
+    if dec_min and dec_min <= m <= 256 and w1_il_dec.numel() > 0:
+        from aiter.ops.flydsl.gemm_a8w8_gelu_mx import flydsl_gate_up_gelu_bf16_dec
+
+        act = torch.empty((m, inter), dtype=torch.bfloat16, device=x_q.device)
+        flydsl_gate_up_gelu_bf16_dec(x_q, w1_il_dec, x_s, w1_s_il_dec, act)
+        return act
+    if m >= envs.VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS:
+        from aiter.ops.flydsl.gemm_a8w8_gelu_mx import flydsl_gate_up_gelu_bf16
+
+        act = torch.empty((m, inter), dtype=torch.bfloat16, device=x_q.device)
+        flydsl_gate_up_gelu_bf16(x_q, w1_il, x_s, w1_s_il, act)
+        return act
+    y = _flydsl_ptpc_gemm_impl(x_q, w1, w1_shuffled, x_s, w1_s)
+    act = torch.empty((m, inter), dtype=torch.bfloat16, device=x_q.device)
+    torch.ops._C.gelu_tanh_and_mul(act, y)
+    return act
+
+
+def _flydsl_gate_up_gelu_bf16_fake(
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    w1: torch.Tensor,
+    w1_shuffled: torch.Tensor,
+    w1_s: torch.Tensor,
+    w1_il: torch.Tensor,
+    w1_s_il: torch.Tensor,
+    w1_il_dec: torch.Tensor,
+    w1_s_il_dec: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty(
+        (x_q.shape[0], w1_il.shape[0] // 2), dtype=torch.bfloat16, device=x_q.device
+    )
+
+
+direct_register_custom_op(
+    op_name="rocm_flydsl_gate_up_gelu_bf16",
+    op_func=_flydsl_gate_up_gelu_bf16_impl,
+    fake_impl=_flydsl_gate_up_gelu_bf16_fake,
+)
+
+
 class FlyDSLPerTokenFp8ScaledMMLinearKernel(RowWiseTorchFP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -422,18 +477,31 @@ def _gelu_mlp_mx_layers(gate_up_proj, down_proj, act_fn):
         return None
     k1 = getattr(getattr(gate_up_proj, "quant_method", None), "fp8_linear", None)
     k2 = getattr(getattr(down_proj, "quant_method", None), "fp8_linear", None)
-    if not (
-        isinstance(k1, FlyDSLPerTokenFp8ScaledMMLinearKernel)
-        and isinstance(k2, FlyDSLPerTokenFp8ScaledMMLinearKernel)
-    ):
+    if not isinstance(k1, FlyDSLPerTokenFp8ScaledMMLinearKernel):
         return None
     w1_name = k1.layer_param_names[0]
-    w2_name = k2.layer_param_names[0]
     w1_il = getattr(gate_up_proj, f"{w1_name}_il", None)
-    w2_sh = getattr(down_proj, f"{w2_name}_shuffled", None)
-    if w1_il is None or w2_sh is None:
+    if w1_il is None or getattr(gate_up_proj, "bias", None) is not None:
         return None
-    if tuple(w2_sh.shape) != _MX_DOWN or getattr(gate_up_proj, "bias", None) is not None:
+    if not isinstance(k2, FlyDSLPerTokenFp8ScaledMMLinearKernel):
+        # FP8 gate_up with a bf16 down_proj: bf16 GeLU*up epilogue, the down GEMM stays the layer's own
+        if not envs.VLLM_ROCM_FLYDSL_GATEUP_BF16 or k2 is not None:
+            return None
+        w2 = getattr(down_proj, "weight", None)
+        if (
+            w2 is None
+            or w2.dtype != torch.bfloat16
+            or tuple(w2.shape) != (_MX_DOWN[0], _MX_DOWN[1])
+            or getattr(down_proj, "bias", None) is not None
+            or down_proj.tp_size != 1
+        ):
+            return None
+        return k1, None, w1_name, None, w1_il, None
+    w2_name = k2.layer_param_names[0]
+    w2_sh = getattr(down_proj, f"{w2_name}_shuffled", None)
+    if w2_sh is None:
+        return None
+    if tuple(w2_sh.shape) != _MX_DOWN:
         return None
     if getattr(down_proj, "bias", None) is not None or down_proj.tp_size != 1:
         return None
@@ -457,7 +525,6 @@ def maybe_fused_gelu_mlp_mx(
         return None
     k1, k2, w1_name, w2_name, w1_il, w2_sh = layers
     w1, w1_s, x_s, x_s_ub = k1._get_layer_params(gate_up_proj)
-    w2, w2_s, *_ = k2._get_layer_params(down_proj)
     if x_quant is not None:
         x_q, x_s = x_quant
     else:
@@ -465,6 +532,21 @@ def maybe_fused_gelu_mlp_mx(
         x_q, x_s = k1.quant_fp8(x_2d, x_s, x_s_ub)
     if x_s.dim() == 1:
         x_s = x_s.view(-1, 1)
+    if k2 is None:
+        act = torch.ops.vllm.rocm_flydsl_gate_up_gelu_bf16(
+            x_q,
+            x_s,
+            w1,
+            getattr(gate_up_proj, f"{w1_name}_shuffled"),
+            w1_s,
+            w1_il,
+            getattr(gate_up_proj, f"{w1_name}_scale_il"),
+            getattr(gate_up_proj, f"{w1_name}_il_dec"),
+            getattr(gate_up_proj, f"{w1_name}_scale_il_dec"),
+        )
+        out, _ = down_proj(act)
+        return out.view(*x_q.shape[:-1], out.shape[-1])
+    w2, w2_s, *_ = k2._get_layer_params(down_proj)
     out = torch.ops.vllm.rocm_flydsl_gelu_mlp_mx(
         x_q,
         x_s,

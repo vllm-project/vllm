@@ -370,6 +370,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS: int = 1024
     VLLM_ROCM_FLYDSL_MX_MLP_DECODE_MIN_TOKENS: int = 136
     VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN: bool = True
+    VLLM_ROCM_FLYDSL_GATEUP_BF16: bool = False
 
 
 def get_default_cache_root():
@@ -2495,6 +2496,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # in three row-wise Triton kernels
     "VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN": lambda: bool(
         int(os.getenv("VLLM_ROCM_GEMMA4_FUSED_NORM_CHAIN", "1"))
+    ),
+    # FP8 gate_up with a bf16 GeLU*up epilogue for gated MLPs whose down_proj stays
+    # bf16 (Gemma-style MLPs with FP8 on gate_up only): the FlyDSL gate_up kernels
+    # store gelu_tanh(gate) * up as bf16 instead of MX-quantizing it.
+    "VLLM_ROCM_FLYDSL_GATEUP_BF16": lambda: bool(
+        int(os.getenv("VLLM_ROCM_FLYDSL_GATEUP_BF16", "0"))
     ),
 }
 
