@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import torch
 
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -41,8 +43,8 @@ def _mxfp8_e4m3_quantize_torch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Naive MXFP8 quantization.
     For each block of 32 elements along the last dimension, compute a
-    shared e8m0 scale (the biased exponent of the block-wise amax)
-    and quantize each element to float8_e4m3fn.
+    shared e8m0 scale that fits the block-wise amax into the finite
+    float8_e4m3fn range, and quantize each element to float8_e4m3fn.
 
     Returns (quantized_values [same shape, fp8], scales uint8).
     Scale shape depends on is_sf_swizzled_layout:
@@ -58,7 +60,8 @@ def _mxfp8_e4m3_quantize_torch(
 
     amax = x_blocked.abs().amax(dim=-1)
     amax = amax.clamp(min=torch.finfo(torch.float32).tiny)
-    scale_biased = torch.floor(torch.log2(amax)) + 127.0
+    fp8_max = torch.finfo(MXFP8_VALUE_DTYPE).max
+    scale_biased = torch.ceil(torch.log2(amax / fp8_max)) + 127.0
     scale_biased = scale_biased.clamp(0, 254)
     scales_uint8 = scale_biased.to(torch.uint8)
 
@@ -84,28 +87,194 @@ def _mxfp8_e4m3_quantize_torch(
     return x_fp8, scales_uint8
 
 
+def requant_block_fp8_to_ue8m0(
+    weight: torch.Tensor, scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Requantize block-FP8 weights to E4M3 with one UE8M0 scale per 1x32.
+
+    The SM100 MegaMoE feeds its scales to the block-scaled MMA, so they have to
+    be powers of two, one per row and 32 columns. A checkpoint with float32
+    scales per block (e.g. 128x128) is rounded once more to get there.
+
+    Args:
+        weight: `(n, mn, k)` E4M3 values.
+        scale: `(n, mn / block_m, k / block_k)` float32 dequantization
+            scales (`real = weight * scale`).
+
+    Returns:
+        `(weight, sf)`: the requantized E4M3 weights and their UE8M0 scale
+        bytes, `(n, mn, k / 32)` uint8.
+
+    """
+    n, mn, k = weight.shape
+    _, blocks_m, blocks_k = scale.shape
+    real = weight.to(torch.float32).view(n, blocks_m, -1, blocks_k, k // blocks_k)
+    real.mul_(scale[:, :, None, :, None])
+    return _mxfp8_e4m3_quantize_torch(real.view(n, mn, k))
+
+
+def _mxfp8_quant_triton_kernel():
+    """Lazily-built Triton kernel: per-32-block E8M0 scale + FP8-E4M3 quant.
+
+    Fuses what `_mxfp8_e4m3_quantize_torch` does in several elementwise passes
+    into one launch. Each program handles `[BLOCK_M, BLOCK_K]`, i.e.
+    BLOCK_K / 32 MX blocks of BLOCK_M rows, so rows are read in long runs.
+    """
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def _kernel(
+        x_ptr,
+        xq_ptr,
+        s_ptr,
+        M,
+        K,
+        sxm,
+        sxk,
+        sqm,
+        sqk,
+        ssm,
+        ssk,
+        BLOCK_M: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        FP8_MAX: tl.constexpr,
+        TINY: tl.constexpr,
+    ):
+        offs_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_k = tl.program_id(1) * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_b = tl.program_id(1) * (BLOCK_K // 32) + tl.arange(0, BLOCK_K // 32)
+        mask = (offs_m[:, None] < M) & (offs_k[None, :] < K)
+        x = tl.load(
+            x_ptr + offs_m[:, None] * sxm + offs_k[None, :] * sxk,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        x = tl.reshape(x, (BLOCK_M, BLOCK_K // 32, 32))
+        # Mirror _mxfp8_e4m3_quantize_torch: the scale has to put the block amax
+        # at the top of the e4m3 range rather than at 1.0, or small elements of
+        # the block end up in the subnormals.
+        amax = tl.maximum(tl.max(tl.abs(x), axis=2), TINY)  # [BLOCK_M, blocks]
+        sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
+        sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
+        # Scale by the reciprocal rather than dividing by ``exp2(sb - 127)``:
+        # sb == 0 (an all-zero / denormal block) makes that divisor 2**-127,
+        # which is subnormal in fp32 and flushes to zero on CDNA, turning the
+        # block's zeros into 0/0 == NaN. The reciprocal is normal for every
+        # reachable sb, and both forms are exact powers of two, so nothing
+        # else changes.
+        rescale = tl.exp2(127.0 - sb)
+        xq = tl.reshape(x * rescale[:, :, None], (BLOCK_M, BLOCK_K))
+        tl.store(
+            xq_ptr + offs_m[:, None] * sqm + offs_k[None, :] * sqk,
+            xq.to(xq_ptr.dtype.element_ty),
+            mask=mask,
+        )
+        tl.store(
+            s_ptr + offs_m[:, None] * ssm + offs_b[None, :] * ssk,
+            sb.to(tl.uint8),
+            mask=(offs_m[:, None] < M) & (offs_b[None, :] < K // 32),
+        )
+
+    return _kernel
+
+
+_MXFP8_QUANT_KERNEL = None
+
+
+def _mxfp8_e4m3_quantize_triton(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused 2D MXFP8 quant (non-swizzled, row-major [M, K//32] scales)."""
+    from vllm.triton_utils import triton
+
+    global _MXFP8_QUANT_KERNEL
+    if _MXFP8_QUANT_KERNEL is None:
+        _MXFP8_QUANT_KERNEL = _mxfp8_quant_triton_kernel()
+
+    M, K = x.shape
+    x = x.contiguous()
+    xq = torch.empty((M, K), dtype=MXFP8_VALUE_DTYPE, device=x.device)
+    scales = torch.empty(
+        (M, K // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
+    )
+    BLOCK_M, BLOCK_K = (1 if M == 1 else 4), 512
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(K, BLOCK_K))
+    _MXFP8_QUANT_KERNEL[grid](
+        x,
+        xq,
+        scales,
+        M,
+        K,
+        x.stride(0),
+        x.stride(1),
+        xq.stride(0),
+        xq.stride(1),
+        scales.stride(0),
+        scales.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_K=BLOCK_K,
+        FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
+        TINY=float(torch.finfo(torch.float32).tiny),
+        num_warps=2,
+    )
+    return xq, scales
+
+
+@functools.cache
+def _flashinfer_mxfp8_quantize():
+    """FlashInfer's MXFP8 quantize when this device uses it, else None."""
+    from vllm.platforms import current_platform
+    from vllm.utils.flashinfer import has_flashinfer
+
+    if current_platform.has_device_capability(100) and has_flashinfer():
+        from flashinfer import mxfp8_quantize
+
+        return mxfp8_quantize
+    return None
+
+
 def _mxfp8_e4m3_quantize_impl(
-    x: torch.Tensor, is_sf_swizzled_layout: bool = False
+    x: torch.Tensor,
+    is_sf_swizzled_layout: bool = False,
+    alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
 
-    if current_platform.has_device_capability(100):
-        from flashinfer import mxfp8_quantize as flashinfer_mxfp8_quantize
-
+    flashinfer_mxfp8_quantize = _flashinfer_mxfp8_quantize()
+    if flashinfer_mxfp8_quantize is not None:
         x_q, x_scales = flashinfer_mxfp8_quantize(
-            x, is_sf_swizzled_layout=is_sf_swizzled_layout
+            x,
+            is_sf_swizzled_layout=is_sf_swizzled_layout,
+            alignment=alignment if alignment > 0 else 32,
+            backend="cute-dsl",
         )
         if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
             x_scales = x_scales.view(x.size(0), -1)
         return x_q, x_scales
 
+    # ROCm: a single fused Triton kernel beats the multi-pass torch path for the
+    # common 2D, non-swizzled activation-quant case (used by the native MX
+    # linear/MoE). Falls back to torch otherwise (3D weights, swizzled layout).
+    if (
+        current_platform.is_rocm()
+        and not is_sf_swizzled_layout
+        and x.ndim == 2
+        and x.shape[-1] % MXFP8_BLOCK_SIZE == 0
+    ):
+        return _mxfp8_e4m3_quantize_triton(x)
+
     return _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout)
 
 
 def mxfp8_e4m3_quantize(
-    x: torch.Tensor, is_sf_swizzled_layout: bool = False
+    x: torch.Tensor,
+    is_sf_swizzled_layout: bool = False,
+    alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout)
+    # The custom op is only needed as a Dynamo boundary.
+    if not torch.compiler.is_compiling():
+        return _mxfp8_e4m3_quantize_impl(x, is_sf_swizzled_layout, alignment)
+    return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout, alignment)
 
 
 def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -124,8 +293,27 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     return dequantized.to(torch.bfloat16)
 
 
+def mxfp8_e4m3fn_to_e4m3fnuz(
+    w: torch.Tensor, scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reinterpret MXFP8 e4m3fn weights as e4m3fnuz without changing values.
+
+    The same bits read as fnuz are worth half, so each E8M0 exponent goes up
+    by one. 0x80 is -0 in fn but NaN in fnuz, so it becomes 0. The weight is
+    updated in place. Exponents 254 and 255 cannot be bumped and become 0xFF
+    (NaN); real checkpoints never use them.
+    """
+    assert w.dtype == torch.float8_e4m3fn and scale.dtype == torch.uint8
+    w_i8 = w.view(torch.int8)
+    w_i8.masked_fill_(w_i8 == -128, 0)
+    scale = torch.where(scale >= 254, 255, scale + 1)
+    return w_i8.view(torch.float8_e4m3fnuz), scale
+
+
 def mxfp8_e4m3_quantize_fake(
-    x: torch.Tensor, is_sf_swizzled_layout: bool = False
+    x: torch.Tensor,
+    is_sf_swizzled_layout: bool = False,
+    alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile tracing."""
     fp_data = torch.empty_like(x, dtype=MXFP8_VALUE_DTYPE)

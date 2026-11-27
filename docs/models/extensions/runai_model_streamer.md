@@ -53,6 +53,20 @@ vllm serve s3://core-llm/Llama-3-8b \
 
 Setting `AWS_ENDPOINT_URL` points the streamer at any S3-compatible object store, so the same `s3://` model paths work against Amazon S3, Backblaze B2, Cloudflare R2, MinIO, and other services that implement the S3 API. Replace the endpoint in the example above with your provider's S3 endpoint, such as `https://your-s3-endpoint.example.com`.
 
+## Model-specific checkpoint selection
+
+For models exposing `is_unused_checkpoint_weight`, `runai_streamer` skips
+safetensors files containing only unused weights before streaming. It uses the
+same model-owned rule as the default loader, including MTP draft models with
+this hook; it does not assume a particular MTP tensor prefix.
+
+Object-storage checkpoints use `model.safetensors.index.json` and verify excluded
+shards against their safetensors headers before streaming. Mixed shards remain
+included. Missing or inconsistent metadata retains the original file list.
+Models without a selection rule keep all files. Distributed streaming with
+pipeline parallelism also retains the full file list. This optimization does
+not change `runai_streamer_sharded`.
+
 ## Tunable parameters
 
 You can tune parameters using `--model-loader-extra-config`:

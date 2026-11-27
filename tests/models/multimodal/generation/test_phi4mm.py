@@ -6,7 +6,6 @@ from collections.abc import Sequence
 
 import pytest
 import regex as re
-from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm.assets.image import ImageAsset
@@ -14,6 +13,7 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode, rescale_image_size
 from vllm.multimodal.media.audio import load_audio
+from vllm.transformers_utils.repo_utils import hf_api
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -35,7 +35,7 @@ HF_MULTIIMAGE_IMAGE_PROMPT = (
     "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
 )
 
-model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+model_path = hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
 # Since the vision-lora and speech-lora co-exist with the base model,
 # we have to manually specify the path of the lora weights.
 vision_lora_path = os.path.join(model_path, "vision-lora")
@@ -66,6 +66,11 @@ def vllm_to_hf_output(
 
 
 target_dtype = "half"
+IMAGE_SIZE_FACTOR_GROUPS = (
+    (1.0,),
+    (1.0, 1.0, 1.0),
+    (0.25, 0.5, 1.0),
+)
 
 
 def run_test(
@@ -99,6 +104,7 @@ def run_test(
     with vllm_runner(
         model,
         runner="generate",
+        trust_remote_code=True,
         max_model_len=max_model_len,
         max_num_seqs=2,
         dtype=dtype,
@@ -128,7 +134,9 @@ def run_test(
     pytest.skip("HF impl is not compatible with current transformers")
 
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
-    with hf_runner(model, dtype=dtype, model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, model_kwargs=hf_model_kwargs, trust_remote_code=True
+    ) as hf_model:
         hf_processor = hf_model.processor
         eos_token_id = hf_processor.tokenizer.eos_token_id
 
@@ -167,17 +175,6 @@ def run_test(
 
 
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize(
-    "size_factors",
-    [
-        # Single-scale
-        [1.0],
-        # Single-scale, batched
-        [1.0, 1.0, 1.0],
-        # Multi-scale
-        [0.25, 0.5, 1.0],
-    ],
-)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_model_len", [12800])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -187,7 +184,6 @@ def test_models(
     vllm_runner,
     image_assets,
     model,
-    size_factors,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
@@ -201,6 +197,7 @@ def test_models(
             [rescale_image_size(image, factor) for factor in size_factors],
             None,
         )
+        for size_factors in IMAGE_SIZE_FACTOR_GROUPS
         for image, prompt in zip(images, HF_IMAGE_PROMPTS)
     ]
 
@@ -220,19 +217,6 @@ def test_models(
 
 @large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize(
-    "size_factors",
-    [
-        # No image
-        # [],
-        # Single-scale
-        [1.0],
-        # Single-scale, batched
-        [1.0, 1.0, 1.0],
-        # Multi-scale
-        [0.25, 0.5, 1.0],
-    ],
-)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_model_len", [25600])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -242,7 +226,6 @@ def test_multi_images_models(
     vllm_runner,
     image_assets,
     model,
-    size_factors,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
@@ -258,7 +241,8 @@ def test_multi_images_models(
                 for factor in size_factors
             ],
             None,
-        ),
+        )
+        for size_factors in IMAGE_SIZE_FACTOR_GROUPS
     ]
 
     run_test(

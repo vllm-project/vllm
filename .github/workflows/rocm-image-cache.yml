@@ -1,0 +1,37 @@
+name: ROCm image cache
+
+# When the ROCm image cache check of a PR that changes the ROCm stack, or its
+# promote job on main, finishes (their per-job `ci/step:` statuses, named after
+# the step labels in .buildkite/image_build/amd_rocm_cache.yaml), take the next
+# step to cache the stack image into main (run_ci_command.py
+# reconcile_rocm_cache). When main changes the stack or its key, check the open
+# PRs whose check passed again (recheck_rocm_stack_prs).
+on:
+  status:
+  push:
+    branches: [main]
+    paths:
+      - .buildkite/scripts/rocm/build.sh
+      - docker/Dockerfile.rocm_base
+      - tools/vllm-rocm/therock_wheels.py
+
+concurrency:
+  group: rocm-image-cache-${{ github.event.target_url || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  reconcile:
+    if: >-
+      github.repository_owner == 'vllm-project' &&
+      (github.event_name == 'push' ||
+      github.event.sender.login == 'buildkite-limited-access[bot]' &&
+      (github.event.state == 'success' || github.event.state == 'failure') &&
+      (github.event.context == 'ci/step: ROCm image cache' ||
+      github.event.context == 'ci/step: Cache a PR''s ROCm images for main'))
+    uses: vllm-project/vllm/.github/workflows/_reusable-rocm-image-cache.yml@main
+    secrets: inherit

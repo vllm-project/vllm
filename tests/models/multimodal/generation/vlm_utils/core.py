@@ -38,7 +38,9 @@ def run_test(
     limit_mm_per_prompt: dict[str, int],
     vllm_runner_kwargs: dict[str, Any] | None,
     hf_model_kwargs: dict[str, Any] | None,
+    hf_processor: Callable[[str], Any] | None,
     patch_hf_runner: Callable[[HfRunner], HfRunner] | None,
+    hf_runner_kwargs: dict[str, Any] | None = None,
     runner: RunnerOption = "auto",
     distributed_executor_backend: str | None = None,
     tensor_parallel_size: int = 1,
@@ -64,7 +66,10 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
 
-    vllm_runner_kwargs_: dict[str, Any] = {"mm_processor_cache_gb": 0}
+    vllm_runner_kwargs_: dict[str, Any] = {
+        "mm_processor_cache_gb": 0,
+        "trust_remote_code": model_info.trust_remote_code,
+    }
     if model_info.tokenizer:
         vllm_runner_kwargs_["tokenizer_name"] = model_info.tokenizer
     if model_info.tokenizer_mode:
@@ -116,8 +121,19 @@ def run_test(
             )
             vllm_outputs_per_mm.append(vllm_output)
 
+    hf_runner_kwargs = dict(hf_runner_kwargs or {})
+    hf_runner_kwargs.setdefault("trust_remote_code", model_info.trust_remote_code)
+    if model_info.tokenizer:
+        hf_runner_kwargs["tokenizer_name"] = model_info.tokenizer
+    if hf_processor is not None:
+        hf_runner_kwargs["processor"] = hf_processor(model)
+
     hf_model = hf_runner(
-        model, dtype=dtype, auto_cls=auto_cls, model_kwargs=hf_model_kwargs
+        model,
+        dtype=dtype,
+        auto_cls=auto_cls,
+        model_kwargs=hf_model_kwargs,
+        **hf_runner_kwargs,
     )
 
     # Some models need to patch things like the model processor, e.g., internvl
@@ -189,7 +205,7 @@ def process_runner_outputs(
 
 
 def process_outputs(output_processor, model, outputs_per_image):
-    """Applies a model specific post-processor function to a runner's output"""
+    """Applies a model specific post-processor function to a runner's output."""
     return [
         [output_processor(res, model) for res in outputs]
         for outputs in outputs_per_image

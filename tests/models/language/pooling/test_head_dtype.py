@@ -7,7 +7,7 @@ from transformers import AutoModelForSequenceClassification
 
 @pytest.mark.parametrize(
     "model",
-    ["nie3e/sentiment-polish-gpt2-small"],
+    ["vllm-project/sentiment-polish-gpt2-small"],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models(

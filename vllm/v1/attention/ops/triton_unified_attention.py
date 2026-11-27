@@ -7,6 +7,7 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import math
 from typing import Any
 
 import torch
@@ -18,7 +19,6 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
-    cdiv_fn,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
     find_seq_idx,
@@ -26,6 +26,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     load_qq_bias_tile,
     resolve_seq_and_query_len,
     softmax_step,
+    split_k_segment_layout,
     store_segm_reduce_scalars,
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
@@ -33,6 +34,122 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
+# Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
+MAX_3D_QUERY_LEN = 8
+
+# RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
+# (RDNA3).
+is_gfx1201 = is_gfx1100 = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1100, on_gfx1201
+
+    is_gfx1201 = on_gfx1201()
+    is_gfx1100 = on_gfx1100()
+
+# The tables are keyed by the padded head size (next power of 2), which the kernel's
+# tiles use: head_size 96 runs as 128, 192 as 256.
+#
+# 2D launch for batches with prefill tokens: padded head size -> one config per
+# max_seqlen_q band (<= 64, 65-4095, >= 4096), each (BLOCK_M, TILE_SIZE, num_warps,
+# num_stages), or None for the default launch.
+_GFX1201_2D_CONFIGS = {
+    64: (None, (64, 64, 4, 1), (128, 64, 8, 1)),
+    128: (None, (64, 32, 4, 1), (128, 32, 8, 2)),
+    256: (None, (32, 32, 4, 1), (128, 32, 8, 1)),
+    512: (None, (64, 16, 8, 1), (64, 16, 8, 1)),
+}
+_GFX1100_2D_CONFIGS = {
+    64: ((16, 32, 2, 1), (32, 32, 2, 1), (128, 64, 8, 1)),
+    128: (None, (64, 32, 4, 1), (128, 32, 8, 1)),
+    256: ((32, 32, 8, 1), (64, 32, 8, 1), (128, 64, 8, 1)),
+    512: ((64, 32, 8, 1), (64, 32, 8, 1), (64, 32, 8, 1)),
+}
+# 2D decode (decode batches above the split-KV threshold): padded head size ->
+# (TILE_SIZE, num_warps, num_stages); BLOCK_M keeps its default.
+_GFX1201_2D_DECODE_CONFIGS = {
+    64: (16, 1, 1),
+    128: (16, 2, 1),
+    256: (16, 2, 1),
+    512: (16, 8, 1),
+}
+_GFX1100_2D_DECODE_CONFIGS = {
+    64: (16, 2, 1),
+    128: (16, 2, 1),
+    256: (16, 4, 1),
+    512: (32, 8, 1),
+}
+# Split-KV (3D) decode: the segment count per request follows requests x KV heads
+# instead of vLLM's fixed 16.
+# gfx1201: padded head sizes whose segment count follows the batch.
+_GFX1201_3D_HEADS = (64, 128, 256)
+# gfx1100: padded head size -> (T, (TILE_SIZE, num_warps, num_stages)), with
+# next_pow2(T / (requests x KV heads)) segments.
+_GFX1100_3D_CONFIGS = {
+    64: (512, (16, 2, 1)),
+    128: (128, (16, 4, 1)),
+    256: (128, (16, 4, 1)),
+    512: (64, (32, 8, 1)),
+}
+# gfx1100 sliding-window decode: padded head size -> requests x KV heads from which
+# a split-KV batch runs as 2D.
+_GFX1100_SW_2D_MIN_FILL = {64: 32, 512: 8}
+
+
+def _prefill_band_config(configs, head_size_padded, max_seqlen_q):
+    """2D launch for a batch with prefill tokens: (BLOCK_M, TILE_SIZE, num_warps,
+    num_stages) from `configs` for the max_seqlen_q band, or None."""
+    bands = configs.get(head_size_padded)
+    if bands is None:
+        return None
+    return bands[0 if max_seqlen_q <= 64 else 1 if max_seqlen_q < 4096 else 2]
+
+
+def _decode_2d_config(configs, head_size_padded, min_tile):
+    """2D decode launch: (TILE_SIZE, num_warps, num_stages) from `configs`, with
+    TILE_SIZE at least `min_tile`, or None."""
+    config = configs.get(head_size_padded)
+    if config is None:
+        return None
+    tile, warps, stages = config
+    return max(tile, min_tile), warps, stages
+
+
+def _gfx1201_split_kv_segments(
+    head_size_padded, grid_fill, sliding_window, fp8_query, segments
+):
+    """gfx1201: segments so that requests x KV heads x segments is about 128 (more
+    for small batches; fewer, down to 4, for larger ones with a 16-bit query).
+    Sliding windows < 2048 keep `segments`."""
+    if 0 < sliding_window < 2048:
+        return segments
+    programs = 64 if fp8_query and head_size_padded == 256 else 128
+    while segments < 128 and segments * 2 * grid_fill <= programs:
+        segments *= 2
+    while not fp8_query and segments > 4 and segments * grid_fill > 128:
+        segments //= 2
+    return segments
+
+
+def _gfx1201_split_kv_launch(head_size_padded, sliding_window, fp8_query, segments):
+    """gfx1201 split-KV launch: (TILE_SIZE, num_warps, num_stages) or None. An fp8
+    query needs TILE_SIZE >= 32 (fp8 P @ V dot)."""
+    if fp8_query:
+        if head_size_padded == 64:
+            return 32, 1, 1
+        return (32, 4, 2) if segments > 16 else None
+    if sliding_window == 0 or sliding_window >= 2048:
+        return 16, 2, 1
+    return {64: (32, 1, 1), 128: (16, 1, 1)}.get(head_size_padded)
+
+
+def _gfx1100_split_kv_segments(head_size_padded, grid_fill, sliding_window):
+    """gfx1100: next_pow2(T / (requests x KV heads)) segments, x8 for sliding
+    windows >= 512, at most 128."""
+    target, _ = _GFX1100_3D_CONFIGS[head_size_padded]
+    segments = triton.next_power_of_2(triton.cdiv(target, grid_fill))
+    if sliding_window >= 512:
+        segments *= 8
+    return min(segments, 128)
 
 
 @triton.jit
@@ -41,11 +158,12 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
 
     Modes handled inside the core kernel:
 
-    - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
-      ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
+    - `KV_QUANT_MODE == 0` (NONE) and `2` (INT8 per-token-head) and
+      `3` (FP8 per-token-head): plain cast.  Per-token-head modes apply
       their scales separately on S/P inside the loop.
-    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
-      tensor-wide scale.
+    - `KV_QUANT_MODE == 1` (FP8 per-tensor): dequantize using the
+      tensor-wide scale, unless Q is also FP8 and the caller folds the scales
+      into the attention score and output accumulator.
     """
     if KV_QUANT_MODE == 1:
         if Q.dtype.is_fp8():
@@ -54,16 +172,132 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     return data.to(Q.dtype)
 
 
+# ---------------------------------------------------------------------------
+# Tensor-descriptor (TD) helpers
+#
+# Used when the caller enables ``USE_TD`` (Intel Xe2/Xe3 HW 2D block reads).
+# When ``USE_TD`` is False the helpers are dead-code-eliminated at Triton
+# compile time, leaving the pointer-arithmetic load/store path untouched.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _load_q_td(
+    query_ptr,
+    q_block_local_len,
+    query_stride_0: tl.int64,
+    query_stride_1: tl.int64,
+    cur_batch_in_all_start_index,
+    q_block_local_idx,
+    kv_head_idx,
+    num_queries_per_kv: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+):
+    """Load Q via a 2D tensor descriptor.
+
+    Caller guarantees (via the wrapper's `use_td_qo` gate):
+      * `HEAD_SIZE == HEAD_SIZE_PADDED` (head_size is a power of 2),
+      * `num_queries_per_kv` is a power of 2,
+      * the `num_queries_per_kv` heads of the current KV group are
+        contiguous in memory (`query_stride_1 == HEAD_SIZE`, which is
+        the default vLLM query layout).
+
+    Under those preconditions the inner two axes are flattened into one
+    row of size `num_queries_per_kv * HEAD_SIZE` with stride 1, which
+    avoids the non-power-of-2 `block_shape` error from the Triton
+    tensor-descriptor validator.  Returns (BLOCK_M, HEAD_SIZE_PADDED).
+    """
+    q_base = (
+        query_ptr
+        + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * query_stride_0
+        + (kv_head_idx * num_queries_per_kv) * query_stride_1
+    )
+    q_desc = tl.make_tensor_descriptor(
+        base=q_base,
+        shape=(q_block_local_len, num_queries_per_kv * HEAD_SIZE),
+        strides=(query_stride_0, 1),
+        block_shape=(BLOCK_Q, num_queries_per_kv * HEAD_SIZE_PADDED),
+    )
+    return q_desc.load([0, 0]).reshape(BLOCK_M, HEAD_SIZE_PADDED)
+
+
+@triton.jit
+def _load_kv_tile_td(
+    cache_ptr,
+    physical_block_idx_scalar,
+    kv_head_idx,
+    offset_in_block,
+    stride_cache_0: tl.int64,
+    stride_cache_1: tl.int64,
+    stride_cache_2: tl.int64,
+    stride_cache_3: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+):
+    """Load a KV cache tile via tensor descriptor.
+
+    Returns shape (TILE_SIZE, HEAD_SIZE_PADDED). Caller transposes for K.
+    Tensor descriptors zero-pad reads beyond the shape boundary, so
+    `HEAD_SIZE_PADDED > HEAD_SIZE` is handled correctly.
+    """
+    base = (
+        cache_ptr
+        + physical_block_idx_scalar * stride_cache_0
+        + kv_head_idx * stride_cache_2
+    )
+    desc = tl.make_tensor_descriptor(
+        base=base,
+        shape=(BLOCK_SIZE, HEAD_SIZE),
+        strides=(stride_cache_1, stride_cache_3),
+        block_shape=(TILE_SIZE, HEAD_SIZE_PADDED),
+    )
+    return desc.load([offset_in_block, 0])
+
+
+@triton.jit
+def _store_output_td(
+    base_ptr,
+    acc,
+    q_block_local_len,
+    stride_token: tl.int64,
+    stride_head: tl.int64,
+    num_queries_per_kv: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+):
+    """Store an output tile via a tensor descriptor.
+
+    The 2D and 3D epilogues differ only in `base_ptr` and the
+    `(stride_token, stride_head)` pair: 2D writes directly to the
+    flat output buffer, 3D writes to a single per-segment slice of
+    `segm_output_ptr`.  Descriptor shape / block_shape / reshape
+    are the same in both modes, so share one helper.
+    """
+    acc = acc.to(base_ptr.dtype.element_ty)
+    output_desc = tl.make_tensor_descriptor(
+        base=base_ptr,
+        shape=(q_block_local_len, num_queries_per_kv, HEAD_SIZE),
+        strides=(stride_token, stride_head, 1),
+        block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+    )
+    output_desc.store(
+        [0, 0, 0],
+        acc.reshape(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+    )
+
+
 @triton.jit
 def kernel_unified_attention(
-    # Output destinations.  In 2D mode we write the final result into
-    # ``output_ptr``; in 3D mode we write per-segment partials into the
-    # three ``segm_*`` tensors and ``output_ptr`` is unused (callers may
-    # pass any non-null pointer).
+    # Output destination for the 2D path.  In 3D mode per-segment partials
+    # go to the ``segm_*`` tensors (see bottom of signature) and
+    # ``output_ptr`` is unused (callers may pass any non-null pointer).
     output_ptr,
-    segm_output_ptr,
-    segm_max_ptr,
-    segm_expsum_ptr,
     # Inputs
     query_ptr,
     key_cache_ptr,
@@ -73,12 +307,9 @@ def kernel_unified_attention(
     seq_lens_ptr,
     alibi_slopes_ptr,
     qq_bias_ptr,
-    # Per-(token, head) scale caches (used iff KV_QUANT_MODE in {2, 3}).
-    # For other modes callers may pass any non-null pointer.
-    k_scale_cache_ptr,
-    v_scale_cache_ptr,
     # Scalars
     scale,
+    q_scale,
     k_scale,
     v_scale,
     out_scale,
@@ -101,9 +332,15 @@ def kernel_unified_attention(
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
+    USE_CAUSAL: tl.constexpr,  # bool
+    USE_PER_SEQ_CAUSAL: tl.constexpr,  # bool
+    per_seq_causal_ptr,  # [num_seqs] int32, or None
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,
+    rswa_prefix_lens_ptr,
+    R_SWA_WINDOW: tl.constexpr,  # int
+    USE_R_SWA: tl.constexpr,  # bool
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -112,12 +349,6 @@ def kernel_unified_attention(
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
     stride_v_cache_3: tl.constexpr,  # int
-    stride_ks_blk: tl.int64,
-    stride_ks_slot: tl.int64,
-    stride_ks_head: tl.int64,
-    stride_vs_blk: tl.int64,
-    stride_vs_slot: tl.int64,
-    stride_vs_head: tl.int64,
     query_start_len_ptr,
     BLOCK_Q: tl.constexpr,
     num_seqs: tl.int32,
@@ -129,9 +360,34 @@ def kernel_unified_attention(
     # to ``[segm_idx, segm_idx+1) × tiles_per_segment`` and writes
     # per-segment partials, finalized by ``reduce_segments``.
     IS_3D: tl.constexpr,
+    # Parameters below default to None so Triton can skip materialising them
+    # on call sites where the corresponding constexpr branch is dead.
+    # Credit: @quinnlp identified this as a perf regression source in
+    # intel/intel-xpu-backend-for-triton#6758 (review comment r3204641104).
+    # Per-segment outputs: used in 3D mode; unused in 2D (IS_3D=False).
+    segm_output_ptr=None,
+    segm_max_ptr=None,
+    segm_expsum_ptr=None,
+    # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
+    k_scale_cache_ptr=None,
+    v_scale_cache_ptr=None,
+    # ``tl.int64`` cannot be combined with a ``None`` default — Triton's JIT
+    # rejects ``Optional[tl.int64]`` / ``tl.int64 | None`` at trace time, and
+    # plain ``tl.int64 = None`` raises ``TypeError: 'NoneType' object cannot
+    # be interpreted as an integer`` when callers omit these arguments.
+    # ``int | None`` is the only annotation that lets the wrapper pass
+    # ``None`` here so Triton can skip materialising the strides when the
+    # ``USE_PER_TOKEN_HEAD_SCALES`` branch is dead.
+    stride_ks_blk: int | None = None,
+    stride_ks_slot: int | None = None,
+    stride_ks_head: int | None = None,
+    stride_vs_blk: int | None = None,
+    stride_vs_slot: int | None = None,
+    stride_vs_head: int | None = None,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
-    # FP8_PER_TOKEN_HEAD (3).
+    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
+    # int4_per_token_head kernel, not this one.
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -140,8 +396,49 @@ def kernel_unified_attention(
     # over ``SLIDING_WINDOW`` inside the helpers.  ``-1`` disables.
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    # Tensor-descriptor load/store for HW 2D block reads on Intel Xe2/Xe3.
+    # ``USE_TD`` gates KV tile loads; ``USE_TD_QO`` separately gates Q/output
+    # (see ``unified_attention`` wrapper for the gating rules).
+    USE_TD: tl.constexpr = False,
+    USE_TD_QO: tl.constexpr = False,
+    Q_IS_FP8: tl.constexpr = False,
+    # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
+    # instead of letting them override it. Default False preserves the
+    # original (causal AND SW) OR mm_prefix behavior for all other models.
+    MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    # 3D only: split the sliding window's tiles, not the whole sequence, into
+    # segments so every segment does useful work once seq_len exceeds the
+    # window. Enabled by the launcher for plain causal sliding windows only;
+    # ``reduce_segments`` must be launched with the same value.
+    WINDOW_SEGMENTS: tl.constexpr = False,
+    # Per-token-head K/V alignment and offset of V from K (kv_tile_alignment).
+    v_cache_delta: tl.int64 = 0,
+    K_ALIGN: tl.constexpr = 1,
+    V_ALIGN: tl.constexpr = 1,
 ):
-    USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
+    # Strides as visible multiples of the alignment found by kv_tile_alignment,
+    # and V addressed from K, let the K/V tile loads compile to vector loads.
+    if K_ALIGN > 1:
+        stride_k_cache_0 = stride_k_cache_0 // K_ALIGN * K_ALIGN
+        stride_k_cache_1 = stride_k_cache_1 // K_ALIGN * K_ALIGN
+        stride_k_cache_2 = stride_k_cache_2 // K_ALIGN * K_ALIGN
+    if V_ALIGN > 1:
+        value_cache_ptr = key_cache_ptr + v_cache_delta // V_ALIGN * V_ALIGN
+        stride_v_cache_0 = stride_v_cache_0 // V_ALIGN * V_ALIGN
+        stride_v_cache_1 = stride_v_cache_1 // V_ALIGN * V_ALIGN
+        stride_v_cache_2 = stride_v_cache_2 // V_ALIGN * V_ALIGN
+
+    # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
+    USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
+        KV_QUANT_MODE <= 3
+    )
+    USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
+
+    if USE_TD:
+        tl.static_assert(
+            BLOCK_SIZE % TILE_SIZE == 0,
+            "USE_TD requires BLOCK_SIZE to be a multiple of TILE_SIZE",
+        )
 
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -161,11 +458,20 @@ def kernel_unified_attention(
         return
 
     if IS_3D:
-        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+        segm_base_tile, tiles_per_segment, num_active_segments = split_k_segment_layout(
+            seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+        )
+        if segm_idx >= num_active_segments:
             return
     else:
         tiles_per_segment = 0
+        segm_base_tile = 0
+
+    # Number of valid query rows in this block (used by TD descriptor
+    # shapes, but always computed so the variable stays in scope).
+    q_block_local_len = tl.minimum(
+        BLOCK_Q, cur_batch_query_len - q_block_local_idx * BLOCK_Q
+    )
 
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
@@ -185,11 +491,27 @@ def kernel_unified_attention(
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
-    Q = tl.load(
-        query_ptr + query_offset,
-        mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        other=0.0,
-    )
+    if USE_TD_QO:
+        Q = _load_q_td(
+            query_ptr,
+            q_block_local_len,
+            query_stride_0,
+            query_stride_1,
+            cur_batch_in_all_start_index,
+            q_block_local_idx,
+            kv_head_idx,
+            num_queries_per_kv,
+            BLOCK_Q,
+            BLOCK_M,
+            HEAD_SIZE,
+            HEAD_SIZE_PADDED,
+        )
+    else:
+        Q = tl.load(
+            query_ptr + query_offset,
+            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+            other=0.0,
+        )
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -199,6 +521,11 @@ def kernel_unified_attention(
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     # acc : (BLOCK_M, HEAD_SIZE_PADDED)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+    score_scale = scale
+    value_scale = 1.0
+    if USE_FP8_Q_DESCALE:
+        score_scale = scale * tl.load(q_scale) * tl.load(k_scale)
+        value_scale = tl.load(v_scale)
 
     context_len = seq_len - cur_batch_query_len
 
@@ -224,8 +551,16 @@ def kernel_unified_attention(
         SLIDING_WINDOW,
         USE_MM_PREFIX,
         IS_3D,
+        USE_CAUSAL,
+        USE_PER_SEQ_CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
+        USE_R_SWA,
+        MM_PREFIX_CLAMP_SW,
+        MAX_MM_RANGES,
+        mm_prefix_range_ptr,
+        seq_idx,
+        segm_base_tile_or_0=segm_base_tile,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -237,31 +572,71 @@ def kernel_unified_attention(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        v_offset = (
-            physical_block_idx[:, None] * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_2
-            + offs_d[None, :] * stride_v_cache_3
-            + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
-        )
-        k_offset = (
-            physical_block_idx[None, :] * stride_k_cache_0
-            + kv_head_idx * stride_k_cache_2
-            + offs_d[:, None] * stride_k_cache_3
-            + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
-        )
-        # K : (HEAD_SIZE, TILE_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & tile_mask[None, :],
-            other=0.0,
-        )
+        if USE_TD:
+            # All TILE_SIZE slots within a single KV tile map to one
+            # physical block (guaranteed by ``BLOCK_SIZE % TILE_SIZE == 0``
+            # from the static_assert above), so load the block index as
+            # a scalar instead of a broadcast reduction.
+            offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
+            physical_block_scalar = tl.load(
+                block_tables_ptr + block_table_offset + (j * TILE_SIZE) // BLOCK_SIZE
+            ).to(tl.int64)
+            # K : (HEAD_SIZE, TILE_SIZE)
+            K_load = _load_kv_tile_td(
+                key_cache_ptr,
+                physical_block_scalar,
+                kv_head_idx,
+                offset_in_block,
+                stride_k_cache_0,
+                stride_k_cache_1,
+                stride_k_cache_2,
+                stride_k_cache_3,
+                BLOCK_SIZE,
+                TILE_SIZE,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            ).T
+            # V : (TILE_SIZE, HEAD_SIZE)
+            V_load = _load_kv_tile_td(
+                value_cache_ptr,
+                physical_block_scalar,
+                kv_head_idx,
+                offset_in_block,
+                stride_v_cache_0,
+                stride_v_cache_1,
+                stride_v_cache_2,
+                stride_v_cache_3,
+                BLOCK_SIZE,
+                TILE_SIZE,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            )
+        else:
+            v_offset = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + offs_d[None, :] * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            k_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + offs_d[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            # K : (HEAD_SIZE, TILE_SIZE)
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0.0,
+            )
+            # V : (TILE_SIZE, HEAD_SIZE)
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=0.0,
+            )
         K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-        # V : (TILE_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & tile_mask[:, None],
-            other=0.0,
-        )
         V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
@@ -288,12 +663,20 @@ def kernel_unified_attention(
             query_abs_pos,
             seq_offset,
             seq_idx,
+            seq_len,
             mm_prefix_range_ptr,
             SLIDING_WINDOW,
             USE_MM_PREFIX,
             MAX_MM_RANGES,
+            USE_CAUSAL,
+            USE_PER_SEQ_CAUSAL,
+            per_seq_causal_ptr,
+            rswa_prefix_lens_ptr,
+            R_SWA_WINDOW,
+            USE_R_SWA,
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
+            MM_PREFIX_CLAMP_SW,
         )
 
         # S : (BLOCK_M, TILE_SIZE)
@@ -301,9 +684,9 @@ def kernel_unified_attention(
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: fuse softmax_scale with per-head k_scale
             # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-            S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
+            S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
         else:
-            S += scale * tl.dot(Q, K)
+            S += score_scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -327,33 +710,78 @@ def kernel_unified_attention(
 
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
-            V = tl.where(
-                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
-                V,
-                0.0,
-            )
+            dist = context_len + qpos_lo - seq_offset[:, None]
+            if USE_PER_SEQ_CAUSAL:
+                is_causal_seq = tl.load(per_seq_causal_ptr + seq_idx)
+                sw_mask_v = tl.where(
+                    is_causal_seq,
+                    dist < SLIDING_WINDOW,
+                    (dist < SLIDING_WINDOW) & (dist > -SLIDING_WINDOW),
+                )
+            elif USE_CAUSAL:
+                sw_mask_v = dist < SLIDING_WINDOW
+            else:
+                sw_mask_v = (dist < SLIDING_WINDOW) & (dist > -SLIDING_WINDOW)
+            V = tl.where(sw_mask_v, V, 0.0)
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: apply v_scale to P instead of V.
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:
-            acc += tl.dot(P.to(V.dtype), V)
+            # Keep softmax weights representable when the P @ V dot uses FP8
+            # tensor cores. Undo the power-of-two scale after the dot.
+            if V.dtype == tl.float8e4nv:
+                p_scale = 256.0
+            elif V.dtype.is_fp8():
+                p_scale = 128.0
+            else:
+                p_scale = 1.0
+            acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
+        if USE_FP8_Q_DESCALE:
+            acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
-        segm_output_offset = (
-            query_offset_0[:, None].to(tl.int64)
-            * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + segm_idx * HEAD_SIZE_PADDED
-            + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
-        )
-        tl.store(
-            segm_output_ptr + segm_output_offset,
-            acc,
-            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        )
+        if USE_TD_QO:
+            # 3D target: segm_output[token, head, segm_idx, :].  Advance
+            # the base to the correct (token-start, head-start, segm)
+            # slice; strides step between tokens / heads of the flattened
+            # (T, H, SEGS, PAD) layout.
+            segm_base = (
+                segm_output_ptr
+                + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q).to(
+                    tl.int64
+                )
+                * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + (kv_head_idx * num_queries_per_kv)
+                * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + segm_idx * HEAD_SIZE_PADDED
+            )
+            _store_output_td(
+                segm_base,
+                acc,
+                q_block_local_len,
+                num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED,
+                NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED,
+                num_queries_per_kv,
+                BLOCK_Q,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            )
+        else:
+            segm_output_offset = (
+                query_offset_0[:, None].to(tl.int64)
+                * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + segm_idx * HEAD_SIZE_PADDED
+                + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
+            )
+            tl.store(
+                segm_output_ptr + segm_output_offset,
+                acc,
+                mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+            )
         store_segm_reduce_scalars(
             segm_max_ptr,
             segm_expsum_ptr,
@@ -369,19 +797,43 @@ def kernel_unified_attention(
         )
     else:
         acc = acc / L[:, None]
+        if USE_FP8_Q_DESCALE:
+            acc *= value_scale
         if USE_FP8:
             acc = acc * tl.load(out_scale)
             acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
-        output_offset = (
-            query_offset_0[:, None] * output_stride_0
-            + query_offset_1[:, None] * output_stride_1
-            + offs_d[None, :]
-        )
-        tl.store(
-            output_ptr + output_offset,
-            acc,
-            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        )
+        if USE_TD_QO:
+            # 2D target: flat output[token, head, :].  Strides come
+            # straight from the caller (``output_stride_0`` per token,
+            # ``output_stride_1`` per head).
+            output_base = (
+                output_ptr
+                + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q)
+                * output_stride_0
+                + (kv_head_idx * num_queries_per_kv) * output_stride_1
+            )
+            _store_output_td(
+                output_base,
+                acc,
+                q_block_local_len,
+                output_stride_0,
+                output_stride_1,
+                num_queries_per_kv,
+                BLOCK_Q,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            )
+        else:
+            output_offset = (
+                query_offset_0[:, None] * output_stride_0
+                + query_offset_1[:, None] * output_stride_1
+                + offs_d[None, :]
+            )
+            tl.store(
+                output_ptr + output_offset,
+                acc,
+                mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+            )
 
 
 @triton.jit
@@ -407,9 +859,17 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    # Must match the WINDOW_SEGMENTS / SLIDING_WINDOW the segments were
+    # produced with (see kernel_unified_attention).
+    WINDOW_SEGMENTS: tl.constexpr = False,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
+
+    # Graph padding must be rejected before sequence lookup or scratch access.
+    if query_token_idx >= tl.load(query_start_len_ptr + num_seqs):
+        return
 
     seq_idx = find_seq_idx(
         query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False
@@ -417,13 +877,15 @@ def reduce_segments(
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
+    if seq_len <= 0:
+        return
 
     # number of segments for this particular sequence
-    num_segments = NUM_SEGMENTS_PER_SEQ
-    tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
+    _, _, act_num_segments = split_k_segment_layout(
+        seq_len, NUM_SEGMENTS_PER_SEQ, SLIDING_WINDOW, TILE_SIZE, WINDOW_SEGMENTS
+    )
 
     # create masks for subsequent loads
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
     segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
         [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
     )
@@ -436,11 +898,16 @@ def reduce_segments(
         + tl.arange(0, NUM_SEGMENTS_PER_SEQ)
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
+    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
+    # Empty segments must not set the maximum. Unvisited segments retain
+    # the M=-inf,L=1 initial state.
+    valid_segment = segm_mask & (segm_expsum > 0) & (segm_max != float("-inf"))
+    segm_max = tl.where(valid_segment, segm_max, float("-inf"))
     overall_max = tl.max(segm_max)
 
     # load and rescale segment exp sums
-    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
-    segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
+    segment_scale = tl.where(valid_segment, tl.exp(segm_max - overall_max), 0.0)
+    segm_expsum = segm_expsum * segment_scale
     overall_expsum = tl.sum(segm_expsum)
 
     # load, rescale, and add segment attention outputs
@@ -456,7 +923,7 @@ def reduce_segments(
         mask=segm_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
-    segm_output *= tl.exp(segm_max - overall_max)[:, None]
+    segm_output *= segment_scale[:, None]
     acc_sum = tl.sum(segm_output, axis=0)
     # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
@@ -472,6 +939,24 @@ def reduce_segments(
         + tl.arange(0, HEAD_SIZE_PADDED)
     )
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
+
+
+def kv_tile_alignment(k: torch.Tensor, v: torch.Tensor) -> tuple[int, int, int]:
+    """Alignment of per-token-head K/V tile loads, which Triton cannot infer.
+
+    Returns:
+        `(k_align, v_align, v_delta)`: the powers of two, at most 16, dividing
+        the K address and strides, and also the V strides and `v_delta`, the
+        offset of `v` from `k`. `v_align` is 1 unless `v` starts inside `k`.
+
+    """
+    if k.element_size() != 1:
+        return 1, 1, 0
+    k_align = math.gcd(16, k.data_ptr(), *k.stride()[:3])
+    v_delta = v.data_ptr() - k.data_ptr()
+    if not 0 < v_delta < k.stride(0) * k.shape[0]:
+        return k_align, 1, 0
+    return k_align, math.gcd(k_align, v_delta, *v.stride()[:3]), v_delta
 
 
 def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
@@ -531,6 +1016,10 @@ def unified_attention(
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
+    # R-SWA support: prefix tokens stay globally visible, generated tokens use
+    # a fixed sliding window.
+    rswa_prefix_lens=None,
+    rswa_window: int | None = None,
     use_alibi_sqrt=False,
     # KV cache quantization mode and per-token-head scale caches.
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
@@ -538,9 +1027,64 @@ def unified_attention(
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     # Chunked attention: restrict attention to aligned blocks with lookback.
     chunk_lookback=-1,
+    # Tensor-descriptor mode: use ``tl.make_tensor_descriptor`` for Q/K/V
+    # loads and output stores.  Enables HW 2D block reads on Intel Xe2/Xe3.
+    # The non-TD branch is dead-code-eliminated at Triton compile time so
+    # disabling this flag costs nothing.
+    use_td: bool = False,
+    # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
+    # Default False keeps the original behavior for every other model.
+    mm_prefix_clamp_sliding_window: bool = False,
+    # Split only the sliding window's tiles into the 3D segments (see
+    # WINDOW_SEGMENTS). Takes effect only for plain causal sliding windows;
+    # False forces the whole-sequence split (for testing and A/B runs).
+    window_aware_segments: bool = True,
 ):
-    assert causal, "Only causal attention is supported"
-    assert q_descale is None, "Q scales not supported"
+    # Resolve causal: bool or per-seq tensor.
+    use_per_seq_causal = isinstance(causal, torch.Tensor)
+    use_causal = bool(causal) if not use_per_seq_causal else True
+    per_seq_causal_ptr = causal if use_per_seq_causal else None
+
+    # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
+    # sub-byte unpack); everything else goes through the core kernel below.
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        assert use_causal and not use_per_seq_causal, (
+            "INT4_PER_TOKEN_HEAD only supports causal attention"
+        )
+        from vllm.v1.attention.ops.int4_per_token_head import (
+            unified_attention_int4,
+        )
+
+        if sinks is not None:
+            assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
+        unified_attention_int4(
+            q=q,
+            k_cache=k,
+            v_cache=v,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            window_size=window_size,
+            block_table=block_table,
+            softcap=softcap,
+            sinks=sinks,
+            alibi_slopes=alibi_slopes,
+            use_alibi_sqrt=use_alibi_sqrt,
+            qq_bias=qq_bias,
+            output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+        )
+        return
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
@@ -565,6 +1109,8 @@ def unified_attention(
                 f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
             )
 
+    use_rswa = rswa_window is not None and rswa_prefix_lens is not None
+
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
 
@@ -574,11 +1120,65 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
+    head_size_padded = triton.next_power_of_2(head_size)
 
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
     BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+    # Tuned launch parameters; ``None`` lets Triton pick its defaults.
+    launch_num_warps: int | None = None
+    launch_num_stages: int | None = None
+    tuned_prefill_tile: int | None = None
+
+    # Prefill-shaped head_size 256 batches (diffusion-gemma canvas, gemma-4
+    # sliding layers) are under-tiled by the decode defaults. BLOCK_M=32 is
+    # ~2x faster on B200 (128 KV tile, 8 warps) and ~1.6x on B70 (4 warps:
+    # XPU warps are 16 lanes). XPU keeps short spec-decode verify batches on
+    # the 3D split-K path, which is faster for them.
+    is_xpu = current_platform.is_xpu()
+    tuned_large_head = (
+        head_size == 256
+        # Preserve batch invariance between single- and multi-query calls.
+        and not is_batch_invariant
+        and max_seqlen_q > 1
+        and num_queries_per_kv <= 16
+        and (
+            (is_xpu and max_seqlen_q > MAX_3D_QUERY_LEN)
+            or current_platform.is_device_capability_family(100)
+        )
+    )
+    if tuned_large_head:
+        BLOCK_M = 32
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+        launch_num_warps = 4 if is_xpu else 8
+        launch_num_stages = 2
+        if not is_xpu:
+            tuned_prefill_tile = 128
+
+    # gfx1201: prefill / chunked-prefill / mixed launch. It sets BLOCK_Q, so it comes
+    # before the grid size and the 2D/3D choice. The default launch is kept for
+    # batches with BLOCK_Q > 16 and an average query below 16 tokens, and for configs
+    # with TILE_SIZE < 32 when the query is fp8.
+    rdna_prefill_tile = None
+    if (
+        is_gfx1201
+        and num_queries_per_kv <= 16
+        and q.element_size() <= 2
+        and not is_batch_invariant
+    ):
+        config = _prefill_band_config(
+            _GFX1201_2D_CONFIGS, head_size_padded, max_seqlen_q
+        )
+        avg_query_len = q.shape[0] // max(num_seqs, 1)
+        if (
+            config is not None
+            and not (config[0] // num_queries_per_kv > 16 and avg_query_len < 16)
+            and (q.element_size() == 2 or config[1] >= 32)
+        ):
+            BLOCK_M, rdna_prefill_tile, launch_num_warps, launch_num_stages = config
+            BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
@@ -608,10 +1208,76 @@ def unified_attention(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
 
+    # Only the 2D path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
+    if tuned_prefill_tile is not None:
+        TILE_SIZE_PREFILL = tuned_prefill_tile
+    elif rdna_prefill_tile is not None:
+        TILE_SIZE_PREFILL = rdna_prefill_tile
+
+    # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
+    # ``tl.static_assert`` in the kernel).  The default prefill tile
+    # size (32) is larger than a common ``block_size=16``, so clamp it
+    # down when TD is enabled.  Zero overhead when disabled.
+    if use_td:
+        TILE_SIZE_PREFILL = min(TILE_SIZE_PREFILL, block_size)
+        TILE_SIZE_DECODE = min(TILE_SIZE_DECODE, block_size)
+
+    # Tensor descriptors for Q load / output store require every element
+    # of ``block_shape`` to be a power of 2.  ``num_queries_per_kv`` is
+    # not always pow2 (e.g. Qwen2-7B: 28 / 4 = 7), so gate the Q/O paths
+    # separately from the KV tile loads (whose ``block_shape`` does not
+    # include ``num_queries_per_kv``).
+    #
+    # The Q/O descriptors also encode ``HEAD_SIZE_PADDED`` on the inner
+    # axis while the backing buffers (both flat output and per-segment
+    # output) are laid out with ``HEAD_SIZE``.  When they differ (e.g.
+    # Phi-3's head_size=96 → HEAD_SIZE_PADDED=128) the store would spill
+    # padded lanes into neighbouring heads because tensor-descriptor
+    # stores don't mask the padded tail.  Fall back to the pointer path
+    # for Q/O in that case — KV tile loads are unaffected because their
+    # ``shape`` already matches ``block_shape`` on the inner axis.
+    _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
+    _is_pow2_hs = head_size == head_size_padded
+    use_td_qo = use_td and _is_pow2_nq and _is_pow2_hs
+
+    # ``_load_q_td`` / ``_store_output_td`` flatten ``(num_queries_per_kv,
+    # HEAD_SIZE)`` into a single contiguous inner axis.  That's only
+    # equivalent to the pointer path when the ``num_queries_per_kv`` heads
+    # for this KV group start at ``kv_head_idx * num_queries_per_kv`` and
+    # lie exactly HEAD_SIZE apart — i.e. ``query_stride_1 == HEAD_SIZE``
+    # and ``output_stride_1 == head_size``.  This is the default vLLM
+    # query/output layout; assert it explicitly so we fail fast if a
+    # future caller passes a non-contiguous query tensor.
+    if use_td_qo:
+        assert q.stride(1) == head_size, (
+            f"USE_TD_QO requires contiguous query heads "
+            f"(q.stride(1) = {q.stride(1)} != head_size = {head_size}); "
+            f"set VLLM_TRITON_USE_TD=0 or pad the query layout."
+        )
+        assert out.stride(1) == head_size, (
+            f"USE_TD_QO requires contiguous output heads "
+            f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
+        )
+
+    # gfx1201 decode: switch to the 2D kernel at half the threshold
+    # (64 // num_kv_heads sequences instead of 128 // num_kv_heads). Multi-token
+    # queries and fp8 KV caches keep the full threshold.
+    if (
+        is_gfx1201
+        and max_seqlen_q == 1
+        and k.element_size() == 2
+        and seq_threshold_3D is not None
+        and not is_batch_invariant
+    ):
+        seq_threshold_3D = max(1, seq_threshold_3D // 2)
+
     # Launch the 2D kernel if
-    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold, or
+    # 1. No split-K threshold or scratch buffers, or the scratch has fewer
+    #    rows than query tokens, or
+    # 2. max_seqlen_q > 1 and either it exceeds MAX_3D_QUERY_LEN, masking is
+    #    non-causal, per-sequence causal, or mm-prefix, or the tuned
+    #    large-head path applies, or
+    # 3. The number of Q blocks exceeds seq_threshold_3D, or
     # 4. Batch invariance is enabled
     use_3d = not (
         seq_threshold_3D is None
@@ -619,16 +1285,158 @@ def unified_attention(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
+        or (
+            max_seqlen_q > 1
+            and (
+                max_seqlen_q > MAX_3D_QUERY_LEN
+                or not use_causal
+                or use_per_seq_causal
+                or use_mm_prefix
+                or tuned_large_head
+            )
+        )
+        or num_seqs * triton.cdiv(max_seqlen_q, BLOCK_Q) > seq_threshold_3D
         or is_batch_invariant
+    )
+    if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
+        logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
+        use_3d = False
+
+    # RDNA launch tuning, after vLLM's 2D/3D choice (it keeps vLLM's split-KV
+    # threshold). Only launch parameters change; sliding window, sinks, softcap and
+    # ALiBi are applied per element inside each tile. Batch-invariant mode keeps the
+    # default launch (vLLM then always runs 2D).
+    if (is_gfx1201 or is_gfx1100) and not is_batch_invariant:
+        grid_fill = num_seqs * num_kv_heads
+        # gfx1100 sliding-window decode: a split-KV batch runs as 2D from this
+        # requests x KV heads, and then gets the 2D tuning below.
+        sw_2d_fill = _GFX1100_SW_2D_MIN_FILL.get(head_size_padded)
+        if (
+            use_3d
+            and is_gfx1100
+            and q.element_size() == 2
+            and not use_td
+            and sliding_window_val > 0
+            and max_seqlen_q == 1
+            and sw_2d_fill is not None
+            and grid_fill >= sw_2d_fill
+        ):
+            use_3d = False
+        if use_3d:
+            # Split-KV segment count and launch. The count depends only on the batch
+            # size and the model shape, so it is fixed per CUDA graph.
+            if is_gfx1201 and head_size_padded in _GFX1201_3D_HEADS:
+                fp8_query = q.element_size() == 1
+                segments = _gfx1201_split_kv_segments(
+                    head_size_padded,
+                    grid_fill,
+                    sliding_window_val,
+                    fp8_query,
+                    num_par_softmax_segments,
+                )
+                rows = softmax_segm_max.shape[0] * num_par_softmax_segments // segments
+                if segments != num_par_softmax_segments and rows >= q.shape[0]:
+                    num_par_softmax_segments = segments
+                    softmax_segm_output = softmax_segm_output.view(-1)[
+                        : rows * num_query_heads * segments * head_size_padded
+                    ].view(rows, num_query_heads, segments, head_size_padded)
+                    softmax_segm_max = softmax_segm_max.view(-1)[
+                        : rows * num_query_heads * segments
+                    ].view(rows, num_query_heads, segments)
+                    softmax_segm_expsum = softmax_segm_expsum.view(-1)[
+                        : rows * num_query_heads * segments
+                    ].view(rows, num_query_heads, segments)
+                launch = _gfx1201_split_kv_launch(
+                    head_size_padded,
+                    sliding_window_val,
+                    fp8_query,
+                    num_par_softmax_segments,
+                )
+                if launch is not None:
+                    TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = launch
+            elif (
+                is_gfx1100
+                and head_size_padded in _GFX1100_3D_CONFIGS
+                and q.element_size() == 2
+                and not use_td
+                and (sliding_window_val == 0 or sliding_window_val >= 512)
+            ):
+                segments = _gfx1100_split_kv_segments(
+                    head_size_padded, grid_fill, sliding_window_val
+                )
+                # The scratch holds query tokens x segments rows per Q head.
+                max_rows = softmax_segm_max.numel() // num_query_heads
+                while segments > num_par_softmax_segments and q.shape[0] * segments > (
+                    max_rows
+                ):
+                    segments //= 2
+                if segments > num_par_softmax_segments:
+                    num_par_softmax_segments = segments
+                    TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = (
+                        _GFX1100_3D_CONFIGS[head_size_padded][1]
+                    )
+        else:
+            if (
+                is_gfx1100
+                and num_queries_per_kv <= 16
+                and q.element_size() == 2
+                and not use_td
+            ):
+                if max_seqlen_q > 1:
+                    config = _prefill_band_config(
+                        _GFX1100_2D_CONFIGS, head_size_padded, max_seqlen_q
+                    )
+                    if config is not None:
+                        (
+                            BLOCK_M,
+                            TILE_SIZE_PREFILL,
+                            launch_num_warps,
+                            launch_num_stages,
+                        ) = config
+                        BLOCK_Q = BLOCK_M // num_queries_per_kv
+                        total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+                else:
+                    # an fp8 KV tile needs TILE_SIZE >= 32
+                    fp8_kv = kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+                    config = _decode_2d_config(
+                        _GFX1100_2D_DECODE_CONFIGS,
+                        head_size_padded,
+                        32 if fp8_kv else 0,
+                    )
+                    if config is not None:
+                        TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = config
+            elif is_gfx1201 and max_seqlen_q == 1 and q.element_size() <= 2:
+                # an fp8 query needs TILE_SIZE >= 32 (fp8 P @ V dot)
+                config = _decode_2d_config(
+                    _GFX1201_2D_DECODE_CONFIGS,
+                    head_size_padded,
+                    32 if q.element_size() == 1 else 0,
+                )
+                if config is not None:
+                    TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = config
+
+    # With a sliding window, splitting the whole sequence into segments leaves
+    # most of them outside the window once seq_len exceeds it. For a plain
+    # causal window and one query token per sequence (what
+    # split_k_segment_layout assumes), split only the window's tiles
+    # instead. Every other case keeps the whole-sequence split.
+    window_segments = (
+        use_3d
+        and window_aware_segments
+        and max_seqlen_q == 1
+        and sliding_window_val > 0
+        and chunk_lookback < 0
+        and use_causal
+        and not use_per_seq_causal
+        and not use_mm_prefix
+        and not use_rswa
     )
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
-    # caches and their strides are required arguments; non-per-token-head
-    # modes pass dummy zeros (the code path is dead-code eliminated by
-    # the ``USE_PER_TOKEN_HEAD_SCALES`` constexpr branch in the kernel).
+    # caches and their strides are passed as ``None`` when the
+    # ``USE_PER_TOKEN_HEAD_SCALES`` branch is dead so Triton can skip
+    # materialising those arguments and the associated registers.
     if use_per_token_head_scales:
         ks_strides = k_scale_cache.stride()
         vs_strides = v_scale_cache.stride()
@@ -637,17 +1445,15 @@ def unified_attention(
         k_scale_ptr = k_scale_cache
         v_scale_ptr = v_scale_cache
     else:
-        ks_blk = ks_slot = ks_head = 0
-        vs_blk = vs_slot = vs_head = 0
-        # Pass the K cache as a stand-in pointer; never dereferenced.
-        k_scale_ptr = k
-        v_scale_ptr = v
-
-    # 3D needs real segm tensors; 2D never touches them but Triton wants
-    # a non-null pointer.  Reuse ``out`` as the placeholder.
-    segm_output_ptr = softmax_segm_output if use_3d else out
-    segm_max_ptr = softmax_segm_max if use_3d else out
-    segm_expsum_ptr = softmax_segm_expsum if use_3d else out
+        ks_blk = ks_slot = ks_head = None
+        vs_blk = vs_slot = vs_head = None
+        k_scale_ptr = None
+        v_scale_ptr = None
+    # 3D needs real segm tensors; 2D never touches them.  Pass ``None`` in
+    # 2D mode so Triton can skip materialising these pointer arguments.
+    segm_output_ptr = softmax_segm_output if use_3d else None
+    segm_max_ptr = softmax_segm_max if use_3d else None
+    segm_expsum_ptr = softmax_segm_expsum if use_3d else None
     num_segments = num_par_softmax_segments if use_3d else 1
 
     grid: tuple[Any, ...]
@@ -657,6 +1463,16 @@ def unified_attention(
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
+
+    launch_kwargs: dict[str, int] = {}
+    if launch_num_warps is not None:
+        launch_kwargs["num_warps"] = launch_num_warps
+    if launch_num_stages is not None:
+        launch_kwargs["num_stages"] = launch_num_stages
+
+    k_align, v_align, v_cache_delta = 1, 1, 0
+    if k_scale_cache is not None and not use_td:
+        k_align, v_align, v_cache_delta = kv_tile_alignment(k, v)
 
     kernel_unified_attention[grid](
         output_ptr=out,
@@ -674,6 +1490,7 @@ def unified_attention(
         k_scale_cache_ptr=k_scale_ptr,
         v_scale_cache_ptr=v_scale_ptr,
         scale=softmax_scale,
+        q_scale=q_descale,
         k_scale=k_descale,
         v_scale=v_descale,
         out_scale=1 / output_scale if output_scale is not None else 1.0,
@@ -689,16 +1506,22 @@ def unified_attention(
         BLOCK_SIZE=block_size,
         TILE_SIZE=tile_size,
         HEAD_SIZE=head_size,
-        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+        HEAD_SIZE_PADDED=head_size_padded,
         USE_ALIBI_SLOPES=use_alibi_slopes,
         USE_ALIBI_SQRT=use_alibi_sqrt,
         USE_QQ_BIAS=use_qq_bias,
         USE_SOFTCAP=(softcap > 0),
         USE_SINKS=(sinks is not None),
+        SLIDING_WINDOW=(1 + window_size[0]),
+        USE_CAUSAL=use_causal,
+        USE_PER_SEQ_CAUSAL=use_per_seq_causal,
+        per_seq_causal_ptr=per_seq_causal_ptr,
         USE_MM_PREFIX=use_mm_prefix,
         MAX_MM_RANGES=max_mm_ranges,
         mm_prefix_range_ptr=mm_prefix_range,
-        SLIDING_WINDOW=(1 + window_size[0]),
+        rswa_prefix_lens_ptr=rswa_prefix_lens if use_rswa else seqused_k,
+        R_SWA_WINDOW=rswa_window or 0,
+        USE_R_SWA=use_rswa,
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
         stride_k_cache_2=k.stride(2),
@@ -721,8 +1544,17 @@ def unified_attention(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
+        Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
+        USE_TD=use_td,
+        USE_TD_QO=use_td_qo,
+        MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        WINDOW_SEGMENTS=window_segments,
+        v_cache_delta=v_cache_delta,
+        K_ALIGN=k_align,
+        V_ALIGN=v_align,
+        **launch_kwargs,
     )
 
     if use_3d:
@@ -740,9 +1572,11 @@ def unified_attention(
             block_table_stride=block_table.stride(0),
             TILE_SIZE=TILE_SIZE_DECODE,
             HEAD_SIZE=head_size,
-            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+            HEAD_SIZE_PADDED=head_size_padded,
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            WINDOW_SEGMENTS=window_segments,
+            SLIDING_WINDOW=sliding_window_val if window_segments else 0,
             USE_FP8=output_scale is not None,
         )

@@ -1,0 +1,9 @@
+model_name: "RedHatAI/Qwen3.5-4B-quantized.w4a16"
+accuracy_threshold: 0.82
+num_questions: 1319
+num_fewshot: 5
+gen_prefix: " <think>\n\n</think>\n"
+server_args: >-
+  --enforce-eager
+  --max-model-len 8192
+  --linear-backend humming

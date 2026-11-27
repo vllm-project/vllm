@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ColBERT late interaction model for retrieval and reranking.
+"""ColBERT late interaction model for retrieval and reranking.
 
 ColBERT uses per-token embeddings and late interaction (MaxSim) scoring
 instead of single-vector representations or cross-encoder concatenation.
 
 This module provides:
 
-- :class:`ColBERTMixin` — mixin that adds ColBERT late-interaction support
+- `ColBERTMixin` — mixin that adds ColBERT late-interaction support
   to any embedding model.
-- :class:`ColBERTModel` — ColBERT with BERT backbone (original architecture).
-- :class:`ColBERTModernBertModel` — ColBERT with ModernBERT backbone.
-- :class:`ColBERTJinaRobertaModel` — ColBERT with Jina XLM-RoBERTa backbone.
+- `ColBERTModel` — ColBERT with BERT backbone (original architecture).
+- `ColBERTModernBertModel` — ColBERT with ModernBERT backbone.
+- `ColBERTJinaRobertaModel` — ColBERT with Jina XLM-RoBERTa backbone.
 
 Reference: https://arxiv.org/abs/2004.12832
 """
@@ -25,6 +24,7 @@ from torch import nn
 from vllm.config import PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 from .bert import BertEmbeddingModel, BertModel
 from .interfaces import HasInnerState, IsHybrid, SupportsLateInteraction
@@ -44,11 +44,11 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
 
     **Integration:**
 
-    1. Inherit from both ``ColBERTMixin`` and ``nn.Module``.
-    2. In ``__init__``: call ``super().__init__()``, then
-       :meth:`_init_colbert_components`, then create ``self.model``
-       (the backbone) and ``self.pooler`` via :meth:`_build_colbert_pooler`.
-    3. In ``load_weights``: use :meth:`_load_colbert_weights` to separate
+    1. Inherit from both `ColBERTMixin` and `nn.Module`.
+    2. In `__init__`: call `super().__init__()`, then
+       `_init_colbert_components`, then create `self.model`
+       (the backbone) and `self.pooler` via `_build_colbert_pooler`.
+    3. In `load_weights`: use `_load_colbert_weights` to separate
        the ColBERT projection weight, then delegate the rest to the backbone.
     """
 
@@ -71,9 +71,10 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
         Args:
             hidden_size: Hidden dimension of the encoder backbone.
             colbert_dim: Output dimension for ColBERT embeddings.  If
-                ``None``, will be inferred from weights during loading (or
+                `None`, will be inferred from weights during loading (or
                 auto-loaded from sentence-transformers Dense layers).
             head_dtype: Data type for the projection layer.
+
         """
         self.hidden_size = hidden_size
         self.colbert_dim = colbert_dim
@@ -100,9 +101,9 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
     def _build_colbert_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         """Build pooler for ColBERT token embeddings.
 
-        When ``colbert_linear`` is set, it is used as the projector.
-        Otherwise ``pooler_for_token_embed`` falls back to auto-loading
-        sentence-transformers Dense layers (``1_Dense/`` etc.).
+        When `colbert_linear` is set, it is used as the projector.
+        Otherwise `pooler_for_token_embed` falls back to auto-loading
+        sentence-transformers Dense layers (`1_Dense/` etc.).
         """
         return pooler_for_token_embed(
             pooler_config,
@@ -115,7 +116,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
     def get_colbert_dim_from_config(cls, hf_config) -> int | None:
         """Extract ColBERT dimension from a HuggingFace config.
 
-        Checks ``colbert_dim``, ``dim`` and ``projection_dim`` in that order.
+        Checks `colbert_dim`, `dim` and `projection_dim` in that order.
         """
         return (
             getattr(hf_config, "colbert_dim", None)
@@ -137,17 +138,18 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
 
         Scans *weights* for entries whose name ends with one of
         *colbert_weight_names*.  The matching weight is loaded into
-        ``self.colbert_linear`` (creating it first if ``colbert_dim`` was
+        `self.colbert_linear` (creating it first if `colbert_dim` was
         not known at init time).
 
         Args:
-            weights: Iterable of ``(name, tensor)`` weight pairs.
+            weights: Iterable of `(name, tensor)` weight pairs.
             colbert_weight_names: Suffixes that identify the ColBERT linear
                 weight.
 
         Returns:
-            ``(remaining_weights, loaded_names)`` — the weights that were
+            `(remaining_weights, loaded_names)` — the weights that were
             **not** consumed and the set of names that were loaded.
+
         """
         weights_list = list(weights)
         other_weights: list[tuple[str, torch.Tensor]] = []
@@ -193,7 +195,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
 class ColBERTModel(ColBERTMixin, BertEmbeddingModel):
     """ColBERT late interaction model with BERT backbone.
 
-    Supports the ``token_embed`` task (per-token embeddings for late
+    Supports the `token_embed` task (per-token embeddings for late
     interaction).  MaxSim scoring is computed externally.
     """
 
@@ -217,38 +219,12 @@ class ColBERTModel(ColBERTMixin, BertEmbeddingModel):
         return self._build_colbert_pooler(pooler_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        def _strip(name: str) -> str:
-            for p in ("model.", "bert."):
-                if name.startswith(p):
-                    name = name[len(p) :]
-            return name
-
-        weights_list = list(weights)
-        model_side: list[tuple[str, torch.Tensor]] = []
-        colbert_side: list[tuple[str, torch.Tensor]] = []
-
-        for name, weight in weights_list:
-            stripped = _strip(name)
-            # Handle different checkpoint naming conventions
-            if stripped in ("linear.weight", "colbert_linear.weight"):
-                colbert_side.append(("colbert_linear.weight", weight))
-            elif stripped.startswith("linear.") or stripped.startswith(
-                "colbert_linear."
-            ):
-                new_name = stripped.replace("linear.", "colbert_linear.")
-                colbert_side.append((new_name, weight))
-            else:
-                model_side.append((stripped, weight))
-
-        loaded: set[str] = set()
-        loaded_model = self.model.load_weights(model_side)
-        loaded.update({"model." + n for n in loaded_model})
-
-        if colbert_side:
-            _, colbert_loaded = self._load_colbert_weights(colbert_side)
-            loaded.update(colbert_loaded)
-
-        return loaded
+        other_weights, colbert_loaded = self._load_colbert_weights(weights)
+        # Force "bert." to become "model."
+        mapper = WeightsMapper(orig_to_new_prefix={"bert.": "model."})
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(other_weights, mapper=mapper)
+        return loaded | colbert_loaded
 
 
 # -----------------------------------------------------------------------
@@ -262,8 +238,8 @@ from .modernbert import ModernBertModel  # noqa: E402
 class ColBERTModernBertModel(ColBERTMixin, nn.Module):
     """ColBERT late interaction model with ModernBERT backbone.
 
-    For ``lightonai/GTE-ModernColBERT-v1`` and similar models.
-    The projection is auto-loaded from sentence-transformers ``1_Dense/``
+    For `lightonai/GTE-ModernColBERT-v1` and similar models.
+    The projection is auto-loaded from sentence-transformers `1_Dense/`
     when not present in the main checkpoint.
     """
 
@@ -309,18 +285,14 @@ class ColBERTModernBertModel(ColBERTMixin, nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        # Strip "model." prefix added by the embedding adapter
-        model_weights = [
-            (n[len("model.") :] if n.startswith("model.") else n, w)
-            for n, w in other_weights
-        ]
+        loaded_model = self.model.load_weights(other_weights)
+        loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 
-        loaded_model = self.model.load_weights(model_weights)
-        loaded = {"model." + n for n in loaded_model} | colbert_loaded
-
-        # When the ST projector was auto-loaded during init
-        # (not from the main checkpoint), mark its params as loaded
-        # so the weight validator doesn't complain.
+        # When the ST projector is loaded via `_build_colbert_pooler`, the weights
+        # might come from `colbert_loaded` or the pooler automatically falls back to
+        # load from `/1_Dense` etc.
+        # We need to mark its params as loaded so the weight validator doesn't complain
+        # when they are loaded via fallback.
         if hasattr(self.pooler, "head"):
             head = self.pooler.head
             projector = getattr(head, "projector", None)
@@ -342,7 +314,7 @@ from .bert_with_rope import JinaRobertaModel  # noqa: E402
 class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
     """ColBERT late interaction model with Jina XLM-RoBERTa backbone.
 
-    For ``jinaai/jina-colbert-v2`` and similar models.
+    For `jinaai/jina-colbert-v2` and similar models.
     """
 
     is_pooling_model = True
@@ -385,36 +357,16 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights_list = list(weights)
-        model_side: list[tuple[str, torch.Tensor]] = []
-        colbert_side: list[tuple[str, torch.Tensor]] = []
+        other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        for name, weight in weights_list:
-            stripped = name
-            # Strip "model." prefix added by the embedding adapter
-            if stripped.startswith("model."):
-                stripped = stripped[len("model.") :]
-            # Strip "roberta." prefix from checkpoint
-            if stripped.startswith("roberta."):
-                stripped = stripped[len("roberta.") :]
+        # HF pooler weights are not used in ColBERT
+        mapper = WeightsMapper(
+            orig_to_new_prefix={"roberta.": "model.", "model.pooler.": None}
+        )
 
-            if stripped in ("linear.weight", "colbert_linear.weight"):
-                colbert_side.append(("colbert_linear.weight", weight))
-            elif stripped.startswith("pooler."):
-                # Skip HF pooler weights (not used in ColBERT)
-                continue
-            else:
-                model_side.append((stripped, weight))
-
-        loaded: set[str] = set()
-        loaded_model = self.model.load_weights(model_side)
-        loaded.update({"model." + n for n in loaded_model})
-
-        if colbert_side:
-            _, colbert_loaded = self._load_colbert_weights(colbert_side)
-            loaded.update(colbert_loaded)
-
-        return loaded
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(other_weights, mapper=mapper)
+        return loaded | colbert_loaded
 
 
 # -----------------------------------------------------------------------
@@ -426,9 +378,9 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
 class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
     """ColBERT late interaction model with LFM2 backbone.
 
-    For ``LiquidAI/LFM2-ColBERT-350M`` and similar models.
+    For `LiquidAI/LFM2-ColBERT-350M` and similar models.
 
-    The projection is auto-loaded from sentence-transformers ``1_Dense/``
+    The projection is auto-loaded from sentence-transformers `1_Dense/`
     when not present in the main checkpoint.
     """
 
@@ -491,17 +443,15 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        # Strip "model." prefix added by the embedding adapter
-        model_weights = [
-            (n[len("model.") :] if n.startswith("model.") else n, w)
-            for n, w in other_weights
-        ]
-        loaded_model = self.model.load_weights(model_weights)
+        loaded_model = self.model.load_weights(other_weights)
+
         loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 
-        # When the ST projector was auto-loaded during init
-        # (not from the main checkpoint), mark its params as loaded
-        # so the weight validator doesn't complain.
+        # When the ST projector is loaded via `_build_colbert_pooler`, the weights
+        # might come from `colbert_loaded` or the pooler automatically falls back to
+        # load from `/1_Dense` etc.
+        # We need to mark its params as loaded so the weight validator doesn't complain
+        # when they are loaded via fallback.
         if hasattr(self.pooler, "head"):
             head = self.pooler.head
             projector = getattr(head, "projector", None)

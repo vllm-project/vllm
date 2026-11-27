@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from vllm import PoolingParams
+from vllm import PoolingParams, envs
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
 from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
-from .typing import ScoreContentPartParam, ScoreInput
+from .types import ScoreContentPartParam, ScoreInput
 
 
 class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
@@ -35,18 +36,83 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             "applies to the combined query+document)."
         ),
     )
+    instruction: str | None = Field(
+        default=None,
+        description=(
+            "Task instruction prepended to each scored pair via the chat "
+            "template. Equivalent to passing "
+            "chat_template_kwargs={'instruction': ...}."
+        ),
+    )
+    add_special_tokens: bool | None = Field(
+        default=None,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false. "
+            "If unset (`None`), the per-path default is used: `False` for the "
+            "chat path, and the model/tokenizer default for the completion path."
+        ),
+    )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the score/rerank chat template."
+        ),
+    )
     # --8<-- [end:scoring-common-params]
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        encoder_config = model_config.encoder_config or {}
+    @model_validator(mode="before")
+    @classmethod
+    def validate_input_list_length(cls, data):
+        if not isinstance(data, dict):
+            return data
+        max_prompts = envs.VLLM_MAX_COMPLETION_PROMPTS
+        for field_name in (
+            "documents",
+            "items",
+            "text_2",
+            "data_2",
+            "queries",
+            "data_1",
+            "text_1",
+        ):
+            value = data.get(field_name)
+            if isinstance(value, list) and len(value) > max_prompts:
+                raise VLLMValidationError(
+                    f"{field_name} list length {len(value)} exceeds the "
+                    f"maximum allowed count of {max_prompts}. To increase "
+                    "this limit, set the VLLM_MAX_COMPLETION_PROMPTS "
+                    "environment variable.",
+                    parameter=field_name,
+                )
+        return data
 
-        return TokenizeParams(
+    @model_validator(mode="after")
+    def _merge_instruction_into_kwargs(self) -> "ScoringRequestMixin":
+        """Fold the top-level `instruction` field into `chat_template_kwargs`.
+
+        This allows callers to use either the convenience field or the generic
+        dict.  Explicit keys inside `chat_template_kwargs` take precedence over
+        the top-level `instruction` field.
+        """
+        if self.instruction is not None:
+            merged = dict(self.chat_template_kwargs or {})
+            merged.setdefault("instruction", self.instruction)
+            self.chat_template_kwargs = merged
+        return self
+
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
+        return self._build_pooling_tok_params(
+            model_config,
+            default_tok_params,
+            add_special_tokens=self.add_special_tokens,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            max_total_tokens_param="max_model_len",
         )
 
     def to_pooling_params(self, task: PoolingTask = "classify"):
@@ -114,7 +180,8 @@ class RerankRequest(ScoringRequestMixin):
     # --8<-- [start:rerank-request-params]
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
-    top_n: int = Field(default_factory=lambda: 0)
+    top_n: int = Field(default=0, ge=0)
+    return_documents: bool | None = True
     # --8<-- [end:rerank-request-params]
 
 
@@ -128,7 +195,9 @@ class RerankDocument(BaseModel):
 
 class RerankResult(BaseModel):
     index: int
-    document: RerankDocument
+    document: RerankDocument | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     relevance_score: float
 
 

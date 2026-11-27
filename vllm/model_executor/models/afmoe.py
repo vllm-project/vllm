@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only AfMoE model compatible with HuggingFace weights."""
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -17,14 +16,18 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
+    FusedMoEFactory,
+    GateLinear,
+    MoERunner,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -35,24 +38,18 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
+    MixtureOfExperts,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
 )
-from vllm.model_executor.models.llama import LlamaMLP as AfmoeMLP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -60,6 +57,45 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
 logger = init_logger(__name__)
+
+
+class AfmoeMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.gate_up_proj(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class AfmoeMoE(nn.Module):
@@ -77,7 +113,6 @@ class AfmoeMoE(nn.Module):
         self.route_norm = config.route_norm
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.num_experts
         self.n_shared_experts: int = config.num_shared_experts
@@ -89,11 +124,18 @@ class AfmoeMoE(nn.Module):
             )
 
         # Router gate
-        self.gate = nn.Linear(
+        router_dtype = (
+            torch.bfloat16
+            if torch.get_default_dtype() == torch.bfloat16
+            and (quant_config is None or quant_config.get_name() == "modelopt_fp4")
+            else torch.float32
+        )
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            dtype=torch.float32,
+            out_dtype=router_dtype,
+            params_dtype=router_dtype,
+            prefix=f"{prefix}.gate",
         )
         self.expert_bias = nn.Parameter(
             torch.empty(config.num_experts, dtype=torch.float32)
@@ -109,11 +151,6 @@ class AfmoeMoE(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         self.shared_experts = None
         # Shared experts
         if config.num_shared_experts > 0:
@@ -127,8 +164,8 @@ class AfmoeMoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        # Routed experts using FusedMoE
-        self.experts = FusedMoE(
+        # Routed experts using FusedMoEFactory
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
@@ -152,7 +189,8 @@ class AfmoeMoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        router_logits = self.gate(hidden_states.to(dtype=torch.float32))
+        router_logits, _ = self.gate(hidden_states)
+        router_logits = router_logits.float()
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -237,7 +275,7 @@ class AfmoeAttention(nn.Module):
 
         # Only create rotary embeddings for local attention
         if self.is_local_attention:
-            self.rotary_emb = get_rope(
+            self.rotary_emb: nn.Module | None = get_rope(
                 self.head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
@@ -414,10 +452,6 @@ class AfmoeModel(nn.Module, EagleModelMixin):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
-
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -479,122 +513,10 @@ class AfmoeModel(nn.Module, EagleModelMixin):
             }
         )
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
-                if (weight_name not in name) or ("self_attn.gate_proj" in name):
-                    continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if ("mlp.experts." in name) and name not in params_dict:
-                    continue
-
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-
-                    # Anyway, this is an expert weight and should not be
-                    # attempted to load as other weights later
-                    is_expert_weight = True
-
-                    # Do not modify `name` since the loop may continue here
-                    # Instead, create a new variable
-                    name_mapped = name.replace(weight_name, param_name)
-
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-
-                    param = params_dict[name_mapped]
-                    # We should ask the weight loader to return success or not
-                    # here since otherwise we may skip experts with other
-                    # available replicas.
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        # We've checked that this is an expert weight
-                        # However it's not mapped locally to this rank
-                        # So we simply skip it
-                        continue
-
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-
-                    # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
-
-
-class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
+class AfmoeForCausalLM(
+    nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA, MixtureOfExperts
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -611,6 +533,17 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         orig_to_new_suffix={
             ".router.gate.weight": ".gate.weight",
         },
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            # `.self_attn.gate_proj` is a gated-attention projection (not fused).
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+        },
     )
 
     fall_back_to_pt_during_load = False
@@ -626,7 +559,10 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                config.vocab_size, config.hidden_size, quant_config=quant_config
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         else:
             self.lm_head = PPMissingLayer()
@@ -634,13 +570,11 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-        self.expert_weights = []
-
         # Set MoE hyperparameters
         self.num_moe_layers = config.num_hidden_layers - config.num_dense_layers
         self.num_expert_groups = config.n_group
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[MoERunner] = []
         example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
@@ -662,21 +596,24 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
 
-    def set_eplb_state(
+    def update_physical_experts_metadata(
         self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
     ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if layer.moe_enabled:
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -700,6 +637,3 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()

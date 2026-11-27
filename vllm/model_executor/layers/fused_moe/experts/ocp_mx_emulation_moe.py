@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-OCP MX quantization emulation for MoE.
+"""OCP MX quantization emulation for MoE.
 
 This file implements OCP MX (MXFP4/MXFP6) emulation for MoE in case the
 hardware used does not natively support OCP MX MoE.
@@ -20,20 +19,75 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.experts.ocp_mx_routed_dequant import (
+    can_dequant_routed_mxfp4,
+    dedup_routed_experts,
+    dequant_routed_mxfp4,
+)
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
+from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_quark
 
 logger = init_logger(__name__)
 
 
-class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
+def activation_quant_dtype(
+    ocp_mx_scheme: OCP_MX_Scheme | str,
+) -> torch.dtype | str | None:
+    """Activation dtype `moe_kernel_quantize_input` should fake-quantize to.
+
+    Args:
+        ocp_mx_scheme: The OCP MX scheme the emulated experts run. Accepts the
+            enum member or its string value.
+
+    Returns:
+        A `quant_dtype` `moe_kernel_quantize_input` dispatches on, or None for
+        weight-only schemes, which leave activations untouched.
+
+    Raises:
+        NotImplementedError: If the scheme has no emulated activation dtype.
+
     """
-    Extension of TritonExperts to support emulated OCP MX MoE experts.
+    if ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4,
+        OCP_MX_Scheme.w_mxfp6_e3m2,
+        OCP_MX_Scheme.w_mxfp6_e2m3,
+    }:
+        return None
+    elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp4:
+        return "mxfp4"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+        OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
+    }:
+        return "mxfp6_e3m2"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+        OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
+    }:
+        return "mxfp6_e2m3"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_fp8,
+        OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
+        OCP_MX_Scheme.w_mxfp6_e2m3_a_fp8,
+    }:
+        return current_platform.fp8_dtype()
+    raise NotImplementedError(
+        f"No emulated activation dtype for OCP MX scheme {ocp_mx_scheme}."
+        " Please open an issue."
+    )
+
+
+class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
+    """Extension of TritonExperts to support emulated OCP MX MoE experts.
 
     It may be used for OCP MX (MXFP4/MXFP6) models when the device does not
     have native support for these dtypes.
@@ -68,24 +122,26 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         self.quantization_emulation = True
 
-        if self.ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-        }:
-            # Weight has to be dequantized for mxfp4 emulation.
-            self._quant_dtype = "mxfp4"
-        elif self.ocp_mx_scheme in [
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-            OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
-        ]:
-            self._quant_dtype = "mxfp6"
-        elif self.ocp_mx_scheme in [
-            OCP_MX_Scheme.w_mxfp4_a_fp8,
-            OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
-        ]:
-            # TODO: double check this one
-            self._quant_dtype = "mxfp8"
+        self._quant_dtype = activation_quant_dtype(self.ocp_mx_scheme)
+
+    @staticmethod
+    def is_supported_config(
+        cls: type["mk.FusedMoEExperts"],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if not has_quark():
+            return False, "kernel requires amd-quark package"
+
+        return TritonExperts.is_supported_config(
+            cls=cls,
+            moe_config=moe_config,
+            weight_key=weight_key,
+            activation_key=activation_key,
+            activation_format=activation_format,
+        )
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
@@ -120,6 +176,58 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         else:
             raise NotImplementedError(f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}")
 
+    def _dequantize_routed(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w1_scale: torch.Tensor | None,
+        w2_scale: torch.Tensor | None,
+        topk_ids: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """w1 and w2 of only the routed experts and topk_ids renumbered onto
+        them, or None to dequantize every expert.
+
+        Every decision and shape depends only on topk_ids' shape, so this
+        needs no host sync and also runs under graph capture.
+        """
+        num_experts = w1.size(0)
+        if topk_ids.numel() == 0 or w1_scale is None or w2_scale is None:
+            return None
+        if (
+            current_platform.is_rocm()
+            and dtype == torch.bfloat16
+            and self.ocp_mx_scheme.startswith("w_mxfp4")  # type: ignore[union-attr]
+            # Rows of -1 ids stay unwritten. MX activation scales are per block,
+            # but a dynamic fp8 a2 scale would be reduced over those rows too.
+            and not (
+                isinstance(self.quant_dtype, torch.dtype)
+                and self.quant_config.a2_scale is None
+            )
+            and can_dequant_routed_mxfp4(w1, w1_scale)
+            and can_dequant_routed_mxfp4(w2, w2_scale)
+        ):
+            # One slot per distinct expert; unused slots cost almost nothing.
+            used, local_ids = dedup_routed_experts(topk_ids, num_experts)
+            return (
+                dequant_routed_mxfp4(w1, w1_scale, used),
+                dequant_routed_mxfp4(w2, w2_scale, used),
+                local_ids,
+            )
+        # Otherwise gather one expert per top-k slot. Past a quarter of the
+        # experts that saves little (break-even near 0.4x on MI250X, 0.65x on
+        # MI355X).
+        if topk_ids.numel() > num_experts // 4:
+            return None
+        flat = topk_ids.reshape(-1)
+        order = flat.argsort()
+        used = flat[order]
+        return (
+            self._dequantize_weights(w1[used], w1_scale[used], dtype),
+            self._dequantize_weights(w2[used], w2_scale[used], dtype),
+            order.argsort().view_as(topk_ids).to(topk_ids.dtype),
+        )
+
     def apply(
         self,
         output: torch.Tensor,
@@ -138,8 +246,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        """
-        Apply emulated quantized MoE computation.
+        """Apply emulated quantized MoE computation.
 
         This dequantizes the weights on the fly and calls TritonExperts.apply
         with activation quantization support.
@@ -147,23 +254,25 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         assert w1.dtype == torch.uint8
         assert w2.dtype == torch.uint8
 
-        # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
-        w1_dequant = self._dequantize_weights(
-            w1, self.w1_scale_val, hidden_states.dtype
-        )
-        w2_dequant = self._dequantize_weights(
-            w2, self.w2_scale_val, hidden_states.dtype
-        )
-
-        # Apply activation QDQ if needed by the OCP MX scheme
-        hidden_states, _ = moe_kernel_quantize_input(
-            A=hidden_states,
-            A_scale=None,
-            quant_dtype=self.quant_config.quant_dtype,
-            per_act_token_quant=False,
-            ocp_mx_scheme=self.ocp_mx_scheme,
-            quantization_emulation=True,
-        )
+        w1_scale, w2_scale = self.w1_scale_val, self.w2_scale_val
+        # Dequantizing every local expert writes the whole layer in bf16/fp16
+        # on each call. Dequantize only the batch's experts where possible.
+        routed = None
+        if (
+            expert_map is None
+            and self._lora_context is None
+            and self.quant_config.w1_bias is None
+            and self.quant_config.w2_bias is None
+        ):
+            routed = self._dequantize_routed(
+                w1, w2, w1_scale, w2_scale, topk_ids, hidden_states.dtype
+            )
+        if routed is not None:
+            w1_dequant, w2_dequant, topk_ids = routed
+            global_num_experts = w1_dequant.size(0)
+        else:
+            w1_dequant = self._dequantize_weights(w1, w1_scale, hidden_states.dtype)
+            w2_dequant = self._dequantize_weights(w2, w2_scale, hidden_states.dtype)
 
         # Activation quantization/dequantization is deferred to
         # `moe_kernel_quantize_input` in TritonExperts.apply.
@@ -178,7 +287,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             a1q_scale=None,
-            a2_scale=None,
+            a2_scale=a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,

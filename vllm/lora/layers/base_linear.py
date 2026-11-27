@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from functools import partial
+
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm import envs
 from vllm.config import get_current_vllm_config
@@ -17,24 +19,19 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
+    QuantizeMethodBase,
     ReplicatedLinear,
     RowParallelLinear,
+    apply_flattened,
 )
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
-from .utils import _get_lora_device
+from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
 if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
-    _lora_aux_cuda_stream: torch.cuda.Stream | None = None
-
-    def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
-        global _lora_aux_cuda_stream
-        if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
-            _lora_aux_cuda_stream = torch.cuda.Stream()
-        return _lora_aux_cuda_stream
 
     def lora_linear_async(
         layer_name: str,
@@ -74,6 +71,10 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
+    # The adapter branch consumes the original activation, independently of
+    # whether the wrapped base layer can consume a pre-quantized activation.
+    requires_unquantized_input = True
+
     def __init__(self, base_layer: LinearBase):
         super().__init__()
 
@@ -100,14 +101,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config
         if self.layer_name in compilation_config.static_forward_context:
-            raise ValueError("Duplicate layer name: {}".format(self.layer_name))
+            raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
 
     def create_lora_weights(
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         self.lora_config = lora_config
         if isinstance(self.base_layer, ReplicatedLinear):
@@ -189,6 +190,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
+    def _get_quant_method(self) -> QuantizeMethodBase:
+        quant_method = self.base_layer.quant_method
+        if quant_method is None:
+            raise RuntimeError(
+                f"{type(self.base_layer).__name__} must define quant_method for LoRA."
+            )
+        return quant_method
+
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         # is_forward_context_available for tower modules
         if self._enable_aux_cuda_stream and is_forward_context_available():
@@ -202,7 +211,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_sync(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+        apply = partial(self._get_quant_method().apply, self.base_layer, bias=bias)
+        output = apply_flattened(apply, x)
         return self._apply_lora_to_output(x, output)
 
     def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -238,8 +248,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_async_impl(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """
-        Forward pass with base linear and LoRA on separate CUDA streams
+        """Forward pass with base linear and LoRA on separate CUDA streams
         for overlap, using maybe_execute_in_parallel.
         Base layer runs on default stream; LoRA runs on aux stream.
         """
@@ -249,7 +258,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output_size = sum(self.output_slices)
 
         def base_fn() -> torch.Tensor:
-            return self.base_layer.quant_method.apply(self.base_layer, x, bias)
+            quant_method = self._get_quant_method()
+            apply = partial(quant_method.apply, self.base_layer, bias=bias)
+            return apply_flattened(apply, x)
 
         def lora_fn() -> torch.Tensor:
             # Must be zeros, not empty: _lora_expand_kernel exits early (without

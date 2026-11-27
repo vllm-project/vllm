@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for max_tokens_per_doc and max_tokens_per_query.
-"""
+"""Tests for max_tokens_per_doc and max_tokens_per_query."""
 
 import json
 import os
@@ -14,22 +12,21 @@ import requests
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse
 
-os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
-
 TEMPLATE_DIR = str(VLLM_PATH / "examples/pooling/score/template")
+ExpectedPromptTokens = int | tuple[int, ...]
 
 long_query = "What is the capital of France?" * 20
 long_doc = "The capital of France is Paris. " * 20
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     model: str
     args: list[str]
-    without_truncated_prompt_tokens: int
-    with_max_tokens_per_query_prompt_tokens: int
-    with_max_tokens_per_doc_prompt_tokens: int
-    with_max_tokens_per_query_and_doc_prompt_tokens: int
+    without_truncated_prompt_tokens: ExpectedPromptTokens
+    with_max_tokens_per_query_prompt_tokens: ExpectedPromptTokens
+    with_max_tokens_per_doc_prompt_tokens: ExpectedPromptTokens
+    with_max_tokens_per_query_and_doc_prompt_tokens: ExpectedPromptTokens
 
 
 RERANK_CONFIGS = [
@@ -72,41 +69,28 @@ RERANK_CONFIGS = [
     ),
     # 3. bi-encoder
     TestConfig(
-        model="intfloat/multilingual-e5-small",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "512",
-            "--trust-remote-code",
-        ],
-        without_truncated_prompt_tokens=286,
-        with_max_tokens_per_query_prompt_tokens=156,
-        with_max_tokens_per_doc_prompt_tokens=155,
-        with_max_tokens_per_query_and_doc_prompt_tokens=25,
+        model="vllm-project/multilingual-e5-small",
+        args=["--enforce-eager", "--max-model-len", "512"],
+        # This model has produced both prompt-token totals in CI/local cache;
+        # keep truncation checks exact while tolerating the boundary delta.
+        without_truncated_prompt_tokens=(284, 285),
+        with_max_tokens_per_query_prompt_tokens=(154, 155),
+        with_max_tokens_per_doc_prompt_tokens=154,
+        with_max_tokens_per_query_and_doc_prompt_tokens=24,
     ),
     # 4. late-interaction
     TestConfig(
         model="answerdotai/answerai-colbert-small-v1",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "512",
-            "--trust-remote-code",
-        ],
-        without_truncated_prompt_tokens=285,
-        with_max_tokens_per_query_prompt_tokens=155,
-        with_max_tokens_per_doc_prompt_tokens=155,
-        with_max_tokens_per_query_and_doc_prompt_tokens=25,
+        args=["--enforce-eager", "--max-model-len", "512"],
+        without_truncated_prompt_tokens=284,
+        with_max_tokens_per_query_prompt_tokens=154,
+        with_max_tokens_per_doc_prompt_tokens=154,
+        with_max_tokens_per_query_and_doc_prompt_tokens=24,
     ),
     # 5. jinaai/jina-reranker-v3
     TestConfig(
         model="jinaai/jina-reranker-v3",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "1024",
-            "--trust-remote-code",
-        ],
+        args=["--enforce-eager", "--max-model-len", "1024"],
         without_truncated_prompt_tokens=567,
         with_max_tokens_per_query_prompt_tokens=308,
         with_max_tokens_per_doc_prompt_tokens=436,
@@ -115,10 +99,20 @@ RERANK_CONFIGS = [
 ]
 
 
+def assert_prompt_tokens(actual: int, expected: ExpectedPromptTokens) -> None:
+    if isinstance(expected, int):
+        assert actual == expected
+    else:
+        assert actual in expected
+
+
 @pytest.fixture(scope="module", params=RERANK_CONFIGS, ids=lambda c: c.model)
 def server(request):
     config: TestConfig = request.param
-    with RemoteOpenAIServer(config.model, config.args) as remote_server:
+    env_dict = {"VLLM_LOGGING_LEVEL": "WARNING"}
+    with RemoteOpenAIServer(
+        config.model, config.args, env_dict=env_dict
+    ) as remote_server:
         yield config, remote_server
 
 
@@ -136,7 +130,10 @@ def test_without_truncated(server):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 1
-    assert rerank.usage.prompt_tokens == config.without_truncated_prompt_tokens
+    assert_prompt_tokens(
+        rerank.usage.prompt_tokens,
+        config.without_truncated_prompt_tokens,
+    )
 
 
 def test_max_tokens_per_query(server):
@@ -158,7 +155,10 @@ def test_max_tokens_per_query(server):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 1
-    assert rerank.usage.prompt_tokens == config.with_max_tokens_per_query_prompt_tokens
+    assert_prompt_tokens(
+        rerank.usage.prompt_tokens,
+        config.with_max_tokens_per_query_prompt_tokens,
+    )
 
 
 def test_max_tokens_per_doc(server):
@@ -180,7 +180,10 @@ def test_max_tokens_per_doc(server):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 1
-    assert rerank.usage.prompt_tokens == config.with_max_tokens_per_doc_prompt_tokens
+    assert_prompt_tokens(
+        rerank.usage.prompt_tokens,
+        config.with_max_tokens_per_doc_prompt_tokens,
+    )
 
 
 def test_max_tokens_per_query_and_doc(server):
@@ -203,7 +206,7 @@ def test_max_tokens_per_query_and_doc(server):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 1
-    assert (
-        rerank.usage.prompt_tokens
-        == config.with_max_tokens_per_query_and_doc_prompt_tokens
+    assert_prompt_tokens(
+        rerank.usage.prompt_tokens,
+        config.with_max_tokens_per_query_and_doc_prompt_tokens,
     )

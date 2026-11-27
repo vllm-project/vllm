@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from vllm_xpu_kernels.rotary import apply_rotary_emb
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -48,10 +51,27 @@ if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
         weight_scale: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        N = q_weight.size(-1)
+        out_shape = (*input.shape[:-1], N)
+        return torch.empty(out_shape, dtype=input.dtype, device=input.device)
+
+
+if hasattr(torch.ops._xpu_C, "fp4_gemm"):
+
+    @register_fake("_xpu_C::fp4_gemm")
+    def _fp4_gemm_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale_act: torch.Tensor,
+        scale_wei: torch.Tensor,
+        out_dtype: torch.dtype | None = None,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         input_2d = input.view(-1, input.shape[-1])
         M = input_2d.size(0)
-        N = q_weight.size(1)
-        return torch.empty((M, N), dtype=input.dtype, device=input.device)
+        N = weight.size(-1)
+        result_dtype = out_dtype if out_dtype is not None else torch.get_default_dtype()
+        return torch.empty((M, N), dtype=result_dtype, device=input.device)
 
 
 if hasattr(torch.ops._xpu_C, "int4_gemm_w4a8"):
@@ -92,6 +112,67 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
+def _gemma_rms_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    # GemmaRMSNorm: computes out = (x_normed_fp32 * (1 + weight.float())
+    # ).to(dtype) with a raw (bf16/fp16) weight; the +1 offset and fp32
+    # multiply are done in-kernel. See vllm-xpu-kernels gemma_rms_norm.
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
+
+
+def _fused_add_gemma_rms_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
+
+
+def _layer_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.layer_norm(out, input, weight, bias, epsilon)
+
+
+def _fused_add_layer_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_layer_norm(input, residual, weight, bias, epsilon)
+
+
+def _nemotron_layer_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.nemotron_layer_norm(out, input, weight, bias, epsilon)
+
+
+def _fused_add_nemotron_layer_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias, epsilon)
+
+
 def _gdn_attention_core_xpu_impl(
     core_attn_out: torch.Tensor,
     z: torch.Tensor,
@@ -114,8 +195,34 @@ def _gdn_attention_core_xpu_impl(
     attn_metadata = attn_metadata_raw[self.prefix]
     assert isinstance(attn_metadata, GDNAttentionMetadata)
 
-    # TODO: xpu does not support speculative decoding yet
-    assert attn_metadata.spec_sequence_masks is None  # type: ignore[attr-defined]
+    num_actual_tokens = attn_metadata.num_actual_tokens
+    num_accepted_tokens = attn_metadata.num_accepted_tokens
+
+    num_prefills = attn_metadata.num_prefills
+    num_decodes = attn_metadata.num_decodes
+    num_spec_decodes = attn_metadata.num_spec_decodes
+
+    has_initial_state = attn_metadata.has_initial_state
+
+    non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
+    non_spec_token_indx = attn_metadata.non_spec_token_indx
+    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+    non_spec_state_indices_tensor = (
+        non_spec_state_indices_tensor.contiguous()
+        if non_spec_state_indices_tensor is not None
+        else None
+    )
+
+    spec_query_start_loc = attn_metadata.spec_query_start_loc
+    spec_token_indx = attn_metadata.spec_token_indx
+    spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
+
+    spec_sequence_masks = attn_metadata.spec_sequence_masks
+    if spec_sequence_masks is not None:
+        if non_spec_token_indx is not None:
+            non_spec_token_indx = non_spec_token_indx.to(torch.int32)
+        if spec_token_indx is not None:
+            spec_token_indx = spec_token_indx.to(torch.int32)
 
     conv_weights = self.conv1d.weight.view(
         self.conv1d.weight.size(0), self.conv1d.weight.size(2)
@@ -137,25 +244,21 @@ def _gdn_attention_core_xpu_impl(
         activation=self.activation,
         A_log=self.A_log,
         dt_bias=self.dt_bias,
-        num_prefills=attn_metadata.num_prefills,  # type: ignore[attr-defined]
-        num_decodes=attn_metadata.num_decodes,  # type: ignore[attr-defined]
-        has_initial_state=attn_metadata.has_initial_state,  # type: ignore[attr-defined]
-        non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,  # type: ignore[attr-defined]
-        non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,  # type: ignore[attr-defined]
-        num_actual_tokens=attn_metadata.num_actual_tokens,  # type: ignore[attr-defined]
+        num_prefills=num_prefills,  # type: ignore[attr-defined]
+        num_decodes=num_decodes,  # type: ignore[attr-defined]
+        num_spec_decodes=num_spec_decodes,  # type: ignore[attr-defined]
+        has_initial_state=has_initial_state,  # type: ignore[attr-defined]
+        non_spec_query_start_loc=non_spec_query_start_loc,  # type: ignore[attr-defined]
+        non_spec_token_indx=non_spec_token_indx,  # type: ignore[attr-defined]
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,  # type: ignore[attr-defined]
+        spec_query_start_loc=spec_query_start_loc,  # type: ignore[attr-defined]
+        spec_token_indx=spec_token_indx,  # type: ignore[attr-defined]
+        spec_state_indices_tensor=spec_state_indices_tensor,
+        num_accepted_tokens=num_accepted_tokens,  # type: ignore[attr-defined]
+        num_actual_tokens=num_actual_tokens,  # type: ignore[attr-defined]
         tp_size=self.tp_size,
         reorder_input=not self.gqa_interleaved_layout,
     )
-
-
-def _gdn_attention_core_xpu_fake(
-    core_attn_out: torch.Tensor,
-    z: torch.Tensor,
-    projected_states_qkvz: torch.Tensor,
-    projected_states_ba: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
 
 
 def _xpu_ops_deepseek_scaling_rope_impl(
@@ -185,6 +288,265 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     return query, key
 
 
+def _xpu_apply_rotary_emb_impl(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return apply_rotary_emb(x, cos, sin, is_neox_style)
+
+
+def _xpu_apply_rotary_emb_fake(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+def _xpu_fp8_bmm_impl(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out_dtype: torch.dtype,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    """XPU FP8 batched GEMM implementation for `torch.ops.vllm.xpu_fp8_bmm`.
+
+    Computes batched matrix multiplication over the leading group dimension:
+    `[G, M, K] @ [G, K, N] -> [G, M, N]`.
+
+    Args:
+        a: FP8 activation tensor with shape `[G, M, K]`.
+            Does not need to be contiguous.
+        b: FP8 weight tensor with shape `[G, K, N]`.
+            Does not need to be contiguous.
+        out_dtype: Output dtype accepted by the kernel (typically
+            `torch.bfloat16` for the DeepSeek-V4 O-proj path).
+        a_scale: Activation scale tensor for `a`.
+            In current DeepSeek-V4 XPU usage it is block-scaled with shape
+            `[G, M, K/bs]` (`bs` is the quant block size, e.g. 128).
+            Must be contiguous.
+        b_scale: Weight scale tensor for `b`.
+            In current DeepSeek-V4 XPU usage it is block-scaled with shape
+            `[G, K/bs, N/bs]` (`bs` is the quant block size, e.g. 128).
+            Must be contiguous.
+        bias: Optional bias tensor. Pass `None` when no bias is required.
+
+    Returns:
+        Output tensor with shape `[G, M, N]` and dtype `out_dtype`.
+
+    Notes:
+        This implementation centralizes access to
+        `torch.ops._xpu_C.fp8_bmm`. Both scales must be contiguous, while
+        `a` and `b` may be non-contiguous views.
+
+    """
+    return torch.ops._xpu_C.fp8_bmm(a, b, out_dtype, a_scale, b_scale, bias)
+
+
+def _xpu_fp8_bmm_fake(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out_dtype: torch.dtype,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    # [G, M, K] @ [G, K, N] => [G, M, N]
+    return torch.empty(
+        (a.shape[0], a.shape[1], b.shape[2]),
+        dtype=out_dtype,
+        device=a.device,
+    )
+
+
+def _xpu_fp8_mqa_logits_impl(
+    q: torch.Tensor,
+    k_quant: torch.Tensor,
+    k_scale: torch.Tensor,
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._xpu_C.fp8_mqa_logits(
+        q,
+        k_quant,
+        k_scale,
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+    )
+
+
+def _xpu_fp8_mqa_logits_fake(
+    q: torch.Tensor,
+    k_quant: torch.Tensor,
+    k_scale: torch.Tensor,
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty(
+        (q.shape[0], k_quant.shape[0]),
+        dtype=torch.float32,
+        device=q.device,
+    )
+
+
+def _xpu_fp8_paged_mqa_logits_impl(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    schedule_metadata: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    return torch.ops._xpu_C.fp8_paged_mqa_logits(
+        q,
+        kv_cache,
+        weights,
+        context_lens,
+        block_tables,
+        schedule_metadata,
+        max_model_len,
+    )
+
+
+def _xpu_fp8_paged_mqa_logits_fake(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    schedule_metadata: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    batch_size, next_n = q.shape[:2]
+    return torch.empty(
+        (batch_size * next_n, max_model_len),
+        dtype=torch.float32,
+        device=q.device,
+    )
+
+
+def _topk_topp_sample_impl(
+    random_sampled: torch.Tensor,
+    logits_to_return: torch.Tensor | None,
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    logprobs_mode: str,
+    seeds: torch.Tensor | None,
+    lambda_: float = 1.0,
+) -> None:
+    torch.ops._xpu_C.topk_topp_sampler(
+        random_sampled, logits_to_return, logits, k, p, logprobs_mode, seeds, lambda_
+    )
+    return
+
+
+def _topk_topp_sample_fake(
+    random_sampled: torch.Tensor,
+    logits_to_return: torch.Tensor | None,
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    logprobs_mode: str,
+    seeds: torch.Tensor | None,
+    lambda_: float = 1.0,
+) -> None:
+    return
+
+
+def _xpu_deepseek_fused_indexer_q_rope_fp8_impl(
+    index_q: torch.Tensor,
+    positions: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_q_fp8: torch.Tensor,
+    index_weights_out: torch.Tensor,
+) -> None:
+    """Fused RoPE + FP8 quant of the DeepSeek-V4 sparse-indexer Q (XPU).
+    Writes `index_q_fp8` and `index_weights_out` in place (no return).
+    Requires head_dim=128, rope_dim=64, and num_heads divisible by 2.
+
+    Args:
+        index_q: (T, H, 128) bfloat16 Q before RoPE. Contiguous.
+        positions: (T,) int64 absolute token positions.
+        index_q_cos_sin_cache: (max_pos, 64) float32 RoPE cos/sin cache.
+        index_weights: (T, H) bfloat16 raw indexer weights.
+        index_weights_softmax_scale: scalar softmax scale.
+        index_weights_head_scale: scalar per-head scale.
+        index_q_fp8: (T, H, 128) fp8 (e4m3) output, preallocated. [written]
+        index_weights_out: (T, H) float32 output, preallocated;
+            = index_weights * q_scale * softmax_scale * head_scale (the
+            per-(token, head) q_scale is folded in here). [written]
+
+    """
+    torch.ops._xpu_C.deepseek_fused_indexer_q_rope_fp8(
+        index_q,
+        positions,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        index_q_fp8,
+        index_weights_out,
+    )
+
+
+def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
+    index_q: torch.Tensor,
+    positions: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_q_packed: torch.Tensor,
+    index_q_scale: torch.Tensor,
+    index_weights_out: torch.Tensor,
+) -> None:
+    """Fused RoPE + MXFP4 quant of the DeepSeek-V4 sparse-indexer Q (XPU).
+    Writes `index_q_packed`, `index_q_scale` and `index_weights_out` in
+    place (no return). Requires head_dim=128, rope_dim=64, and num_heads
+    divisible by 4.
+
+    Args:
+        index_q: (T, H, 128) bfloat16 Q before RoPE. Contiguous.
+        positions: (T,) int64 absolute token positions.
+        index_q_cos_sin_cache: (max_pos, 64) float32 RoPE cos/sin cache.
+        index_weights: (T, H) bfloat16 raw indexer weights.
+        index_weights_softmax_scale: scalar softmax scale.
+        index_weights_head_scale: scalar per-head scale.
+        index_q_packed: (T, H, 64) uint8 packed E2M1 nibbles (2 per byte),
+            preallocated. [written]
+        index_q_scale: (T, H, 4) uint8 ue8m0 per-block (32-elem) scales,
+            preallocated. [written]
+        index_weights_out: (T, H) float32 output, preallocated;
+            = index_weights * softmax_scale * head_scale (no q_scale folded;
+            per-block scales live in index_q_scale). [written]
+
+    """
+    torch.ops._xpu_C.deepseek_fused_indexer_q_rope_mxfp4(
+        index_q,
+        positions,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        index_q_packed,
+        index_q_scale,
+        index_weights_out,
+    )
+
+
 def _xpu_mxfp8_quantize_impl(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -207,7 +569,16 @@ def _xpu_mxfp8_quantize_impl(
     shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
     x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
     torch.ops._C.per_token_group_fp8_quant(
-        x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True
+        x,
+        x_q,
+        x_s,
+        MXFP8_BLOCK_SIZE,
+        eps,
+        fp8_min,
+        fp8_max,
+        True,
+        False,
+        False,  # dummy_is_scale_transposed, dummy_is_tma_aligned
     )
     x_s = x_s.to(torch.float8_e8m0fnu)
     return x_q, x_s
@@ -265,6 +636,37 @@ def _xpu_mxfp4_quantize_fake(
     x_q = x_q.view(torch.float4_e2m1fn_x2)
     x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
     return x_q, x_s
+
+
+def _xpu_fused_input_norm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    visual_dtype: torch.dtype,
+) -> torch.Tensor:
+    patches, size = x.shape
+    out = torch.empty(
+        (patches, size),
+        dtype=visual_dtype,
+        device=x.device,
+    )
+    torch.ops._xpu_C.fused_input_norm(out, x.contiguous(), weight, bias)
+    return out
+
+
+def _xpu_fused_input_norm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    visual_dtype: torch.dtype,
+) -> torch.Tensor:
+    patches, size = x.shape
+    out = torch.empty(
+        (patches, size),
+        dtype=visual_dtype,
+        device=x.device,
+    )
+    return out
 
 
 # Global flag to ensure ops are registered only once
@@ -325,6 +727,7 @@ class xpu_ops:
         cu_seqlens_k: torch.Tensor | None = None,
         # passed in qwen vl
         dropout_p: float = 0.0,
+        num_splits=0,
         # The following parameters are not used in xpu kernel currently,
         # we keep API compatible to CUDA's.
         scheduler_metadata=None,
@@ -332,10 +735,13 @@ class xpu_ops:
         q_descale=None,
         k_descale=None,
         v_descale=None,
-        num_splits=0,
         return_softmax_lse: bool | None = False,
         s_aux: torch.Tensor | None = None,
         return_attn_probs: bool | None = False,
+        dynamic_causal: torch.Tensor | None = None,
+        mask_mod: Callable | None = None,
+        aux_tensors: list | None = None,
+        **kwargs,
     ):
         assert cu_seqlens_k is not None or seqused_k is not None, (
             "cu_seqlens_k or seqused_k must be provided"
@@ -350,7 +756,11 @@ class xpu_ops:
             "when block_table is disabled, cu_seqlens_k is needed"
         )
         if out is None:
-            out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+            out = torch.empty(
+                q.shape[:-1] + (v.shape[-1],),
+                dtype=q.dtype,
+                device=q.device,
+            )
         real_window_size: tuple[int, int]
         if window_size is None:
             real_window_size = (-1, -1)
@@ -358,16 +768,12 @@ class xpu_ops:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])  # noqa: F841
 
-        # In encode attention, k and v maybe not contiguous and current
-        # kernel can't handle it
-        if block_table is None:
-            k = k.contiguous()
-            v = v.contiguous()
         return flash_attn_varlen_func(
             out=out,
-            q=q.contiguous(),
+            q=q,
             k=k,
             v=v,
+            num_splits_kv=num_splits if num_splits > 0 else None,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             seqused_k=seqused_k,
@@ -378,8 +784,8 @@ class xpu_ops:
             block_table=block_table,
             s_aux=s_aux,
             window_size=real_window_size,
-            # alibi_slopes = alibi_slopes,
-            # softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            softcap=softcap,
             return_softmax_lse=return_softmax_lse,
             q_descale=q_descale,
             k_descale=k_descale,
@@ -415,261 +821,61 @@ class xpu_ops:
         return None
 
     @staticmethod
-    def indexer_k_quant_and_cache(
-        k: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        quant_block_size: int,
-        scale_fmt: str | None,
-    ) -> None:
-        head_dim = k.shape[-1]
-        k = k.view(-1, head_dim)  # [total_tokens, head_dim]
-
-        def group_quant_torch(
-            x: torch.Tensor,
-            group_size: int,
-            eps: float = 1e-10,
-            dtype: torch.dtype | None = None,
-            column_major_scales: bool = False,
-            out_q: torch.Tensor | None = None,
-            use_ue8m0: bool | None = None,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            if use_ue8m0 is None:
-                # Default fallback - could import is_deep_gemm_e8m0_used if needed
-                use_ue8m0 = False
-
-            if dtype is None:
-                dtype = current_platform.fp8_dtype()
-
-            # Validate inputs
-            assert x.shape[-1] % group_size == 0, (
-                f"Last dimension {x.shape[-1]} must be divisible by "
-                f"group_size {group_size}"
-            )
-            assert x.stride(-1) == 1, "Input tensor groups must be contiguous"
-
-            # Prepare output tensor
-            if out_q is None:
-                x_q = torch.empty_like(x, dtype=dtype)
-            else:
-                assert out_q.shape == x.shape
-                x_q = out_q
-
-            # Reshape input for group processing
-            # Original shape: (..., last_dim)
-            # Target shape: (..., num_groups, group_size)
-            original_shape = x.shape
-            num_groups = original_shape[-1] // group_size
-
-            # Reshape to separate groups
-            group_shape = original_shape[:-1] + (num_groups, group_size)
-            x_grouped = x.view(group_shape)
-
-            # Compute per-group absolute maximum values
-            # Shape: (..., num_groups)
-            abs_max = torch.amax(torch.abs(x_grouped), dim=-1, keepdim=False)
-            abs_max = torch.maximum(
-                abs_max, torch.tensor(eps, device=x.device, dtype=x.dtype)
-            )
-
-            # Compute scales
-            FP8_MAX = torch.finfo(dtype).max
-            FP8_MIN = torch.finfo(dtype).min
-            scale_raw = abs_max / FP8_MAX
-
-            if use_ue8m0:
-                # For UE8M0 format, scales must be powers of 2
-                scales = torch.pow(2.0, torch.ceil(torch.log2(scale_raw)))
-            else:
-                scales = scale_raw
-
-            # Expand scales for broadcasting with grouped data
-            # Shape: (..., num_groups, 1)
-            scales_expanded = scales.unsqueeze(-1)
-
-            # Quantize the grouped data
-            x_scaled = x_grouped / scales_expanded
-            x_clamped = torch.clamp(x_scaled, FP8_MIN, FP8_MAX)
-            x_quantized = x_clamped.to(dtype)
-
-            # Reshape back to original shape
-            x_q.copy_(x_quantized.view(original_shape))
-
-            # Prepare scales tensor in requested format
-            if column_major_scales:
-                # Column-major: (num_groups,) + batch_dims
-                # Transpose the scales to put group dimension first
-                scales_shape = (num_groups,) + original_shape[:-1]
-                x_s = scales.permute(-1, *range(len(original_shape) - 1))
-                x_s = x_s.contiguous().view(scales_shape)
-            else:
-                # Row-major: batch_dims + (num_groups,)
-                x_s = scales.contiguous()
-
-            # Ensure scales are float32
-            return x_q, x_s.float()
-
-        k_fp8, k_scale = group_quant_torch(
-            k,
-            group_size=quant_block_size,
-            column_major_scales=False,
-            use_ue8m0=(scale_fmt == "ue8m0"),
-        )
-
-        k_fp8_bytes = k_fp8.view(-1, head_dim).view(torch.uint8)
-        scale_bytes = k_scale.view(torch.uint8).view(-1, 4)
-        k = torch.cat(
-            [k_fp8_bytes, scale_bytes], dim=-1
-        )  # [total_tokens, head_dim + 4]
-
-        slot_mapping = slot_mapping.flatten()
-        # kv_cache: [num_block, block_size, head_dim + 4]
-        kv_cache.view(-1, kv_cache.shape[-1]).index_copy_(0, slot_mapping, k)
-
-    @staticmethod
-    def cp_gather_indexer_k_quant_cache(
-        kv_cache: torch.Tensor,
-        dst_k: torch.Tensor,
-        dst_scale: torch.Tensor,
-        block_table: torch.Tensor,
-        cu_seq_lens: torch.Tensor,
-    ) -> None:
-        """
-        Args:
-            kv_cache: [num_blocks, block_size, cache_stride] - quantized KV cache
-                    Layout per block: [k_values, scale_values]
-                    - k_values: [block_size * head_dim]
-                    - scale_values: [block_size * head_dim * 4 / quant_block_size]
-            dst_k: [num_tokens, head_dim] - output tensor for K values
-            dst_scale: [num_tokens, head_dim / quant_block_size * 4]
-                - output tensor for scale values
-            block_table: [batch_size, num_blocks] - block table for indexing
-            cu_seq_lens: [batch_size + 1] - cumulative sequence lengths
-        """
-        batch_size = block_table.size(0)
-        num_tokens = dst_k.size(0)
-        head_dim = dst_k.size(1)
-        cache_block_size = kv_cache.size(1)
-        quant_block_size = head_dim * 4 // dst_scale.size(1)
-
-        # For each token, find which batch it belongs to using searchsorted
-        token_indices = torch.arange(num_tokens, device=dst_k.device) + 1
-        # cu_seq_lens is [batch_size + 1], we need to find which interval each
-        # token belongs to
-        batch_indices = torch.searchsorted(cu_seq_lens, token_indices) - 1
-        batch_indices = torch.clamp(batch_indices, 0, batch_size - 1)
-
-        # Calculate the in-batch sequence index for each token
-        inbatch_seq_indices = token_indices - cu_seq_lens[batch_indices]
-
-        # Find which block each token belongs to
-        block_indices_in_table = inbatch_seq_indices // cache_block_size
-        physical_block_indices = block_table[batch_indices, block_indices_in_table]
-
-        # Calculate the offset within each block
-        inblock_offsets = (inbatch_seq_indices - 1) % cache_block_size
-
-        # Calculate strides
-        block_stride = kv_cache.stride(0)  # stride for each block
-
-        # Flatten kv_cache for easier indexing
-        kv_cache_flat = kv_cache.view(-1)
-
-        # Calculate source offset for K values for all tokens (vectorized)
-        src_block_offsets = physical_block_indices * block_stride
-        src_k_offsets = src_block_offsets + inblock_offsets * head_dim
-
-        # Gather K values using advanced indexing
-        # Create indices for all elements we need to gather
-        k_indices = src_k_offsets.unsqueeze(1) + torch.arange(
-            head_dim, device=dst_k.device
-        )
-        dst_k[:] = kv_cache_flat[k_indices]
-
-        # Calculate source offset for scale values (vectorized)
-        # Scales are stored after all K values for each block
-        scale_size = head_dim * 4 // quant_block_size
-        src_scale_offsets = src_block_offsets + head_dim + inblock_offsets * scale_size
-
-        # Gather scale values
-        scale_indices = src_scale_offsets.unsqueeze(1) + torch.arange(
-            scale_size, device=dst_scale.device
-        )
-        dst_scale[:] = kv_cache_flat[scale_indices]
-
-    @staticmethod
-    def top_k_per_row_prefill(
-        logits: torch.Tensor,
-        cu_seqlen_ks: torch.Tensor,
-        cu_seqlen_ke: torch.Tensor,
-        raw_topk_indices: torch.Tensor,
-        num_rows: int,
-        stride0: int,
-        strdide1: int,
-        topk_tokens: int,
-    ) -> torch.Tensor:
-        real_topk = min(topk_tokens, logits.shape[-1])
-        topk_indices = logits.topk(real_topk, dim=-1)[1].to(torch.int32)
-        topk_indices -= cu_seqlen_ks[:, None]
-        mask_lo = topk_indices >= 0
-        mask_hi = topk_indices - (cu_seqlen_ke - cu_seqlen_ks)[:, None] < 0
-        mask = torch.full_like(
-            topk_indices, False, dtype=torch.bool, device=topk_indices.device
-        )
-        mask = mask_lo & mask_hi
-        topk_indices.masked_fill_(~mask, -1)
-        raw_topk_indices[: topk_indices.shape[0], : topk_indices.shape[1]] = (
-            topk_indices
-        )
-
-    @staticmethod
-    def top_k_per_row_decode(
-        logits: torch.Tensor,
-        next_n: int,
-        seq_lens: torch.Tensor,
-        raw_topk_indices: torch.Tensor,
-        num_rows: int,
-        stride0: int,
-        stride1: int,
-        topk_tokens: int,
-    ) -> torch.Tensor:
-        device = logits.device
-        batch_size = seq_lens.size(0)
-        # padded query len
-        padded_num_tokens = batch_size * next_n
-        positions = (
-            torch.arange(logits.shape[-1], device=device)
-            .unsqueeze(0)
-            .expand(batch_size * next_n, -1)
-        )
-        row_indices = torch.arange(padded_num_tokens, device=device) // next_n
-        next_n_offset = torch.arange(padded_num_tokens, device=device) % next_n
-        index_end_pos = (seq_lens[row_indices] - next_n + next_n_offset).unsqueeze(1)
-        # index_end_pos: [B * N, 1]
-        mask = positions <= index_end_pos
-        # mask: [B * N, L]
-        logits = logits.masked_fill(~mask, float("-inf"))
-        real_topk = min(topk_tokens, logits.shape[-1])
-        topk_indices = logits.topk(real_topk, dim=-1)[1].to(torch.int32)  # [B * N, K]
-        # ensure we don't set indices for the top k
-        # that is out of range(masked already)
-        # this will happen if context length is shorter than K
-        topk_indices[topk_indices > index_end_pos] = -1
-        raw_topk_indices[: topk_indices.shape[0], : topk_indices.shape[1]] = (
-            topk_indices
-        )
-
-    @staticmethod
     def register_ops_once() -> None:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
             # register all the custom ops here
+            if hasattr(torch.ops._C, "gemma_rms_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_gemma_rms_norm",
+                    op_func=_gemma_rms_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_gemma_rms_norm",
+                    op_func=_fused_add_gemma_rms_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
+            if hasattr(torch.ops._C, "layer_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_layer_norm",
+                    op_func=_layer_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_layer_norm",
+                    op_func=_fused_add_layer_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
+            if hasattr(torch.ops._C, "nemotron_layer_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_nemotron_layer_norm",
+                    op_func=_nemotron_layer_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_nemotron_layer_norm",
+                    op_func=_fused_add_nemotron_layer_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
             direct_register_custom_op(
                 op_name="xpu_ops_deepseek_scaling_rope",
                 op_func=_xpu_ops_deepseek_scaling_rope_impl,
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_apply_rotary_emb",
+                op_func=_xpu_apply_rotary_emb_impl,
+                fake_impl=_xpu_apply_rotary_emb_fake,
             )
 
             direct_register_custom_op(
@@ -685,10 +891,55 @@ class xpu_ops:
             )
 
             direct_register_custom_op(
+                op_name="xpu_fp8_bmm",
+                op_func=_xpu_fp8_bmm_impl,
+                fake_impl=_xpu_fp8_bmm_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_fp8_mqa_logits",
+                op_func=_xpu_fp8_mqa_logits_impl,
+                fake_impl=_xpu_fp8_mqa_logits_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_fp8_paged_mqa_logits",
+                op_func=_xpu_fp8_paged_mqa_logits_impl,
+                fake_impl=_xpu_fp8_paged_mqa_logits_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="gdn_attention_core_xpu",
-                op_func=_gdn_attention_core_xpu_impl,
+                op_func=eager_break_during_capture(_gdn_attention_core_xpu_impl),
                 mutates_args=["core_attn_out", "z"],
-                fake_impl=_gdn_attention_core_xpu_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_topk_topp_sampler",
+                op_func=_topk_topp_sample_impl,
+                fake_impl=_topk_topp_sample_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_deepseek_fused_indexer_q_rope_fp8",
+                op_func=_xpu_deepseek_fused_indexer_q_rope_fp8_impl,
+                mutates_args=["index_q_fp8", "index_weights_out"],
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_deepseek_fused_indexer_q_rope_mxfp4",
+                op_func=_xpu_deepseek_fused_indexer_q_rope_mxfp4_impl,
+                mutates_args=[
+                    "index_q_packed",
+                    "index_q_scale",
+                    "index_weights_out",
+                ],
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_fused_input_norm",
+                op_func=_xpu_fused_input_norm_impl,
+                fake_impl=_xpu_fused_input_norm_fake,
             )
 
             _OPS_REGISTERED = True

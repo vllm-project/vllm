@@ -25,7 +25,15 @@ inline int get_cuda_max_shared_memory_per_block_opt_in(int const device) {
   return max_shared_mem_per_block_opt_in;
 }
 
-int32_t get_sm_version_num();
+inline int32_t get_sm_version_num() {
+  int32_t major_capability, minor_capability;
+  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
+                         0);
+  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor,
+                         0);
+  int32_t version_num = major_capability * 10 + minor_capability;
+  return version_num;
+}
 
 /**
  * A wrapper for a kernel that is used to guard against compilation on
@@ -104,21 +112,6 @@ struct enable_sm100_to_sm120 : Kernel {
     Kernel::operator()(std::forward<Args>(args)...);
   #else
     printf("This kernel only supports sm[100, 120).\n");
-    asm("trap;");
-  #endif
-#endif
-  }
-};
-
-template <typename Kernel>
-struct enable_sm120_only : Kernel {
-  template <typename... Args>
-  CUTLASS_DEVICE void operator()(Args&&... args) {
-#if defined __CUDA_ARCH__
-  #if __CUDA_ARCH__ == 1200
-    Kernel::operator()(std::forward<Args>(args)...);
-  #else
-    printf("This kernel only supports sm120a.\n");
     asm("trap;");
   #endif
 #endif

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 import openai
@@ -12,7 +14,10 @@ import requests
 import torch
 import torch.nn.functional as F
 
-from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
+from tests.models.language.pooling.embed_utils import (
+    float_embeddings,
+    run_embedding_correctness_test,
+)
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
@@ -23,10 +28,11 @@ from vllm.entrypoints.pooling.utils import (
     decode_pooling_output,
 )
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
 input_text = "The best thing about vLLM is that it supports many different models"
@@ -50,20 +56,76 @@ input_tokens = [
     2,
 ]
 
-if current_platform.is_rocm():
-    # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
-
 # On ROCm, floating-point reductions in attention and GEMM kernels are
 # non-associative and sensitive to batch geometry. Force LLM instances
 # into an identical, deterministic execution mode:
 ROCM_DETERMINISM_ARGS: list[str] = (
     ["--max-num-seqs", "1"] if current_platform.is_rocm() else []
 )
+
+
+def test_pooling_rejects_media_before_fetching_on_text_model(
+    server: RemoteOpenAIServer,
+) -> None:
+    requested = threading.Event()
+
+    class MediaHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requested.set()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"not an image")
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    media_server = ThreadingHTTPServer(("127.0.0.1", 0), MediaHandler)
+    thread = threading.Thread(target=media_server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        response = requests.post(
+            server.url_for("/pooling"),
+            json={
+                "model": MODEL_NAME,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": (
+                                        f"http://127.0.0.1:{media_server.server_port}/image"
+                                    )
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            timeout=10,
+        )
+        assert response.status_code == 400
+        assert "not a multimodal model" in response.text
+        assert not requested.is_set()
+    finally:
+        media_server.shutdown()
+        thread.join()
+        media_server.server_close()
+
+
+def test_pooling_rejects_request_tokenizer_options(server: RemoteOpenAIServer):
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"padding": False},
+        },
+        timeout=10,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "chat_template_kwargs"
 
 
 @pytest.fixture(scope="module")
@@ -85,6 +147,26 @@ def server():
         yield remote_server
 
 
+@pytest.fixture(scope="module")
+def server_with_default_chat_template_kwargs():
+    args = [
+        "--runner",
+        "pooling",
+        "--dtype",
+        DTYPE,
+        "--enforce-eager",
+        "--max-model-len",
+        "512",
+        "--chat-template",
+        "{% if prefix %}{{ prefix }} {% endif %}" + DUMMY_CHAT_TEMPLATE,
+        "--default-chat-template-kwargs",
+        json.dumps({"prefix": "Represent this conversation for retrieval:"}),
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
 @pytest_asyncio.fixture
 async def client(server):
     async with server.get_async_client() as async_client:
@@ -95,6 +177,17 @@ async def client(server):
 def hf_model(hf_runner):
     with hf_runner(MODEL_NAME, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
         yield hf_model
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_negative_token_ids(client: openai.AsyncOpenAI, model_name: str):
+    # A negative token id is out of vocabulary just like an over-large one, but
+    # is not caught by the upper-bound check. Unlike the OpenAI completion
+    # schema, the pooling schema does not constrain token ids to be
+    # non-negative, so the request reaches the shared engine-level validation.
+    with pytest.raises(openai.BadRequestError, match=".*out of vocabulary.*"):
+        await client.embeddings.create(model=model_name, input=[-1])
 
 
 @pytest.mark.asyncio
@@ -142,7 +235,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
     # test input: list[int]
@@ -162,7 +255,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
 
@@ -191,7 +284,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test list[list[int]]
@@ -211,7 +304,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = [d.embedding for d in embeddings.data]
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
 
@@ -279,17 +372,72 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
     ]
 
-    with pytest.raises(openai.BadRequestError):
-        response = await client.embeddings.create(
+    with pytest.raises(openai.BadRequestError) as err:
+        await client.embeddings.create(
             model=model_name,
             input=input_texts,
             extra_body={"truncate_prompt_tokens": 8193},
         )
-        assert "error" in response.object
-        assert (
-            "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please request a smaller truncation size." in response.message
+    assert err.value.status_code == 400
+    error_message = err.value.response.json()["error"]["message"]
+    assert "Please request a smaller truncation size." in error_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_padding(client: openai.AsyncOpenAI, model_name: str):
+    input_texts = ["Hello"]
+
+    async def prompt_tokens(**extra_body):
+        response = await client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+            extra_body=extra_body,
         )
+        embeddings = EmbeddingResponse.model_validate(response.model_dump(mode="json"))
+        assert len(embeddings.data) == 1
+        return embeddings.usage.prompt_tokens
+
+    unpadded = await prompt_tokens()
+    padded = await prompt_tokens(padding="max_length")
+
+    # Models trained with a fixed sequence length and no attention mask need
+    # this; without it their embeddings are not comparable.
+    assert padded > unpadded
+    assert await prompt_tokens(padding="do_not_pad") == unpadded
+
+    with pytest.raises(openai.BadRequestError):
+        await client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+            extra_body={"padding": "longest"},
+        )
+
+
+def test_chat_request_uses_default_chat_template_kwargs(
+    server_with_default_chat_template_kwargs: RemoteOpenAIServer,
+):
+    """`--default-chat-template-kwargs` applies to chat embedding requests,
+    and request-level `chat_template_kwargs` still take precedence."""
+    server = server_with_default_chat_template_kwargs
+    messages = [{"role": "user", "content": "The cat sat on the mat."}]
+
+    def prompt_tokens(**extra) -> int:
+        response = requests.post(
+            server.url_for("v1/embeddings"),
+            json={"model": MODEL_NAME, "messages": messages, **extra},
+        )
+        response.raise_for_status()
+        return response.json()["usage"]["prompt_tokens"]
+
+    server_default = prompt_tokens()
+    explicit = prompt_tokens(
+        chat_template_kwargs={"prefix": "Represent this conversation for retrieval:"}
+    )
+    overridden = prompt_tokens(chat_template_kwargs={"prefix": ""})
+
+    assert server_default == explicit == 18
+    assert overridden == 9
 
 
 @pytest.mark.asyncio
@@ -297,7 +445,7 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
 async def test_chat_request(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",
@@ -348,8 +496,8 @@ async def test_chat_request(
     assert chat_embeddings.created <= completion_embeddings.created
     # Use tolerance-based comparison for embeddings
     check_embeddings_close(
-        embeddings_0_lst=[d.embedding for d in chat_embeddings.data],
-        embeddings_1_lst=[d.embedding for d in completion_embeddings.data],
+        embeddings_0_lst=float_embeddings(chat_embeddings),
+        embeddings_1_lst=float_embeddings(completion_embeddings),
         name_0="chat",
         name_1="completion",
     )
@@ -369,7 +517,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 34
+    assert output.usage.prompt_tokens == 33
 
     # test continue_final_message
     response = requests.post(
@@ -401,7 +549,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 36
+    assert output.usage.prompt_tokens == 35
 
     # test continue_final_message with add_generation_prompt
     response = requests.post(
@@ -454,7 +602,7 @@ async def test_invocations_completion_request(
 
 @pytest.mark.asyncio
 async def test_invocations_chat_request(server: RemoteOpenAIServer):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",
@@ -507,11 +655,17 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
         "The best thing about vLLM is that it supports many different models",
     ]
 
+    def check_outputs(outputs: list[list[float]]) -> None:
+        # The embeddings endpoint executes list elements as separate scheduler
+        # requests, so use the same per-request geometry for the HF reference.
+        for input_text, output in zip(input_texts, outputs, strict=True):
+            run_embedding_correctness_test(hf_model, [input_text], [output])
+
     responses_float = await client.embeddings.create(
         input=input_texts, model=model_name, encoding_format="float"
     )
     float_data = [d.embedding for d in responses_float.data]
-    run_embedding_correctness_test(hf_model, input_texts, float_data)
+    check_outputs(float_data)
 
     responses_base64 = await client.embeddings.create(
         input=input_texts, model=model_name, encoding_format="base64"
@@ -522,14 +676,14 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
             np.frombuffer(base64.b64decode(data.embedding), dtype="float32").tolist()
         )
 
-    run_embedding_correctness_test(hf_model, input_texts, base64_data)
+    check_outputs(base64_data)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(
         input=input_texts, model=model_name
     )
     default_data = [d.embedding for d in responses_default.data]
-    run_embedding_correctness_test(hf_model, input_texts, default_data)
+    check_outputs(default_data)
 
 
 @pytest.mark.asyncio

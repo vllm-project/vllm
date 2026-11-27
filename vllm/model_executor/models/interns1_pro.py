@@ -26,15 +26,16 @@
 
 import functools
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 from torch import nn
-from transformers import AutoProcessor, PretrainedConfig
+from transformers import AutoProcessor, PreTrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
+    get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
@@ -42,13 +43,14 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
+    GateLinear,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -74,6 +76,7 @@ from .qwen3_vl import (
 from .qwen3_vl_moe import Qwen3MoeLLMModel
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
     maybe_prefix,
@@ -144,7 +147,6 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -165,15 +167,10 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         # For custom routing function
         self.n_groups = getattr(config, "router_n_groups", -1)
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -187,10 +184,9 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
             custom_routing_function=self._custom_routing_function,
         )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
             prefix=f"{prefix}.gate",
         )
 
@@ -276,7 +272,6 @@ class InternS1ProMoeAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -299,7 +294,6 @@ class InternS1ProMoeAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -324,7 +318,6 @@ class InternS1ProMoeAttention(nn.Module):
             self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
         self.attn = Attention(
@@ -335,12 +328,6 @@ class InternS1ProMoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
         )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -377,17 +364,14 @@ class InternS1ProMoeDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
 
         # update rope related parameters
-        rope_scaling = config.rope_scaling
+        rope_parameters = config.rope_parameters
         fope_keys = {"fope_init_factor", "fope_sep_head", "num_inv_freq"}
-        use_fope = any(rope_scaling.get(key) is not None for key in fope_keys)
-        fope_init_factor = rope_scaling.get("fope_init_factor", None)
-        fope_sep_head = rope_scaling.get("fope_sep_head", None)
-        num_inv_freq = rope_scaling.get("num_inv_freq", None)
+        use_fope = any(rope_parameters.get(key) is not None for key in fope_keys)
+        fope_init_factor = rope_parameters.get("fope_init_factor", None)
+        fope_sep_head = rope_parameters.get("fope_sep_head", None)
+        num_inv_freq = rope_parameters.get("num_inv_freq", None)
 
         config.rope_parameters["use_fope"] = use_fope
         config.rope_parameters["fope_init_factor"] = fope_init_factor
@@ -407,7 +391,6 @@ class InternS1ProMoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
         # `mlp_only_layers` in the config.
@@ -480,14 +463,17 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
         self.model = InternS1ProMoeLLMModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if self.config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -495,6 +481,9 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
 
 
 class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
+    language_model: InternS1ProMoeLLMForCausalLM
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -513,8 +502,6 @@ class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
                 moe.experts.update_expert_map()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
         self.moe_layers = []
         example_moe = None
         for layer in self.language_model.model.layers:
@@ -546,8 +533,8 @@ class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
 class InternS1ProForConditionalGeneration(
     Qwen3VLForConditionalGeneration, InternS1ProMoeMixtureOfExperts
 ):
-    is_3d_moe_weight: bool = True
-    packed_modules_mapping = {
+    is_3d_moe_weight: ClassVar[bool] = True
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
@@ -566,21 +553,20 @@ class InternS1ProForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3VLForConditionalGeneration, self).__init__()
-        config: PretrainedConfig = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
+        self._init_video_pruning(multimodal_config)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -612,9 +598,9 @@ class InternS1ProForConditionalGeneration(
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
-    def get_frope_params_map(self) -> str:
-        mapper = {}
-        for name, params in self.language_model.model.named_parameters():
+    def get_frope_params_map(self) -> dict[str, str]:
+        mapper: dict[str, str] = {}
+        for name, _ in self.language_model.model.named_parameters():
             if "rotary_emb.sin_coef" in name:
                 mapper["language_model.model.rotary_emb.sin_coef"] = (
                     f"language_model.model.{name}"
@@ -626,18 +612,19 @@ class InternS1ProForConditionalGeneration(
         return mapper
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        """load weights"""
-        skip_prefixes = ["model.time_series."]
+        """Load weights"""
+        orig_to_new_prefix: dict[str, str | None] = {
+            "model.visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            "model.time_series.": None,
+        }
         if self.visual is None:
-            skip_prefixes.append("visual.")
+            orig_to_new_prefix["visual."] = None
         # FIXME(Isotr0py): See if we can avoid tighing FoPE to PP layers
         weights_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                "model.visual.": "visual.",
-                "lm_head.": "language_model.lm_head.",
-                "model.language_model.": "language_model.model.",
-            },
+            orig_to_new_prefix=orig_to_new_prefix,
             orig_to_new_suffix=self.get_frope_params_map(),
         )
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=weights_mapper)

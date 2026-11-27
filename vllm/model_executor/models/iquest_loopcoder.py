@@ -16,21 +16,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
-from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -45,7 +47,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.llama import LlamaMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -57,10 +58,47 @@ from .utils import (
 )
 
 
+class IQuestLoopCoderMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.gate_up_proj(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
+        x, _ = self.down_proj(x)
+        return x
+
+
 class LoopCoderAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -69,7 +107,6 @@ class LoopCoderAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         layer_idx: int = 0,
     ) -> None:
         super().__init__()
@@ -93,7 +130,6 @@ class LoopCoderAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         # Get loop_num from config, default to 2 if not specified
         self.loop_num = getattr(config, "loop_num", 2)
@@ -124,7 +160,6 @@ class LoopCoderAttention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=config.rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
         self.attn = nn.ModuleList()
 
@@ -162,12 +197,6 @@ class LoopCoderAttention(nn.Module):
                     quant_config=quant_config,
                     attn_type=attn_type,
                     prefix=f"{unique_prefix}.attn",
-                    **{
-                        "layer_idx": unique_layer_idx,
-                        "dual_chunk_attention_config": dual_chunk_attention_config,
-                    }
-                    if dual_chunk_attention_config and loop_idx == 0
-                    else {},
                 )
             )
 
@@ -210,7 +239,7 @@ class LoopCoderAttention(nn.Module):
 class LoopCoderDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -218,9 +247,6 @@ class LoopCoderDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
         self.layer_idx = layer_idx
         if getattr(config, "is_causal", True):
             attn_type = AttentionType.DECODER
@@ -237,10 +263,9 @@ class LoopCoderDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             layer_idx=self.layer_idx,
         )
-        self.mlp = LlamaMLP(
+        self.mlp = IQuestLoopCoderMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -321,6 +346,7 @@ class LoopGateProjection(nn.Module):
 
         Returns:
             gate: [num_tokens, num_heads * head_dim] (flattened format matching q shape)
+
         """
         num_heads, num_tokens, head_dim = query.shape
 
@@ -385,12 +411,10 @@ class IQuestLoopCoderModel(nn.Module):
         ):
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = {} "
-                "is less than `num_hidden_layers` = {}. Please open an issue "
-                "to discuss this feature.".format(
-                    config.max_window_layers,
-                    config.num_hidden_layers,
-                )
+                "This model uses sliding window but `max_window_layers` = "
+                f"{config.max_window_layers} is less than `num_hidden_layers` = "
+                f"{config.num_hidden_layers}. Please open an issue "
+                "to discuss this feature."
             )
 
         self.config = config
@@ -476,18 +500,6 @@ class IQuestLoopCoderModel(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if "gate_projections" in name:
                     continue
@@ -499,11 +511,14 @@ class IQuestLoopCoderModel(nn.Module):
                     continue
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader: Callable[..., None] = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 if weight_loader == default_weight_loader:
                     weight_loader(param, loaded_weight)
                 else:
@@ -530,9 +545,10 @@ class IQuestLoopCoderModel(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -553,15 +569,14 @@ class IQuestLoopCoderForCausalLM(nn.Module):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -588,8 +603,5 @@ class IQuestLoopCoderForCausalLM(nn.Module):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

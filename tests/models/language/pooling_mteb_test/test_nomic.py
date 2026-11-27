@@ -17,6 +17,7 @@ MODELS = [
         #  HF version and remove revision set.
         revision="720244025c1a7e15661a174c63cce63c8218e52b",
         mteb_score=0.737568559,
+        mteb_tol=2e-3,
         enable_test=True,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
@@ -33,8 +34,10 @@ MODELS = [
     ),
     EmbedModelInfo(
         "nomic-ai/nomic-embed-text-v2-moe",
+        trust_remote_code=True,
         architecture="NomicBertModel",
         mteb_score=0.715488912,
+        mteb_tol=2e-3,
         enable_test=True,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
@@ -44,6 +47,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)

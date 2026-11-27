@@ -4,15 +4,188 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
+import functools
+import json
+import os
+from contextlib import contextmanager
+from typing import Any
+
 import torch
 from packaging import version
 
-from vllm import _custom_ops as ops
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+logger = init_logger(__name__)
+
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
+
+
+# ---------------------------------------------------------------------------
+# JSON config loading
+# ---------------------------------------------------------------------------
+
+_CONFIGS_DIR = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "configs", "selective_state_update"
+)
+
+
+def get_ssm_config_file_name(
+    headdim: int, dstate: int, cache_dtype: str, device_name: str
+) -> str:
+    """Return the JSON filename for the given kernel shape.
+
+    Layout: `configs/selective_state_update/
+    headdim=<H>,dstate=<D>,device_name=<dev>,cache_dtype=<dt>.json`.
+    """
+    return (
+        f"headdim={headdim},dstate={dstate},"
+        f"device_name={device_name},cache_dtype={cache_dtype}.json"
+    )
+
+
+def get_ssm_device_name() -> str:
+    return get_device_name_as_file_name()
+
+
+def _canonical_cache_dtype(cache_dtype: str) -> str:
+    """Canonical key for config lookup. bf16 and fp16 share the same tuned
+    configs because the kernel only sees bit width when accessing state."""
+    return "float16" if cache_dtype == "bfloat16" else cache_dtype
+
+
+@functools.cache
+def get_ssm_configs(
+    headdim: int, dstate: int, cache_dtype: str
+) -> dict[int, Any] | None:
+    """Return tuned (BLOCK_SIZE_M, num_warps) configs for *selective_state_update*
+    keyed by `effective_batch = batch * nheads`, or `None` if no config
+    file is found for the (headdim, dstate, cache_dtype, device) combination.
+
+    They can be generated with:
+        benchmarks/kernels/benchmark_selective_state_update.py --save-configs
+    """
+    cache_dtype = _canonical_cache_dtype(cache_dtype)
+    device_name = get_ssm_device_name()
+    json_file_name = get_ssm_config_file_name(headdim, dstate, cache_dtype, device_name)
+
+    config_file_paths: list[str] = []
+
+    # User-supplied override
+    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_defined_config_folder is not None:
+        config_file_paths.append(
+            os.path.join(user_defined_config_folder, json_file_name)
+        )
+
+    # Bundled default
+    config_file_paths.append(os.path.join(_CONFIGS_DIR, json_file_name))
+
+    for path in config_file_paths:
+        if os.path.exists(path):
+            with open(path) as f:
+                logger.info_once(
+                    "Using SSM config from %s for selective_state_update.",
+                    path,
+                    scope="global",
+                )
+                raw = json.load(f)
+                if isinstance(raw, dict):
+                    # triton_version included in the config file only for reference
+                    raw.pop("triton_version", None)
+                    return {int(k): v for k, v in raw.items() if k.isdigit()}
+
+    logger.warning_once(
+        "Using default Mamba SSU config. Performance might be sub-optimal! "
+        "Config file not found at %s",
+        ", ".join(config_file_paths),
+    )
+    return None
+
+
+def _get_default_ssm_launch_config(
+    dstate: int,
+    is_blackwell: bool,
+) -> tuple[int, int]:
+    """Hard-coded fallback heuristic used when no tuned config is available."""
+    BLOCK_SIZE_M, num_warps = 4, 8
+    if dstate <= 16:
+        BLOCK_SIZE_M, num_warps = 32, 4
+    elif dstate <= 32:
+        BLOCK_SIZE_M, num_warps = 16, 4
+    elif dstate <= 64:
+        BLOCK_SIZE_M, num_warps = 8, 4
+    else:
+        if is_blackwell:
+            BLOCK_SIZE_M, num_warps = 32, 8
+        elif dstate <= 128:
+            BLOCK_SIZE_M, num_warps = 4, 4
+    return BLOCK_SIZE_M, num_warps
+
+
+@functools.cache
+def _try_get_optimal_ssm_config_cached(
+    headdim: int,
+    dstate: int,
+    batch: int,
+    nheads: int,
+    cache_dtype: str,
+    is_blackwell: bool,
+) -> tuple[int, int]:
+    """Cached resolution. See `try_get_optimal_ssm_config`."""
+    effective_batch = batch * nheads
+    configs = get_ssm_configs(headdim, dstate, cache_dtype)
+    if configs:
+        # Pick the closest effective_batch in the tuned grid (MoE strategy).
+        closest = min(configs.keys(), key=lambda x: abs(x - effective_batch))
+        cfg = configs[closest]
+        return cfg["BLOCK_SIZE_M"], cfg["num_warps"]
+
+    return _get_default_ssm_launch_config(dstate, is_blackwell)
+
+
+# Override hook for benchmarks/tests, see `override_ssm_config`.
+_ssm_config_override: tuple[int, int] | None = None
+
+
+@contextmanager
+def override_ssm_config(config: tuple[int, int]):
+    """Pin `try_get_optimal_ssm_config` to `config` for the duration of
+    the context. Used by the tuning benchmark to time specific configs."""
+    global _ssm_config_override
+    prev = _ssm_config_override
+    _ssm_config_override = config
+    try:
+        yield
+    finally:
+        _ssm_config_override = prev
+
+
+def try_get_optimal_ssm_config(
+    headdim: int,
+    dstate: int,
+    batch: int,
+    nheads: int,
+    cache_dtype: str,
+    is_blackwell: bool,
+) -> tuple[int, int]:
+    """Return (BLOCK_SIZE_M, num_warps) for the given kernel shape.
+
+    Tuning is keyed on `effective_batch = batch * nheads` (the kernel grid
+    scales with the product), so configs transfer across (model, TP) combos
+    sharing `(headdim, dstate, cache_dtype)`.
+    """
+    if _ssm_config_override is not None:
+        return _ssm_config_override
+    return _try_get_optimal_ssm_config_cached(
+        headdim, dstate, batch, nheads, cache_dtype, is_blackwell
+    )
+
 
 if TRITON3:
 
@@ -28,19 +201,33 @@ else:
         return dt
 
 
-@triton.jit
-def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
-    y = tl.inline_asm_elementwise(
-        asm="""{
-cvt.rs.f16x2.f32 $0, $2, $1, $3;
-}""",
-        constraints="=r,r,r,r,r",
-        args=(x, rand),
-        dtype=tl.float16,
-        is_pure=True,
-        pack=2,
-    )
-    return y
+if current_platform.is_rocm():
+
+    @triton.jit
+    def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+        # gfx950 only. Rounds with rand[31:19]; cvt.rs.f16x2 uses [12:0] and [28:16].
+        y = tl.inline_asm_elementwise(
+            asm="v_cvt_sr_f16_f32 $0, $1, $2",
+            constraints="=v,v,v",
+            args=(x, rand),
+            dtype=tl.float16,
+            is_pure=True,
+            pack=1,
+        )
+        return y
+else:
+
+    @triton.jit
+    def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+        y = tl.inline_asm_elementwise(
+            asm="{\ncvt.rs.f16x2.f32 $0, $2, $1, $3;\n}",
+            constraints="=r,r,r,r,r",
+            args=(x, rand),
+            dtype=tl.float16,
+            is_pure=True,
+            pack=2,
+        )
+        return y
 
 
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
@@ -48,8 +235,9 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
 @triton.heuristics(
     {
-        "HAS_STATE_BATCH_INDICES": lambda args: args["state_batch_indices_ptr"]
-        is not None
+        "HAS_STATE_BATCH_INDICES": lambda args: (
+            args["state_batch_indices_ptr"] is not None
+        )
     }
 )
 @triton.heuristics(
@@ -337,30 +525,29 @@ def selective_state_update(
     enable_stochastic_rounding=False,
     cache_philox_rounds=0,
 ):
-    """
-    Argument:
-        state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        x: (batch, dim) or (batch, nheads, dim)
-        dt: (batch, dim) or (batch, nheads, dim)
-        A: (dim, dstate) or (nheads, dim, dstate)
-        B: (batch, dstate) or (batch, ngroups, dstate)
-        C: (batch, dstate) or (batch, ngroups, dstate)
-        D: (dim,) or (nheads, dim)
-        z: (batch, dim) or (batch, nheads, dim)
-        dt_bias: (dim,) or (nheads, dim)
-        null_block_id: int
-            if state_batch_indices is passed, lets the kernel identify
-            padded entries that will not be processed,
-            for example: state_batch_indices = [null_block_id, 1, 20,
-            null_block_id] in this case, the kernel will not process
-            entries at indices 0 and 3
-        out: Preallocated ssm output tensor. Assume same shape as x.
-             In-place updated.
-        num_accepted_tokens: (batch,)
-            number of accepted tokens from previous verification step,
-            tells the kernel which initial state to use
-        cu_seqlens: (batch,)
-            length per sequence, for variable length in speculative decoding cases
+    """Argument:
+    state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
+    x: (batch, dim) or (batch, nheads, dim)
+    dt: (batch, dim) or (batch, nheads, dim)
+    A: (dim, dstate) or (nheads, dim, dstate)
+    B: (batch, dstate) or (batch, ngroups, dstate)
+    C: (batch, dstate) or (batch, ngroups, dstate)
+    D: (dim,) or (nheads, dim)
+    z: (batch, dim) or (batch, nheads, dim)
+    dt_bias: (dim,) or (nheads, dim)
+    null_block_id: int
+        if state_batch_indices is passed, lets the kernel identify
+        padded entries that will not be processed,
+        for example: state_batch_indices = [null_block_id, 1, 20,
+        null_block_id] in this case, the kernel will not process
+        entries at indices 0 and 3
+    out: Preallocated ssm output tensor. Assume same shape as x.
+         In-place updated.
+    num_accepted_tokens: (batch,)
+        number of accepted tokens from previous verification step,
+        tells the kernel which initial state to use
+    cu_seqlens: (batch,)
+        length per sequence, for variable length in speculative decoding cases
     """
     if state.dim() == 3:
         state = state.unsqueeze(1)
@@ -440,24 +627,11 @@ def selective_state_update(
         else (0, 0)
     )
     # We don't want autotune since it will overwrite the state.
-    # We instead tune by hand based on dstate.
-
-    # Default
-    BLOCK_SIZE_M, num_warps = 4, 8
-
-    if dstate <= 16:
-        BLOCK_SIZE_M, num_warps = 32, 4
-    elif dstate <= 32:
-        BLOCK_SIZE_M, num_warps = 16, 4
-    elif dstate <= 64:
-        BLOCK_SIZE_M, num_warps = 8, 4
-    else:
-        # dstate > 64
-        if is_blackwell:
-            # Optimized for B200 with dstate>64
-            BLOCK_SIZE_M, num_warps = 32, 8
-        elif dstate <= 128:
-            BLOCK_SIZE_M, num_warps = 4, 4
+    # Load from JSON config if available, otherwise fall back to heuristic.
+    cache_dtype = str(state.dtype).removeprefix("torch.")
+    BLOCK_SIZE_M, num_warps = try_get_optimal_ssm_config(
+        dim, dstate, N, nheads, cache_dtype, is_blackwell
+    )
 
     tie_hdim = (
         A.stride(-1) == 0
@@ -536,123 +710,11 @@ def selective_state_update(
         )
 
 
-def selective_scan_fn(
-    u,
-    ssm_states,
-    delta,
-    A,
-    B,
-    C,
-    D=None,
-    z=None,
-    delta_bias=None,
-    delta_softplus=False,
-    query_start_loc=None,
-    cache_indices=None,
-    has_initial_state=None,
-    null_block_id=NULL_BLOCK_ID,
-    block_size=1024,
-    block_idx_first_scheduled_token=None,
-    block_idx_last_scheduled_token=None,
-    initial_state_idx=None,
-    cu_chunk_seqlen=None,
-    last_chunk_indices=None,
-) -> torch.Tensor:
-    """
-    u: (dim, total_length) for varlen or (batch, dim, seqlen)
-        applies changes in place.
-    ssm_states: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        applies changes in place.
-    delta: (dim, total_length) for varlen or (batch, dim, seqlen)
-    A: (dim, dstate)
-    B: (ngroups, dstate, total_length) for varlen or
-                                        (batch,ngroups,dstate,seqlen)
-    C: (ngroups, dstate, total_length) for varlen or
-                                        (batch,ngroups,dstate,seqlen)
-    D: (dim,)
-    z: (dim, total_length) for varlen or (batch, dim, seqlen)
-    dt_bias: (dim,) or (dim)
-    query_start_loc: (batch + 1) int32
-        The cumulative sequence lengths of the sequences in
-        the batch, used to index into sequence. prepended with 0.
-        for example: query_start_loc = torch.Tensor([0,10,16,17]),
-        x.shape=(dim,17)
-    cache_indices: (batch) int32
-        A tensor with each cell is a correspondent
-        input and output ssm_state indices
-      - Without APC: (batch,) - single state index per batch item
-      - With APC: (batch, max_positions) - cache block indices for read/write
-        Each non-zero value indicates a cache block to load from and/or write to.
-    has_initial_state: (batch) bool
-        A tensor populated with ones and zeros,
-        indicate if the ssm_state at the corresponding index should be
-        used as initial state. Not providing argument assumes
-        there's no initial state
-    null_block_id: int
-        if cache_indices is passed, lets the kernel identify padding entries
-        that will not be processed,
-        for example: cache_indices = [null_block_id, 1 ,20 ,null_block_id]
-        in this case, the kernel will not process entries at indices 0 and 3
-    block_size: int
-        The block size to align the cached states to
-    block_idx_first_scheduled_token: (batch,), dtype int32
-        The pointer into cache_indices, where the first
-        cache block to be filled is located.
-    block_idx_last_scheduled_token: (batch,), dtype int32
-        The pointer into cache_indices, where the last cache block
-        to be filled is located.
-    initial_state_idx: (batch,), dtype int32
-        The pointer into cache_indices, where the cache block
-        containing the initial state is located.
-    returns
-        output: (dim, total_length) for varlen or (batch, dim, seqlen)
-                supports inplace replacement
-    """
-    if u.stride(-1) != 1:
-        u = u.contiguous()
-    if delta.stride(-1) != 1:
-        delta = delta.contiguous()
-    if D is not None:
-        D = D.contiguous()
-    if B.stride(-1) != 1:
-        B = B.contiguous()
-    if C.stride(-1) != 1:
-        C = C.contiguous()
-    if z is not None and z.stride(-1) != 1:
-        z = z.contiguous()
-    if B.dim() == 3 and query_start_loc is None:
-        B = B.unsqueeze(1)
-    if B.dim() == 2 and query_start_loc is not None:
-        B = B.unsqueeze(0)
-    if C.dim() == 3 and query_start_loc is None:
-        C = C.unsqueeze(1)
-    if C.dim() == 2 and query_start_loc is not None:
-        C = C.unsqueeze(0)
+from vllm.platforms import current_platform  # noqa: E402
 
-    ops.selective_scan_fwd(
-        u,
-        delta,
-        A,
-        B,
-        C,
-        D,
-        z,
-        delta_bias,
-        delta_softplus,
-        query_start_loc,
-        cache_indices,
-        has_initial_state,
-        ssm_states,
-        null_block_id,
-        block_size,
-        block_idx_first_scheduled_token,
-        block_idx_last_scheduled_token,
-        initial_state_idx,
-        cu_chunk_seqlen,
-        last_chunk_indices,
+if current_platform.is_cpu():
+    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
+        selective_state_update as selective_state_update_cpu,
     )
 
-    if z is None:
-        return delta  # output written inplace to delta
-    else:
-        return z  # output written inplace to z
+    selective_state_update = selective_state_update_cpu  # type: ignore

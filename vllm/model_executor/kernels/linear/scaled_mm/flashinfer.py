@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -21,7 +23,7 @@ from vllm.utils.flashinfer import (
     is_flashinfer_fp8_blockscale_gemm_supported,
     should_use_flashinfer_for_blockscale_fp8_gemm,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, eager_bypass_custom_op
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledDynamicMMLinearKernel,
@@ -62,6 +64,11 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
+    def input_quant_key(self) -> QuantKey | None:
+        if self.config.activation_quant_key == kFp8StaticTensorSym:
+            return kFp8StaticTensorSym
+        return None
+
     def apply_scaled_mm(
         self,
         *,
@@ -95,8 +102,10 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
 
         if not should_use_flashinfer_for_blockscale_fp8_gemm(
@@ -132,7 +141,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         # A is BF16 — FlashInfer handles FP8 conversion internally.
         # As is a placeholder (apply_input_quant=False) and is not used here.
-        return torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
+        return _flashinfer_fp8_blockscale_gemm_op(
             A,  # BF16 input
             B,  # FP8 weight
             Bs,  # Weight scales
@@ -142,8 +151,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     Fp8BlockScaledDynamicMMLinearKernel
 ):
-    """
-    Conditional FlashInfer / DeepGEMM FP8 block-scaled GEMM.
+    """Conditional FlashInfer / DeepGEMM FP8 block-scaled GEMM.
 
     Dispatches between two kernels based on input batch size:
     - Small batches (M < 32): FlashInfer's swapAB trick for better utilisation.
@@ -184,7 +192,7 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
         group_size = self.weight_group_shape.col
         use_deep_gemm_e8m0 = self.fallback.use_deep_gemm_e8m0
 
-        return torch.ops.vllm.dynamic_flashinfer_deepgemm_blockscale_gemm(
+        return _dynamic_flashinfer_deepgemm_blockscale_gemm_op(
             A, B, Bs, group_size, use_deep_gemm_e8m0
         )
 
@@ -194,8 +202,10 @@ def _flashinfer_fp8_blockscale_gemm_impl(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> torch.Tensor:
+    # The sm90 binding takes only a data pointer and assumes packed rows, so a
+    # strided input (e.g. a column slice) misreads every row after the first.
     return flashinfer_fp8_blockscale_gemm(
-        input=input,
+        input=input.contiguous(),
         weight=weight,
         weight_scale=weight_scale,
         out_dtype=torch.bfloat16,
@@ -207,9 +217,7 @@ def _flashinfer_fp8_blockscale_gemm_fake(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Required fake/meta implementation for torch.compile graph tracing.
-    """
+    """Required fake/meta implementation for torch.compile graph tracing."""
     return torch.empty(
         input.shape[0], weight.shape[0], dtype=torch.bfloat16, device=input.device
     )
@@ -220,6 +228,9 @@ direct_register_custom_op(
     _flashinfer_fp8_blockscale_gemm_impl,
     fake_impl=_flashinfer_fp8_blockscale_gemm_fake,
 )
+_flashinfer_fp8_blockscale_gemm_op = eager_bypass_custom_op(
+    "flashinfer_fp8_blockscale_gemm", _flashinfer_fp8_blockscale_gemm_impl
+)
 
 
 def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
@@ -229,8 +240,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
     group_size: int,
     use_deep_gemm_e8m0: bool,
 ) -> torch.Tensor:
-    """
-    Conditional FlashInfer FP8 blockscale GEMM with batch-size-dependent selection.
+    """Conditional FlashInfer FP8 blockscale GEMM with batch-size-dependent selection.
 
     This function switches between two optimized kernels based on the input batch size:
     - For small batches (M < 32): Uses FlashInfer's DeepGEMM swapAB optimization.
@@ -253,6 +263,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
 
     Returns:
         Output tensor of shape (batch_size, output_dim) in bfloat16 format
+
     """
 
     def run_flashinfer_deepgemm_swapAB(
@@ -260,8 +271,9 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
+        # Packed rows required, see _flashinfer_fp8_blockscale_gemm_impl.
         return flashinfer_fp8_blockscale_gemm(
-            input=input,
+            input=input.contiguous(),
             weight=weight,
             weight_scale=weight_scale,
             out_dtype=torch.bfloat16,
@@ -316,9 +328,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_fake(
     group_size: int,
     use_deep_gemm_e8m0: bool,
 ) -> torch.Tensor:
-    """
-    Required fake/meta implementation for torch.compile graph tracing.
-    """
+    """Required fake/meta implementation for torch.compile graph tracing."""
     return torch.empty(
         input.shape[0], weight.shape[0], dtype=torch.bfloat16, device=input.device
     )
@@ -328,4 +338,8 @@ direct_register_custom_op(
     "dynamic_flashinfer_deepgemm_blockscale_gemm",
     _dynamic_flashinfer_deepgemm_blockscale_gemm_impl,
     fake_impl=_dynamic_flashinfer_deepgemm_blockscale_gemm_fake,
+)
+_dynamic_flashinfer_deepgemm_blockscale_gemm_op = eager_bypass_custom_op(
+    "dynamic_flashinfer_deepgemm_blockscale_gemm",
+    _dynamic_flashinfer_deepgemm_blockscale_gemm_impl,
 )

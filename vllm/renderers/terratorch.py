@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.entrypoints.chat_utils import (
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
 
 from .base import BaseRenderer
 from .inputs import DictPrompt

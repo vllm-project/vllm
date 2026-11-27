@@ -17,6 +17,16 @@ available to generate structured outputs.
     - `structural_tag` -> `{"structured_outputs": {"structural_tag": ...}}` or `StructuredOutputsParams(structural_tag=...)`
     - `guided_decoding_backend` -> Remove this field from your request
 
+## Migrating from LM Format Enforcer
+
+The `lm-format-enforcer` structured outputs backend was removed in v0.35.0.
+Replace `--structured-outputs-config.backend lm-format-enforcer` (or
+`structured_outputs_config={"backend": "lm-format-enforcer"}`) with `auto`, or
+drop the option to use the default. You can also select `xgrammar` or
+`guidance` explicitly. These backends use Rust-style regex syntax rather than
+Python's `re`, so validate existing regex patterns and JSON schemas before
+migrating.
+
 ## Online Serving (OpenAI API)
 
 You can generate structured outputs using the OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
@@ -29,7 +39,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `grammar`: the output will follow the context free grammar.
 - `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/online_serving/openai_compatible_server.md) page.
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
@@ -61,7 +71,7 @@ Now let's see an example for each of the cases, starting with the `choice`, as i
     print(completion.choices[0].message.content)
     ```
 
-The next example shows how to use the `regex`. The supported regex syntax depends on the structured output backend. For example, `xgrammar`, `guidance`, and `outlines` use Rust-style regex, while `lm-format-enforcer` uses Python's `re` module. The idea is to generate an email address, given a simple regex template:
+The next example shows how to use the `regex`. All structured output backends (`xgrammar`, `guidance`, and `outlines`) use Rust-style regex syntax. The idea is to generate an email address, given a simple regex template:
 
 ??? code
 
@@ -171,6 +181,12 @@ See also: [full example](../../examples/features/structured_outputs/README.md)
 
 You can also use structured outputs with <project:#reasoning-outputs> for reasoning models.
 
+When reasoning is outside the output grammar, the structured-output manager's
+fallback boundary detection activates constraints after the first reasoning-end
+prefix. A later speculative token that reopens thinking does not defer those
+constraints. This path does not support reopening an unconstrained thinking
+block after the boundary; subsequent tokens must satisfy the selected grammar.
+
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r1
 ```
@@ -215,6 +231,54 @@ See also: [full example](../../examples/features/structured_outputs/README.md)
     To use both features together, you must explicitly enable structured outputs in reasoning mode.
     To do so, add the following flag when starting the vLLM server: `--structured-outputs-config.enable_in_reasoning=True`.
     See also: [Reasoning Outputs](reasoning_outputs.md) documentation.
+
+### Custom grammars and parser boundary tokens
+
+!!! warning
+    Some reasoning and tool-call parsers identify protocol boundaries by token ID.
+    A text-only grammar can emit ordinary vocabulary tokens with the same decoded
+    spelling as a boundary token. When a custom grammar includes these boundaries,
+    require the token IDs expected by the configured parser; matching decoded text
+    alone does not ensure that parsing succeeds.
+
+For example, the Qwen3 streaming parser recognizes `<think>`, `</think>`,
+`<tool_call>`, and `</tool_call>` by their dedicated token IDs. A text EBNF
+literal with the same spelling can also accept a sequence of ordinary vocabulary
+tokens. A tool invocation can then remain in `reasoning` without producing
+`tool_calls`.
+
+For the XGrammar backend, use token-level structural-tag elements for these
+boundaries. For example, replace a text-only `</think>` element:
+
+```json
+{"type": "const_string", "value": "</think>"}
+```
+
+with the dedicated-token element:
+
+```json
+{"type": "token", "token": "</think>"}
+```
+
+Both can decode to `</think>`, but only the second requires its dedicated token
+ID. Apply the same approach to each boundary that the configured parser expects
+as a dedicated token. Compose these elements with the rest of your grammar using a
+structural-tag `sequence`, and pass the complete structure through
+`structured_outputs.structural_tag` or `response_format.type="structural_tag"`.
+A token string is resolved against the configured tokenizer; if you use numeric
+IDs instead, resolve them from that same tokenizer rather than copying IDs from
+another model. See XGrammar's [token-level formats](https://xgrammar.mlc.ai/docs/latest/structural_tag/structural_tag.html#token-level-formats).
+
+Enabling `--structured-outputs-config.enable_in_reasoning=True` determines when
+constraints apply; it does not convert text literals into token-ID constraints.
+This requirement concerns grammars that include the protocol boundaries, not
+JSON schemas that constrain only the final answer or tool arguments.
+
+When diagnosing missing streamed calls, set `return_token_ids=true` and compare
+the emitted boundary IDs with the configured tokenizer's vocabulary. Do not
+infer those IDs by re-encoding the response text: multiple token sequences can
+decode to the same text. Also inspect the full sequence; an ordinary-token
+`</think>` alone does not establish that a call was lost.
 
 ## Experimental Automatic Parsing (OpenAI API)
 

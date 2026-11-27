@@ -3,9 +3,10 @@
 vLLM supports the following hardware platforms:
 
 - [GPU](gpu.md)
-    - [NVIDIA CUDA](gpu.md#nvidia-cuda)
-    - [AMD ROCm](gpu.md#amd-rocm)
-    - [Intel XPU](gpu.md#intel-xpu)
+    - [NVIDIA CUDA](gpu.md)
+    - [AMD ROCm](gpu.md)
+    - [Intel XPU](gpu.md)
+    - [Apple Silicon](gpu.md) (via [vLLM-Metal](https://github.com/vllm-project/vllm-metal))
 - [CPU](cpu.md)
     - [Intel/AMD x86](cpu.md#intelamd-x86)
     - [ARM AArch64](cpu.md#arm-aarch64)

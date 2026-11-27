@@ -2,25 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
+from .base import SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+from .hf import BaseHfRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
-logger = init_logger(__name__)
 
+class DeepseekV32Renderer(BaseHfRenderer[DeepseekV32Tokenizer]):
+    _server_owned_chat_template_kwargs = SERVER_OWNED_CHAT_TEMPLATE_KWARGS
 
-class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
     def __init__(
         self,
         config: VllmConfig,

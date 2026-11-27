@@ -10,7 +10,10 @@ from vllm.config import PoolerConfig
 
 @pytest.mark.parametrize(
     "model",
-    ["jason9693/Qwen2.5-1.5B-apeach", "papluca/xlm-roberta-base-language-detection"],
+    [
+        "vllm-project/Qwen2.5-1.5B-apeach",
+        "vllm-project/xlm-roberta-base-language-detection",
+    ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models_using_activation(
@@ -51,7 +54,7 @@ def test_classify_models_using_activation(
 @pytest.mark.parametrize(
     "model",
     [
-        "intfloat/multilingual-e5-small",
+        "vllm-project/multilingual-e5-small",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
@@ -104,17 +107,19 @@ def test_reward_models_using_activation(
         model,
         max_model_len=1024,
         dtype=dtype,
+        trust_remote_code=True,
         pooler_config=PoolerConfig(use_activation=False),
     ) as vllm_model:
-        wo_activation = vllm_model.reward(example_prompts)
+        wo_activation = vllm_model.token_classify(example_prompts)
 
     with vllm_runner(
         model,
         max_model_len=1024,
         dtype=dtype,
+        trust_remote_code=True,
         pooler_config=PoolerConfig(use_activation=True),
     ) as vllm_model:
-        w_activation = vllm_model.reward(example_prompts)
+        w_activation = vllm_model.token_classify(example_prompts)
 
     for wo, w in zip(wo_activation, w_activation):
         wo = torch.tensor(wo)
@@ -131,7 +136,7 @@ def test_reward_models_using_activation(
 @pytest.mark.parametrize(
     "model",
     [
-        "intfloat/multilingual-e5-small",
+        "vllm-project/multilingual-e5-small",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])

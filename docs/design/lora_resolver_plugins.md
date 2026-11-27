@@ -62,8 +62,7 @@ The filesystem resolver is installed with vLLM by default and enables loading Lo
 3. **Start vLLM server**:
    Your base model can be `meta-llama/Llama-2-7b-hf`. Please make sure you set up the Hugging Face token in your env var `export HF_TOKEN=xxx235`.
    ```bash
-   python -m vllm.entrypoints.openai.api_server \
-       --model your-base-model \
+   vllm serve your-base-model \
        --enable-lora
    ```
 

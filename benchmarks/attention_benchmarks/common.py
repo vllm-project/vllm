@@ -4,8 +4,10 @@
 """Common utilities for attention benchmarking."""
 
 import csv
+import gc
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -15,10 +17,12 @@ from batch_spec import get_batch_type, parse_batch_spec
 from rich.console import Console
 from rich.table import Table
 
+from vllm.triton_utils import triton
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
+
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
-    """
-    Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
+    """Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
 
     This ensures results are sorted by batch size first, then query length,
     then sequence length, rather than alphabetically.
@@ -32,6 +36,33 @@ def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
     except Exception:
         # Fallback for unparsable specs
         return (0, 0, 0)
+
+
+def run_do_bench(
+    benchmark_fn,
+    use_cuda_graphs: bool,
+    warmup_ms: int | None = None,
+) -> list[float]:
+    kwargs: dict[str, Any] = {"return_mode": "all"}
+    if use_cuda_graphs:
+        result = triton.testing.do_bench_cudagraph(benchmark_fn, **kwargs)
+        gc.collect()
+        torch.accelerator.empty_cache()
+    else:
+        if warmup_ms is not None:
+            kwargs["warmup"] = warmup_ms
+        result = triton.testing.do_bench(benchmark_fn, **kwargs)
+    torch.accelerator.synchronize()
+    return result
+
+
+def run_ncu_profile(benchmark_fn) -> None:
+    benchmark_fn()
+    torch.accelerator.synchronize()
+    torch.cuda.cudart().cudaProfilerStart()
+    benchmark_fn()
+    torch.accelerator.synchronize()
+    torch.cuda.cudart().cudaProfilerStop()
 
 
 # Mock classes for vLLM attention infrastructure
@@ -65,42 +96,6 @@ except ImportError:
     AttentionLayerBase = object  # Fallback
 
 
-class MockKVBProj:
-    """Mock KV projection layer for MLA prefill mode.
-
-    Mimics ColumnParallelLinear behavior for kv_b_proj in MLA backends.
-    Projects kv_c_normed to [qk_nope_head_dim + v_head_dim] per head.
-    """
-
-    def __init__(self, num_heads: int, qk_nope_head_dim: int, v_head_dim: int):
-        self.num_heads = num_heads
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.v_head_dim = v_head_dim
-        self.out_dim = qk_nope_head_dim + v_head_dim
-        self.weight = torch.empty(0, dtype=torch.bfloat16)
-
-    def __call__(self, x: torch.Tensor) -> tuple[torch.Tensor]:
-        """
-        Project kv_c_normed to output space.
-
-        Args:
-            x: Input tensor [num_tokens, kv_lora_rank]
-
-        Returns:
-            Tuple containing output tensor
-                [num_tokens, num_heads, qk_nope_head_dim + v_head_dim]
-        """
-        num_tokens = x.shape[0]
-        result = torch.randn(
-            num_tokens,
-            self.num_heads,
-            self.out_dim,
-            device=x.device,
-            dtype=x.dtype,
-        )
-        return (result,)  # Return as tuple to match ColumnParallelLinear API
-
-
 class MockIndexer:
     """Mock Indexer for sparse MLA backends.
 
@@ -132,6 +127,60 @@ class MockIndexer:
         )
         self.topk_indices_buffer[:num_tokens] = indices
 
+    def fill_indices(
+        self,
+        num_tokens: int,
+        max_kv_len: int,
+        pattern: str = "random",
+        requests: Sequence[Any] | None = None,
+    ):
+        if pattern == "random":
+            self.fill_random_indices(num_tokens, max_kv_len)
+            return
+        if pattern == "prefix":
+            indices = torch.arange(
+                self.topk_tokens,
+                dtype=torch.int32,
+                device=self.topk_indices_buffer.device,
+            )
+            indices = (indices % max_kv_len).expand(num_tokens, -1)
+            self.topk_indices_buffer[:num_tokens] = indices
+            return
+        if pattern == "sliding_window":
+            if requests is None:
+                start = max(max_kv_len - self.topk_tokens, 0)
+                indices = torch.arange(
+                    start,
+                    start + self.topk_tokens,
+                    dtype=torch.int32,
+                    device=self.topk_indices_buffer.device,
+                )
+                indices = indices.clamp(max=max_kv_len - 1).expand(num_tokens, -1)
+                self.topk_indices_buffer[:num_tokens] = indices
+                return
+
+            rows = []
+            offsets = torch.arange(
+                self.topk_tokens,
+                dtype=torch.int32,
+                device=self.topk_indices_buffer.device,
+            ) - (self.topk_tokens - 1)
+            for request in requests:
+                q_len = request.q_len
+                kv_len = request.kv_len
+                context_len = kv_len - q_len
+                positions = torch.arange(
+                    context_len,
+                    kv_len,
+                    dtype=torch.int32,
+                    device=self.topk_indices_buffer.device,
+                )
+                row_indices = positions[:, None] + offsets[None, :]
+                rows.append(row_indices.clamp(min=0, max=kv_len - 1))
+            self.topk_indices_buffer[:num_tokens] = torch.cat(rows, dim=0)
+            return
+        raise ValueError(f"Unknown sparse MLA topk pattern: {pattern}")
+
 
 class MockLayer(AttentionLayerBase):
     """Mock attention layer with scale parameters and impl.
@@ -140,7 +189,9 @@ class MockLayer(AttentionLayerBase):
     in get_layers_from_vllm_config when FlashInfer prefill is enabled.
     """
 
-    def __init__(self, device: torch.device, impl=None, kv_cache_spec=None):
+    def __init__(
+        self, device: torch.device, impl=None, kv_cache_spec=None, attn_backend=None
+    ):
         # Don't call super().__init__() as AttentionLayerBase doesn't have __init__
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
@@ -151,20 +202,22 @@ class MockLayer(AttentionLayerBase):
         self._q_scale_float = float(self._q_scale.item())
         # AttentionImpl for metadata builders to query
         self.impl = impl
-        # KV cache spec for get_kv_cache_spec
+        # KV cache spec for get_kv_cache_config
         self._kv_cache_spec = kv_cache_spec
+        self._attn_backend = attn_backend
 
     def get_attn_backend(self):
         """Get the attention backend class (required by AttentionLayerBase)."""
-        # Return None as this is just a mock layer for benchmarking
-        return None
+        return self._attn_backend
 
-    def get_kv_cache_spec(self):
-        """Get the KV cache spec (required by AttentionLayerBase)."""
-        return self._kv_cache_spec
+    def get_kv_cache_config(self, vllm_config=None):
+        """Get the KV cache config (required by AttentionLayerBase)."""
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        return FullAttentionManager.layer_config(self._kv_cache_spec)
 
 
-@dataclass
+@dataclass(slots=True)
 class ParameterSweep:
     """Configuration for sweeping a backend parameter."""
 
@@ -180,22 +233,41 @@ class ParameterSweep:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelParameterSweep:
-    """Configuration for sweeping a model configuration parameter."""
+    """Configuration for sweeping model configuration parameter(s).
 
-    param_name: str  # Name of the model config parameter to sweep (e.g., "num_q_heads")
-    values: list[Any]  # List of values to test
-    label_format: str = "{backend}_{param_name}_{value}"  # Result label template
+    Supports two modes:
+    - Single param: param_name="head_dim", values=[128, 256, 512]
+    - Multi param: values=[{head_dim: 192, v_head_dim: 128}, {head_dim: 256}]
+      When values are dicts, each dict's keys are applied as config overrides.
+    """
+
+    param_name: str | None = None
+    values: list[Any] | None = None
+    label_format: str = "{backend}_{param_name}_{value}"
 
     def get_label(self, backend: str, value: Any) -> str:
         """Generate a label for a specific parameter value."""
+        if isinstance(value, dict):
+            return self.label_format.format(
+                backend=backend, param_name=self.param_name, value=value, **value
+            )
         return self.label_format.format(
             backend=backend, param_name=self.param_name, value=value
         )
 
+    def apply(self, config_args: dict, value: Any) -> None:
+        """Apply a sweep value to config args."""
+        if isinstance(value, dict):
+            config_args.update(value)
+        elif self.param_name is not None:
+            config_args[self.param_name] = value
+        else:
+            raise ValueError("param_name must be set if sweep values are not dicts")
 
-@dataclass
+
+@dataclass(slots=True)
 class BenchmarkConfig:
     """Configuration for a single benchmark run."""
 
@@ -207,14 +279,20 @@ class BenchmarkConfig:
     num_kv_heads: int
     block_size: int
     device: str
+    max_model_len: int | None = None
     dtype: torch.dtype = torch.float16
-    repeats: int = 1
-    warmup_iters: int = 3
     profile_memory: bool = False
-    use_cuda_graphs: bool = False
+    use_cuda_graphs: bool = True
+    ncu_profile: bool = False
+    torch_profile: bool = False
+    torch_profile_dir: str | None = None
+    torch_profile_iters: int = 3
+    warmup_ms: int | None = None
 
-    # "auto" or "fp8"
+    # Any CacheDType: "auto", "fp8", "int8_per_token_head", ...
     kv_cache_dtype: str = "auto"
+    # Model whose config the backend sees (dtype, rotary dims, ...)
+    model: str = "meta-llama/Meta-Llama-3-8B"
 
     # MLA-specific
     prefill_backend: str | None = None
@@ -226,14 +304,20 @@ class BenchmarkConfig:
     # Backend-specific tuning
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
+    sparse_mla_route: SparseMLAPrefillRoute | None = None
+    sparse_mla_dense_mha_max_seq_len: int | None = None
+    sparse_mla_masked_mha_max_seq_len: int | None = None
+    sparse_mla_topk_pattern: str = "random"  # "random", "prefix", "sliding_window"
+    num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkResult:
     """Results from a single benchmark run."""
 
     config: BenchmarkConfig
     mean_time: float  # seconds
+    median_time: float  # seconds
     std_time: float  # seconds
     min_time: float  # seconds
     max_time: float  # seconds
@@ -241,6 +325,7 @@ class BenchmarkResult:
     memory_allocated_mb: float | None = None
     memory_reserved_mb: float | None = None
     error: str | None = None
+    actual_sparse_mla_route: SparseMLAPrefillRoute | None = None
 
     @property
     def success(self) -> bool:
@@ -252,6 +337,7 @@ class BenchmarkResult:
         return {
             "config": asdict(self.config),
             "mean_time": self.mean_time,
+            "median_time": self.median_time,
             "std_time": self.std_time,
             "min_time": self.min_time,
             "max_time": self.max_time,
@@ -259,6 +345,11 @@ class BenchmarkResult:
             "memory_allocated_mb": self.memory_allocated_mb,
             "memory_reserved_mb": self.memory_reserved_mb,
             "error": self.error,
+            "actual_sparse_mla_route": (
+                self.actual_sparse_mla_route.name
+                if self.actual_sparse_mla_route is not None
+                else None
+            ),
         }
 
 
@@ -274,13 +365,13 @@ class ResultsFormatter:
         backends: list[str],
         compare_to_fastest: bool = True,
     ):
-        """
-        Print results as a rich table.
+        """Print results as a rich table.
 
         Args:
             results: List of BenchmarkResult
             backends: List of backend names being compared
             compare_to_fastest: Show percentage comparison to fastest
+
         """
         # Group by batch spec, preserving first-occurrence order
         by_spec = {}
@@ -335,7 +426,10 @@ class ResultsFormatter:
                 if backend in spec_results:
                     r = spec_results[backend]
                     if r.success:
-                        row.append(f"{r.mean_time:.6f}")
+                        timing = f"{r.mean_time:.6f}"
+                        if r.actual_sparse_mla_route is not None:
+                            timing += f"\n{r.actual_sparse_mla_route.name}"
+                        row.append(timing)
                         if multi and compare_to_fastest:
                             pct = (
                                 (r.mean_time / best_time * 100) if best_time > 0 else 0
@@ -373,6 +467,7 @@ class ResultsFormatter:
                     "batch_spec",
                     "num_layers",
                     "kv_cache_dtype",
+                    "actual_sparse_mla_route",
                     "mean_time",
                     "std_time",
                     "throughput",
@@ -387,6 +482,11 @@ class ResultsFormatter:
                         "batch_spec": r.config.batch_spec,
                         "num_layers": r.config.num_layers,
                         "kv_cache_dtype": r.config.kv_cache_dtype,
+                        "actual_sparse_mla_route": (
+                            r.actual_sparse_mla_route.name
+                            if r.actual_sparse_mla_route is not None
+                            else ""
+                        ),
                         "mean_time": r.mean_time,
                         "std_time": r.std_time,
                         "throughput": r.throughput_tokens_per_sec or 0,
@@ -409,14 +509,14 @@ class ResultsFormatter:
 
 
 def setup_mla_dims(model_name: str = "deepseek-v3") -> dict:
-    """
-    Get MLA dimensions for known models.
+    """Get MLA dimensions for known models.
 
     Args:
         model_name: Model identifier
 
     Returns:
         Dict with MLA dimension configuration
+
     """
     configs = {
         "deepseek-v2": {
@@ -462,8 +562,7 @@ def get_attention_scale(head_dim: int) -> float:
 
 
 def is_mla_backend(backend: str) -> bool:
-    """
-    Check if backend is an MLA backend using the AttentionBackendEnum.
+    """Check if backend is an MLA backend using the AttentionBackendEnum.
 
     Args:
         backend: Backend name matching AttentionBackendEnum exactly
@@ -471,6 +570,7 @@ def is_mla_backend(backend: str) -> bool:
 
     Returns:
         True if the backend is an MLA backend, False otherwise
+
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

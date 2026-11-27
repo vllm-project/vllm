@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import dataclasses
+
 import pytest
 
 from vllm.platforms import current_platform
 
-if not current_platform.has_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
         reason="Nvfp4 Requires compute capability of 10 or above.",
         allow_module_level=True,
@@ -16,9 +18,26 @@ import torch
 from flashinfer import fp4_quantize
 from torch.nn import functional as F
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+    FlashInferCuteDSLBatchedExperts,
     flashinfer_cutedsl_moe_masked,
+    flashinfer_cutedsl_mxfp8_moe_masked,
+    swizzle_mxfp8_moe_weight_scales,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+    mxfp8_e4m3_quantize,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
@@ -91,11 +110,9 @@ def break_fp4_bytes(a, dtype):
 def generate_balanced_routing(
     hidden_states: torch.Tensor, num_experts: int, top_k: int
 ):
-    """
-    Generate routing weights and topk indices such that every expert is active.
+    """Generate routing weights and topk indices such that every expert is active.
     Returns routing_weights, topk_idx
     """
-
     num_tokens, hidden_dim = hidden_states.shape
     #   num_tokens = batch_size * seq_len
 
@@ -232,13 +249,13 @@ def grouped_gemm_ref(
     *,
     block_size: int = 16,
 ) -> torch.Tensor:
-    """
-    Computes the reference grouped GEMM (fp4 quantized per-expert loop),
+    """Computes the reference grouped GEMM (fp4 quantized per-expert loop),
     computes flashinfer grouped GEMM (for scale consistency),
     and returns ONLY the repacked reference output: out_ref.
 
     Returns:
         out_ref: Tensor [num_experts, max_m, n_out]
+
     """
     device_hs = hidden_states_expanded.device
     device_w = weights.device
@@ -453,11 +470,15 @@ def test_flashinfer_cutedsl_moe_masked(
     )
 
     # reference
-    a_fp4, a_scale_interleaved = fp4_quantize(hidden_states, input_global_scale)
+    # input_global_scale is per-expert ([num_experts]); fp4_quantize and
+    # dequantize_nvfp4_to_dtype are non-grouped APIs that expect [1] or
+    # [num_tokens]. Use a single element since all values are uniform here.
+    a_global = input_global_scale[:1].contiguous()
+    a_fp4, a_scale_interleaved = fp4_quantize(hidden_states, a_global)
     a_in_dtype = dequantize_nvfp4_to_dtype(
         a_fp4,
         a_scale_interleaved,
-        input_global_scale,
+        a_global,
         dtype=hidden_states.dtype,
         device=hidden_states.device,
         block_size=16,
@@ -517,6 +538,160 @@ def test_flashinfer_cutedsl_moe_masked(
     torch.testing.assert_close(
         out_weighted.cpu(), ref_output.cpu(), atol=2e-1, rtol=2e-1
     )
+
+
+@pytest.mark.parametrize(
+    "num_experts, max_m, hidden_dim, inter_dim",
+    [(8, 64, 256, 128), (16, 128, 512, 384)],
+)
+@torch.inference_mode()
+def test_flashinfer_cutedsl_mxfp8_moe_masked(
+    num_experts: int, max_m: int, hidden_dim: int, inter_dim: int
+):
+    torch.manual_seed(42)
+    device = "cuda"
+    hidden_states = torch.randn(
+        num_experts, max_m, hidden_dim, dtype=torch.bfloat16, device=device
+    )
+    # Empty, partially filled and full experts.
+    masked_m = torch.randint(
+        0, max_m + 1, (num_experts,), dtype=torch.int32, device=device
+    )
+    masked_m[0], masked_m[-1] = 0, max_m
+    w1 = torch.randn(
+        num_experts, 2 * inter_dim, hidden_dim, dtype=torch.bfloat16, device=device
+    ) / (hidden_dim**0.5)
+    w2 = torch.randn(
+        num_experts, hidden_dim, inter_dim, dtype=torch.bfloat16, device=device
+    ) / (inter_dim**0.5)
+    w1_fp8, w1_scale = mxfp8_e4m3_quantize(w1)
+    w2_fp8, w2_scale = mxfp8_e4m3_quantize(w2)
+    w1_fp8 = w1_fp8.view(num_experts, 2 * inter_dim, hidden_dim)
+    w1_scale = w1_scale.view(num_experts, 2 * inter_dim, hidden_dim // 32)
+    w2_fp8 = w2_fp8.view(num_experts, hidden_dim, inter_dim)
+    w2_scale = w2_scale.view(num_experts, hidden_dim, inter_dim // 32)
+
+    out = torch.empty_like(hidden_states)
+    flashinfer_cutedsl_mxfp8_moe_masked(
+        hidden_states,
+        w1_fp8,
+        swizzle_mxfp8_moe_weight_scales(w1_scale),
+        w2_fp8,
+        swizzle_mxfp8_moe_weight_scales(w2_scale),
+        masked_m,
+        torch.empty(
+            num_experts, max_m, 2 * inter_dim, dtype=torch.bfloat16, device=device
+        ),
+        out,
+    )
+
+    # reference: both GEMM inputs are MXFP8 quantize-dequantized and the gate/up
+    # output is rounded to bf16, as in the kernel.
+    w1_ref = dequant_mxfp8_to_bf16(w1_fp8, w1_scale).float()
+    w2_ref = dequant_mxfp8_to_bf16(w2_fp8, w2_scale).float()
+    for i, m in enumerate(masked_m.tolist()):
+        if m == 0:
+            continue
+        x_q, x_s = mxfp8_e4m3_quantize(hidden_states[i, :m])
+        gate_up = dequant_mxfp8_to_bf16(x_q, x_s.view(m, -1)).float() @ w1_ref[i].T
+        gate_up = gate_up.to(torch.bfloat16)
+        act = F.silu(gate_up[:, :inter_dim].float()) * gate_up[:, inter_dim:]
+        act_q, act_s = mxfp8_e4m3_quantize(act.to(torch.bfloat16))
+        ref = dequant_mxfp8_to_bf16(act_q, act_s.view(m, -1)).float() @ w2_ref[i].T
+        torch.testing.assert_close(out[i, :m], ref.to(out.dtype), atol=3e-2, rtol=5e-2)
+
+
+@pytest.mark.parametrize(
+    "overrides, supported",
+    [
+        pytest.param({}, True, id="supported"),
+        pytest.param({"has_bias": True}, False, id="bias"),
+        pytest.param({"swiglu_limit": 7.0}, False, id="swiglu_limit"),
+        pytest.param({"swiglu_alpha": 1.702}, False, id="swiglu_alpha"),
+        pytest.param({"swiglu_beta": 1.0}, False, id="swiglu_beta"),
+        pytest.param({"hidden_dim": 192}, False, id="unaligned_hidden"),
+        pytest.param({"intermediate_size": 192}, False, id="unaligned_inter"),
+    ],
+)
+def test_flashinfer_cutedsl_batched_mxfp8_supported_config(
+    overrides: dict, supported: bool
+):
+    """MXFP8 needs plain SiLU-and-mul without expert biases, and 128-aligned
+    hidden and intermediate sizes."""
+    overrides = dict(overrides)
+    moe_config = make_dummy_moe_config(
+        hidden_dim=overrides.pop("hidden_dim", 256),
+        intermediate_size=overrides.pop("intermediate_size", 128),
+    )
+    moe_config.moe_parallel_config = dataclasses.replace(
+        FusedMoEParallelConfig.make_no_parallel(),
+        dp_size=2,
+        ep_size=2,
+        use_ep=True,
+        all2all_backend="deepep_low_latency",
+    )
+    for name, value in overrides.items():
+        setattr(moe_config, name, value)
+
+    result, reason = FlashInferCuteDSLBatchedExperts.is_supported_config(
+        FlashInferCuteDSLBatchedExperts,
+        moe_config,
+        kMxfp8Static,
+        kMxfp8Dynamic,
+        mk.FusedMoEActivationFormat.BatchedExperts,
+    )
+    assert result == supported
+    if not supported:
+        assert reason is not None and "mxfp8" in reason
+
+
+@pytest.mark.parametrize("all2all_backend", ["deepep_low_latency", "nixl_ep"])
+@torch.inference_mode()
+def test_batched_dispatch_keeps_mxfp8_activations_unquantized(all2all_backend: str):
+    """The DeepEP low-latency and NIXL EP dispatches hand MXFP8 activations to
+    the experts in bfloat16, without scales."""
+    num_experts, max_tokens, hidden_dim = 4, 16, 256
+    if all2all_backend == "deepep_low_latency":
+        pytest.importorskip("deep_ep")
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (  # noqa: E501
+            DeepEPLLPrepareAndFinalize,
+        )
+
+        prepare_finalize = DeepEPLLPrepareAndFinalize(
+            buffer=None, max_tokens_per_rank=max_tokens, num_dispatchers=2
+        )
+    else:
+        pytest.importorskip("nixl_ep")
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep import (
+            NixlEPPrepareAndFinalize,
+        )
+
+        prepare_finalize = NixlEPPrepareAndFinalize(
+            buffer=None,
+            max_tokens_per_rank=max_tokens,
+            num_dispatchers=2,
+            expert_capacity=num_experts,
+        )
+    quant_config = FusedMoEQuantConfig.make(
+        "mxfp8",
+        w1_scale=torch.ones(1, device="cuda"),
+        w2_scale=torch.ones(1, device="cuda"),
+        block_shape=[1, 32],
+        is_scale_swizzled=False,
+    )
+    x = torch.randn(
+        num_experts, max_tokens, hidden_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    expert_num_tokens = torch.tensor(
+        [0, 3, max_tokens, 7], dtype=torch.int32, device="cuda"
+    )
+
+    out, scales = prepare_finalize._do_quant(
+        x, torch.bfloat16, quant_config, expert_num_tokens
+    )
+
+    assert scales is None
+    torch.testing.assert_close(out, x, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize(
@@ -581,4 +756,5 @@ def test_grouped_gemm_nt_masked(
 
 if __name__ == "__main__":
     test_flashinfer_cutedsl_moe_masked(16, 128, 512, 4)
+    test_flashinfer_cutedsl_mxfp8_moe_masked(16, 128, 512, 384)
     test_grouped_gemm_nt_masked(16, 128, 512, 4)

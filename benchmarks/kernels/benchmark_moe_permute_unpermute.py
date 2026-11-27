@@ -10,6 +10,7 @@ from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    MoEPermuteScratch,
     moe_permute,
     moe_unpermute,
 )
@@ -54,6 +55,11 @@ def benchmark_permute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         qhidden_states, input_gating, topk, False
     )
+    scratch = MoEPermuteScratch(
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        device=qhidden_states.device,
+    )
 
     def prepare(i: int):
         input_gating.copy_(gating_output[i])
@@ -65,6 +71,7 @@ def benchmark_permute(
             topk_ids=topk_ids,
             n_expert=num_experts,
             expert_map=None,
+            scratch=scratch,
         )
 
     # JIT compilation & warmup
@@ -123,6 +130,11 @@ def benchmark_unpermute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         qhidden_states, input_gating, topk, False
     )
+    scratch = MoEPermuteScratch(
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        device=qhidden_states.device,
+    )
 
     def prepare():
         (
@@ -137,6 +149,7 @@ def benchmark_unpermute(
             topk_ids=topk_ids,
             n_expert=num_experts,
             expert_map=None,
+            scratch=scratch,
         )
         # convert to fp16/bf16 as gemm output
         return (
@@ -177,7 +190,7 @@ def benchmark_unpermute(
     end_event = torch.Event(enable_timing=True)
 
     latencies: list[float] = []
-    for i in range(num_iters):
+    for _ in range(num_iters):
         torch.accelerator.synchronize()
         start_event.record()
         graph.replay()
@@ -248,13 +261,7 @@ def main(args: argparse.Namespace):
     config = AutoConfig.from_pretrained(
         args.model, trust_remote_code=args.trust_remote_code
     )
-    if config.architectures[0] == "DbrxForCausalLM":
-        E = config.ffn_config.moe_num_experts
-        topk = config.ffn_config.moe_top_k
-    elif config.architectures[0] == "JambaForCausalLM":
-        E = config.num_experts
-        topk = config.num_experts_per_tok
-    elif (
+    if (
         config.architectures[0] == "DeepseekV3ForCausalLM"
         or config.architectures[0] == "DeepseekV2ForCausalLM"
         or config.architectures[0] == "Glm4MoeForCausalLM"

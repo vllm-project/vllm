@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
+import json
 import math
-from dataclasses import dataclass
-from functools import lru_cache
-from typing import Any
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
+from functools import partial
+from typing import Any, Literal, cast
 
 import pybase64
 import torch
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.renderers import TokenizeParams
 from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import (
     EMBED_DTYPES,
@@ -24,6 +27,11 @@ from vllm.utils.serial_utils import (
 )
 
 logger = init_logger(__name__)
+
+JsonEncodingFormat = Literal["float", "base64"]
+BytesEncodingFormat = Literal["bytes", "bytes_only"]
+FloatEncodedPoolingOutput = list[float] | list[list[float]]
+JsonEncodedPoolingOutput = FloatEncodedPoolingOutput | str
 
 
 @dataclass
@@ -58,8 +66,21 @@ def build_metadata_items(
     ]
 
 
-def encode_pooling_output_float(output: PoolingRequestOutput) -> list[float]:
+def encode_pooling_output_float(
+    output: PoolingRequestOutput,
+) -> FloatEncodedPoolingOutput:
     return output.outputs.data.tolist()
+
+
+def encode_pooling_output_float_or_ndarray(output: PoolingRequestOutput) -> Any:
+    """Return an ndarray when the response renderer can serialize NumPy."""
+    try:
+        data = output.outputs.data
+        if not data.is_contiguous():
+            data = data.contiguous()
+        return data.numpy()
+    except (RuntimeError, TypeError):
+        return output.outputs.data.tolist()
 
 
 def encode_pooling_output_base64(
@@ -75,8 +96,7 @@ def encode_pooling_bytes(
     pooling_outputs: list[PoolingRequestOutput],
     embed_dtype: EmbedDType,
     endianness: Endianness,
-) -> tuple[list[bytes], list[dict[str, Any]], dict[str, Any]]:
-    num_prompt_tokens = 0
+) -> tuple[list[bytes], list[dict[str, Any]]]:
     items: list[dict[str, Any]] = []
     body: list[bytes] = []
     offset = 0
@@ -100,17 +120,89 @@ def encode_pooling_bytes(
 
         body.append(binary)
         items.append(item)
-        prompt_token_ids = output.prompt_token_ids
-        num_prompt_tokens += len(prompt_token_ids)
         offset += size
 
-    # Dictionary form of UsageInfo
-    usage = dict(
+    return body, items
+
+
+def get_pooling_output_encoder(
+    encoding_format: JsonEncodingFormat,
+    embed_dtype: EmbedDType,
+    endianness: Endianness,
+) -> Callable[[PoolingRequestOutput], JsonEncodedPoolingOutput]:
+    return cast(
+        Callable[[PoolingRequestOutput], JsonEncodedPoolingOutput],
+        (
+            encode_pooling_output_float
+            if encoding_format == "float"
+            else partial(
+                encode_pooling_output_base64,
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+            )
+        ),
+    )
+
+
+def get_pooling_usage(
+    pooling_outputs: Sequence[PoolingRequestOutput],
+) -> UsageInfo:
+    num_prompt_tokens = sum(
+        len(output.prompt_token_ids) if output.prompt_token_ids is not None else 0
+        for output in pooling_outputs
+    )
+    return UsageInfo(
         prompt_tokens=num_prompt_tokens,
         total_tokens=num_prompt_tokens,
     )
 
-    return body, items, usage
+
+def get_pooling_usage_payload(
+    pooling_outputs: Sequence[PoolingRequestOutput],
+) -> dict[str, int]:
+    usage = get_pooling_usage(pooling_outputs)
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "total_tokens": usage.total_tokens,
+    }
+
+
+def build_pooling_bytes_streaming_response(
+    pooling_outputs: list[PoolingRequestOutput],
+    request_id: str,
+    created_time: int,
+    model_name: str,
+    encoding_format: BytesEncodingFormat,
+    embed_dtype: EmbedDType,
+    endianness: Endianness,
+) -> StreamingResponse:
+    content, items = encode_pooling_bytes(
+        pooling_outputs=pooling_outputs,
+        embed_dtype=embed_dtype,
+        endianness=endianness,
+    )
+
+    headers = (
+        None
+        if encoding_format == "bytes_only"
+        else {
+            "metadata": json.dumps(
+                {
+                    "id": request_id,
+                    "created": created_time,
+                    "model": model_name,
+                    "data": items,
+                    "usage": get_pooling_usage_payload(pooling_outputs),
+                }
+            )
+        }
+    )
+
+    return StreamingResponse(
+        content=content,
+        headers=headers,
+        media_type="application/octet-stream",
+    )
 
 
 def decode_pooling_output(items: list[MetadataItem], body: bytes) -> list[torch.Tensor]:
@@ -123,18 +215,6 @@ def decode_pooling_output(items: list[MetadataItem], body: bytes) -> list[torch.
         )
         for item in sorted(items, key=lambda x: x.index)
     ]
-
-
-@lru_cache(maxsize=1)
-def get_json_response_cls() -> type[JSONResponse]:
-    if importlib.util.find_spec("orjson") is not None:
-        from fastapi.responses import ORJSONResponse
-
-        return ORJSONResponse
-    logger.warning_once(
-        "To make v1/embeddings API fast, please install orjson by `pip install orjson`"
-    )
-    return JSONResponse
 
 
 def enable_scoring_api(
@@ -156,3 +236,17 @@ def enable_scoring_api(
         return True
 
     return False
+
+
+def reserve_tokens(tok_params: TokenizeParams, num_tokens: int) -> TokenizeParams:
+    """Shrink every length limit by `num_tokens` that are appended afterwards."""
+
+    def shrink(length: int | None) -> int | None:
+        return length if length is None or length < 0 else max(length - num_tokens, 0)
+
+    return replace(
+        tok_params,
+        max_total_tokens=shrink(tok_params.max_total_tokens),
+        truncate_prompt_tokens=shrink(tok_params.truncate_prompt_tokens),
+        pad_prompt_tokens=shrink(tok_params.pad_prompt_tokens),
+    )

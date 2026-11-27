@@ -2,67 +2,140 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Data transfer objects for encoder CUDA graph management."""
 
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Callable, Hashable
+from dataclasses import dataclass, field
 
 import torch
 
+EncoderCudaGraphPaddingLogic = Callable[[torch.Tensor, torch.Tensor], None]
 
-@dataclass
+# Reserved mm_kwargs key: models with ``EncoderCudaGraphConfig.capture_axes``
+# put the resolved per-axis keys (one per axis, in order) into the dict
+# returned by ``select_encoder_cudagraph_items()``; the manager pops it before
+# the kwargs are used anywhere else.
+ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG = "encoder_cudagraph_axis_keys"
+
+
+@dataclass(slots=True)
+class EncoderItemSpec:
+    """Description of a single encoder input item.
+
+    Returned by `get_encoder_cudagraph_item_specs()` to describe each
+    image or video in a batch without the manager needing to understand
+    model-specific input formats.
+    """
+
+    input_size: int
+    """Number of input patches/rows for this item."""
+
+    output_tokens: int
+    """Number of output tokens after encoder processing (e.g. after
+    spatial merge)."""
+
+    path_output_tokens: dict[str, int] = field(default_factory=dict)
+    """Per-path output token counts for multi-path encoders.
+
+    Single-path encoders leave this empty and use `output_tokens` for the
+    default path.
+    """
+
+    def get_path_output_tokens(self, path: str) -> int:
+        if path == "default" and not self.path_output_tokens:
+            return self.output_tokens
+        return self.path_output_tokens.get(path, 0)
+
+
+@dataclass(frozen=True, slots=True)
+class EncoderCudaGraphPathConfig:
+    """Capture policy for one independently replayable encoder path."""
+
+    min_token_budget: int | None = None
+    """Output tokens of one item on this path, for paths whose items all have
+    the same size. Budgets are then multiples of it, so few-item batches fit
+    exactly. Unset: the model default range and grid."""
+
+    allow_zero_tokens: bool = False
+    """Whether a batch may omit this path entirely."""
+
+
+@dataclass(slots=True)
 class EncoderCudaGraphConfig:
     """Configuration for encoder CUDA graph management.
 
     Provided by the model at init time via
-    ``get_encoder_cudagraph_config()``. Values are fixed for the
+    `get_encoder_cudagraph_config()`. Values are fixed for the
     lifetime of the manager.
     """
 
     modalities: list[str]
     """Supported modalities (e.g. ["image"])."""
 
-    input_key_by_modality: dict[str, str]
-    """Per-modality input tensor key mapping, e.g.
-    {"image": "pixel_values", "video": "pixel_values_videos"}.
-    """
-
     buffer_keys: list[str]
     """Keys for the tensor buffers recorded into the CUDA graph.
-    Before replay the manager zeros then slice-copies new data
-    into these buffers."""
+    Before replay the manager copies new data into these buffers,
+    padding them as described in `padding_logics`."""
 
     out_hidden_size: int
     """Output hidden dim of the vision encoder.
     Used for DP gather buffer allocation."""
 
+    padding_logics: dict[str, EncoderCudaGraphPaddingLogic] = field(
+        default_factory=dict
+    )
+    """Optional per-buffer replay padding/copy logic.
+    If absent for a key, the manager slice-copies the replay buffer into the
+    capture buffer and pads the tail with the last value for cumulative keys
+    (`cu_seqlens`, `cu_window_seqlens`) or with zeros otherwise. A padding
+    logic must write the whole capture buffer: budgets share buffers, so rows
+    it leaves untouched may hold another budget's data."""
 
-@dataclass
+    max_frames_per_video: int = 1
+    """Maximum number of frames per video.
+    Only relevant when "video" is in `modalities`.
+    Image-only models can use the default of 1."""
+
+    paths: dict[str, EncoderCudaGraphPathConfig] = field(
+        default_factory=lambda: {"default": EncoderCudaGraphPathConfig()}
+    )
+    """Independently captured encoder paths keyed by their forward name."""
+
+    capture_axes: tuple[tuple[Hashable, ...], ...] = ()
+    """Extra capture axes beyond the token budget; empty to disable.
+
+    Each entry is the ordered key set of one axis. When non-empty, one graph
+    is captured per token budget per combination of axis keys (cartesian
+    product), so the total number of captured graphs is
+    `num_budgets * prod(len(axis) for axis in capture_axes)`."""
+
+    eager_fallback_fast_path: bool = False
+    """Opt in to skip full-fallback staging when eager accepts unsorted inputs.
+    Oversized output views are compacted in a batch."""
+
+
+@dataclass(slots=True)
 class EncoderCudaGraphCaptureInputs:
     """Everything needed for one CUDA graph capture.
 
-    Returned by ``prepare_encoder_cudagraph_capture_inputs()``.
+    Returned by `prepare_encoder_cudagraph_capture_inputs()`.
     """
 
-    mm_kwargs: dict[str, Any]
-    """Dummy forward inputs (model-specific keys).
-    For Qwen3-VL this contains pixel_values and grid_thw."""
-
-    buffers: dict[str, torch.Tensor]
+    values: dict[str, torch.Tensor]
     """Precomputed tensor buffers that will be recorded into the
     CUDA graph.  The manager stores references to these exact
     tensor objects and copies new data into them before each
-    ``graph.replay()`` call (buffer identity invariant)."""
+    `graph.replay()` call (buffer identity invariant)."""
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderCudaGraphReplayBuffers:
     """New buffer values for graph replay, computed by the model from
     actual batch inputs.
 
-    Returned by ``prepare_encoder_cudagraph_replay_buffers()``.
-    Keys match ``EncoderCudaGraphConfig.buffer_keys``.
+    Returned by `prepare_encoder_cudagraph_replay_buffers()`.
+    Keys match `EncoderCudaGraphConfig.buffer_keys`.
     """
 
-    buffers: dict[str, torch.Tensor | None]
+    values: dict[str, torch.Tensor | None]
     """Data to copy into the captured buffers before replay.
-    ``None`` values leave the corresponding captured buffer
+    `None` values leave the corresponding captured buffer
     unchanged."""

@@ -20,6 +20,8 @@ from .BlockScaledMMLinearKernel import (
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
+    FP8ScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearLayerConfig,
 )
 
@@ -29,9 +31,9 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
             return True, None
-        return False, "requires ROCm or CUDA."
+        return False, "requires ROCm, CUDA or XPU."
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -71,7 +73,6 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
                     i_s_name,
                     torch.nn.Parameter(i_s.max(), requires_grad=False),
                 )
-                setattr(layer, i_zp_name, None)
             else:
                 input_zero_point = getattr(layer, i_zp_name)
 
@@ -110,11 +111,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             if self.config.is_static_input_scheme:
                 # Fold azp into azp_adj for the per-tensor case
                 azp_adj = getattr(layer, i_zp_name) * azp_adj
-            setattr(
-                layer,
-                azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
-            )
+            replace_parameter(layer, azp_adj_name, azp_adj)
         else:
             setattr(layer, azp_adj_name, None)
 
@@ -131,36 +128,58 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             x.contiguous(), i_s, i_zp, symmetric=symmetric
         )
 
-        out = triton_scaled_mm(
-            x_q, w_q, scale_a=x_s, scale_b=w_s, out_dtype=x.dtype, bias=bias
+        # A static per-tensor azp is already folded into azp_adj.
+        azp = x_zp if i_zp is None else None
+        return torch.ops.vllm.int8_scaled_mm_func(
+            x_q, w_q, x_s, w_s, x.dtype, bias, azp_adj, azp
         )
 
-        if azp_adj is not None:
-            # Asymmetric quantization: subtract the zero-point correction.
-            # D = scale_a * scale_b * (A_q @ B_q - azp * azp_adj) + bias
-            # triton_scaled_mm already computed scale_a * scale_b * (A_q @ B_q) + bias
-            # so we subtract scale_a * scale_b * azp * azp_adj
-            #
-            # x_s: [M, 1] or scalar, w_s: [N, 1] or scalar, azp_adj: [1, N]
-            # Reshape w_s from [N, 1] to [1, N] for proper broadcasting.
-            w_s_row = w_s.view(1, -1) if w_s.dim() > 0 else w_s
-            static = i_zp is not None
-            if not static and x_zp is not None:
-                # Dynamic per-token: azp is per-token, azp_adj is per-channel
-                # x_zp: [M, 1], azp_adj: [1, N]
-                out -= x_s * w_s_row * (x_zp * azp_adj).to(x.dtype)
-            else:
-                # Static per-tensor: azp already folded into azp_adj
-                out -= (x_s * w_s_row * azp_adj).to(x.dtype)
 
-        return out
+class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda_alike():
+            return False, "requires ROCm or CUDA."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        act_group = c.activation_quant_key.scale.group_shape
+        weight_group = c.weight_quant_key.scale.group_shape
+        if not (act_group.is_per_tensor() or act_group.is_per_token()):
+            return False, "requires per-tensor or per-token activation scales."
+        if not (
+            weight_group.is_per_tensor()
+            or weight_group.is_per_channel()
+            or weight_group.is_per_token()
+        ):
+            return False, "requires per-tensor, per-channel or per-token weight scales."
+        return True, None
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        out = triton_scaled_mm(
+            A, B, scale_a=As, scale_b=Bs, out_dtype=out_dtype, bias=bias
+        )
+        return out.view(*output_shape)
 
 
 class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     @classmethod
     def is_supported(cls, compute_capability=None):
-        if not current_platform.is_cuda_alike():
-            return False, "only cuda like devices are supported."
+        if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+            return False, "only CUDA-alike and XPU devices are supported."
         return True, None
 
     def apply_block_scaled_mm(
@@ -178,6 +197,50 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             list(self.weight_group_shape),
             self.config.out_dtype,
         )
+
+
+def _int8_scaled_mm_func(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+    azp_adj: torch.Tensor | None = None,
+    azp: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return triton_scaled_mm(
+        qx,
+        weight,
+        scale_a=x_scale,
+        scale_b=weight_scale,
+        out_dtype=output_dtype,
+        bias=bias,
+        azp_adj=azp_adj,
+        azp=azp,
+    )
+
+
+def _int8_scaled_mm_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+    azp_adj: torch.Tensor | None = None,
+    azp: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty(
+        (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device
+    )
+
+
+direct_register_custom_op(
+    "int8_scaled_mm_func",
+    _int8_scaled_mm_func,
+    fake_impl=_int8_scaled_mm_fake,
+)
 
 
 # TODO we should be able to change the type of block_size to GroupShape

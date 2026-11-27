@@ -5,8 +5,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 
 
 class DummyStatLogger(StatLoggerBase):
-    """
-    A dummy stat logger for testing purposes.
+    """A dummy stat logger for testing purposes.
     Implements the minimal interface expected by StatLoggerManager.
     """
 
@@ -17,7 +16,9 @@ class DummyStatLogger(StatLoggerBase):
         self.logged = False
         self.engine_initialized = False
 
-    def record(self, scheduler_stats, iteration_stats, mm_cache_stats, engine_idx):
+    def record(
+        self, scheduler_stats, iteration_stats, mm_cache_stats=None, engine_idx=0
+    ):
         self.recorded.append(
             (scheduler_stats, iteration_stats, mm_cache_stats, engine_idx)
         )

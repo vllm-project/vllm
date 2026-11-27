@@ -27,8 +27,8 @@ FORCE_INLINE std::pair<vec_op::FP32Vec16, vec_op::FP32Vec16> load_b_pair_vec(
     return {vec_op::FP32Vec16(bf16_b_reg, 0), vec_op::FP32Vec16(bf16_b_reg, 1)};
   } else {
     using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
-    return {vec_op::FP32Vec16(load_vec_t(ptr)),
-            vec_op::FP32Vec16(load_vec_t(ptr + 16))};
+    return std::make_pair(vec_op::FP32Vec16(load_vec_t(ptr)),
+                          vec_op::FP32Vec16(load_vec_t(ptr + 16)));
   }
 }
 
@@ -102,7 +102,9 @@ class TileGemm82 {
     kv_cache_t* __restrict__ curr_b = b_tile;
 
     for (int32_t k = 0; k < dynamic_k_size; ++k) {
-      auto [fp32_b_0_reg, fp32_b_1_reg] = load_b_pair_vec(curr_b);
+      auto fp32_b_regs = load_b_pair_vec(curr_b);
+      auto fp32_b_0_reg = fp32_b_regs.first;
+      auto fp32_b_1_reg = fp32_b_regs.second;
 
       float* __restrict__ curr_m_a = curr_a;
       vec_op::unroll_loop<int32_t, M>([&](int32_t i) {

@@ -1,9 +1,6 @@
 #ifndef CONCAT_MLA_Q_CUH_
 #define CONCAT_MLA_Q_CUH_
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
-
 #include "cuda_vec_utils.cuh"
 
 namespace vllm {

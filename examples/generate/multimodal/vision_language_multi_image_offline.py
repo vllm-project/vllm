@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference with
+"""This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
 using the chat template defined by the model.
 """
@@ -17,6 +16,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 QUESTION = "What is the content of each image?"
@@ -55,8 +55,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "rhymes-ai/Aria"
     engine_args = EngineArgs(
         model=model_name,
-        tokenizer_mode="slow",
-        trust_remote_code=True,
         dtype="bfloat16",
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -70,39 +68,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereLabs/aya-vision-8b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -202,15 +167,12 @@ def load_deepseek_vl2(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_deepseek_ocr(question: str, image_urls: list[str]) -> ModelRequestData:
-    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
-
     model_name = "deepseek-ai/DeepSeek-OCR"
 
     engine_args = EngineArgs(
         model=model_name,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
-        logits_processors=[NGramPerReqLogitsProcessor],
     )
 
     placeholder = "<image>\n" * len(image_urls)
@@ -218,18 +180,11 @@ def load_deepseek_ocr(question: str, image_urls: list[str]) -> ModelRequestData:
 
     # The following sampling params config is taken from
     # the official Deepseek-OCR inference example.
-    # (IMPORTANT) Use the custom logits processor and avoid skipping
-    # special tokens for this model for the optimal OCR performance.
+    # (IMPORTANT) Avoid skipping special tokens for this model for the
+    # optimal OCR performance.
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=8192,
-        # ngram logit processor args
-        extra_args=dict(
-            ngram_size=30,
-            window_size=90,
-            # whitelist: <td>, </td>
-            whitelist_token_ids={128821, 128822},
-        ),
         skip_special_tokens=False,
     )
 
@@ -397,53 +352,6 @@ def load_hunyuan_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_hyperclovax_seed_vision(
-    question: str, image_urls: list[str]
-) -> ModelRequestData:
-    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=16384,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    message = {"role": "user", "content": list()}
-    for _image_url in image_urls:
-        message["content"].append(
-            {
-                "type": "image",
-                "image": _image_url,
-                "ocr": "",
-                "lens_keywords": "",
-                "lens_local_keywords": "",
-            }
-        )
-    message["content"].append(
-        {
-            "type": "text",
-            "text": question,
-        }
-    )
-
-    prompt = tokenizer.apply_chat_template(
-        [
-            message,
-        ],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        stop_token_ids=None,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
 def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
 
@@ -532,80 +440,6 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
-def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-1_5-8B"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=32768,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
     )
 
 
@@ -831,32 +665,6 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-# OpenPangu
-def load_openpangu_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "FreedomIntelligence/openPangu-VL-7B"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        max_num_seqs=2,
-        enforce_eager=True,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = "[unused18][unused19][unused20]" * len(image_urls)
-    prompt = (
-        f"<s>[unused9]系统：[unused10][unused9]用户：{question}{placeholders}"
-        "[unused10][unused9]助手："
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
 # Ovis
 def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "AIDC-AI/Ovis2-1B"
@@ -865,7 +673,6 @@ def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=8192,
         max_num_seqs=2,
-        trust_remote_code=True,
         dtype="half",
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -875,7 +682,7 @@ def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     )
     messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -920,7 +727,6 @@ def load_paddleocr_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
@@ -992,11 +798,9 @@ def load_phi3v(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    """Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
     show how to process multi images inputs.
     """
-
     model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
     # Since the vision-lora and speech-lora co-exist with the base model,
     # we have to manually specify the path of the lora weights.
@@ -1039,49 +843,6 @@ def load_phi4siglip(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Qwen/Qwen-VL-Chat"
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=1024,
-        max_num_seqs=2,
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-    placeholders = "".join(
-        f"Picture {i}: <img></img>\n" for i, _ in enumerate(image_urls, start=1)
-    )
-
-    # This model does not have a chat_template attribute on its tokenizer,
-    # so we need to explicitly pass it. We use ChatML since it's used in the
-    # generation utils of the model:
-    # https://huggingface.co/Qwen/Qwen-VL-Chat/blob/main/qwen_generation_utils.py#L265
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    # Copied from: https://huggingface.co/docs/transformers/main/en/chat_templating
-    chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"  # noqa: E501
-
-    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        chat_template=chat_template,
-    )
-
-    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
-    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
-        chat_template=chat_template,
     )
 
 
@@ -1272,7 +1033,6 @@ def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_num_batched_tokens=4096,
-        gpu_memory_utilization=0.85,
         tensor_parallel_size=8,
         limit_mm_per_prompt={"image": len(image_urls)},
         reasoning_parser="step3",
@@ -1308,55 +1068,6 @@ def load_step_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
         f"{'<im_patch>' * len(image_urls)}{question}<|EOT|><|BOT|>"
         "assistant\n<think>\n"
-    )
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
-def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "omni-research/Tarsier-7b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    prompt = f"USER: {'<image>' * len(image_urls)}\n{question}\n ASSISTANT:"
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
-def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "omni-research/Tarsier2-Recap-7b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=32768,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        hf_overrides={
-            "architectures": ["Tarsier2ForConditionalGeneration"],
-            "model_type": "tarsier2",
-        },
-    )
-
-    prompt = (
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        f"<|im_start|>user\n<|vision_start|>{'<|image_pad|>' * len(image_urls)}"
-        f"<|vision_end|>{question}<|im_end|>\n"
-        "<|im_start|>assistant\n"
     )
     image_data = [fetch_image(url) for url in image_urls]
 
@@ -1510,9 +1221,29 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_unlimited_ocr2(question: str, image_urls: list[str]) -> ModelRequestData:
+    engine_args = EngineArgs(
+        model="baidu/Unlimited-OCR-2",
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        max_model_len=32768,
+        max_num_batched_tokens=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_encoder_attn_backend="TORCH_SDPA",
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt="<PAGE><image>" * len(image_urls) + "Multi page parsing.",
+        image_data=[fetch_image(url) for url in image_urls],
+        sampling_params=SamplingParams(
+            temperature=0, max_tokens=4096, skip_special_tokens=False
+        ),
+    )
+
+
 model_example_map = {
     "aria": load_aria,
-    "aya_vision": load_aya_vision,
     "bee": load_bee,
     "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
@@ -1522,12 +1253,9 @@ model_example_map = {
     "granite4_vision": load_granite4_vision,
     "h2ovl_chat": load_h2ovl,
     "hunyuan_vl": load_hunyuan_vl,
-    "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "idefics3": load_idefics3,
     "interns1": load_interns1,
     "internvl_chat": load_internvl,
-    "keye_vl": load_keye_vl,
-    "keye_vl1_5": load_keye_vl1_5,
     "kimi_vl": load_kimi_vl,
     "llama4": load_llama4,
     "llava": load_llava,
@@ -1536,7 +1264,6 @@ model_example_map = {
     "mistral3": load_mistral3,
     "molmo2": load_molmo2,
     "NVLM_D": load_nvlm_d,
-    "openpangu_vl": load_openpangu_vl,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,
     "paddleocr_vl": load_paddleocr_vl,
@@ -1544,15 +1271,13 @@ model_example_map = {
     "phi4_mm": load_phi4mm,
     "phi4_siglip": load_phi4siglip,
     "pixtral_hf": load_pixtral_hf,
-    "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
     "rvl": load_r_vl,
     "smolvlm": load_smolvlm,
     "step3": load_step3,
     "stepvl": load_step_vl,
-    "tarsier": load_tarsier,
-    "tarsier2": load_tarsier2,
+    "unlimited_ocr2": load_unlimited_ocr2,
     "glm4_1v": load_glm4_1v,
     "glm4_5v": load_glm4_5v,
     "glm4_5v_fp8": load_glm4_5v_fp8,
@@ -1572,10 +1297,16 @@ def run_generate(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
-    sampling_params = SamplingParams(
-        temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
+    sampling_params = (
+        SamplingParams(
+            temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
+        )
+        if req_data.sampling_params is None
+        else req_data.sampling_params
     )
 
     outputs = llm.generate(
@@ -1613,6 +1344,8 @@ def run_chat(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = (

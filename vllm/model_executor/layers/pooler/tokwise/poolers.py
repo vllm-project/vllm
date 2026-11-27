@@ -28,6 +28,7 @@ from .heads import (
     TokenPoolerHeadOutputItem,
 )
 from .methods import (
+    AllPool,
     TokenPoolingMethod,
     TokenPoolingMethodOutputItem,
     get_tok_pooling_method,
@@ -46,8 +47,7 @@ TokenPoolerOutput: TypeAlias = list[torch.Tensor | None]
 
 
 class TokenPooler(Pooler):
-    """
-    A layer that pools specific information from hidden states.
+    """A layer that pools specific information from hidden states.
 
     This layer does the following:
     1. Extracts specific tokens or aggregates data based on pooling method.
@@ -64,6 +64,10 @@ class TokenPooler(Pooler):
 
         self.pooling = pooling
         self.head = head
+
+    def extra_repr(self) -> str:
+        head_name = self.head.__class__.__name__ if self.head is not None else None
+        return f"pooling={self.pooling.__class__.__name__}, head={head_name}"
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         tasks = set(POOLING_TASKS)
@@ -88,6 +92,22 @@ class TokenPooler(Pooler):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
+        params = pooling_metadata.pooling_params
+        if (
+            params
+            and type(self.pooling) is AllPool
+            and not self.pooling.enable_chunked_prefill
+            and type(self.head) is TokenEmbeddingPoolerHead
+            and (
+                outputs := self.head.forward_batched(
+                    hidden_states,
+                    params,
+                    lambda embeddings: self.pooling(embeddings, pooling_metadata),
+                )
+            )
+            is not None
+        ):
+            return outputs
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         if self.head is not None:
             pooled_data = self.head(pooled_data, pooling_metadata)
@@ -118,13 +138,16 @@ def pooler_for_token_classify(
     pooling: TokenPoolingMethod | TokenPoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | None = None,
-):
+) -> TokenPooler:
     if pooling is None:
         pooling = get_tok_pooling_method(pooler_config.get_tok_pooling_type())
 
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
-    assert model_config.pooler_config is not None
+    if model_config.pooler_config is None:
+        raise ValueError(
+            "model_config.pooler_config must be set for token classification pooling"
+        )
     head = TokenClassifierPoolerHead(
         head_dtype=model_config.head_dtype,
         classifier=classifier,

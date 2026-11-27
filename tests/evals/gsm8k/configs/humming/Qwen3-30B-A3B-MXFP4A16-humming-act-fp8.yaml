@@ -1,0 +1,11 @@
+model_name: "nm-testing/Qwen3-30B-A3B-MXFP4A16"
+accuracy_threshold: 0.86
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --enforce-eager
+  --max-model-len 8192
+  --quantization humming
+  --linear-backend humming
+env:
+  VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"float8e4m3"}'

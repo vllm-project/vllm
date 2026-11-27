@@ -5,7 +5,9 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+)
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
@@ -21,8 +23,8 @@ class ExpertsInt8Config(QuantizationConfig):
     """Online int8 quantization for MoE expert weights.
     Linear layers are left unquantized.
 
-    Backward-compatible config for ``--quantization experts_int8``.
-    Prefer ``--quantization int8_per_channel``
+    Backward-compatible config for `--quantization experts_int8`.
+    Prefer `--quantization int8_per_channel`
     """
 
     def __init__(self) -> None:
@@ -53,6 +55,6 @@ class ExpertsInt8Config(QuantizationConfig):
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
-        elif isinstance(layer, FusedMoE):
-            return Int8OnlineMoEMethod(layer=layer)
+        elif isinstance(layer, RoutedExperts):
+            return Int8OnlineMoEMethod(moe=layer.moe_config)
         return None

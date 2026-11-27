@@ -3,28 +3,49 @@
 import filecmp
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config
+from tests.v1.kv_connector.unit.utils import (
+    create_vllm_config,
+    maybe_update_block_size,
+    set_mtp_config,
+)
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
+    SupportsHMA,
+    supports_hma,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorLogging,
+    KVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiKVConnectorPromMetrics,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
@@ -48,11 +69,18 @@ class MockConnectorStats(KVConnectorStats):
 class MockConnector(KVConnectorBase_V1):
     """Mock connector for testing."""
 
+    _supports_divergent_local_hybrid_hits = False
+
     def __new__(cls, *args, **kwargs):
         # mock all KVConnectorBase_V1 functions
         mock = MagicMock(spec_set=KVConnectorBase_V1)
+        mock.supports_divergent_local_hybrid_hits = (
+            cls._supports_divergent_local_hybrid_hits
+        )
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
+        mock.get_kv_connector_stats.return_value = None
+        mock.get_mem_pool_context.return_value = None
         return mock
 
     @classmethod
@@ -83,24 +111,153 @@ class MockConnector(KVConnectorBase_V1):
         pass
 
 
-# Register the mock connector
+class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
+    """Mock connector that supports HMA for testing."""
+
+    _supports_divergent_local_hybrid_hits = False
+
+    def __new__(cls, *args, **kwargs):
+        mock = MagicMock(spec_set=cls)
+        mock.supports_divergent_local_hybrid_hits = (
+            cls._supports_divergent_local_hybrid_hits
+        )
+        mock.get_kv_connector_stats.return_value = None
+        return mock
+
+    def start_load_kv(self, forward_context, **kwargs):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+    def build_connector_meta(self, scheduler_output):
+        return None
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        return (0, False)
+
+    def update_state_after_alloc(self, request, blocks, num_tokens) -> None:
+        pass
+
+    def request_finished_all_groups(self, request, block_ids):
+        return (False, None)
+
+
+class LookaheadHashingTestConnector(ExampleConnector):
+    """Minimal real connector for lookahead-hash protocol tests."""
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return bool(
+            kv_transfer_config.kv_connector_extra_config.get(
+                "supports_lookahead_block_hashes", False
+            )
+        )
+
+
+class MockDivergentHMAConnector(MockHMAConnector):
+    _supports_divergent_local_hybrid_hits = True
+
+
+@dataclass
+class HandshakeTestMetadata(KVConnectorHandshakeMetadata):
+    agent: str
+
+
+class HandshakeTestConnector(ExampleConnector):
+    """Real connector that reports handshake metadata and accepts it from every
+    PP stage, as NixlConnector does."""
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        return HandshakeTestMetadata(
+            agent=self._kv_transfer_config.get_from_extra_config("agent", "")
+        )
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        self.received_handshake_metadata = metadata
+
+
+def _handshake_child(agent: str) -> dict[str, Any]:
+    return {
+        "kv_connector": "HandshakeTestConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+        "kv_connector_extra_config": {"agent": agent},
+    }
+
+
+class LastHandshakeMultiConnector(MultiConnector):
+    """Reports only its last sub-connector's handshake metadata, as Dynamo's
+    PdConnector does for NIXL."""
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        return self._connectors[-1].get_handshake_metadata()
+
+
+# Register mock connectors
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
+KVConnectorFactory.register_connector(
+    "MockHMAConnector", __name__, MockHMAConnector.__name__
+)
+KVConnectorFactory.register_connector(
+    "MockDivergentHMAConnector",
+    __name__,
+    MockDivergentHMAConnector.__name__,
+)
+
+
+def _lookahead_connector_config(supported: bool) -> dict[str, Any]:
+    return {
+        "kv_connector": "LookaheadHashingTestConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+        "kv_connector_extra_config": {
+            "supports_lookahead_block_hashes": supported,
+        },
+    }
+
+
+def test_register_finished_partial_tail_notifies_every_connector():
+    connector = object.__new__(MultiConnector)
+    first = MagicMock(spec_set=KVConnectorBase_V1)
+    second = MagicMock(spec_set=KVConnectorBase_V1)
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    connector._connectors = [first, second]
+    request = MagicMock()
+    block_ids = ([1], [2])
+    offloads = [(1, 2, 12)]
+
+    assert connector.register_finished_partial_tail(request, block_ids, offloads)
+    first.register_finished_partial_tail.assert_called_once_with(
+        request, block_ids, offloads
+    )
+    second.register_finished_partial_tail.assert_called_once_with(
+        request, block_ids, offloads
+    )
 
 
 @pytest.fixture
 def mc() -> MultiConnector:
-    """MultiConnector using two mocked connectors"""
-    vllm_config = create_vllm_config()
-
+    """MultiConnector using two mocked connectors."""
     mock_connector_config = {
         "kv_connector": "MockConnector",
         "kv_role": "kv_both",
         "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
     }
 
-    vllm_config.kv_transfer_config = KVTransferConfig(
+    vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
-        kv_role="kv_both",
         kv_connector_extra_config={
             "connectors": [mock_connector_config, mock_connector_config],
         },
@@ -117,6 +274,64 @@ def mc() -> MultiConnector:
     )
 
     return mc
+
+
+@pytest.mark.parametrize("chosen", [0, 1])
+def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
+    request = MagicMock(request_id="request")
+    for i, connector in enumerate(mc._connectors):
+        connector.get_num_new_matched_tokens.return_value = (
+            (16, True) if i == chosen else (0, False)
+        )
+        connector.get_loaded_kv_cache_group_ids.return_value = (i,)
+
+    assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    assert mc.get_loaded_kv_cache_group_ids(request) == (chosen,)
+    mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
+
+
+def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
+    assert mc.get_mem_pool_context() is None
+
+
+def test_multi_connector_forwards_mem_pool_context(mc: MultiConnector):
+    context = MagicMock()
+    provider = MagicMock(spec_set=KVConnectorBase_V1)
+    provider.get_mem_pool_context.return_value = context
+    mc._connectors = [mc._connectors[0], provider]
+
+    assert mc.get_mem_pool_context() is context
+    provider.get_mem_pool_context.assert_called_once_with()
+
+
+def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
+    providers = [
+        MagicMock(spec_set=KVConnectorBase_V1),
+        MagicMock(spec_set=KVConnectorBase_V1),
+    ]
+    for provider in providers:
+        provider.get_mem_pool_context.return_value = MagicMock()
+    mc._connectors = providers
+
+    with pytest.raises(
+        ValueError,
+        match="Multiple connectors provide a KV cache memory pool",
+    ):
+        mc.get_mem_pool_context()
+
+
+def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
+    request = MagicMock(request_id="request")
+    mc._requests_to_connector[request.request_id] = 1
+    sources = {CacheHitSource.DISK: 32}
+    selected_connector = mc._connectors[1]
+    assert isinstance(selected_connector, MagicMock)
+    selected_connector.get_external_cache_hit_sources.return_value = sources
+
+    assert mc.get_external_cache_hit_sources(request, 32) is sources
+    selected_connector.get_external_cache_hit_sources.assert_called_once_with(
+        request, 32
+    )
 
 
 # Helper function to compare directories recursively
@@ -136,8 +351,7 @@ def _compare_directories(dir1: Path, dir2: Path) -> bool:
 
 
 def test_multi_example_connector_consistency():
-    """
-    Tests that MultiConnector with two ExampleConnectors saves
+    """Tests that MultiConnector with two ExampleConnectors saves
     identical KV cache data to separate storage locations.
     """
     storage_1_path = Path("storage_1/")
@@ -175,11 +389,16 @@ def test_multi_example_connector_consistency():
         },
     )
 
+    block_size = maybe_update_block_size(16)
+    expected_num_blocks = 2 if block_size == 64 else 7
+    expected_num_matched_tokens = (expected_num_blocks - 1) * block_size
     llm = LLM(
         model=MODEL_NAME,
         enforce_eager=True,
+        block_size=block_size,
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
+        async_scheduling=False,
     )
     # Run generation - this should trigger saving KV cache
     # Use a single prompt to avoid race conditions depending on the order of scheduling
@@ -221,43 +440,46 @@ def test_multi_example_connector_consistency():
         )
 
     events = get_connector_events()
-    # First event is set_xfer_handshake_metadata from initialization, then
-    # get_num_new_matched_tokens and update_state_after_alloc from generate().
-    assert events["storage1-SCHEDULER"][:4] == [
-        "set_xfer_handshake_metadata",
+    storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
+    storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    # The cache manager is bound, completion counts queried, and handshake
+    # metadata exchanged before the request is enqueued.
+    assert storage1_scheduler_events[:7] == [
+        "bind_kv_cache_manager",
+        "get_finished_count",
+        "set_xfer_handshake_metadata_pp_aware",
+        "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization (register_kv_caches,
-    # set_host_xfer_buffer_ops, get_handshake_metadata), then generate() events.
-    assert events["storage1-WORKER"][:8] == [
+    # Layer hooks run before the deferred load starts after the forward pass.
+    expected_worker_prefix = [
+        "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
+        "on_kv_cache_ready",
         "get_handshake_metadata",
         "handle_preemptions",
         "bind_connector_metadata",
-        "start_load_kv",
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert events["storage2-SCHEDULER"][:4] == [
-        "set_xfer_handshake_metadata",
+    for connector_name in ("storage1-WORKER", "storage2-WORKER"):
+        worker_events = events[connector_name]
+        assert worker_events[: len(expected_worker_prefix)] == expected_worker_prefix
+        assert worker_events.index("start_load_kv") > worker_events.index(
+            "save_kv_layer"
+        )
+    assert storage2_scheduler_events[:7] == [
+        "bind_kv_cache_manager",
+        "get_finished_count",
+        "set_xfer_handshake_metadata_pp_aware",
+        "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-WORKER"][:8] == [
-        "register_kv_caches",
-        "set_host_xfer_buffer_ops",
-        "get_handshake_metadata",
-        "handle_preemptions",
-        "bind_connector_metadata",
-        "start_load_kv",
-        "wait_for_layer_load",
-        "save_kv_layer",
-    ]
-
     # Reset prefix cache or else we'll just get the tokens back from there.
     llm.reset_prefix_cache()
 
@@ -267,17 +489,28 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will return new tokens from the first
-    # connector so update_state_after_alloc will be with allocated blocks
-    # on that one but with zero blocks for others (first nonzero match is
-    # chosen).
-    assert events["storage1-SCHEDULER"][:3] == [
+    # connector (first nonzero match is chosen), so update_state_after_alloc
+    # will report those external tokens on that one. Other connectors still
+    # receive the request's real blocks but with 0 external tokens.
+    storage1_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage1-SCHEDULER"])
+    )
+    storage2_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage2-SCHEDULER"])
+    )
+    assert storage1_scheduler_events[:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 96",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert storage2_scheduler_events[:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
 
@@ -293,23 +526,51 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will be called for both connectors but will
-    # return 0 from the first connector, but the second connector should have
-    # a hit, so update_state_after_alloc will only be called with allocated
-    # blocks for the second connector.
-    assert events["storage1-SCHEDULER"][:3] == [
+    # return 0 from the first connector, while the second connector has a hit.
+    # Both connectors receive the request's real blocks, but only the chosen
+    # (second) connector reports external tokens.
+    storage1_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage1-SCHEDULER"])
+    )
+    storage2_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage2-SCHEDULER"])
+    )
+    assert storage1_scheduler_events[:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert storage2_scheduler_events[:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 96",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
 
     # Clean up
     shutil.rmtree(storage_1_path)
     shutil.rmtree(storage_2_path)
+
+
+def _ignore_event_collection(events: list[str]) -> list[str]:
+    # Filter out per-step polling hooks that the scheduler calls repeatedly
+    # and which are not meaningful state transitions for these assertions.
+    ignored = {"get_kv_connector_stats", "has_pending_push_work", "take_events"}
+    return [event for event in events if event not in ignored]
+
+
+def _events_from_request(events: list[str]) -> list[str]:
+    # The async engine-core can emit a trailing build_connector_meta from the
+    # previous generation's final (idle) scheduler step. Depending on timing it
+    # may be flushed into this window ahead of on_new_request, so anchor the
+    # comparison on the new request's first event to avoid a flaky ordering.
+    if "on_new_request" in events:
+        return events[events.index("on_new_request") :]
+    return events
 
 
 def get_connector_events() -> dict[str, list[str]]:
@@ -339,8 +600,7 @@ def test_engine_id_conflict():
 
 
 def test_multi_connector_handle_preemptions_integration():
-    """
-    Integration test: verify MultiConnector delegates handle_preemptions
+    """Integration test: verify MultiConnector delegates handle_preemptions
     to all sub-connectors.
 
     Uses TestExampleConnector which logs all method calls to temp files.
@@ -356,39 +616,35 @@ def test_multi_connector_handle_preemptions_integration():
 
     try:
         # Configure MultiConnector with two TestExampleConnectors
-        kv_transfer_config = KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "connectors": [
-                    {
-                        "kv_connector": "TestExampleConnector",
-                        "kv_role": "kv_both",
-                        "kv_connector_extra_config": {
-                            "shared_storage_path": str(storage_path / "s1"),
-                            "name": "preempt1",
-                        },
-                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+        connectors_extra_config = {
+            "connectors": [
+                {
+                    "kv_connector": "TestExampleConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "shared_storage_path": str(storage_path / "s1"),
+                        "name": "preempt1",
                     },
-                    {
-                        "kv_connector": "TestExampleConnector",
-                        "kv_role": "kv_both",
-                        "kv_connector_extra_config": {
-                            "shared_storage_path": str(storage_path / "s2"),
-                            "name": "preempt2",
-                        },
-                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                },
+                {
+                    "kv_connector": "TestExampleConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "shared_storage_path": str(storage_path / "s2"),
+                        "name": "preempt2",
                     },
-                ]
-            },
-        )
+                    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                },
+            ]
+        }
 
         vllm_config = create_vllm_config(
             block_size=16,
             max_num_batched_tokens=100,
-            kv_connector_extra_config=kv_transfer_config.kv_connector_extra_config,
+            kv_connector="MultiConnector",
+            kv_connector_extra_config=connectors_extra_config,
         )
-        vllm_config.kv_transfer_config = kv_transfer_config
 
         # Create scheduler - this initializes the MultiConnector with SCHEDULER role
         scheduler = create_scheduler(vllm_config, num_blocks=10)
@@ -448,19 +704,22 @@ class TestMultiConnectorStats:
         correct data."""
         serialized_data = {
             "NixlConnector": {
-                "data": {
-                    "transfer_duration": [1.5, 2.3],
-                    "post_duration": [0.1, 0.2],
-                    "bytes_transferred": [1024, 2048],
-                    "num_descriptors": [10, 20],
-                    "num_failed_transfers": [],
-                    "num_failed_notifications": [],
-                }
+                "transfer_duration": [1.5, 2.3],
+                "post_duration": [0.1, 0.2],
+                "bytes_transferred": [1024, 2048],
+                "num_descriptors": [10, 20],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             }
         }
 
         stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
 
+        assert stats is not None
         assert "NixlConnector" in stats.data
         nixl_stats = stats.data["NixlConnector"]
         assert isinstance(nixl_stats, NixlKVConnectorStats)
@@ -473,16 +732,18 @@ class TestMultiConnectorStats:
         """Test reconstruction with multiple connector types that have custom stats."""
         serialized_data = {
             "NixlConnector": {
-                "data": {
-                    "transfer_duration": [1.5],
-                    "post_duration": [0.1],
-                    "bytes_transferred": [1024],
-                    "num_descriptors": [10],
-                    "num_failed_transfers": [],
-                    "num_failed_notifications": [],
-                }
+                "transfer_duration": [1.5],
+                "post_duration": [0.1],
+                "bytes_transferred": [1024],
+                "num_descriptors": [10],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             },
-            "MockConnector": {"data": {"mock_field": [1, 2, 3]}},
+            "MockConnector": {"mock_field": [1, 2, 3]},
         }
 
         stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
@@ -497,20 +758,23 @@ class TestMultiConnectorStats:
         assert isinstance(stats.data["MockConnector"], MockConnectorStats)
         # Verify data is preserved
         assert stats.data["MockConnector"].data == {"mock_field": [1, 2, 3]}
+        assert stats.to_dict() == serialized_data
 
     def test_build_kv_connector_stats_raises_error_for_unknown_connector(self):
         """Test that unknown connectors raise an error."""
         serialized_data = {
-            "UnknownConnector": {"data": {"some_field": [1, 2, 3]}},
+            "UnknownConnector": {"some_field": [1, 2, 3]},
             "NixlConnector": {
-                "data": {
-                    "transfer_duration": [1.5],
-                    "post_duration": [0.1],
-                    "bytes_transferred": [1024],
-                    "num_descriptors": [10],
-                    "num_failed_transfers": [],
-                    "num_failed_notifications": [],
-                }
+                "transfer_duration": [1.5],
+                "post_duration": [0.1],
+                "bytes_transferred": [1024],
+                "num_descriptors": [10],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             },
         }
 
@@ -530,6 +794,10 @@ class TestMultiConnectorStats:
                 "num_descriptors": [10],
                 "num_failed_transfers": [],
                 "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             }
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
@@ -559,12 +827,16 @@ class TestMultiConnectorStats:
                 "num_descriptors": [10],
                 "num_failed_transfers": [],
                 "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             }
         )
 
         mixed_data = {
             "NixlConnector": nixl_stats,  # Already instantiated
-            "MockConnector": {"data": {"mock_field": [1, 2, 3]}},  # Serialized
+            "MockConnector": {"mock_field": [1, 2, 3]},  # Serialized
         }
 
         stats = MultiConnector.build_kv_connector_stats(data=mixed_data)
@@ -584,16 +856,18 @@ class TestMultiConnectorStats:
         # so it returns None and should be skipped
         serialized_data = {
             "NixlConnector": {
-                "data": {
-                    "transfer_duration": [1.5],
-                    "post_duration": [0.1],
-                    "bytes_transferred": [1024],
-                    "num_descriptors": [10],
-                    "num_failed_transfers": [],
-                    "num_failed_notifications": [],
-                }
+                "transfer_duration": [1.5],
+                "post_duration": [0.1],
+                "bytes_transferred": [1024],
+                "num_descriptors": [10],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             },
-            "ExampleConnector": {"data": {"some_field": [1, 2, 3]}},
+            "ExampleConnector": {"some_field": [1, 2, 3]},
         }
 
         stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
@@ -607,14 +881,32 @@ class TestMultiConnectorStats:
         # ExampleConnector should be skipped (returns None)
         assert "ExampleConnector" not in stats.data
 
-    def test_build_kv_connector_stats_handles_malformed_data(self):
-        """Test that malformed data raises appropriate errors."""
-        serialized_data = {
-            "NixlConnector": {"wrong_field": {"transfer_duration": [1.5]}}
-        }
+    def test_prom_metrics_passes_flat_data_to_children(self):
+        child_metrics = MagicMock()
+        metrics = object.__new__(MultiKVConnectorPromMetrics)
+        metrics._prom_metrics = {"NixlConnector": child_metrics}
+        payload = {"NixlConnector": {"transfer_duration": [1.5]}}
 
-        with pytest.raises(AssertionError, match="Expected a dict with a 'data' field"):
-            MultiConnector.build_kv_connector_stats(data=serialized_data)
+        metrics.observe(payload, engine_idx=2)
+
+        child_metrics.observe.assert_called_once_with({"transfer_duration": [1.5]}, 2)
+
+    @pytest.mark.parametrize("with_exporter", [False, True])
+    def test_prom_metrics_skips_stats_only_connectors(self, with_exporter):
+        """Stats-only children must not prevent supported metrics from exporting."""
+        child_metrics = MagicMock()
+        metrics = object.__new__(MultiKVConnectorPromMetrics)
+        metrics._prom_metrics = (
+            {"MooncakeStoreConnector": child_metrics} if with_exporter else {}
+        )
+        payload = {"MooncakeConnector": {"bytes_transferred": [1024]}}
+        if with_exporter:
+            payload["MooncakeStoreConnector"] = {"load_get_bytes": [2048]}
+
+        metrics.observe(payload, engine_idx=2)
+
+        if with_exporter:
+            child_metrics.observe.assert_called_once_with({"load_get_bytes": [2048]}, 2)
 
     def test_aggregate_same_connector(self):
         """Test aggregating stats from the same connector type."""
@@ -628,6 +920,10 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -643,6 +939,10 @@ class TestMultiConnectorStats:
                         "num_descriptors": [20],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -674,6 +974,10 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -700,6 +1004,10 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10, 20],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -713,6 +1021,40 @@ class TestMultiConnectorStats:
         assert "Num successful transfers" in reduced["NixlConnector"]
         assert reduced["NixlConnector"]["Num successful transfers"] == 2
 
+    def test_log_renders_plain_scalars(self):
+        """Reduced stats must render as plain numbers in the CLI log, not
+        numpy reprs (eg np.float64(2.338))."""
+        stats = MultiKVConnectorStats(
+            data={
+                "NixlConnector": NixlKVConnectorStats(
+                    data={
+                        "transfer_duration": [1.0, 2.0],
+                        "post_duration": [0.1, 0.2],
+                        "bytes_transferred": [1024, 2048],
+                        "num_descriptors": [10, 20],
+                        "num_failed_transfers": [],
+                        "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
+                    }
+                )
+            }
+        )
+
+        kv_logging = KVConnectorLogging(kv_transfer_config=None)
+        kv_logging.transfer_stats_accumulator = stats
+        log_records: list[tuple] = []
+        kv_logging.log(log_fn=lambda *args: log_records.append(args))
+
+        assert len(log_records) == 1
+        msg = log_records[0][1]
+        assert "np.float" not in msg
+        assert "'Avg xfer time (ms)': 1500.0" in msg
+        # The accumulator is reset after logging.
+        assert kv_logging.transfer_stats_accumulator is None
+
     def test_reset(self):
         """Test that reset() resets all nested connector stats."""
         stats = MultiKVConnectorStats(
@@ -725,6 +1067,10 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10, 20],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -757,9 +1103,7 @@ class TestMultiConnectorStats:
 
 
 def test_multi_connector_overrides_all_base_methods():
-    """
-    Ensure MultiConnector overrides all public methods from KVConnectorBase_V1.
-    """
+    """Ensure MultiConnector overrides all public methods from KVConnectorBase_V1."""
     # These are fine to inherit from KVConnectorBase_V1
     # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
     # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
@@ -792,14 +1136,73 @@ Options:
 """)
 
 
-def test_multi_connector_prefer_cross_layer_blocks(mc):
-    mc._connectors[0].prefer_cross_layer_blocks = False
-    mc._connectors[1].prefer_cross_layer_blocks = True
-    assert mc.prefer_cross_layer_blocks is False
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("child_support", "num_lookahead", "prefix_caching", "nested", "role"),
+    [
+        ([True, True], 1, True, False, "SCHEDULER"),
+        ([True, False], 1, True, False, "SCHEDULER"),
+        ([True, True], 1, False, False, "SCHEDULER"),
+        ([True, True], 2, True, False, "SCHEDULER"),
+        ([True, True], 1, True, False, "WORKER"),
+        ([True, False], 1, True, False, "WORKER"),
+        ([True, True], 1, True, True, "SCHEDULER"),
+        ([True, False], 1, True, True, "SCHEDULER"),
+        ([True, True], 1, True, True, "WORKER"),
+        ([True, False], 1, True, True, "WORKER"),
+    ],
+)
+def test_multi_connector_children_use_configured_lookahead_hashes(
+    child_support: list[bool],
+    num_lookahead: int,
+    prefix_caching: bool,
+    nested: bool,
+    role: str,
+    caplog_vllm,
+):
+    """An unsupported child only warns, once on the scheduler side; every
+    connector keeps the lookahead."""
+    children = [_lookahead_connector_config(supported) for supported in child_support]
+    if nested:
+        children = [
+            {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {"connectors": children},
+            }
+        ]
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": children},
+        kv_role="kv_both",
+        disable_hybrid_kv_cache_manager=True,
+    )
+    vllm_config.cache_config.enable_prefix_caching = prefix_caching
+    set_mtp_config(vllm_config, num_lookahead)
 
-    mc._connectors[0].prefer_cross_layer_blocks = True
-    mc._connectors[1].prefer_cross_layer_blocks = True
-    assert mc.prefer_cross_layer_blocks is True
+    assert MultiConnector.supports_lookahead_block_hashes(
+        vllm_config.kv_transfer_config
+    ) == all(child_support)
+    expected = num_lookahead
+    assert vllm_config.num_hash_lookahead_tokens == expected
+
+    connector = KVConnectorFactory.create_connector(
+        vllm_config,
+        KVConnectorRole[role],
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    warned = "does not support hash lookahead" in caplog_vllm.text
+    assert warned == (role == "SCHEDULER" and not all(child_support))
+    assert isinstance(connector, MultiConnector)
+    assert connector._vllm_config.num_hash_lookahead_tokens == expected
+    for child in connector.sub_connectors:
+        assert child._vllm_config.num_hash_lookahead_tokens == expected
+        if isinstance(child, MultiConnector):
+            assert all(
+                leaf._vllm_config.num_hash_lookahead_tokens == expected
+                for leaf in child.sub_connectors
+            )
 
 
 def test_multi_connector_worker_metadata(mc):
@@ -899,6 +1302,7 @@ def test_multi_connector_worker_metadata(mc):
 
     def assert_update_connector_output_called(mc: MultiConnector):
         for c in mc._connectors:
+            assert isinstance(c.update_connector_output, MagicMock)
             c.update_connector_output.assert_called_once()
             c.update_connector_output.reset_mock()
 
@@ -920,3 +1324,247 @@ def test_multi_connector_worker_metadata(mc):
     mc.update_connector_output(kv_connector_output)
     assert_update_connector_output_called(mc)
     assert kv_connector_output.kv_connector_worker_meta == mc_worker_meta_01a_01b
+
+
+@pytest.mark.cpu_test
+def test_handshake_metadata_reaches_only_its_connector():
+    """With PP, the engine core gives the scheduler side the handshake metadata
+    of every stage. Each sub-connector must receive only the metadata it
+    reported. A sibling that reports none, such as a KV store next to NIXL on a
+    PP prefill instance, would reject pp_rank > 0 in the base class, and the
+    engine would fail to start."""
+    children = [
+        _handshake_child("first"),
+        {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+        _handshake_child("third"),
+    ]
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": children},
+        kv_role="kv_both",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    worker = KVConnectorFactory.create_connector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    scheduler = KVConnectorFactory.create_connector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    assert isinstance(scheduler, MultiConnector)
+
+    worker_metadata = worker.get_handshake_metadata()
+    assert worker_metadata is not None
+    # What the engine core merges from the workers of two PP stages.
+    scheduler.set_xfer_handshake_metadata_pp_aware(
+        {(pp_rank, 0): worker_metadata for pp_rank in range(2)}
+    )
+
+    for index, agent in ((0, "first"), (2, "third")):
+        handshake_connector = scheduler.sub_connectors[index]
+        assert isinstance(handshake_connector, HandshakeTestConnector)
+        expected = HandshakeTestMetadata(agent=agent)
+        assert handshake_connector.received_handshake_metadata == {
+            (0, 0): expected,
+            (1, 0): expected,
+        }
+
+
+@pytest.mark.cpu_test
+def test_handshake_metadata_of_subclass_reaches_every_connector():
+    """If a MultiConnector subclass reports one sub-connector's handshake
+    metadata instead of one entry per sub-connector, every sub-connector
+    receives that metadata."""
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [_handshake_child("store"), _handshake_child("nixl")]
+        },
+        kv_role="kv_both",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    worker = LastHandshakeMultiConnector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    scheduler = LastHandshakeMultiConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+
+    worker_metadata = worker.get_handshake_metadata()
+    assert worker_metadata is not None
+    scheduler.set_xfer_handshake_metadata_pp_aware({(0, 0): worker_metadata})
+
+    for connector in scheduler.sub_connectors:
+        assert isinstance(connector, HandshakeTestConnector)
+        assert connector.received_handshake_metadata == {
+            (0, 0): HandshakeTestMetadata(agent="nixl")
+        }
+
+
+def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
+    """Build a MultiConnector wrapping the given registered connectors."""
+    connectors = [
+        {
+            "kv_connector": name,
+            "kv_role": "kv_both",
+            "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",  # noqa: E501
+        }
+        for name in connector_names
+    ]
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": connectors},
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+    return MultiConnector(
+        vllm_config=vllm_config,
+        role=KVConnectorRole.WORKER,
+        kv_cache_config=kv_cache_config,
+    )
+
+
+def test_multi_connector_hma_support_detection():
+    """At runtime, _all_support_hma is True only when every sub-connector
+    implements SupportsHMA. Test all combinations of HMA / non-HMA
+    sub-connectors.
+    """
+    assert supports_hma(MultiConnector)
+
+    # -- All non-HMA connectors => _all_support_hma is False --
+    mc_none = _make_multi_connector(["MockConnector", "MockConnector"])
+    assert not supports_hma(mc_none._connectors[0])
+    assert not supports_hma(mc_none._connectors[1])
+    assert mc_none._all_support_hma is False
+
+    # -- All HMA connectors => _all_support_hma is True --
+    mc_all = _make_multi_connector(["MockHMAConnector", "MockHMAConnector"])
+    assert supports_hma(mc_all._connectors[0])
+    assert supports_hma(mc_all._connectors[1])
+    assert mc_all._all_support_hma is True
+
+    # -- Mixed: first HMA, second non-HMA => _all_support_hma is False --
+    mc_mixed1 = _make_multi_connector(["MockHMAConnector", "MockConnector"])
+    assert supports_hma(mc_mixed1._connectors[0])
+    assert not supports_hma(mc_mixed1._connectors[1])
+    assert mc_mixed1._all_support_hma is False
+
+    # -- Mixed: first non-HMA, second HMA => _all_support_hma is False --
+    mc_mixed2 = _make_multi_connector(["MockConnector", "MockHMAConnector"])
+    assert not supports_hma(mc_mixed2._connectors[0])
+    assert supports_hma(mc_mixed2._connectors[1])
+    assert mc_mixed2._all_support_hma is False
+
+
+def test_divergent_local_hybrid_hit_capability_is_conservative():
+    all_supported = _make_multi_connector(
+        ["MockDivergentHMAConnector", "MockDivergentHMAConnector"]
+    )
+    assert all_supported.supports_divergent_local_hybrid_hits is True
+
+    mixed = _make_multi_connector(["MockDivergentHMAConnector", "MockHMAConnector"])
+    assert mixed.supports_divergent_local_hybrid_hits is False
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("top_role", "child_roles", "consumer", "producer"),
+    [
+        ("kv_producer", ["kv_producer", "kv_both"], True, True),
+        ("kv_producer", ["kv_producer", "kv_producer"], False, True),
+        ("kv_consumer", ["kv_consumer", "kv_both"], True, True),
+        ("kv_both", ["kv_producer"], False, True),
+    ],
+    ids=["loading-child", "pure-producers", "saving-child", "no-loading-child"],
+)
+def test_multi_connector_role_follows_children(
+    top_role, child_roles, consumer, producer
+):
+    """MultiConnector does not pass its own kv_role to its connectors, so their
+    roles decide whether it loads KV (e.g. whether the scheduler defers freeing
+    blocks) and whether it saves KV."""
+    config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role=top_role,
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "ExampleConnector", "kv_role": role}
+                for role in child_roles
+            ]
+        },
+    )
+    assert config.is_kv_consumer is consumer
+    assert config.is_kv_producer is producer
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
+)
+def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
+    """When MultiConnector wraps a mix of HMA (NixlConnector) and non-HMA
+    (MockConnector) sub-connectors, verify that:
+    1. The scheduler's MultiConnector has _all_support_hma == False.
+    2. vLLM auto-disables the hybrid KV cache manager (no preference expressed by user)
+    """
+    from unittest.mock import patch
+
+    from tests.v1.kv_connector.unit.test_nixl_connector import FakeNixlWrapper
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_consumer",
+                },
+                {
+                    "kv_connector": "MockConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_module_path": (
+                        "tests.v1.kv_connector.unit.test_multi_connector"
+                    ),
+                },
+            ],
+        },
+    )
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    ):
+        llm = LLM(
+            model="Qwen/Qwen3-0.6B",
+            enforce_eager=True,
+            gpu_memory_utilization=0.3,
+            max_model_len=128,
+            max_num_seqs=1,
+            max_num_batched_tokens=128,
+            kv_transfer_config=kv_transfer_config,
+        )
+        try:
+            # HMA should be auto-disabled when user has not expressed a preference.
+            assert (
+                llm.llm_engine.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+                is True
+            )
+            # The scheduler-side MultiConnector should detect the mixed
+            # HMA support among its sub-connectors.
+            engine_core_client = llm.llm_engine.engine_core
+            assert isinstance(engine_core_client, InprocClient)
+            scheduler = engine_core_client.engine_core.scheduler
+            assert isinstance(scheduler, Scheduler)
+            mc = scheduler.connector
+            assert isinstance(mc, MultiConnector)
+            assert mc._all_support_hma is False
+        finally:
+            llm.llm_engine.engine_core.shutdown()

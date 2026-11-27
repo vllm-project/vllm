@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-WARNING: This test runs in both single-node (4 GPUs) and multi-node
- (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
- important to set the distributed backend to "mp" to avoid Ray scheduling
- all workers in a node other than the head node, which can cause the test
- to fail.
+"""WARNING: This test runs in both single-node (4 GPUs) and multi-node
+(2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
+important to set the distributed backend to "mp" to avoid Ray scheduling
+all workers in a node other than the head node, which can cause the test
+to fail.
 """
 
 import json
@@ -20,7 +19,12 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 
 from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import compare_two_settings, create_new_process_for_each_test
+from ..models.utils import check_logprobs_close
+from ..utils import (
+    compare_two_settings,
+    create_new_process_for_each_test,
+    multi_gpu_only,
+)
 
 logger = init_logger("test_pipeline_parallel")
 
@@ -38,7 +42,7 @@ class PPTestOptions(NamedTuple):
     load_format: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]
@@ -91,10 +95,18 @@ class PPTestSettings:
 
     def iter_params(self, model_id: str):
         opts = self.test_options
+        # Skip at collection: each case runs in a fresh process, which costs
+        # seconds to start even when the case only skips.
+        marks = pytest.mark.skipif(
+            opts.multi_node_only and not VLLM_MULTI_NODE,
+            reason="Not in multi-node setting",
+        )
 
         for parallel_setup in self.parallel_setups:
             for backend in self.distributed_backends:
-                yield (model_id, parallel_setup, backend, self.runner, opts)
+                yield pytest.param(
+                    model_id, parallel_setup, backend, self.runner, opts, marks=marks
+                )
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -102,15 +114,9 @@ class PPTestSettings:
 
 TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    # Uses Llama
-    # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
-    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),
-    "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
-    "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "zai-org/chatglm3-6b": PPTestSettings.fast(),
     "CohereLabs/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
-    "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
     "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(tp_base=2),
@@ -118,50 +124,37 @@ TEXT_GENERATION_MODELS = {
     "tiiuae/falcon-7b": PPTestSettings.fast(),
     "google/gemma-1.1-2b-it": PPTestSettings.fast(),
     "google/gemma-2-9b": PPTestSettings.fast(),
-    "gpt2": PPTestSettings.fast(),
-    "bigcode/starcoder": PPTestSettings.fast(),
+    "openai-community/gpt2": PPTestSettings.fast(),
     "EleutherAI/gpt-j-6b": PPTestSettings.fast(),
     "EleutherAI/pythia-1.4b": PPTestSettings.fast(),
     "ibm/PowerLM-3b": PPTestSettings.fast(),
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
-    # Uses Llama
-    # "internlm/internlm-chat-7b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
-    "inceptionai/jais-13b-chat": PPTestSettings.fast(),
-    "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
-    "pfnet/plamo-2-1b": PPTestSettings.fast(),
     "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
-    "hmellor/Ilama-3.2-1B": PPTestSettings.fast(),
+    "vllm-project/Ilama-3.2-1B": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
-    "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),
-    "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
     "allenai/OLMo-2-0425-1B": PPTestSettings.fast(),
     "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(),
-    "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "microsoft/phi-2": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(
         multi_node_only=True, load_format="dummy"
     ),
-    "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
     "upstage/solar-pro-preview-instruct": PPTestSettings.fast(load_format="dummy"),
-    # FIXME: Cannot load tokenizer in latest transformers version.
-    # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
-    # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(),
     # [Encoder-only]
     # TODO: Implement PP
     # "facebook/bart-base": PPTestSettings.fast(),
@@ -169,7 +162,7 @@ TEXT_GENERATION_MODELS = {
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
-    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
+    "vllm-project/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),
     "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(
         load_format="dummy", runner="pooling"
@@ -179,10 +172,8 @@ EMBEDDING_MODELS = {  # type: ignore[var-annotated]
 MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Salesforce/blip2-opt-6.7b": PPTestSettings.fast(),
-    "facebook/chameleon-7b": PPTestSettings.fast(),
-    "adept/fuyu-8b": PPTestSettings.fast(),
     "zai-org/glm-4v-9b": PPTestSettings.fast(),
-    "OpenGVLab/InternVL2-1B": PPTestSettings.fast(),
+    "OpenGVLab/InternVL3-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
     "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
     "llava-hf/LLaVA-NeXT-Video-7B-hf": PPTestSettings.fast(),
@@ -193,7 +184,6 @@ MULTIMODAL_MODELS = {
     "AIDC-AI/Ovis2.5-2B": PPTestSettings.fast(),
     "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
-    "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
     "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),
@@ -204,18 +194,16 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
-    "hmellor/Ilama-3.2-1B",
+    "vllm-project/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
     # [LANGUAGE EMBEDDING]
-    "intfloat/e5-mistral-7b-instruct",
+    "vllm-project/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
-    "OpenGVLab/InternVL2-1B",
+    "OpenGVLab/InternVL3-1B",
     "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
-    # [LANGUAGE GENERATION - HYBRID ARCH]
-    "ai21labs/Jamba-tiny-dev",
 ]
 
 
@@ -314,16 +302,7 @@ def _compare_tp(
     if max_num_seqs:
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
 
-    if distributed_backend == "ray":
-        # Test Ray Compiled Graph for all the tests
-        pp_env = {
-            "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
-        }
-    elif distributed_backend == "mp":
-        pp_env = None
-    else:
-        pp_env = None
-
+    pp_env = None
     tp_env = None
 
     pp_args = [
@@ -349,7 +328,14 @@ def _compare_tp(
         "mp",
     ]
 
-    compare_two_settings(model_id, pp_args, tp_args, pp_env, tp_env, method=method)
+    compare_two_settings(
+        model_id,
+        pp_args,
+        tp_args,
+        pp_env,
+        tp_env,
+        method=method,
+    )
 
 
 @pytest.mark.parametrize(
@@ -439,4 +425,131 @@ def test_tp_multimodal_generation(
         num_gpus_available,
         method="generate",
         is_multimodal=True,
+    )
+
+
+@create_new_process_for_each_test()
+def test_pp_mixed_precision_kv_cache():
+    """A mixed first PP stage must not send zeroing work to an unprepared stage."""
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--kv-cache-dtype",
+        "fp8",
+        "--kv-cache-dtype-skip-layers",
+        "0",
+        "--load-format",
+        "safetensors",
+        "--max-model-len",
+        "512",
+        "--max-num-seqs",
+        "8",
+        "--kv-cache-memory-bytes",
+        "64M",
+        "--enforce-eager",
+        "--distributed-executor-backend",
+        "mp",
+    ]
+    compare_two_settings(
+        "Qwen/Qwen3-0.6B",
+        [*common_args, "--pipeline-parallel-size", "2"],
+        common_args,
+        method="generate_close",
+    )
+
+
+@create_new_process_for_each_test()
+def test_pp_granite4_vision_deepstack(num_gpus_available):
+    """A later PP stage must receive the deepstack features of its layers."""
+    if num_gpus_available < 2:
+        pytest.skip("Need at least 2 GPUs")
+    # With 4 layers, deepstack layers 0 and 3 land on different PP stages.
+    text_config = {
+        "num_hidden_layers": 4,
+        "hidden_size": 512,
+        "intermediate_size": 800,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,
+    }
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--load-format",
+        "dummy",
+        "--hf-overrides",
+        json.dumps({"text_config": text_config}),
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "4",
+        "--enforce-eager",
+        "--distributed-executor-backend",
+        "mp",
+    ]
+    compare_two_settings(
+        "ibm-granite/granite-vision-4.1-4b",
+        [*common_args, "--pipeline-parallel-size", "2"],
+        common_args,
+        method="generate_with_image",
+    )
+
+
+@multi_gpu_only(num_gpus=2)
+@pytest.mark.parametrize(
+    ("model_id", "model_kwargs"),
+    [
+        pytest.param("tiiuae/Falcon-H1-Tiny-90M-Instruct", {}, id="falcon_h1"),
+        pytest.param("Qwen/Qwen3.5-0.8B", {}, id="qwen3_5"),
+        pytest.param("google/gemma-3-1b-it", {}, id="gemma3"),
+        pytest.param(
+            "ibm-granite/granite-4.0-h-350m",
+            {"hf_overrides": {"head_dtype": "float32"}},
+            id="granite4_h",
+        ),
+        # Startup check only: dummy weights give near-uniform logits.
+        pytest.param(
+            "baidu/ERNIE-4.5-21B-A3B-PT",
+            {
+                "load_format": "dummy",
+                "hf_overrides": {
+                    "num_hidden_layers": 2,
+                    "hidden_size": 512,
+                    "intermediate_size": 1024,
+                    "num_attention_heads": 4,
+                    "num_key_value_heads": 1,
+                    "moe_num_experts": 4,
+                    "moe_k": 2,
+                    "moe_intermediate_size": 256,
+                    "moe_num_shared_experts": 1,
+                },
+            },
+            id="ernie45_moe",
+        ),
+    ],
+)
+@create_new_process_for_each_test()
+def test_pp_tied_word_embeddings(
+    vllm_runner, example_prompts, model_id: str, model_kwargs: dict
+):
+    """The last PP stage needs its own embedding to tie lm_head to it."""
+    outputs = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            model_id,
+            max_model_len=512,
+            enable_chunked_prefill=True,
+            enforce_eager=True,
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+            **model_kwargs,
+        ) as vllm_model:
+            outputs[pp_size] = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens=8, num_logprobs=5
+            )
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[1],
+        outputs_1_lst=outputs[2],
+        name_0="pp1",
+        name_1="pp2",
     )

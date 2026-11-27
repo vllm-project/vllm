@@ -7,7 +7,7 @@
 from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModelKeys:
     language_model: list[str] = field(default_factory=list)
     connector: list[str] = field(default_factory=list)
@@ -17,10 +17,10 @@ class MultiModelKeys:
 
     @staticmethod
     def from_string_field(
-        language_model: str | list[str] = None,
-        connector: str | list[str] = None,
-        tower_model: str | list[str] = None,
-        generator: str | list[str] = None,
+        language_model: str | list[str] | None = None,
+        connector: str | list[str] | None = None,
+        tower_model: str | list[str] | None = None,
+        generator: str | list[str] | None = None,
         **kwargs,
     ) -> "MultiModelKeys":
         def to_list(value):

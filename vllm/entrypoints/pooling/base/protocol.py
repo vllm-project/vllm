@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-
+from dataclasses import replace
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
-from vllm.entrypoints.chat_utils import (
+from vllm import envs
+from vllm.config import ModelConfig
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.exceptions import VLLMValidationError
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
-from vllm.exceptions import VLLMValidationError
-from vllm.renderers import ChatParams, merge_kwargs
+from vllm.tasks import check_removed_pooling_task
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -25,6 +28,17 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
     # --8<-- [start:pooling-common-extra-params]
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    padding: Literal["max_length", "do_not_pad"] | None = Field(
+        default=None,
+        description=(
+            "Whether to pad the prompt, using the same names as the "
+            "Transformers tokenizer. 'max_length' pads to the maximum input "
+            "length, 'do_not_pad' leaves the prompt as is. Models trained "
+            "with a fixed sequence length and no attention mask, such as "
+            "SigLIP, need 'max_length' to match training, otherwise their "
+            "embeddings are not comparable."
+        ),
+    )
     truncation_side: Literal["left", "right"] | None = Field(
         default=None,
         description=(
@@ -57,6 +71,8 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -68,6 +84,125 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     # --8<-- [end:pooling-common-extra-params]
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        validate_cache_salt(data.get("cache_salt"))
+        return data
+
+    def _build_pooling_tok_params(
+        self,
+        model_config: ModelConfig,
+        default_tok_params: TokenizeParams,
+        *,
+        add_special_tokens: bool | None,
+        max_total_tokens: int | None,
+        max_output_tokens: int,
+        max_total_tokens_param: str = "max_model_len",
+        max_output_tokens_param: str | None = None,
+    ) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+        tok_params = replace(
+            default_tok_params,
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=(
+                default_tok_params.add_special_tokens
+                if add_special_tokens is None
+                else add_special_tokens
+            ),
+            max_total_tokens_param=max_total_tokens_param,
+            max_output_tokens_param=(
+                default_tok_params.max_output_tokens_param
+                if max_output_tokens_param is None
+                else max_output_tokens_param
+            ),
+        )
+
+        if self.padding is None:
+            return tok_params
+
+        return tok_params.with_kwargs(padding=self.padding)
+
+
+class PoolingTokenizeParamsMixin:
+    # Tri-state: `None` means "not specified" and falls back to the per-path default
+    add_special_tokens: bool | None = None
+
+    def _build_pooling_tok_params(
+        self,
+        model_config: ModelConfig,
+        default_tok_params: TokenizeParams,
+        *,
+        add_special_tokens: bool | None,
+        max_total_tokens: int | None,
+        max_output_tokens: int,
+        max_total_tokens_param: str = "max_model_len",
+        max_output_tokens_param: str | None = None,
+    ) -> TokenizeParams:
+        raise NotImplementedError
+
+
+class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
+        return self._build_pooling_tok_params(
+            model_config,
+            default_tok_params,
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+        )
+
+
+class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
+    padding: Literal["max_length", "do_not_pad"] | None
+
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
+        default_max_total_tokens = model_config.max_model_len
+        max_total_tokens: int | None = default_max_total_tokens
+        max_output_tokens = 0
+
+        pooler_config = model_config.pooler_config
+        if pooler_config is not None:
+            if pooler_config.enable_chunked_processing:
+                max_total_tokens = pooler_config.max_embed_len
+            else:
+                max_total_tokens = (
+                    pooler_config.max_embed_len or default_max_total_tokens
+                )
+
+        tok_params = self._build_pooling_tok_params(
+            model_config,
+            default_tok_params,
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
+        )
+
+        if (
+            self.padding == "max_length"
+            and pooler_config is not None
+            and pooler_config.enable_chunked_processing
+        ):
+            max_padding_len = pooler_config.max_embed_len
+            if max_padding_len is None:
+                max_padding_len = default_max_total_tokens
+            return tok_params.with_kwargs(
+                pad_prompt_tokens=min(default_max_total_tokens, max_padding_len)
+            )
+
+        return tok_params
+
 
 class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [start:completion-params]
@@ -75,21 +210,38 @@ class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [end:completion-params]
 
     # --8<-- [start:completion-extra-params]
-    add_special_tokens: bool = Field(
-        default=True,
+    add_special_tokens: bool | None = Field(
+        default=None,
         description=(
-            "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."
+            "If true, special tokens (e.g. BOS) will be added to the prompt. "
+            "If unset (`None`), the model/tokenizer default is used, which for "
+            "some multimodal models is `False` to avoid a duplicate BOS."
         ),
     )
     # --8<-- [end:completion-extra-params]
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_input_list_length(cls, data):
+        if not isinstance(data, dict):
+            return data
+        max_prompts = envs.VLLM_MAX_COMPLETION_PROMPTS
+        input_val = data.get("input")
+        if not isinstance(input_val, list) or len(input_val) == 0:
+            return data
+        if isinstance(input_val[0], int):
+            return data
+        if len(input_val) > max_prompts:
+            raise VLLMValidationError(
+                f"input list length {len(input_val)} exceeds the maximum "
+                f"allowed count of {max_prompts}. To increase this limit, "
+                "set the VLLM_MAX_COMPLETION_PROMPTS environment variable.",
+                parameter="input",
+            )
+        return data
 
-class ChatRequestMixin(OpenAIBaseModel):
-    # --8<-- [start:chat-params]
-    messages: list[ChatCompletionMessageParam]
-    # --8<-- [end:chat-params]
 
+class ChatRequestOptionsMixin(OpenAIBaseModel):
     # --8<-- [start:chat-extra-params]
     add_generation_prompt: bool = Field(
         default=False,
@@ -109,14 +261,15 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Cannot be used at the same time as `add_generation_prompt`."
         ),
     )
-    add_special_tokens: bool = Field(
-        default=False,
+    add_special_tokens: bool | None = Field(
+        default=None,
         description=(
             "If true, special tokens (e.g. BOS) will be added to the prompt "
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to false (as is the "
-            "default)."
+            "special tokens so this should be set to false. "
+            "If unset (`None`), the per-path default is used: `False` for the "
+            "chat path, and the model/tokenizer default for the completion path."
         ),
     )
     chat_template: str | None = Field(
@@ -147,12 +300,24 @@ class ChatRequestMixin(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
             raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
                 "`add_generation_prompt` to True.",
             )
         return data
+
+    @model_validator(mode="after")
+    def set_default_add_special_tokens(self):
+        # Unlike `CompletionRequestMixin` where `None` falls back to the
+        # model/tokenizer default in `default_tok_params`, chat templates
+        # generally add special tokens during rendering, so resolve `None`
+        # to `False` for the chat path.
+        if self.add_special_tokens is None:
+            self.add_special_tokens = False
+        return self
 
     def build_chat_params(
         self,
@@ -171,6 +336,12 @@ class ChatRequestMixin(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
+
+
+class ChatRequestMixin(ChatRequestOptionsMixin):
+    # --8<-- [start:chat-params]
+    messages: list[ChatCompletionMessageParam]
+    # --8<-- [end:chat-params]
 
 
 class EncodingRequestMixin(OpenAIBaseModel):
@@ -220,3 +391,15 @@ class ClassifyRequestMixin(OpenAIBaseModel):
         "`None` uses the pooler's default, which is `True` in most cases.",
     )
     # --8<-- [end:classify-extra-params]
+
+
+def reject_removed_pooling_parameters(data):
+    if not isinstance(data, dict):
+        return data
+    if "normalize" in data:
+        raise VLLMValidationError(
+            "Parameter `normalize` was removed; use `use_activation` instead.",
+            parameter="normalize",
+        )
+    check_removed_pooling_task(data.get("task"))
+    return data

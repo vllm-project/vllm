@@ -34,11 +34,10 @@ vllm serve Qwen/Qwen3-4B-Thinking-2507 \
     --seed 42 \
     -tp 1 \
     --max-model-len 2048 \
-    --gpu-memory-utilization 0.8 \
     --speculative-config '{"model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 5, "method": "draft_model"}'
 ```
 
-The code used to request as completions as a client remains unchanged:
+The code used to request completions as a client remains unchanged:
 
 ??? code
 
