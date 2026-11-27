@@ -3,7 +3,8 @@
 """StreamingLLM page table for the DSpark draft.
 
 The draft attends to the first ``sink`` tokens plus the last ``window``
-tokens. The target verification backend is separate and still sees the
+tokens. Pages are gathered whole, so the sink is rounded up to whole KV pages.
+The target verification backend is separate and still sees the
 full context. RoPE is already stored in K, so the dropped middle is not
 reapplied. The column count is fixed so a CUDA graph can capture the gather.
 """

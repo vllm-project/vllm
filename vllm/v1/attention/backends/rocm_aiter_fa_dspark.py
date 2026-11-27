@@ -4,9 +4,10 @@
 
 UltraQuant pages are LBNHC. Shipping ``ROCM_AITER_FA`` is LBHNC/LHBNC, so the
 two backends have no layout in common and the draft cannot be allocated next
-to the target. This backend accepts LBNHC and reads a StreamingLLM span: the
-first 4 tokens plus the last 2048. That is the DSpark draft path. Target
-verification stays on UltraQuant and still sees the full context.
+to the target. This backend accepts LBNHC and reads a StreamingLLM span: a
+sink of 4 tokens, rounded up to whole KV pages, plus the last 2048 tokens.
+That is the DSpark draft path. Target verification stays on UltraQuant and
+still sees the full context.
 
 Selected by default when the target KV dtype is ``ultraquant_4bit`` and the
 speculative config does not name a draft attention backend.
@@ -126,8 +127,8 @@ class AiterFlashAttentionDSparkImpl(AiterFlashAttentionImpl):
             )
             logger.info_once(
                 "DSpark draft attention is AITER FA with an UltraQuant "
-                "layout: a %d-token sink plus the last %d tokens. Target "
-                "verification is unchanged.",
+                "layout: a %d-token sink, rounded up to whole KV pages, plus "
+                "the last %d tokens. Target verification is unchanged.",
                 DSPARK_DRAFT_SINK,
                 DSPARK_DRAFT_WINDOW,
             )

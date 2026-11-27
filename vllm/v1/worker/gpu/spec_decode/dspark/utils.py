@@ -17,6 +17,25 @@ def _shares_target_kv(draft_model_config: ModelConfig) -> bool:
     return draft_model_config.hf_config.model_type in ("deepseek_v4", "deepseek_v41")
 
 
+def _resolve_draft_kv_cache_dtype(
+    explicit_kv_cache_dtype: str | None,
+    target_cache_dtype: str | None,
+    shares_target_kv: bool,
+) -> str | None:
+    """Cache dtype for the DSpark draft model's own KV cache.
+
+    An explicit speculative ``kv_cache_dtype`` always wins. A Qwen-style draft
+    behind an UltraQuant target gets an unquantized (``auto``) cache. That is
+    the measured UltraQuant DSpark config. Any other case keeps the target's
+    cache dtype.
+    """
+    if explicit_kv_cache_dtype is not None:
+        return explicit_kv_cache_dtype
+    if target_cache_dtype == "ultraquant_4bit" and not shares_target_kv:
+        return "auto"
+    return None
+
+
 def _resolve_dspark_attention_backend(
     draft_model_config: ModelConfig,
     draft_backend: AttentionBackendEnum | None,
@@ -36,8 +55,9 @@ def _resolve_dspark_attention_backend(
             )
         return target_backend
     # UltraQuant pages are LBNHC, which shipping AITER FA does not allocate.
-    # The DSpark draft reads a 4-token sink plus the last 2048 tokens through
-    # that layout. This is the default for the pair, not an environment switch.
+    # The DSpark draft reads a sink plus the last 2048 tokens through that
+    # layout. The sink is 4 tokens rounded up to whole KV pages. This is the
+    # default for the pair, not an environment switch.
     if target_kv_cache_dtype == "ultraquant_4bit":
         logger.info_once(
             "DSpark draft attention is ROCM_AITER_FA_DSPARK because the "
@@ -111,18 +131,18 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         vllm_config.attention_config.backend,
         vllm_config.cache_config.cache_dtype,
     )
-    # The draft does not share UltraQuant slots. fp8 is the draft cache
-    # measured with this target. An explicit speculative kv_cache_dtype wins.
-    draft_kv_cache_dtype = speculative_config.kv_cache_dtype
-    if (
-        draft_kv_cache_dtype is None
-        and vllm_config.cache_config.cache_dtype == "ultraquant_4bit"
-        and not _shares_target_kv(draft_model_config)
-    ):
-        draft_kv_cache_dtype = "fp8"
+    # The draft does not share UltraQuant slots, so it takes its own cache
+    # dtype. Behind an UltraQuant target the default is auto, the measured
+    # UltraQuant DSpark config.
+    draft_kv_cache_dtype = _resolve_draft_kv_cache_dtype(
+        speculative_config.kv_cache_dtype,
+        vllm_config.cache_config.cache_dtype,
+        _shares_target_kv(draft_model_config),
+    )
+    if speculative_config.kv_cache_dtype is None and draft_kv_cache_dtype == "auto":
         logger.info_once(
-            "DSpark draft KV cache is fp8 because the target KV cache is "
-            "ultraquant_4bit."
+            "DSpark draft KV cache is auto (unquantized) because the target "
+            "KV cache is ultraquant_4bit."
         )
 
     draft_vllm_config = speculative_config.apply_draft_overrides(
