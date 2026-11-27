@@ -19,24 +19,6 @@ from vllm.transformers_utils.configs.extract_hidden_states import (
 model_dir = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 
-class _DummyVLMConfig(PreTrainedConfig):
-    """Minimal composite config that mimics VLMs like Kimi-K2.5 or LLaVA.
-
-    The text model's parameters (hidden_size, num_attention_heads, …) live
-    exclusively under `text_config`; the top-level config has none of them.
-    """
-
-    model_type = "test_vlm"
-
-    def __init__(self, text_config: PreTrainedConfig, **kwargs):
-        self.text_config = text_config
-        super().__init__(architectures=["LlamaForCausalLM"], **kwargs)
-
-    def get_text_config(self, decoder: bool = False) -> PreTrainedConfig:
-        del decoder
-        return self.text_config
-
-
 def test_extract_hidden_states_text_only_config_regression():
     """Text-only models (no nested text_config) must keep working."""
     model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
@@ -107,8 +89,11 @@ def test_extract_hidden_states_config_preserves_vlm_text_config():
     )
 
 
-def test_extract_hidden_states_speculative_config_vlm():
-    """SpeculativeConfig with a VLM target must build without errors."""
+@pytest.mark.parametrize(
+    "text_config_key", ["text_config", "decoder", "generator", "text_encoder"]
+)
+def test_extract_hidden_states_speculative_config_vlm(text_config_key):
+    """Build the extraction draft with the target's original nested config."""
     nested_text_config = LlamaConfig(
         vocab_size=32000,
         hidden_size=128,
@@ -121,12 +106,12 @@ def test_extract_hidden_states_speculative_config_vlm():
         model=model_dir,
         runner="generate",
         max_model_len=100,
+        hf_overrides=lambda config: PreTrainedConfig(
+            model_type=config.model_type,
+            architectures=config.architectures,
+            **{text_config_key: nested_text_config},
+        ),
     )
-    # Replace the real text-only config with our composite VLM config.
-    target_model_config.hf_config = _DummyVLMConfig(
-        text_config=nested_text_config,
-    )
-    target_model_config.hf_text_config = nested_text_config
 
     speculative_config = SpeculativeConfig(
         target_model_config=target_model_config,
@@ -140,24 +125,21 @@ def test_extract_hidden_states_speculative_config_vlm():
         },
     )
 
-    assert speculative_config.draft_model_config is not None
-    assert isinstance(
-        speculative_config.draft_model_config.hf_config.text_config,
-        LlamaConfig,
+    draft = speculative_config.draft_model_config
+    assert draft is not None
+    assert draft.hf_text_config is target_model_config.hf_config.get_text_config()
+    serialized = draft.hf_config.to_dict()
+    assert serialized[text_config_key]["num_attention_heads"] == (
+        nested_text_config.num_attention_heads
     )
-    assert speculative_config.draft_model_config.hf_text_config is (
-        speculative_config.draft_model_config.hf_config.text_config
-    )
-    assert (
-        speculative_config.draft_model_config.hf_text_config.num_attention_heads
-        == nested_text_config.num_attention_heads
-    )
+    if text_config_key != "text_config":
+        assert "text_config" not in serialized
 
 
 def test_extract_hidden_states_config_invalid_text_config():
     """A nested text_config missing required attrs must still be rejected."""
     broken_text_config = PreTrainedConfig(hidden_size=128)
-    vlm_config = _DummyVLMConfig(text_config=broken_text_config)
+    vlm_config = PreTrainedConfig(text_config=broken_text_config)
 
     extract_config = ExtractHiddenStatesConfig(
         vlm_config,
