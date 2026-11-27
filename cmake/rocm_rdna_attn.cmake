@@ -37,6 +37,6 @@ static const bool kRegistered =
   target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/csrc/rocm)
   # -O3 regardless of build type. Some builds leave values unused.
   target_compile_options(${TARGET} PRIVATE
-    $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>
+    $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_GPU_FLAGS}>
     -O3 -g0 -Wno-unused-variable)
 endfunction()

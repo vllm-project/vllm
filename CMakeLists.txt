@@ -270,6 +270,21 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" AND
 endif()
 
 #
+# Compress the offloaded device binaries for ROCm.
+#
+# The 9-arch release build packs ~2 GiB of .hip_fatbin into _rocm_C.abi3.so,
+# which pushes the module past the 2 GiB reach of the 32-bit PC-relative
+# relocations in crtbegin's .text and makes both mold and lld fail with
+# "relocation R_X86_64_PC32 against .eh_frame out of range". Every ROCm
+# extension has the same limit. --offload-compress keeps the device debug info
+# (so the RelWithDebInfo build type is unchanged) while shrinking the fatbin
+# ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
+#
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  list(APPEND VLLM_GPU_FLAGS "--offload-compress")
+endif()
+
+#
 # Set CUDA include flags for CXX compiler.
 #
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -1780,15 +1795,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/torch_bindings.cpp"
     ${VLLM_SKINNY_SRC})
 
-  # Compress the offloaded device binaries. The 9-arch release build packs
-  # ~2 GiB of .hip_fatbin into _rocm_C.abi3.so, which pushes the module past
-  # the 2 GiB reach of the 32-bit PC-relative relocations in crtbegin's .text
-  # and makes both mold and lld fail with "relocation R_X86_64_PC32 against
-  # .eh_frame out of range". --offload-compress keeps the device debug info
-  # (so the RelWithDebInfo build type is unchanged) while shrinking the
-  # fatbin ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
-  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
-
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
@@ -1808,12 +1814,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       POSITION_INDEPENDENT_CODE ON)
     target_include_directories(_rocm_C_skinny PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc)
     target_compile_options(_rocm_C_skinny PRIVATE
-      $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>)
+      $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_GPU_FLAGS}>)
     target_compile_definitions(_rocm_C_skinny PRIVATE "-DTORCH_EXTENSION_NAME=_rocm_C")
     target_link_libraries(_rocm_C_skinny PRIVATE torch)
   else()
     message(STATUS "Only gfx1250, skipping skinny_gemms")
-    list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
   endif()
 
   # Paged attention only uses the stable ABI, so it is built into
@@ -1834,7 +1839,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     POSITION_INDEPENDENT_CODE ON)
   target_include_directories(_rocm_C_paged_attn PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   target_compile_options(_rocm_C_paged_attn PRIVATE
-    $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>)
+    $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_GPU_FLAGS}>)
   target_compile_definitions(_rocm_C_paged_attn PRIVATE
     TORCH_TARGET_VERSION=0x020B000000000000ULL USE_ROCM)
   target_link_libraries(_rocm_C_paged_attn PRIVATE torch)
@@ -1895,7 +1900,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_ROCM_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_ROCM_EXT_FLAGS}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
