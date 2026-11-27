@@ -103,10 +103,11 @@ def test_replace_executor_does_not_break_tokenize_or_decode():
     old_inner = executor._inner
 
     async def _run():
-        assert await renderer._tokenize_text_prompt_async(
+        tokenized, _ = await renderer._tokenize_text_prompt_async(
             {"prompt": "ab"},
             TokenizeParams(max_total_tokens=100),
         )
+        assert tokenized["prompt_token_ids"] == [0, 1]
         renderer._replace_executor()
         assert renderer._executor is executor
         assert executor._inner is not old_inner
