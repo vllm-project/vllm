@@ -366,6 +366,8 @@ if TYPE_CHECKING:
     VLLM_SKIP_VERSION_SUFFIX: bool = False
     VLLM_ROCM_FUSE_GELU_MUL_FP8_QUANT: bool = True
     VLLM_ROCM_USE_FLYDSL_PTPC_GEMM: bool = True
+    VLLM_ROCM_FLYDSL_MX_MLP: bool = True
+    VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS: int = 1024
 
 
 def get_default_cache_root():
@@ -2470,6 +2472,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # row-wise torch._scaled_mm is slow (ROCm gfx950, tuned shapes only)
     "VLLM_ROCM_USE_FLYDSL_PTPC_GEMM": lambda: bool(
         int(os.getenv("VLLM_ROCM_USE_FLYDSL_PTPC_GEMM", "1"))
+    ),
+    # Prefill-size FP8 gated MLP (gate_up GEMM with a fused GeLU*up + MX quant
+    # epilogue, then an MX down GEMM) through AITER's FlyDSL 8-wave kernels.
+    "VLLM_ROCM_FLYDSL_MX_MLP": lambda: bool(
+        int(os.getenv("VLLM_ROCM_FLYDSL_MX_MLP", "1"))
+    ),
+    # Smallest token count that takes the fused MX MLP path.
+    "VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS", "1024")
     ),
 }
 

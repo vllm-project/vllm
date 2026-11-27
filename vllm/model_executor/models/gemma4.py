@@ -39,6 +39,9 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.kernels.linear.scaled_mm.flydsl import (
+    maybe_fused_gelu_mlp_mx,
+)
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -330,6 +333,11 @@ class Gemma4MLP(nn.Module):
         self.act_fn = get_act_and_mul_fn(hidden_activation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        fused = maybe_fused_gelu_mlp_mx(
+            self.gate_up_proj, self.down_proj, self.act_fn, x
+        )
+        if fused is not None:
+            return fused
         gate_up, _ = self.gate_up_proj(x)
         x = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         x, _ = self.down_proj(x)

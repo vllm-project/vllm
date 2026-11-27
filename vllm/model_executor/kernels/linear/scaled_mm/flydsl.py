@@ -186,6 +186,85 @@ def _flydsl_ptpc_gemm_fake(
     )
 
 
+_MX_GATE_UP = (20480, 2560)  # merged gate/up of Gemma-4-E4B
+_MX_DOWN = (2560, 10240)
+_MX_UNIT_SCALES: dict[tuple, torch.Tensor] = {}
+
+
+def _mx_unit_scale(device: torch.device, n: int, k: int) -> torch.Tensor:
+    key = (device, n, k)
+    t = _MX_UNIT_SCALES.get(key)
+    if t is None:
+        t = torch.full(
+            (-(-n // 256) * 256 * (k // 32),), 127, dtype=torch.uint8, device=device
+        )
+        _MX_UNIT_SCALES[key] = t
+    return t
+
+
+def _flydsl_gelu_mlp_mx_impl(
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    w1: torch.Tensor,
+    w1_shuffled: torch.Tensor,
+    w1_s: torch.Tensor,
+    w1_il: torch.Tensor,
+    w1_s_il: torch.Tensor,
+    w2: torch.Tensor,
+    w2_shuffled: torch.Tensor,
+    w2_s: torch.Tensor,
+    w2_unit: torch.Tensor,
+) -> torch.Tensor:
+    m = x_q.shape[0]
+    inter = w2_shuffled.shape[1]
+    if m >= envs.VLLM_ROCM_FLYDSL_MX_MLP_MIN_TOKENS:
+        from aiter.ops.flydsl.gemm_a8w8_gelu_mx import (
+            flydsl_gate_up_gelu_mx,
+            flydsl_mx_down,
+        )
+
+        act = torch.empty((m, inter), dtype=x_q.dtype, device=x_q.device)
+        act_sc = torch.empty(
+            -(-m // 256) * 256 * (inter // 32), dtype=torch.uint8, device=x_q.device
+        )
+        flydsl_gate_up_gelu_mx(x_q, w1_il, x_s, w1_s_il, act, act_sc)
+        out = torch.empty((m, w2_shuffled.shape[0]), dtype=torch.bfloat16, device=x_q.device)
+        flydsl_mx_down(act, act_sc, w2_shuffled, w2_unit, w2_s.reshape(-1), out)
+        return out
+    from vllm.model_executor.layers.fusion.gelu_tanh_mul_fp8_quant import (
+        _gelu_tanh_mul_fp8_per_token_quant_impl,
+    )
+
+    y = _flydsl_ptpc_gemm_impl(x_q, w1, w1_shuffled, x_s, w1_s)
+    q, s = _gelu_tanh_mul_fp8_per_token_quant_impl(y)
+    return _flydsl_ptpc_gemm_impl(q, w2, w2_shuffled, s, w2_s)
+
+
+def _flydsl_gelu_mlp_mx_fake(
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    w1: torch.Tensor,
+    w1_shuffled: torch.Tensor,
+    w1_s: torch.Tensor,
+    w1_il: torch.Tensor,
+    w1_s_il: torch.Tensor,
+    w2: torch.Tensor,
+    w2_shuffled: torch.Tensor,
+    w2_s: torch.Tensor,
+    w2_unit: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty(
+        (x_q.shape[0], w2_shuffled.shape[0]), dtype=torch.bfloat16, device=x_q.device
+    )
+
+
+direct_register_custom_op(
+    op_name="rocm_flydsl_gelu_mlp_mx",
+    op_func=_flydsl_gelu_mlp_mx_impl,
+    fake_impl=_flydsl_gelu_mlp_mx_fake,
+)
+
+
 direct_register_custom_op(
     op_name="rocm_flydsl_ptpc_fp8_gemm",
     op_func=_flydsl_ptpc_gemm_impl,
@@ -245,6 +324,19 @@ class FlyDSLPerTokenFp8ScaledMMLinearKernel(RowWiseTorchFP8ScaledMMLinearKernel)
         layer.register_parameter(
             f"{w_name}_shuffled", torch.nn.Parameter(shuffled, requires_grad=False)
         )
+        if envs.VLLM_ROCM_FLYDSL_MX_MLP and (w.shape[1], w.shape[0]) == _MX_GATE_UP:
+            from aiter.ops.flydsl.gemm_a8w8_gelu_mx import prepare_gate_up_weight
+
+            _, w_s_name, *_ = self.layer_param_names
+            w_il, w_s_il = prepare_gate_up_weight(
+                w.t().contiguous(), getattr(layer, w_s_name).reshape(-1)
+            )
+            layer.register_parameter(
+                f"{w_name}_il", torch.nn.Parameter(w_il, requires_grad=False)
+            )
+            layer.register_parameter(
+                f"{w_name}_scale_il", torch.nn.Parameter(w_s_il, requires_grad=False)
+            )
 
     def apply_weights(
         self,
@@ -288,3 +380,52 @@ class FlyDSLPerTokenFp8ScaledMMLinearKernel(RowWiseTorchFP8ScaledMMLinearKernel)
         )
         num_tokens = _get_num_tokens(output_shape)
         return torch.narrow(output, 0, 0, num_tokens).view(*output_shape)
+
+
+def maybe_fused_gelu_mlp_mx(gate_up_proj, down_proj, act_fn, x: torch.Tensor):
+    """The gated MLP ``down(gelu_tanh(gate) * up)`` of two FP8 per-token/per-channel layers through the FlyDSL
+    fused gate_up + MX-quant and MX down kernels for prefill-size token counts (smaller ones keep the unfused
+    path inside the op). Returns None when the layers or the activation do not qualify."""
+    from vllm.model_executor.layers.activation import GeluAndMul
+
+    if not envs.VLLM_ROCM_FLYDSL_MX_MLP:
+        return None
+    if not (isinstance(act_fn, GeluAndMul) and act_fn.approximate == "tanh"):
+        return None
+    k1 = getattr(getattr(gate_up_proj, "quant_method", None), "fp8_linear", None)
+    k2 = getattr(getattr(down_proj, "quant_method", None), "fp8_linear", None)
+    if not (
+        isinstance(k1, FlyDSLPerTokenFp8ScaledMMLinearKernel)
+        and isinstance(k2, FlyDSLPerTokenFp8ScaledMMLinearKernel)
+    ):
+        return None
+    w1_name = k1.layer_param_names[0]
+    w2_name = k2.layer_param_names[0]
+    w1_il = getattr(gate_up_proj, f"{w1_name}_il", None)
+    w2_sh = getattr(down_proj, f"{w2_name}_shuffled", None)
+    if w1_il is None or w2_sh is None or x.dtype != torch.bfloat16:
+        return None
+    if tuple(w2_sh.shape) != _MX_DOWN or getattr(gate_up_proj, "bias", None) is not None:
+        return None
+    if getattr(down_proj, "bias", None) is not None or down_proj.tp_size != 1:
+        return None
+    w1, w1_s, x_s, x_s_ub = k1._get_layer_params(gate_up_proj)
+    w2, w2_s, *_ = k2._get_layer_params(down_proj)
+    x_2d = x.view(-1, x.shape[-1])
+    x_q, x_s = k1.quant_fp8(x_2d, x_s, x_s_ub)
+    if x_s.dim() == 1:
+        x_s = x_s.view(-1, 1)
+    out = torch.ops.vllm.rocm_flydsl_gelu_mlp_mx(
+        x_q,
+        x_s,
+        w1,
+        getattr(gate_up_proj, f"{w1_name}_shuffled"),
+        w1_s,
+        w1_il,
+        getattr(gate_up_proj, f"{w1_name}_scale_il"),
+        w2,
+        w2_sh,
+        w2_s,
+        _mx_unit_scale(w2_sh.device, *_MX_DOWN),
+    )
+    return out.view(*x.shape[:-1], out.shape[-1])
