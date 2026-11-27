@@ -261,21 +261,23 @@ def test_video_budget_rejects_frames_before_sampling(
     ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor = processor.info.get_hf_processor()
-    # A 384x384 RGB frame takes 442368 uint8 or 1769472 float32 bytes, so 2 frames
-    # fit in 4 MiB and 16 do not in either format.
-    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 4 << 20)
-    video = np.zeros((16, 64, 64, 3), dtype=np.uint8)
+    video = np.zeros((15, 64, 64, 3), dtype=np.uint8)
 
-    def process(num_frames: int):
-        return processor(
+    def process(num_frames: int) -> torch.Tensor:
+        out = processor(
             hf_processor.video_token,
             mm_items=processor.info.parse_mm_data({"video": [video]}),
             hf_processor_mm_kwargs={"do_sample_frames": True, "num_frames": num_frames},
         )
+        pixels = out["mm_kwargs"].get_data()["pixel_values_videos"][0]
+        assert isinstance(pixels, torch.Tensor)
+        return pixels
 
-    pixels = process(2)["mm_kwargs"].get_data()["pixel_values_videos"][0]
-    assert isinstance(pixels, torch.Tensor)
-    assert pixels.shape[0] == 2
+    frame_bytes = process(1)[0].nbytes
+    # Transformers 5.16 samples 14 indices for 13 of 15 frames, so 13 frames'
+    # worth of budget only admits requests for 12.
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 13 * frame_bytes)
+    assert process(12).shape[0] == 12
 
     def fail_sampling(*args: object, **kwargs: object):
         raise AssertionError("Frames were sampled before the budget check.")
@@ -284,4 +286,4 @@ def test_video_budget_rejects_frames_before_sampling(
         type(hf_processor.video_processor), "sample_frames", fail_sampling
     )
     with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
-        process(16)
+        process(13)

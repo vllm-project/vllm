@@ -437,7 +437,9 @@ class LlavaOnevisionMultiModalProcessor(
                     if None not in (fps, metadata.fps) and num_frames is None:
                         num_frames = max(1, int(frame_count / metadata.fps * fps))
                     if num_frames is not None:
-                        frame_count = min(num_frames, frame_count)
+                        # Older Transformers can return one more index than
+                        # requested because of float rounding in `arange`.
+                        frame_count = min(num_frames + 1, frame_count)
                 except (ArithmeticError, AttributeError, IndexError, TypeError) as exc:
                     raise ValueError("Invalid video sampling settings.") from exc
             height, width, channels = get_video_frame_dimensions(video)
