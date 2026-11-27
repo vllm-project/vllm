@@ -817,9 +817,9 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         self._whole_tp_blocks = False
         if (
             current_platform.is_rocm()
-            and moe.moe_backend == "aiter"
             and self.fp8_backend == Fp8MoeBackend.AITER
             and isinstance(self.requantization_source, Mxfp4MoEMethod)
+            and moe.moe_backend == "aiter"
             and cfg is not None
             and cfg.model_config is not None
             and cfg.model_config.hf_config.model_type
@@ -856,12 +856,11 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
         from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 
-        limit = self.moe.swiglu_limit
         if (
             self.fp8_backend == Fp8MoeBackend.AITER
             and isinstance(source_method, Mxfp4MoEMethod)
             and self.moe.activation == MoEActivation.SILU
-            and limit is not None
+            and (limit := self.moe.swiglu_limit) is not None
             and 0 < limit < float("inf")
         ):
             from vllm._aiter_ops import rocm_aiter_ops
