@@ -12,6 +12,8 @@ QK/PV product matches the split-K kernel's (QK in bf16, PV in fp16, both
 exact) -- only fp32 summation grouping differs.
 """
 
+import functools
+
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
@@ -88,9 +90,11 @@ def _qsa_physical_slots_kernel(
         tl.extra.cuda.gdc_launch_dependents()
 
 
+@functools.cache
 def _ptxas_has_bf16x2_e4m3() -> bool:
-    # cvt.rn.bf16x2.e4m3x2 needs PTX ISA 9.2 (ptxas >= 13.2); some images run
-    # Triton with an older system ptxas (e.g. via CUDA_HOME).
+    # cvt.rn.bf16x2.e4m3x2 needs PTX ISA 9.2 (ptxas >= 13.2); checked lazily
+    # after imports (e.g. flashinfer.triton may override TRITON_PTXAS_BLACKWELL_PATH
+    # with an older system ptxas).
     if not current_platform.is_cuda():
         return False
     from triton.backends.nvidia.compiler import get_ptxas
@@ -99,15 +103,12 @@ def _ptxas_has_bf16x2_e4m3() -> bool:
     return (major, minor) >= (13, 2)
 
 
-_HAS_BF16X2_E4M3 = tl.constexpr(_ptxas_has_bf16x2_e4m3())
-
-
 @triton.jit
-def _e4m3_pairs_to_bf16(pairs, HIGH: tl.constexpr):
+def _e4m3_pairs_to_bf16(pairs, HIGH: tl.constexpr, USE_BF16_CVT: tl.constexpr):
     """bf16 of one byte of each int16 pair of e4m3 codes (byte 0 = dim 2i,
     byte 1 = dim 2i + 1); exact via PTX 9.2 cvt.rn.bf16x2.e4m3x2 (sm_100f+),
     with fp16->bf16 fallback on older ptxas."""
-    if not _HAS_BF16X2_E4M3:
+    if not USE_BF16_CVT:
         return _e4m3_pairs_to_fp16(pairs, HIGH).to(tl.bfloat16)
     if HIGH:
         return tl.inline_asm_elementwise(
@@ -228,6 +229,7 @@ def _qsa_sparse_paged_decode_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_STAGES: tl.constexpr,
+    USE_BF16_CVT: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
     """Single-pass and split-K Blackwell fp8 attention kernel.
@@ -328,9 +330,9 @@ def _qsa_sparse_paged_decode_kernel(
             tl.load(k_head_ptr + pair_pointers, mask=valid[:, None], other=0)
         )
         value_pairs = tl.load(v_head_ptr + pair_pointers, mask=valid[:, None], other=0)
-        scores = tl.dot(query_even, _e4m3_pairs_to_bf16(key_pairs, False)) + tl.dot(
-            query_odd, _e4m3_pairs_to_bf16(key_pairs, True)
-        )
+        scores = tl.dot(
+            query_even, _e4m3_pairs_to_bf16(key_pairs, False, USE_BF16_CVT)
+        ) + tl.dot(query_odd, _e4m3_pairs_to_bf16(key_pairs, True, USE_BF16_CVT))
         scores *= score_scale
         scores = tl.where(valid[None, :], scores, -1.0e20)
         next_max = tl.maximum(max_value, tl.max(scores, axis=1))
@@ -593,6 +595,7 @@ def qsa_sparse_paged_decode(
         BLOCK_M=triton.next_power_of_2(group_size),
         BLOCK_N=block_n,
         NUM_STAGES=num_stages,
+        USE_BF16_CVT=_ptxas_has_bf16x2_e4m3(),
         num_warps=num_warps,
         num_stages=num_stages,
         launch_pdl=use_pdl,
@@ -789,6 +792,7 @@ def warmup_qsa_fp8_decode(
             BLOCK_M=block_m,
             BLOCK_N=block_n,
             NUM_STAGES=num_stages,
+            USE_BF16_CVT=_ptxas_has_bf16x2_e4m3(),
             num_warps=num_warps,
             num_stages=num_stages,
             launch_pdl=use_pdl,
