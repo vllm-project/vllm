@@ -163,8 +163,7 @@ class PendingAuxOutput:
         return self.connector.process_output(self)
 
     def take_dropped_objects(self) -> list[str] | None:
-        writer = self.connector._writer
-        return (writer.take_dropped() or None) if writer is not None else None
+        return self.connector.take_dropped_objects()
 
 
 class AuxOutputWorkerConnector:
@@ -430,6 +429,11 @@ class AuxOutputWorkerConnector:
         for _, blocks in ready_batches:
             for _, rows in blocks:
                 buffer.release_block(rows)
+
+    def take_dropped_objects(self) -> list[str] | None:
+        """Keys of the objects the writer dropped since the last call."""
+        writer = self._writer
+        return (writer.take_dropped() or None) if writer is not None else None
 
     def _put_objects(self, objects: AuxObjects) -> None:
         """One put per step, so a step waits for the writer at most once."""

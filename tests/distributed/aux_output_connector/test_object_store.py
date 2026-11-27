@@ -83,12 +83,12 @@ def test_read_aux_rows_waits_for_an_object_through_a_write_stall(monkeypatch):
 
 @pytest.mark.parametrize(
     "missing",
-    ["job/g/1", "job/g/s0/1", "job/h/1"],
-    ids=["its-namespace", "nested-namespace", "other-namespace"],
+    ["job/g/1", "job/g/2", "job/h/1"],
+    ids=["its-key", "other-key-of-its-namespace", "other-namespace"],
 )
-def test_read_aux_rows_stops_at_the_drop_marker_of_the_namespace(monkeypatch, missing):
+def test_read_aux_rows_stops_at_the_drop_marker_of_the_key(monkeypatch, missing):
     store, keys = _stored([_rows(0, 4)])
-    store.put_batch(["job/g/dropped"], [b"not written within 1 s"])
+    store.put_batch(["job/g/1.dropped"], [b"not written within 1 s"])
     now = [0.0]
 
     def sleep(seconds):
@@ -98,7 +98,7 @@ def test_read_aux_rows_stops_at_the_drop_marker_of_the_namespace(monkeypatch, mi
         object_store, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep)
     )
     marked = missing == "job/g/1"
-    error = "of its namespace: not written within 1 s" if marked else "after 600"
+    error = "dropped it: not written within 1 s" if marked else "after 600"
     with pytest.raises(BlockObjectStoreError, match=error):
         read_aux_rows(store, [*keys, missing], "routed_experts")
     assert (now[0] == 0.0) == marked
@@ -205,7 +205,7 @@ def test_store_retries_only_puts_mooncake_has_no_room_for(code, error):
         writer.close()
         writer._thread.join(10)
         # Its drop marker is attempted once and fails as well.
-        assert client.writes == [["g/0"], ["g/0"], ["g/dropped"]]
+        assert client.writes == [["g/0"], ["g/0"], ["g/0.dropped"]]
         assert not client.objects
 
 
@@ -363,13 +363,13 @@ def test_writer_drops_only_the_batch_it_cannot_write(monkeypatch, failure, reaso
     writer.put(_objects("g/1", "h/0"))
     queued.set()
     wait_for_writer(writer)
-    # Its keys are missing, its namespace gets a drop marker, and later
+    # Its keys are missing and get a drop marker, and later
     # objects of its namespace are written.
-    assert list(client.objects) == ["g/dropped", "g/1", "h/0"]
+    assert list(client.objects) == ["g/0.dropped", "g/1", "h/0"]
     assert client.writes[-1] == ["g/1", "h/0"]
     assert len(read_aux_rows(store, ["g/1"], "routed_experts", timeout_s=0)) == 1
     logged_text = "put failed" if failure == "raises" else "Mooncake failed to"
-    with pytest.raises(BlockObjectStoreError, match=f"namespace: {logged_text}"):
+    with pytest.raises(BlockObjectStoreError, match=f"dropped it: {logged_text}"):
         read_aux_rows(store, ["g/0"], "routed_experts", timeout_s=5)
     ((_, _, key, logged), _) = logger.error.call_args
     assert key == "g/0" and isinstance(logged, reason)
@@ -382,7 +382,7 @@ def test_writer_drops_only_the_batch_it_cannot_write(monkeypatch, failure, reaso
     # A batch queued after the failure is written as well.
     writer.put(_objects("g/2", "h/1"))
     wait_for_writer(writer)
-    assert list(client.objects) == ["g/dropped", "g/1", "h/0", "g/2", "h/1"]
+    assert list(client.objects) == ["g/0.dropped", "g/1", "h/0", "g/2", "h/1"]
     assert logger.error.call_count == 1
     writer.close()
     writer._thread.join(10)
@@ -459,7 +459,7 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
     release.set()
     writer._thread.join(10)
     assert client.closed
-    assert calls == [["g/0"], ["h/dropped", "k/dropped"]]
+    assert calls == [["g/0"], ["h/0.dropped", "h/1.dropped", "k/0.dropped"]]
     assert logger.error.call_count == 3
 
 
@@ -467,7 +467,7 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
     "stuck,written",
     [
         (False, ["g/0", "h/0", "k/0"]),
-        (True, ["g/0", "h/dropped", "k/dropped"]),
+        (True, ["g/0", "h/0.dropped", "k/0.dropped"]),
     ],
     ids=["write-ends", "store-stuck"],
 )
@@ -598,7 +598,7 @@ def test_writer_waits_on_a_full_queue_again_once_a_put_lands(monkeypatch):
     writer.close()
     writer._thread.join(10)
     assert {"g/0", "k/0", "k/1", "k/2"} <= set(client.objects)
-    assert "g/dropped" not in client.objects
+    assert "g/0.dropped" not in client.objects
 
 
 def test_writer_does_not_spin_behind_a_batch_that_expired_during_a_marker_write(
@@ -610,7 +610,7 @@ def test_writer_does_not_spin_behind_a_batch_that_expired_during_a_marker_write(
     def put(keys):
         if keys == ["g/A"]:
             land.wait(30)
-        elif keys[0].endswith("/dropped"):
+        elif keys[0].endswith(".dropped"):
             in_marker.set()
             release.wait(30)
         return None
@@ -643,12 +643,12 @@ def test_writer_writes_a_refused_drop_marker_after_the_next_put_that_lands():
     client, _, writer = _writer(put, 1.0)
     writer.put(_objects("g/0"))
     deadline = time.monotonic() + 5
-    while ["g/dropped"] not in attempts and time.monotonic() < deadline:
+    while ["g/0.dropped"] not in attempts and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert ["g/dropped"] in attempts and "g/dropped" not in client.objects
+    assert ["g/0.dropped"] in attempts and "g/0.dropped" not in client.objects
     accept.set()
     writer.put(_objects("h/0"))
     wait_for_writer(writer)
     writer.close()
     writer._thread.join(10)
-    assert {"h/0", "g/dropped"} <= set(client.objects)
+    assert {"h/0", "g/0.dropped"} <= set(client.objects)

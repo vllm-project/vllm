@@ -170,7 +170,7 @@ def read_aux_rows(
     timeout_s: float = 600.0,
 ) -> np.ndarray:
     """Concatenate `field` of the objects `keys`; wait up to `timeout_s` in
-    total for objects still being written, unless their namespace has a drop."""
+    total for objects still being written, unless the engine dropped them."""
     deadline = time.monotonic() + timeout_s
     parts = []
     for key in keys:
@@ -178,7 +178,7 @@ def read_aux_rows(
             if (reason := store.get(_drop_marker(key))) is not None:
                 raise BlockObjectStoreError(
                     f"auxiliary-output object {key!r} is missing, and the engine "
-                    f"dropped objects of its namespace: {reason.decode()}"
+                    f"dropped it: {reason.decode()}"
                 )
             if time.monotonic() >= deadline:
                 raise BlockObjectStoreError(
@@ -190,7 +190,7 @@ def read_aux_rows(
 
 
 def _drop_marker(key: str) -> str:
-    return f"{key.rpartition('/')[0]}/dropped"
+    return f"{key}.dropped"
 
 
 _RETRY_INTERVAL_S = 0.2
@@ -210,8 +210,8 @@ class AuxObjectWriter:
     field. A batch not written within `timeout_s` of being queued is dropped:
     the store refused it until then (refusals are retried every
     `_RETRY_INTERVAL_S`), or it was still queued behind a put that had not
-    returned. A batch whose put fails otherwise is dropped at once. Its
-    namespaces get a drop marker that readers stop at; nothing else changes.
+    returned. A batch whose put fails otherwise is dropped at once. Each of
+    its objects gets a drop marker that readers stop at.
     Queuing waits while `_MAX_QUEUED_BATCHES` batches are queued or being
     written, at most until the first of them is written or misses its deadline.
     Once a batch has missed its deadline, until a put succeeds, queuing never
