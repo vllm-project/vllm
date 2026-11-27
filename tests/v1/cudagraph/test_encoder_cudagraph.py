@@ -2426,3 +2426,57 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
         for out, ref in zip(result, expected):
             torch.testing.assert_close(out, ref, rtol=0, atol=0)
             assert out.untyped_storage().nbytes() == out.numel() * out.element_size()
+
+
+# ---------------------------------------------------------------------------
+# execute() data-parallel path
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteDataParallel:
+    """A single item runs locally on every rank instead of shard + all-gather."""
+
+    def _make_dp_manager(self) -> EncoderCudaGraphManager:
+        mgr = _make_manager_with_budgets([64])
+        mgr.use_dp = True
+        return mgr
+
+    def test_single_item_runs_locally_without_shard_or_gather(self):
+        mgr = self._make_dp_manager()
+        mm_kwargs = {"pixel_values": torch.zeros(1, 4, 32)}
+        expected = [torch.zeros(8, 32)]
+        with (
+            patch.object(mgr, "_get_per_item_out_tokens", return_value=[8]),
+            patch.object(mgr, "_execute_local", return_value=expected) as local,
+            patch.object(mgr, "_dp_shard") as shard,
+            patch.object(mgr, "_dp_gather") as gather,
+        ):
+            result = mgr.execute(mm_kwargs)
+        assert result is expected
+        local.assert_called_once_with(mm_kwargs)
+        shard.assert_not_called()
+        gather.assert_not_called()
+
+    def test_multiple_items_still_shard_and_gather(self):
+        mgr = self._make_dp_manager()
+        mm_kwargs = {"pixel_values": torch.zeros(2, 4, 32)}
+        per_item_out_tokens = [8, 8]
+        local_outputs = [torch.zeros(8, 32)]
+        gathered = [torch.zeros(8, 32), torch.zeros(8, 32)]
+        with (
+            patch.object(
+                mgr, "_get_per_item_out_tokens", return_value=per_item_out_tokens
+            ),
+            patch.object(
+                mgr,
+                "_dp_shard",
+                return_value=(mm_kwargs, [0, 1], [1, 1], 8),
+            ) as shard,
+            patch.object(mgr, "_execute_local", return_value=local_outputs) as local,
+            patch.object(mgr, "_dp_gather", return_value=gathered) as gather,
+        ):
+            result = mgr.execute(mm_kwargs)
+        assert result is gathered
+        shard.assert_called_once_with(mm_kwargs, per_item_out_tokens)
+        local.assert_called_once_with(mm_kwargs)
+        gather.assert_called_once()

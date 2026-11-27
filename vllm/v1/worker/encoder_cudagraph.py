@@ -873,9 +873,17 @@ class EncoderCudaGraphManager:
             List of encoder outputs (one per item).
 
         """
-        if self.use_dp:
-            per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)
+        per_item_out_tokens = (
+            self._get_per_item_out_tokens(mm_kwargs) if self.use_dp else None
+        )
 
+        # With a single item, load balancing assigns it to one rank while the
+        # other ranks run an empty batch, and the result is then padded and
+        # all-gathered. Every rank holds a full encoder replica in DP mode, so
+        # running the item locally on every rank skips the collective; the
+        # redundant compute on the other ranks runs in parallel with the owner
+        # rank's compute and does not add latency.
+        if per_item_out_tokens is not None and len(per_item_out_tokens) > 1:
             (
                 local_mm_kwargs,
                 image_rank_assignment,
