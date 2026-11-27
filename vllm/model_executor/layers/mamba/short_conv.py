@@ -14,6 +14,18 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.linear_attention.conv1d.decode.base import (
+    Conv1dDecodeKernel,
+)
+from vllm.model_executor.layers.linear_attention.conv1d.decode.selector import (
+    select_conv1d_decode_kernel,
+)
+from vllm.model_executor.layers.linear_attention.conv1d.prefill.base import (
+    Conv1dPrefillKernel,
+)
+from vllm.model_executor.layers.linear_attention.conv1d.prefill.selector import (
+    select_conv1d_prefill_kernel,
+)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -21,22 +33,22 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
-)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 # --8<-- [start:short_conv]
 @PluggableLayer.register("short_conv")
 class ShortConv(MambaBase, PluggableLayer):
     # --8<-- [end:short_conv]
+
+    conv_prefill_kernel: type[Conv1dPrefillKernel]
+    conv_decode_kernel: type[Conv1dDecodeKernel]
 
     def __init__(
         self,
@@ -96,115 +108,35 @@ class ShortConv(MambaBase, PluggableLayer):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
-
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
-        # Reference torch causal conv1d; runs on all CPU platforms. AMX kernels
-        # for causal conv can be plugged in here later.
-        from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-            causal_conv1d_fn_cpu as causal_conv1d_torch,
+        spec: MambaSpec | None = None
+        if model_config is not None:
+            layer_config = self.get_kv_cache_config(vllm_config)
+            assert layer_config is not None
+            assert isinstance(layer_config.spec, MambaSpec)
+            spec = layer_config.spec
+        self.conv_prefill_kernel = select_conv1d_prefill_kernel(
+            vllm_config, spec, width=self.L_cache, activation=None
         )
-        from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-            causal_conv1d_update_cpu,
-            causal_conv1d_update_torch,
+        self.conv_decode_kernel = select_conv1d_decode_kernel(
+            vllm_config, spec, width=self.L_cache, activation=None
         )
-        from vllm.platforms import CpuArchEnum, current_platform
-
-        forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-        attn_metadata: AttentionMetadata | None = None
-        if attn_metadata_raw is not None:
-            assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw.get(self.prefix)
-            assert attn_metadata is None or isinstance(
-                attn_metadata, ShortConvAttentionMetadata
+        if spec is not None:
+            dim_first = is_conv_state_dim_first()
+            conv_dim, conv_state_len = spec.shapes[0][:: 1 if dim_first else -1]
+            conv_bias = self.conv.bias
+            self.conv_prefill_kernel.register_warmup(
+                dim=conv_dim,
+                state_len=conv_state_len,
+                dim_first=dim_first,
+                # The kernel convolves B * x, a new (tokens, dim) tensor.
+                x_row_stride=conv_dim,
+                weight_dtype=self.conv.weight.dtype,
+                bias_dtype=None if conv_bias is None else conv_bias.dtype,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
             )
-
-        BCx, _ = self.in_proj(hidden_states)
-        B, C, x = BCx.chunk(3, dim=-1)
-
-        # (dim, kernel_size) — same reshape as forward_cuda
-        conv_weights = self.conv.weight.view(
-            self.conv.weight.size(0), self.conv.weight.size(2)
-        )
-
-        if attn_metadata is None:
-            # Profile run — output value doesn't matter
-            Bx = (B * x).contiguous()
-            output_tensor, _ = self.out_proj(C * Bx)
-            output[: hidden_states.shape[0]] = output_tensor
-            return
-
-        conv_state = (
-            self.kv_cache[0]
-            if is_conv_state_dim_first()
-            else self.kv_cache[0].transpose(-1, -2)
-        )  # (num_blocks, dim, state_len)
-
-        num_prefills = attn_metadata.num_prefills
-        num_decodes = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        has_prefill = num_prefills > 0
-        has_decode = num_decodes > 0
-        num_actual_tokens = num_decodes + num_prefill_tokens
-
-        B_d, B_p = torch.split(
-            B[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
-        )
-        C_d, C_p = torch.split(
-            C[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
-        )
-        x_d, x_p = torch.split(
-            x[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
-        )
-
-        conv_output_list = []
-
-        if has_prefill:
-            assert attn_metadata.state_indices_tensor_p is not None
-            Bx_p = (B_p * x_p).transpose(0, 1)  # (dim, num_prefill_tokens)
-            out_p = causal_conv1d_torch(
-                Bx_p,
-                conv_weights,
-                self.conv.bias,
-                conv_state,
-                attn_metadata.query_start_loc_p,
-                attn_metadata.state_indices_tensor_p.flatten(),
-                attn_metadata.has_initial_states_p,
-                activation=None,
-            ).transpose(0, 1)[:num_prefill_tokens]  # (num_prefill_tokens, dim)
-            conv_output_list.append(C_p * out_p)
-
-        if has_decode:
-            assert attn_metadata.state_indices_tensor_d is not None
-            state_indices_d = attn_metadata.state_indices_tensor_d.flatten()
-            Bx_d = B_d * x_d  # (num_decodes, dim)
-            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-                conv_state_view = conv_state[state_indices_d].contiguous()
-                out_d = causal_conv1d_update_torch(
-                    Bx_d.unsqueeze(-1),
-                    conv_state_view,
-                    conv_weights,
-                    self.conv.bias,
-                    activation=None,
-                ).squeeze(-1)
-                conv_state[state_indices_d] = conv_state_view
-            else:
-                out_d = causal_conv1d_update_cpu(
-                    Bx_d,
-                    conv_state,
-                    conv_weights,
-                    self.conv.bias,
-                    activation=None,
-                    conv_state_indices=state_indices_d,
-                )
-            conv_output_list.insert(0, C_d * out_d)
-
-        hidden_states_out = torch.vstack(conv_output_list)
-        output[:num_actual_tokens], _ = self.out_proj(hidden_states_out)
 
     def forward(
         self,
@@ -217,140 +149,73 @@ class ShortConv(MambaBase, PluggableLayer):
             self.prefix,
         )
 
-    def forward_cuda(
+    def forward_impl(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        forward_context = get_forward_context()
-        # ShortConvAttentionMetadata contains metadata necessary for the
-        # short_conv triton kernels to operate in continuous batching and in
-        # chunked prefill modes; they are computed at top-level model forward
-        # since they stay the same and reused for all mamba layers in the same
-        # iteration.
-        attn_metadata_raw = forward_context.attn_metadata
         attn_metadata: AttentionMetadata | None = None
+        attn_metadata_raw = get_forward_context().attn_metadata
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
             attn_metadata = attn_metadata_raw.get(self.prefix)
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, ShortConvAttentionMetadata)
-            conv_state = (
-                self.kv_cache[0]
-                if is_conv_state_dim_first()
-                else self.kv_cache[0].transpose(-1, -2)
-            )
-            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
-            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
-            has_initial_states_p = attn_metadata.has_initial_states_p
-            query_start_loc_p = attn_metadata.query_start_loc_p
-            num_accepted_tokens = attn_metadata.num_accepted_tokens
-            query_start_loc_d = attn_metadata.query_start_loc_d
 
         BCx, _ = self.in_proj(hidden_states)
-
         B, C, x = BCx.chunk(3, dim=-1)
-
         conv_weights = self.conv.weight.view(
             self.conv.weight.size(0), self.conv.weight.size(2)
         )
 
         if attn_metadata is None:
-            # V1 profile run
-            Bx = (B * x).contiguous()
-            hidden_states = C * Bx
-            contextualized_states, _ = self.out_proj(hidden_states)
-            return contextualized_states
+            # Profile run
+            output_tensor, _ = self.out_proj(C * (B * x))
+            output[: hidden_states.shape[0]] = output_tensor
+            return
 
-        num_prefills = attn_metadata.num_prefills  # request count
-        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
-        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
-        has_prefill = num_prefills > 0
-        has_decode = num_decodes > 0
+        assert isinstance(attn_metadata, ShortConvAttentionMetadata)
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        num_decodes = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_actual_tokens = num_decodes + num_prefill_tokens
 
-        # NOTE: V1 puts decode before prefill
-        # Separate prefill and decode by splitting varlen input
-        # Split along token dimension
-        B_d, B_p = torch.split(
-            B[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
-        )
-        C_d, C_p = torch.split(
-            C[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
-        )
-        x_d, x_p = torch.split(
-            x[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
-        )
+        # Decodes come before prefills.
+        B_d, B_p = torch.split(B[:num_actual_tokens], [num_decodes, num_prefill_tokens])
+        C_d, C_p = torch.split(C[:num_actual_tokens], [num_decodes, num_prefill_tokens])
+        x_d, x_p = torch.split(x[:num_actual_tokens], [num_decodes, num_prefill_tokens])
         conv_output_list = []
 
-        if has_prefill:
+        if attn_metadata.num_prefills > 0:
             Bx_p = (B_p * x_p).transpose(0, 1)
-            Bx = causal_conv1d_fn(
-                Bx_p,
-                conv_weights,
-                self.conv.bias,
-                activation=None,
-                conv_states=conv_state,
-                has_initial_state=has_initial_states_p,
-                cache_indices=state_indices_tensor_p,
-                metadata=attn_metadata,
-                query_start_loc=query_start_loc_p,
+            Bx = self.conv_prefill_kernel.forward(
+                Bx_p, conv_state, conv_weights, self.conv.bias, None, attn_metadata
             ).transpose(0, 1)[:num_prefill_tokens]
             if attn_metadata.checkpoint is not None:
-                assert query_start_loc_p is not None
+                assert attn_metadata.query_start_loc_p is not None
                 self._checkpoint_exporter.export(
                     attn_metadata.checkpoint,
                     raw_qkv=Bx_p.transpose(0, 1),
                     conv_state=conv_state,
-                    cu_seqlens=query_start_loc_p,
+                    cu_seqlens=attn_metadata.query_start_loc_p,
                 )
+            conv_output_list.append(C_p * Bx)
 
-            y = C_p * Bx
-            conv_output_list.append(y)
+        if num_decodes > 0:
+            Bx = self.conv_decode_kernel.forward(
+                (B_d * x_d).contiguous(),
+                conv_state,
+                conv_weights,
+                self.conv.bias,
+                None,
+                attn_metadata,
+                max_query_len=1 + self.num_spec,
+            )
+            conv_output_list.insert(0, C_d * Bx)
 
-        if has_decode:
-            Bx_d = (B_d * x_d).contiguous()
-            if num_accepted_tokens is not None:
-                # Speculative decode: the verify step feeds >1 query token per
-                # decode request, so use the spec-aware conv update path
-                # (mirrors mamba_mixer2). state_indices_tensor_d is
-                # (num_decodes, 1 + num_spec_tokens) here.
-                assert state_indices_tensor_d is not None
-                Bx = causal_conv1d_update(
-                    Bx_d,
-                    conv_state,
-                    conv_weights,
-                    self.conv.bias,
-                    activation=None,
-                    conv_state_indices=state_indices_tensor_d,
-                    num_accepted_tokens=num_accepted_tokens,
-                    query_start_loc=query_start_loc_d,
-                    max_query_len=state_indices_tensor_d.size(-1),
-                )
-            else:
-                # Non-spec decode
-                Bx = causal_conv1d_update(
-                    Bx_d,
-                    conv_state,
-                    conv_weights,
-                    self.conv.bias,
-                    activation=None,
-                    conv_state_indices=state_indices_tensor_d,
-                )
-            y = C_d * Bx
-            conv_output_list.insert(0, y)
-
-        # Merge prefill and decode outputs before passing to gated MLP
-        hidden_states = torch.vstack(conv_output_list)
-
-        # Final linear projection
-        output[:num_actual_tokens], _ = self.out_proj(hidden_states)
+        output[:num_actual_tokens], _ = self.out_proj(torch.vstack(conv_output_list))
 
     def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # The window ending at a checkpoint is a copy of its last inputs, so
@@ -386,10 +251,7 @@ def short_conv(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    if not current_platform.is_cpu():
-        self.forward_cuda(hidden_states=hidden_states, output=output)
-    else:
-        self.forward_native(hidden_states=hidden_states, output=output)
+    self.forward_impl(hidden_states=hidden_states, output=output)
 
 
 direct_register_custom_op(

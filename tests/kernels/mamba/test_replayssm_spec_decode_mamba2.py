@@ -42,10 +42,16 @@ def _step_ref(S, x, dt, A, B, C, D):
         (torch.float16, torch.bfloat16),
     ],
 )
-@pytest.mark.parametrize("num_spec,max_window", [(1, 4), (5, 16), (3, 4)])
+@pytest.mark.parametrize(
+    "num_spec,max_window,draft_free",
+    [(1, 4, False), (5, 16, False), (3, 4, False), (3, 4, True)],
+    ids=["spec1", "spec5", "spec3", "spec3-no-drafts"],
+)
 def test_replayssm_spec_decode_matches_recurrence(
-    state_dtype, act_dtype, num_spec, max_window
+    state_dtype, act_dtype, num_spec, max_window, draft_free
 ):
+    """`draft_free` sends only one-token rows, as steps without drafts do: with
+    speculative decoding configured, every decode row runs this kernel."""
     set_random_seed(0)
     device = "cuda"
     T = 1 + num_spec
@@ -76,7 +82,9 @@ def test_replayssm_spec_decode_matches_recurrence(
     pad_x = torch.randn(NHEADS, HEADDIM, device=device).to(act_dtype)
 
     for _ in range(num_steps):
-        seqlens = torch.randint(1, T + 1, (batch,)).tolist()
+        seqlens = (
+            [1] * batch if draft_free else torch.randint(1, T + 1, (batch,)).tolist()
+        )
         cu_seqlens = torch.tensor(
             [0, *torch.tensor(seqlens).cumsum(0).tolist(), sum(seqlens)],
             device=device,

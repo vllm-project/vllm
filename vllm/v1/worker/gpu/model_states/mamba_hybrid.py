@@ -9,6 +9,10 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.linear_attention.lifecycle import (
+    StepLifecycle,
+    make_step_lifecycles,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -36,7 +40,10 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
-from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
+from vllm.v1.worker.replayssm_utils import (
+    initialize_replayssm_ring_trackers,
+    uses_ring_trackers,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -90,12 +97,15 @@ class MambaHybridModelState(DefaultModelState):
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
         self._replayssm_query_start_loc: torch.Tensor | None = None
+        self._step_lifecycles: list[StepLifecycle] = []
         # Pre-copy prefix-cache state (V2). The migration of each request's
         # mamba state across block boundaries runs as a fused GPU kernel reusing
         # the postprocess copy machinery, so the per-step src columns and the
         # running state_idx are kept GPU-resident.
         self.prefix_caching = self.cache_config.enable_prefix_caching
-        self._use_replayssm_trackers = vllm_config.use_replayssm_trackers
+        self._use_replayssm_trackers = any(
+            uses_ring_trackers(layer) for layer in model.modules()
+        )
         if self._use_replayssm_trackers:
             self._is_prefilling_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.bool, device=self.device
@@ -135,11 +145,10 @@ class MambaHybridModelState(DefaultModelState):
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
     ) -> None:
+        forward_context = self.vllm_config.compilation_config.static_forward_context
         if self.cache_config.use_replayssm:
-            initialize_replayssm_ring_trackers(
-                kv_cache_config,
-                self.vllm_config.compilation_config.static_forward_context,
-            )
+            initialize_replayssm_ring_trackers(kv_cache_config, forward_context)
+        self._step_lifecycles = make_step_lifecycles(kv_cache_config, forward_context)
         if not (self.prefix_caching or self._use_replayssm_trackers):
             return
         if self._mamba_state_copy_funcs is None:
@@ -359,6 +368,8 @@ class MambaHybridModelState(DefaultModelState):
                 async_tensor_h2d(
                     replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
                 )
+        for lifecycle in self._step_lifecycles:
+            lifecycle.record_step(attn_metadata)
         if self.recoverssm is not None:
             self.recoverssm.record_step(
                 attn_metadata, attn_groups, for_capture=for_capture

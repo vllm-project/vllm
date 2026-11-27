@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.v1.attention.test_gdn_metadata_builder import (
+    BLOCK_SIZE,
     DEVICE,
     _common_attn_metadata,
     _create_gdn_builder,
@@ -17,6 +18,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_vllm_config,
 )
+from tests.v1.worker.test_utils import _TestReplaySSMMixer
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
 from vllm.platforms import current_platform
@@ -58,6 +60,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
+    state._step_lifecycles = []
 
     positions = torch.tensor([1536], dtype=torch.int64)
     input_batch = SimpleNamespace(
@@ -126,6 +129,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
+    state._step_lifecycles = []
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
 
     # A verify decode, a padded prompt tail (128 of 129 prompt tokens already
@@ -191,6 +195,7 @@ def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
+    state._step_lifecycles = []
     # A request that accepted 3 drafts (plus the bonus token) on the previous
     # step; the others have never had a draft accepted.
     state.num_accepted_tokens_gpu = torch.tensor([4, 1, 1], dtype=torch.int32)
@@ -262,16 +267,21 @@ def test_replayssm_uses_built_mamba_decode_split(
     gdn_builder = _create_gdn_builder(num_speculative_tokens=3, full_cuda_graph=True)
     config = gdn_builder.vllm_config
     config.model_config.hf_text_config.mamba_chunk_size = 256
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64), (4, 8, 16)),
+        dtypes=(torch.float16, torch.float32),
+    )
     mamba_builder = Mamba2AttentionMetadataBuilder(
-        gdn_builder.kv_cache_spec, ["mamba"], config, DEVICE
+        mamba_spec, ["mamba"], config, DEVICE
     )
     # Classification uses the provider-independent Mamba builder on CPU.
     state_config = create_vllm_config(max_num_seqs=4, max_num_batched_tokens=16)
     state_config.speculative_config = config.speculative_config
     state_config.cache_config.use_replayssm = True
     state_config.cache_config.enable_prefix_caching = False
-    state_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
-    state = MambaHybridModelState(state_config, torch.nn.Module(), None, DEVICE)
+    model = torch.nn.Sequential(_TestReplaySSMMixer(MambaBackendEnum.FLASHINFER))
+    state = MambaHybridModelState(state_config, model, None, DEVICE)
     # The groups use these backend types without instantiating them.
     groups = [
         AttentionGroup(

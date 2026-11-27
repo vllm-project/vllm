@@ -79,7 +79,7 @@ def _forward(layer, vllm_config, hidden, num_decodes, prefill_lens, slots, ckpt)
     )
     output = torch.empty_like(hidden)
     with set_forward_context({PREFIX: metadata}, vllm_config):
-        layer.forward_cuda(hidden, output)
+        layer.forward_impl(hidden, output)
 
 
 @pytest.fixture(params=["SD", "DS"])

@@ -49,7 +49,7 @@ def vllm_config():
     return VllmConfig(compilation_config=CompilationConfig())
 
 
-def test_short_conv_forward_native_prefill(vllm_config):
+def test_short_conv_cpu_prefill(vllm_config):
     prefix = "test_layer"
     config = SimpleNamespace(conv_L_cache=4, conv_bias=True)
     dim = 16
@@ -101,13 +101,13 @@ def test_short_conv_forward_native_prefill(vllm_config):
 
     attn_metadata_dict = {prefix: attn_metadata}
     with set_forward_context(attn_metadata=attn_metadata_dict, vllm_config=vllm_config):
-        layer.forward_native(hidden_states, output)
+        layer.forward_impl(hidden_states, output)
 
     # Check if KV cache was updated
     assert not torch.allclose(conv_state, torch.zeros_like(conv_state))
 
 
-def test_short_conv_forward_native_decode(vllm_config):
+def test_short_conv_cpu_decode(vllm_config):
     prefix = "test_layer_decode"
     config = SimpleNamespace(conv_L_cache=4, conv_bias=True)
     dim = 16
@@ -126,7 +126,7 @@ def test_short_conv_forward_native_decode(vllm_config):
 
     # Mock AttentionMetadata for 2 decode requests
     num_decodes = 2
-    state_indices_tensor_d = torch.tensor([0, 1], dtype=torch.int32)
+    state_indices_tensor_d = torch.tensor([[0], [1]], dtype=torch.int32)
 
     attn_metadata = ShortConvAttentionMetadata(
         num_prefills=0,
@@ -154,7 +154,7 @@ def test_short_conv_forward_native_decode(vllm_config):
 
     attn_metadata_dict = {prefix: attn_metadata}
     with set_forward_context(attn_metadata=attn_metadata_dict, vllm_config=vllm_config):
-        layer.forward_native(hidden_states, output)
+        layer.forward_impl(hidden_states, output)
 
     # Check if KV cache was updated
     assert not torch.allclose(conv_state, old_conv_state)

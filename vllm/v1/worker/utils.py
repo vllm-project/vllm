@@ -980,9 +980,9 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._v_scale_cache = None
             if hasattr(layer.impl, "_kv_view_cache"):
                 layer.impl._kv_view_cache = None
-        for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):
-            if hasattr(layer, name):
-                setattr(layer, name, torch.empty(0, dtype=torch.int32))
+        # Decode kernels' per-layer state may hold cache-sized buffers.
+        if (ssu_state := getattr(layer, "ssu_state", None)) is not None:
+            ssu_state.release()
 
 
 def _block_copy_runs(blocks: torch.Tensor, block_ids: np.ndarray) -> np.ndarray:

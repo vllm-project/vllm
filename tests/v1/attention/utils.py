@@ -22,6 +22,9 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import ModelDType
+from vllm.model_executor.layers.linear_attention.mamba2.decode.base import (
+    MambaSSUKernel,
+)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.attention.backend import (
     AttentionImplBase,
@@ -216,13 +219,19 @@ class CheckpointingMambaLayer(MambaBase):
 
 
 def register_mamba_layers(
-    vllm_config: VllmConfig, layer_names: list[str], checkpoint_alignment: int | None
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    checkpoint_alignment: int | None,
+    *,
+    ssu_kernel: type[MambaSSUKernel] | None = None,
 ) -> None:
     """Register stand-in Mamba layers for builders that read their prefill
-    checkpoint alignment from their group's layers."""
+    checkpoint alignment and kernels from their group's layers."""
     forward_context = vllm_config.compilation_config.static_forward_context
     for name in layer_names:
-        forward_context[name] = CheckpointingMambaLayer(checkpoint_alignment)
+        layer = CheckpointingMambaLayer(checkpoint_alignment)
+        layer.ssu_kernel = ssu_kernel
+        forward_context[name] = layer
 
 
 def create_vllm_config(

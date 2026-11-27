@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+from tests.kernels.mamba.utils import record_triton_compiles
+from tests.utils import create_new_process_for_each_test
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -489,3 +491,289 @@ def _create_ragged_varlen_ref_outs(
             max_query_len=max_query_len,
         )
         yield out_ref
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton JIT on CUDA")
+@create_new_process_for_each_test("spawn")
+def test_conv1d_update_compiles_once_for_graph_and_eager_state_indices():
+    """CUDA-graph batches slice the builder's `(rows, 1 + num_spec)` state
+    index buffer, eager batches a one-slot block-table gather. An eager batch
+    must reuse the kernel a graph batch compiled, or the first one compiles
+    during inference. The conv states are views into padded cache pages, as the
+    mixer reads them. A fresh process keeps other tests' compiles out of the
+    JIT caches."""
+    set_random_seed(0)
+    dim, width, num_spec = 256, 4, 3
+    query_len, state_len = 1 + num_spec, width - 1 + num_spec
+    dtype = torch.bfloat16
+    pages = torch.randn(10, state_len * dim + 64, device=DEVICE, dtype=dtype)
+    conv_state = pages[:, : state_len * dim].view(10, state_len, dim).transpose(1, 2)
+    weight = torch.randn(dim, width, device=DEVICE, dtype=dtype)
+    bias = torch.randn(dim, device=DEVICE, dtype=dtype)
+
+    def decode(state_indices):
+        rows = state_indices.size(0)
+        causal_conv1d_update(
+            torch.randn(rows * query_len, dim, device=DEVICE, dtype=dtype),
+            conv_state,
+            weight,
+            bias,
+            "silu",
+            conv_state_indices=state_indices,
+            num_accepted_tokens=torch.ones(rows, device=DEVICE).int(),
+            query_start_loc=torch.arange(
+                0, rows * query_len + 1, query_len, device=DEVICE
+            ).int(),
+            max_query_len=query_len,
+        )
+
+    # Two decodes padded to four rows of the graph buffer.
+    graph_indices = torch.full(
+        (8, query_len), NULL_BLOCK_ID, dtype=torch.int32, device=DEVICE
+    )
+    graph_indices[:2, 0] = torch.tensor([5, 9], device=DEVICE)
+    decode(graph_indices[:4])
+    torch.accelerator.synchronize()
+
+    with record_triton_compiles() as compiled:
+        decode(torch.tensor([[3], [6]], device=DEVICE).int())
+        decode(torch.tensor([[3], [6], [7]], device=DEVICE).int())
+        torch.accelerator.synchronize()
+
+    assert not compiled, f"Triton compiled for an eager batch: {compiled}"
+
+
+requires_flashinfer_conv1d = pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.get_device_capability() in ((10, 0), (10, 3))
+    ),
+    reason="FlashInfer conv1d needs compute capability 10.0 or 10.3",
+)
+
+FI_DIM, FI_WIDTH, FI_SLOTS = 1280, 4, 64
+
+
+def _fi_layer(state_len, dim_first):
+    """Conv weights and a conv state pool laid out as a Mamba2 layer reads
+    them: views into padded cache pages, dim-first or state-first."""
+    dtype = torch.bfloat16
+    weight = torch.randn(FI_DIM, FI_WIDTH, device=DEVICE, dtype=dtype)
+    bias = torch.randn(FI_DIM, device=DEVICE, dtype=dtype)
+    pages = torch.randn(FI_SLOTS, state_len * FI_DIM + 64, device=DEVICE, dtype=dtype)
+    payload = pages[:, : state_len * FI_DIM]
+    if dim_first:
+        state = payload.view(FI_SLOTS, FI_DIM, state_len)
+    else:
+        state = payload.view(FI_SLOTS, state_len, FI_DIM).transpose(1, 2)
+    return weight, bias, state
+
+
+def _fi_rows(num_tokens):
+    """Conv inputs as the mixer passes them: rows of a wider projection."""
+    projected = torch.randn(
+        num_tokens, FI_DIM + 96, device=DEVICE, dtype=torch.bfloat16
+    )
+    return projected[:, :FI_DIM]
+
+
+def _prefill_metadata(lengths, slots, has_initial_states):
+    from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+
+    starts = torch.tensor((0, *lengths), dtype=torch.int32).cumsum(0).int()
+    metadata = Mamba2AttentionMetadata(
+        num_prefills=len(lengths),
+        num_prefill_tokens=sum(lengths),
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_reqs=len(lengths),
+        has_initial_states_p=torch.tensor(has_initial_states, device=DEVICE),
+        query_start_loc_p=starts.to(DEVICE),
+        # A block-table column, strided as with a speculative block.
+        state_indices_tensor_p=torch.tensor(
+            [[slot, 0] for slot in slots], dtype=torch.int32, device=DEVICE
+        )[:, 0],
+        state_indices_tensor_d=None,
+        query_start_loc_d=None,
+        num_accepted_tokens=None,
+        seq_lens=torch.tensor(lengths, dtype=torch.int32, device=DEVICE),
+    )
+    return metadata, starts
+
+
+@requires_flashinfer_conv1d
+@pytest.mark.parametrize("dim_first", [False, True])
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize(
+    "lengths",
+    [[37], [1, 2, 3, 70, 5, 6, 7, 300], [9] * 40],
+    ids=["one", "eight", "forty"],
+)
+def test_flashinfer_conv1d_prefill_matches_triton(dim_first, num_spec, lengths):
+    """Fed vLLM's prefill metadata, FlashInfer's prefill writes the same conv
+    states as Triton's and outputs the same up to BF16 rounding, so either
+    prefill kernel can precede either decode kernel. Forty prefills need
+    FlashInfer's workspace."""
+    from vllm.model_executor.layers.linear_attention.conv1d.prefill.flashinfer import (  # noqa: E501
+        FlashInferConv1dPrefillKernel,
+    )
+    from vllm.model_executor.layers.linear_attention.conv1d.prefill.triton import (
+        TritonConv1dPrefillKernel,
+    )
+
+    set_random_seed(0)
+    weight, bias, state = _fi_layer(FI_WIDTH - 1 + num_spec, dim_first)
+    slots = torch.randperm(FI_SLOTS - 1)[: len(lengths)] + 1
+    has_initial_states = [i % 2 == 0 for i in range(len(lengths))]
+    metadata, starts = _prefill_metadata(lengths, slots.tolist(), has_initial_states)
+    x = _fi_rows(sum(lengths))
+
+    outputs, states = [], []
+    for kernel in (TritonConv1dPrefillKernel, FlashInferConv1dPrefillKernel):
+        kernel_state = state.clone()
+        out = kernel.forward(
+            x.T,
+            kernel_state,
+            weight,
+            bias,
+            "silu",
+            kernel.prepare_metadata(metadata, starts),
+        )
+        outputs.append(out.T)
+        states.append(kernel_state)
+
+    torch.testing.assert_close(outputs[1], outputs[0], atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(states[1], states[0], atol=0, rtol=0)
+
+
+@requires_flashinfer_conv1d
+@pytest.mark.parametrize("dim_first", [False, True])
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("padded", [False, True])
+def test_flashinfer_conv1d_decode_matches_triton(dim_first, num_spec, padded):
+    """Fed vLLM's decode metadata (a `(rows, 1 + num_spec)` state index
+    buffer, padded with the null block in a full CUDA graph), FlashInfer's
+    decode matches Triton's on the live rows and leaves the null block alone.
+    With speculative decoding, each row starts after its accepted tokens."""
+    from vllm.config import VllmConfig
+    from vllm.model_executor.layers.linear_attention.conv1d.decode.flashinfer import (  # noqa: E501
+        FlashInferConv1dDecodeKernel,
+    )
+    from vllm.model_executor.layers.linear_attention.conv1d.decode.triton import (
+        TritonConv1dDecodeKernel,
+    )
+    from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    set_random_seed(0)
+    state_len, query_len = FI_WIDTH - 1 + num_spec, 1 + num_spec
+    weight, bias, state = _fi_layer(state_len, dim_first)
+    num_decodes = 5
+    rows = 8 if padded else num_decodes
+    indices = torch.full((rows, query_len), NULL_BLOCK_ID, dtype=torch.int32)
+    indices[:num_decodes] = (
+        torch.randperm(FI_SLOTS - 1)[: num_decodes * query_len] + 1
+    ).view(num_decodes, query_len)
+    accepted = torch.ones(rows, dtype=torch.int32)
+    accepted[:num_decodes] = torch.randint(1, query_len + 1, (num_decodes,))
+    metadata = Mamba2AttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes * query_len,
+        num_reqs=rows,
+        has_initial_states_p=None,
+        query_start_loc_p=None,
+        state_indices_tensor_p=None,
+        state_indices_tensor_d=indices.to(DEVICE),
+        query_start_loc_d=torch.arange(
+            0, rows * query_len + 1, query_len, dtype=torch.int32, device=DEVICE
+        )
+        if num_spec
+        else None,
+        num_accepted_tokens=accepted.to(DEVICE) if num_spec else None,
+        seq_lens=torch.full((rows,), 100, dtype=torch.int32, device=DEVICE),
+    )
+    spec = MambaSpec(
+        block_size=256,
+        shapes=((state_len, FI_DIM), (8, 64, 128)),
+        dtypes=(torch.bfloat16, torch.float32),
+    )
+    buffers = FlashInferConv1dDecodeKernel.allocate_buffers(
+        VllmConfig(), spec, rows, torch.device(DEVICE)
+    )
+    fi_metadata = FlashInferConv1dDecodeKernel.prepare_metadata(
+        buffers, metadata, rows, padded
+    )
+    x = _fi_rows(rows * query_len)
+
+    triton_state, fi_state = state.clone(), state.clone()
+    # Triton writes its output over its input.
+    triton_out = TritonConv1dDecodeKernel.forward(
+        x.clone(), triton_state, weight, bias, "silu", metadata, max_query_len=query_len
+    )
+    fi_out = FlashInferConv1dDecodeKernel.forward(
+        x, fi_state, weight, bias, "silu", fi_metadata, max_query_len=query_len
+    )
+
+    live_rows = num_decodes * query_len
+    torch.testing.assert_close(
+        fi_out[:live_rows], triton_out[:live_rows], atol=2e-2, rtol=2e-2
+    )
+    live_slots = indices[:num_decodes, 0].long()
+    torch.testing.assert_close(
+        fi_state[live_slots], triton_state[live_slots], atol=0, rtol=0
+    )
+    assert torch.equal(fi_state[NULL_BLOCK_ID], state[NULL_BLOCK_ID])
+
+
+@requires_flashinfer_conv1d
+@create_new_process_for_each_test("spawn")
+def test_registered_flashinfer_conv1d_prefill_warmup_leaves_nothing_to_compile():
+    """FlashInfer compiles a conv prefill variant per batch shape class on
+    first use. After the registry's warmup, prefills of one, a few and more
+    than 32 sequences, short and long, with and without cached states, compile
+    nothing: vLLM's JIT monitor, in error mode, raises on any CuTe DSL compile.
+    FlashInfer's disk cache is off, so kernels compiled by earlier runs can't
+    pass for warmed ones, and a fresh process keeps other tests' compiles out
+    of FlashInfer's in-process cache."""
+    import os
+
+    from vllm.model_executor.layers.linear_attention.conv1d.prefill.flashinfer import (  # noqa: E501
+        FlashInferConv1dPrefillKernel,
+    )
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+    from vllm.utils import jit_monitor
+
+    os.environ["FLASHINFER_CUTE_DSL_DISABLE_CACHE"] = "1"
+    set_random_seed(0)
+    num_spec = 3
+    weight, bias, state = _fi_layer(FI_WIDTH - 1 + num_spec, dim_first=False)
+    registry = JitWarmupRegistry(None)
+    with registry.activate():
+        FlashInferConv1dPrefillKernel.register_warmup(
+            dim=FI_DIM,
+            state_len=FI_WIDTH - 1 + num_spec,
+            dim_first=False,
+            x_row_stride=_fi_rows(1).stride(0),
+            weight_dtype=weight.dtype,
+            bias_dtype=bias.dtype,
+            max_num_seqs=64,
+            max_num_batched_tokens=8192,
+        )
+    registry.warmup()
+
+    jit_monitor.activate(mode="error")
+    for lengths in ([1], [700], [3, 1, 40], [2000], [5] * 40, [128] * 40):
+        slots = (torch.randperm(FI_SLOTS - 1)[: len(lengths)] + 1).tolist()
+        has_initial_states = [i % 2 == 1 for i in range(len(lengths))]
+        metadata, starts = _prefill_metadata(lengths, slots, has_initial_states)
+        FlashInferConv1dPrefillKernel.forward(
+            _fi_rows(sum(lengths)).T,
+            state,
+            weight,
+            bias,
+            "silu",
+            FlashInferConv1dPrefillKernel.prepare_metadata(metadata, starts),
+        )
+    torch.accelerator.synchronize()

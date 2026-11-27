@@ -817,9 +817,11 @@ class EngineArgs:
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
 
-    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    mamba_backend: MambaBackendEnum | None = MambaConfig.backend
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
-    mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
+    mamba_prefill_backend: MambaBackendEnum | None = MambaConfig.prefill_backend
+    conv1d_prefill_backend: MambaBackendEnum | None = MambaConfig.conv1d_prefill_backend
+    conv1d_decode_backend: MambaBackendEnum | None = MambaConfig.conv1d_decode_backend
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -1127,6 +1129,12 @@ class EngineArgs:
         )
         mamba_group.add_argument(
             "--mamba-prefill-backend", **mamba_kwargs["prefill_backend"]
+        )
+        mamba_group.add_argument(
+            "--conv1d-prefill-backend", **mamba_kwargs["conv1d_prefill_backend"]
+        )
+        mamba_group.add_argument(
+            "--conv1d-decode-backend", **mamba_kwargs["conv1d_decode_backend"]
         )
         mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
@@ -2812,19 +2820,28 @@ class EngineArgs:
 
         # Mamba config overrides
         mamba_config = copy.deepcopy(self.mamba_config)
-        # Convert string to enum if needed (CLI parsing returns a string)
-        if isinstance(self.mamba_backend, str):
-            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
-        else:
-            mamba_config.backend = self.mamba_backend
+        if self.mamba_backend is not None:
+            if mamba_config.backend is not None:
+                raise ValueError(
+                    "mamba_backend and mamba_config.backend are mutually exclusive"
+                )
+            mamba_config.backend = MambaBackendEnum(self.mamba_backend)
         if self.mamba_ssu_algorithm is not None:
             mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
-        if isinstance(self.mamba_prefill_backend, str):
-            mamba_config.prefill_backend = MambaBackendEnum[
-                self.mamba_prefill_backend.upper()
-            ]
-        else:
-            mamba_config.prefill_backend = self.mamba_prefill_backend
+        if self.mamba_prefill_backend is not None:
+            if mamba_config.prefill_backend is not None:
+                raise ValueError(
+                    "mamba_prefill_backend and mamba_config.prefill_backend "
+                    "are mutually exclusive"
+                )
+            mamba_config.prefill_backend = MambaBackendEnum(self.mamba_prefill_backend)
+        for field in ("conv1d_prefill_backend", "conv1d_decode_backend"):
+            if (value := getattr(self, field)) is not None:
+                if getattr(mamba_config, field) is not None:
+                    raise ValueError(
+                        f"{field} and mamba_config.{field} are mutually exclusive"
+                    )
+                setattr(mamba_config, field, MambaBackendEnum(value))
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding

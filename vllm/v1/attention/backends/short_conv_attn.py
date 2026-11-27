@@ -169,7 +169,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     reorder_batch_threshold: int = 1
     supports_update_block_table = False
-    needs_causal_conv1d_metadata = False
 
     def __init__(
         self,
