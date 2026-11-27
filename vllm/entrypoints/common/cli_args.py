@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 
 import vllm.envs as envs
 from vllm.config import config
+from vllm.config.mm_tensor_refs import MMTensorRefsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
@@ -303,6 +304,11 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    mm_tensor_refs_config: MMTensorRefsConfig | None = None
+    """Enable `features.kwargs_refs` in `/inference/v1/generate`, which loads
+    processed multimodal tensors that clients upload to an S3-compatible store.
+    Requires `--enable-scale-out` or `--tokens-only`. Off by default. Example:
+    `'{"s3_allowed_uri_prefix": "s3://bucket/prefix"}'`."""
     grpc_port: int | None = None
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
@@ -576,6 +582,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if getattr(args, "mm_tensor_refs_config", None) is not None and not (
+        getattr(args, "enable_scale_out", False) or getattr(args, "tokens_only", False)
+    ):
+        raise ValueError(
+            "Error: --mm-tensor-refs-config requires --enable-scale-out or "
+            "--tokens-only, which serve /inference/v1/generate"
+        )
 
     # SSE keep-alive interval must be zero (disabled) or a positive integer.
     if getattr(args, "sse_keep_alive_interval", 0) < 0:
