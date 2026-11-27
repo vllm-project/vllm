@@ -377,22 +377,31 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             )
             return cols * unit, rows * unit
 
-        rows = math.isqrt(max_soft_tokens)
-        while max_soft_tokens % rows:
-            rows -= 1
-        cols = max_soft_tokens // rows
-        width_limit = max_width or cols * unit
-        height_limit = max_height or rows * unit
-        scale, cols, rows = next(
+        width_limit = max_width or max_soft_tokens * unit
+        height_limit = max_height or max_soft_tokens * unit
+        grids = sorted(
             (
-                (s, c, r)
-                for c, r in ((cols, rows), (rows, cols))
-                for s in range(unit, 0, -1)
-                if unit % s == 0 and c * s <= width_limit and r * s <= height_limit
+                (max_soft_tokens // r, r)
+                for r in range(1, max_soft_tokens + 1)
+                if max_soft_tokens % r == 0
             ),
-            (1, cols, rows),
+            key=lambda grid: (abs(grid[0] - grid[1]), -grid[0]),
         )
-        return min(cols * scale, width_limit), min(rows * scale, height_limit)
+        exact = (
+            (c * s, r * s)
+            for c, r in grids
+            for s in range(unit, 0, -1)
+            if unit % s == 0 and c * s <= width_limit and r * s <= height_limit
+        )
+        if size := next(exact, None):
+            return size
+        return max(
+            itertools.product(range(1, width_limit + 1), range(1, height_limit + 1)),
+            key=lambda size: (
+                self._compute_num_soft_tokens(*size, max_soft_tokens),
+                size[0] * size[1],
+            ),
+        )
 
     def get_data_parser(self) -> MultiModalDataParser:
         kwargs: dict[str, Any] = {"video_needs_metadata": True}

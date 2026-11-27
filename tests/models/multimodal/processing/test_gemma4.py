@@ -296,8 +296,10 @@ def test_dummy_audio_reaches_audio_budget(model_id: str):
         (None, "image", {"height": 80}, 280),
         (None, "image", {"width": 1280, "height": 80}, 280),
         ({"max_soft_tokens": 1120}, "image", {"width": 32, "height": 560}, 1120),
+        ({"max_soft_tokens": 1120}, "image", {"width": 28, "height": 40}, 1120),
         ({"do_resize": False}, "image", {"width": 500}, 280),
         (None, "video", {"num_frames": 2, "width": 32, "height": 560}, 140),
+        (None, "video", {"num_frames": 2, "width": 8, "height": 8}, 132),
         ({"do_resize": False}, "video", {"num_frames": 2, "width": 200}, 140),
     ],
 )
