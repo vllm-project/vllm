@@ -19,6 +19,7 @@ from vllm.lora.layers import (
     LogitsProcessorWithLoRA,
     LoRAMapping,
     MergedColumnParallelLinearVariableSliceWithLoRA,
+    MergedColumnParallelLinearVariableSliceWithShardedLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
@@ -1200,10 +1201,11 @@ def test_expand_packed_lora_with_missing_group(present_groups) -> None:
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("num_slices", [3, 5])
+@pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_merged_column_parallel_variable_slice(
-    default_vllm_config, dist_init, num_loras, num_slices, device, stage
+    default_vllm_config, dist_init, num_loras, num_slices, fully_shard, device, stage
 ) -> None:
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
@@ -1211,7 +1213,10 @@ def test_merged_column_parallel_variable_slice(
     max_loras = 8
     torch.set_default_device(device)
     lora_config = LoRAConfig(
-        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
+        max_loras=max_loras,
+        max_lora_rank=8,
+        fully_sharded_loras=fully_shard,
+        lora_dtype=torch.float16,
     )
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
 
@@ -1230,9 +1235,13 @@ def test_merged_column_parallel_variable_slice(
         )
         linear.weight.data = torch.rand_like(linear.weight.data)
 
-        # Create linear layer with LoRA adapter
-        lora_linear = MergedColumnParallelLinearVariableSliceWithLoRA(linear)
-        lora_linear.create_lora_weights(max_loras, lora_config)
+        lora_linear = from_layer(linear, max_loras, lora_config, ["in_proj"])
+        expected_cls = (
+            MergedColumnParallelLinearVariableSliceWithShardedLoRA
+            if fully_shard
+            else MergedColumnParallelLinearVariableSliceWithLoRA
+        )
+        assert type(lora_linear) is expected_cls
         return linear, lora_linear
 
     for i in range(NUM_RANDOM_SEEDS):
@@ -1309,6 +1318,21 @@ def test_merged_column_parallel_variable_slice(
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
+
+
+def test_fully_sharded_variable_slice_skips_replicated_layer(
+    default_vllm_config, dist_init
+) -> None:
+    """The fully-sharded path all-gathers over the TP group, which is wrong for
+    replicated layers, so they stay unwrapped as on main."""
+    linear = MergedColumnParallelLinear(
+        64, [16, 16, 16], bias=False, params_dtype=torch.float16, disable_tp=True
+    )
+    lora_config = LoRAConfig(
+        max_loras=1, max_lora_rank=8, fully_sharded_loras=True, lora_dtype=torch.float16
+    )
+
+    assert from_layer(linear, 1, lora_config, ["a", "b", "c"]) is linear
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
