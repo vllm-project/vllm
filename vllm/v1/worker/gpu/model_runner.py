@@ -597,7 +597,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if (
             getattr(self.vllm_config.kv_transfer_config, "kv_load_failure_policy", None)
             == "repair"
+            and not self.model_config.is_hybrid
         ):
+            # Hybrid repair uses an internal ordinary request with private
+            # recurrent state, rather than this direct layer-replay executor.
             # Fail fast on architectures the replay cannot reproduce
             # faithfully (post-embed transforms, per-layer loop inputs):
             # a silently-diverging replay would write wrong KV under a

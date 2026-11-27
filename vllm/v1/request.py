@@ -86,6 +86,10 @@ class Request:
         block_hashes: list["BlockHash"] | None = None,
     ) -> None:
         self.request_id = request_id
+        # Internal replay requests use normal execution, but neither publish
+        # scratch cache entries nor produce user-visible output.
+        self.is_internal_kv_repair = False
+        self.kv_repair_end = 0
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
@@ -354,6 +358,41 @@ class Request:
         # The last token is always recomputed to produce logits.
         limits = (self.num_tokens - 1, self.prefix_cache_hit_limit, bound)
         return min(limit for limit in limits if limit is not None)
+
+    def make_attention_replay(
+        self, request_id: str, end: int, checkpoint_limit: int
+    ) -> "Request":
+        """Create private normal prefill through ``end``, without sampling.
+
+        Keep one original prompt token beyond the replay boundary, so the
+        normal runner treats every replay step as unfinished prefill. Local
+        cache reuse is bounded by a healthy pre-hole checkpoint; external
+        lookup and scratch publication are disabled for this internal request.
+        """
+        if (
+            self.prompt_token_ids is None
+            or self.sampling_params is None
+            or not 0 <= checkpoint_limit < end < self.num_prompt_tokens
+        ):
+            raise ValueError("Invalid hybrid attention replay boundary or request")
+        params = SamplingParams(temperature=0, max_tokens=1, ignore_eos=True)
+        params.update_from_generation_config({}, self.sampling_params.eos_token_id)
+        replay = Request(
+            request_id=request_id,
+            prompt_token_ids=list(self.prompt_token_ids[: end + 1]),
+            sampling_params=params,
+            pooling_params=None,
+            client_index=self.client_index,
+            priority=self.priority,
+            arrival_time=self.arrival_time,
+            lora_request=self.lora_request,
+            cache_salt=self.cache_salt,
+            block_hasher=self._block_hasher,
+        )
+        replay.is_internal_kv_repair = True
+        replay.kv_repair_end = end
+        replay.prefix_cache_hit_limit = checkpoint_limit
+        return replay
 
     @property
     def skip_reading_external_kv(self) -> bool:

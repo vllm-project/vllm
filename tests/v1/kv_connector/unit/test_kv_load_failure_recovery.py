@@ -69,6 +69,139 @@ def test_failed_receive_completion_honors_failure_policy(policy):
         assert request.request_id in next_output.num_scheduled_tokens
 
 
+@pytest.mark.parametrize("hole_start", [0, 32, 112])
+@pytest.mark.parametrize("outcome", ["commit", "abort", "stall"])
+@pytest.mark.parametrize("recurrent_groups", [1, 3])
+def test_hybrid_attention_replay_shares_normal_scheduler_and_preserves_state(
+    hole_start, outcome, recurrent_groups
+):
+    """A private replay donates only the hole and emits no client output."""
+    from vllm.v1.outputs import KVLoadAttestation, KVLoadFailureReport
+
+    config = create_vllm_config(
+        kv_load_failure_policy="repair", max_num_batched_tokens=256
+    )
+    config.scheduler_config.async_scheduling = False
+    config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.mamba_block_size = 16
+    cache_config = make_kv_cache_config(
+        16, mamba_enabled=True, mamba_cache_mode="align", num_blocks=100
+    )
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
+    cache_config.kv_cache_groups[0].layer_names = [
+        "model.layers.0.attn",
+        "model.layers.2.attn",
+    ]
+    state_group = cache_config.kv_cache_groups[1]
+    for index in range(1, recurrent_groups):
+        cache_config.kv_cache_groups.append(
+            KVCacheGroupSpec(
+                layer_names=[f"extra_state_{index}"],
+                kv_cache_spec=state_group.kv_cache_spec,
+            )
+        )
+    scheduler = create_scheduler(config, kv_cache_config=cache_config)
+    parent = create_request(num_tokens=129)
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
+
+    connector = create_mock_connector()
+    connector.__class__ = SupportsHMA
+    connector.request_finished_all_groups.return_value = (False, None)
+    connector.get_loaded_kv_cache_group_ids.return_value = tuple(
+        range(recurrent_groups + 1)
+    )
+    connector.get_num_new_matched_tokens.side_effect = lambda req, _: (
+        (128, True) if req is parent else (0, False)
+    )
+    connector.request_finished.return_value = (False, None)
+    connector.take_events.return_value = ()
+    scheduler.connector = connector
+    scheduler.add_request(parent)
+    load_step = scheduler.schedule()
+    assert parent.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    generation = connector.note_transfer_attempt.call_args.args[1]
+    before = scheduler.kv_cache_manager.get_block_ids(parent.request_id)
+    report = KVLoadFailureReport(
+        parent.request_id,
+        [before[0][hole_start // 16]],
+        (hole_start, hole_start + 16),
+        0,
+        [0, 2],
+        True,
+        128,
+        source_rank=0,
+        transfer_generation=generation,
+        failed_blocks_by_group={0: [before[0][hole_start // 16]]},
+        healthy_recurrent_group_ids=tuple(range(1, recurrent_groups + 1)),
+    )
+    attestation = KVLoadAttestation(
+        parent.request_id,
+        16 + recurrent_groups,
+        14 + recurrent_groups,
+        2,
+        "content",
+        14 + recurrent_groups,
+        0,
+        True,
+        transfer_generation=generation,
+        source_rank=0,
+    )
+    output = create_model_runner_output([], finished_recving={parent.request_id})
+    output.kv_connector_output.load_failure_reports = [report]
+    output.kv_connector_output.load_attestations = [attestation]
+    scheduler.update_from_output(load_step, output)
+    if outcome == "stall":
+        budget = scheduler.max_num_scheduled_tokens
+        scheduler.max_num_scheduled_tokens = 0
+        for _ in range(Scheduler.REPAIR_MAX_ADMISSION_DEFERRALS + 2):
+            scheduler.schedule()
+        assert parent.request_id not in scheduler.recovery_plans
+        assert not any(req.is_internal_kv_repair for req in scheduler.requests.values())
+        scheduler.max_num_scheduled_tokens = budget
+        assert parent.request_id in scheduler.schedule().num_scheduled_tokens
+        return
+    ordinary = create_request(num_tokens=17)
+    scheduler.add_request(ordinary)
+    step = scheduler.schedule()
+    assert parent.request_id not in step.num_scheduled_tokens
+    assert ordinary.request_id in step.num_scheduled_tokens
+    replays = [
+        scheduler.requests[rid]
+        for rid in step.num_scheduled_tokens
+        if rid != ordinary.request_id
+    ]
+    assert len(replays) == 1 and replays[0].is_internal_kv_repair
+    replay = replays[0]
+    source = scheduler.kv_cache_manager.get_block_ids(replay.request_id)
+    runner_output = create_model_runner_output(
+        [scheduler.requests[rid] for rid in step.num_scheduled_tokens]
+    )
+    if outcome == "abort":
+        scheduler.finish_requests(parent.request_id, RequestStatus.FINISHED_ABORTED)
+    response = scheduler.update_from_output(
+        step,
+        runner_output,
+    )
+    if outcome == "abort":
+        assert parent.request_id not in scheduler.requests
+        assert replay.request_id not in scheduler.requests
+        return
+    after = scheduler.kv_cache_manager.get_block_ids(parent.request_id)
+    assert after[1:] == before[1:]
+    slot = hole_start // 16
+    assert after[0][:slot] == before[0][:slot]
+    assert after[0][slot] == source[0][slot]
+    assert after[0][slot + 1 :] == before[0][slot + 1 :]
+    assert replay.request_id not in scheduler.requests
+    assert all(
+        row.request_id != replay.request_id
+        for client in response.values()
+        for row in client.outputs
+    )
+    assert parent.request_id in scheduler.schedule().num_scheduled_tokens
+
+
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [

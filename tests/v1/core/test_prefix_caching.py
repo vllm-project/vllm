@@ -180,6 +180,69 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
+def test_hybrid_repair_adopts_only_attention_hole_and_never_publishes_scratch():
+    """Completed private replay donates the hole while healthy state stays put."""
+    config = make_kv_cache_config(16, 64)
+    config.kv_cache_groups.append(
+        KVCacheGroupSpec(
+            ["state"],
+            MambaSpec(
+                block_size=64,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        )
+    )
+    manager = make_kv_cache_manager(config, max_model_len=512, hash_block_size=16)
+    parent = make_request("parent", list(range(257)), 16, sha256)
+    replay = make_request("replay", list(range(64)), 16, sha256)
+    replay.is_internal_kv_repair = True
+    initial_free = manager.block_pool.get_num_free_blocks()
+    assert manager.allocate_slots(parent, 128, delay_cache_blocks=True) is not None
+    before = manager.get_block_ids(parent.request_id)
+    assert manager.allocate_slots(replay, 64) is not None
+    replay.num_computed_tokens = 64
+    source = manager.get_blocks(replay.request_id)
+    assert all(block.block_hash is None for blocks in source.blocks for block in blocks)
+    manager.adopt_attention_repair(parent, replay, (32, 48), (0,))
+    after = manager.get_block_ids(parent.request_id)
+    assert after[0][:2] == before[0][:2]
+    assert after[0][2] == source.blocks[0][2].block_id
+    assert after[0][3:] == before[0][3:]
+    assert after[1] == before[1]
+    manager.free(replay)
+    assert manager.block_pool.blocks[after[0][2]].ref_cnt == 1
+    manager.free(parent)
+    assert manager.block_pool.get_num_free_blocks() == initial_free
+
+
+def test_hybrid_repair_refuses_recurrent_group_without_mutation():
+    config = make_kv_cache_config(16, 64)
+    config.kv_cache_groups.append(
+        KVCacheGroupSpec(
+            ["state"],
+            MambaSpec(
+                block_size=64,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        )
+    )
+    manager = make_kv_cache_manager(config, max_model_len=512, hash_block_size=16)
+    parent = make_request("parent", list(range(257)), 16, sha256)
+    replay = make_request("replay", list(range(64)), 16, sha256)
+    replay.is_internal_kv_repair = True
+    assert manager.allocate_slots(parent, 128, delay_cache_blocks=True) is not None
+    assert manager.allocate_slots(replay, 64, delay_cache_blocks=True) is not None
+    replay.num_computed_tokens = 64
+    before = manager.get_block_ids(parent.request_id)
+    with pytest.raises(ValueError):
+        manager.adopt_attention_repair(parent, replay, (0, 64), (1,))
+    assert manager.get_block_ids(parent.request_id) == before
+
+
 HISPARSE_BLOCK_SIZE = 16
 
 
@@ -705,6 +768,8 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     scheduler = SimpleNamespace(
         connector=connector,
         kv_cache_manager=manager,
+        repair_kv_load_failures=False,
+        needs_kv_cache_zeroing=False,
         failed_recving_kv_req_ids=set(),
         finished_recving_kv_req_ids={request.request_id},
         prefix_replay_tokens=0,

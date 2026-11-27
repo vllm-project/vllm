@@ -149,6 +149,10 @@ class RecoveryPlan:
     admitted_step: int | None = None
     state: str = "DETECTED"
     num_deferrals: int = 0
+    hybrid_replay_id: str | None = None
+    hybrid_attention_groups: tuple[int, ...] = ()
+    hybrid_hole_span: tuple[int, int] | None = None
+    hybrid_last_progress: int = -1
 
     @property
     def n_eff(self) -> int:
@@ -399,19 +403,29 @@ class Scheduler(SchedulerInterface):
                     "data_parallel_size=1 in v1 (the repair verdict "
                     "consensus is TP-group-scoped)"
                 )
-            if self.repair_kv_load_failures and (
-                len(self.kv_cache_config.kv_cache_groups) > 1
+            groups = self.kv_cache_config.kv_cache_groups
+            hybrid_attention_repair = (
+                len(groups) >= 2
+                and sum(isinstance(g.kv_cache_spec, FullAttentionSpec) for g in groups)
+                == 1
+                and sum(isinstance(g.kv_cache_spec, MambaSpec) for g in groups)
+                == len(groups) - 1
+                and all(
+                    not isinstance(g.kv_cache_spec, MambaSpec)
+                    or g.kv_cache_spec.mamba_cache_mode == "align"
+                    for g in groups
+                )
+                and vllm_config.parallel_config.tensor_parallel_size == 1
+                and vllm_config.speculative_config is None
+            )
+            if (
+                self.repair_kv_load_failures
+                and len(groups) > 1
+                and not hybrid_attention_repair
             ):
-                # The report consumer, the write-set
-                # derivation, and the block-table geometry are all
-                # single-group-shaped (the per-group block-id unpack in
-                # _repair_write_set_block_ids would raise ValueError --
-                # an engine crash, not a refusal). Reject at init so the
-                # documented single-group scope is loud, not latent.
                 raise RuntimeError(
-                    "kv_load_failure_policy='repair' requires a single "
-                    "KV cache group in v1 (the repair write-set and report "
-                    "geometry are single-group-shaped)"
+                    "kv_load_failure_policy='repair' requires a single KV cache "
+                    "group or one full-attention plus recurrent groups on one GPU"
                 )
             if self.repair_kv_load_failures and (
                 vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -518,6 +532,7 @@ class Scheduler(SchedulerInterface):
         # Hole recovery: pending repair plans, keyed by request id. A plan
         # adds an equivalent-token budget charge at the repair admission.
         self.recovery_plans: dict[str, RecoveryPlan] = {}
+        self.hybrid_replay_parents: dict[str, str] = {}
         self._next_repair_plan_id = 0
 
         # Grammar compilation failures to finish as per-request errors in
@@ -1071,6 +1086,7 @@ class Scheduler(SchedulerInterface):
         as consumed: a late re-delivery of it is
         absorbed, never re-authorized on top of the fallback."""
         self.recovery_plans.pop(plan.request_id, None)
+        self._cancel_hybrid_attention_replay(plan)
         self._remember_consumed_evidence(plan)
         logger.warning(
             "Repair plan dissolved: req=%s plan_id=%d span=%s E=%d "
@@ -1086,6 +1102,7 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        self._expire_stalled_hybrid_replays()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -1113,6 +1130,7 @@ class Scheduler(SchedulerInterface):
         repair_charges: dict[str, int] = {}
         repair_admitted = False
         repair_exclusive = False
+        hybrid_replay_scheduled = False
         # Partial-depth replay still drains an exclusive batch. Full-depth
         # attention-only repair participates in ordinary admission order.
         repair_pending = any(
@@ -1173,6 +1191,9 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if request.is_internal_kv_repair and hybrid_replay_scheduled:
+                req_index += 1
+                continue
             if input_budget <= draft_slots:
                 break
             if repair_admitted and (
@@ -1235,6 +1256,10 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+            if request.is_internal_kv_repair:
+                num_new_tokens = min(
+                    num_new_tokens, request.kv_repair_end - request.num_computed_tokens
+                )
             _pending_plan = self.recovery_plans.get(request.request_id)
             if (
                 0 < long_prefill_token_threshold < num_new_tokens
@@ -1443,6 +1468,7 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
+            hybrid_replay_scheduled |= request.is_internal_kv_repair
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots + recovery_surcharge
             if recovery_surcharge:
@@ -1560,6 +1586,9 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+                if request.is_internal_kv_repair and hybrid_replay_scheduled:
+                    skip_request(request_queue)
+                    continue
 
                 if repair_admitted and (
                     repair_exclusive or request.request_id in self.recovery_plans
@@ -1823,6 +1852,10 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+                    if request.is_internal_kv_repair:
+                        num_new_tokens = min(
+                            num_new_tokens, request.kv_repair_end - num_computed_tokens
+                        )
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
@@ -2164,6 +2197,7 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                hybrid_replay_scheduled |= request.is_internal_kv_repair
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots + recovery_surcharge
                 if recovery_surcharge:
@@ -2487,6 +2521,7 @@ class Scheduler(SchedulerInterface):
             # voided plan's evidence is absorbed, never re-authorized).
             preempted_plan = self.recovery_plans.pop(request.request_id, None)
             if preempted_plan is not None:
+                self._cancel_hybrid_attention_replay(preempted_plan)
                 self._remember_consumed_evidence(preempted_plan)
             # The preempted request's blocks are freed, so its pending
             # delayed publication must not survive to a later update (the
@@ -3199,6 +3234,17 @@ class Scheduler(SchedulerInterface):
                 # cache transfer in KV connector), the aborted request will not
                 # be set to None (in order to finish async KV transfer).
                 # In this case, we use is_finished() to check.
+                continue
+
+            if request.is_internal_kv_repair:
+                if (
+                    not output_is_stale
+                    and request.num_computed_tokens >= request.kv_repair_end
+                ):
+                    self._finish_hybrid_attention_replay(request)
+                    request.status = RequestStatus.FINISHED_STOPPED
+                    stopped_running_reqs.add(request)
+                    self._free_request(request)
                 continue
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
@@ -4020,7 +4066,13 @@ class Scheduler(SchedulerInterface):
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
         if self._evidence_state_initialized:
-            self.recovery_plans.pop(request_id, None)
+            plan = self.recovery_plans.pop(request_id, None)
+            if plan is not None and plan.hybrid_replay_id is not None:
+                child_id = plan.hybrid_replay_id
+                self.hybrid_replay_parents.pop(child_id, None)
+                self.finish_requests(child_id, RequestStatus.FINISHED_ABORTED)
+            elif request.is_internal_kv_repair:
+                self._fail_hybrid_attention_replay(request_id)
             # The transfer-identity bookkeeping dies with the request:
             # a later request reusing the ID cannot inherit (or
             # collide with) its generations -- the global counter
@@ -4034,7 +4086,7 @@ class Scheduler(SchedulerInterface):
             self._consumed_report_evidence.pop(request_id, None)
             self._untrusted_external_reqs.discard(request_id)
         self.finished_req_ids.add(request_id)
-        if self.finished_req_ids_dict is not None:
+        if self.finished_req_ids_dict is not None and not request.is_internal_kv_repair:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
         delay_free_blocks |= connector_delay_free_blocks
@@ -4590,6 +4642,9 @@ class Scheduler(SchedulerInterface):
         """Returns True if scheduling of this request should proceed, False if
         it should be skipped for this step."""
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            plan = self.recovery_plans.get(request.request_id)
+            if plan is not None and plan.state == "HYBRID_REPLAY":
+                return False
             # Check whether async loading requests are finished.
             request_id = request.request_id
             if request_id not in self.finished_recving_kv_req_ids:
@@ -4597,6 +4652,10 @@ class Scheduler(SchedulerInterface):
                 return False
             # Promote request to waiting or preempted.
             self._update_waiting_for_remote_kv(request)
+            if plan is not None and plan.state == "HYBRID_COMMITTED":
+                self.recovery_plans.pop(request.request_id)
+                self._remember_consumed_evidence(plan)
+                self._req_transfer_attestations.pop(request.request_id, None)
             self._reserve_parked(request)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
@@ -4825,6 +4884,13 @@ class Scheduler(SchedulerInterface):
             tuple(report.observed_failed_layers),
             report.healthy_above_span,
             report.restored_extent,
+            None
+            if report.failed_blocks_by_group is None
+            else tuple(
+                (gid, tuple(blocks))
+                for gid, blocks in sorted(report.failed_blocks_by_group.items())
+            ),
+            report.healthy_recurrent_group_ids,
         )
 
     def _handle_repair_evidence(
@@ -5789,6 +5855,10 @@ class Scheduler(SchedulerInterface):
                         mark_external_untrusted=True,
                     )
                     continue
+            if report.failed_blocks_by_group is not None:
+                self._begin_hybrid_attention_replay(request, report)
+                skip_req_ids.add(req_id)
+                continue
             write_set = self._repair_write_set_block_ids(request, rollback, corrupt_end)
             violating_block = self._write_set_shared_block(write_set)
             if violating_block is not None:
@@ -5936,6 +6006,8 @@ class Scheduler(SchedulerInterface):
         request = self.requests.get(report.request_id)
         if request is None or request.is_finished():
             return "request is unknown or finished"
+        if report.failed_blocks_by_group is not None:
+            return self._validate_hybrid_attention_report(request, report)
         if len(report.failed_block_ids) != 1:
             return (
                 "names "
@@ -6118,6 +6190,7 @@ class Scheduler(SchedulerInterface):
         if dissolved is not None:
             # The plan's evidence was superseded by this rejection: a
             # late re-delivery of it is absorbed, not re-authorized.
+            self._cancel_hybrid_attention_replay(dissolved)
             self._remember_consumed_evidence(dissolved)
         # The attempt's accumulated positive evidence dies with the
         # rejection -- it failed closed, and no later gate may read the
@@ -6172,6 +6245,11 @@ class Scheduler(SchedulerInterface):
         # refusal too (the battery refuses them per request), and the
         # refusal itself must not crash on the single-group unpack.
         req_block_ids_groups = self.kv_cache_manager.get_block_ids(request.request_id)
+        if len(req_block_ids_groups) > 1:
+            # A healthy later recurrent checkpoint cannot seed recompute at an
+            # earlier attention boundary. Abandon the entire external claim.
+            rollback = 0
+            self.failed_recving_kv_req_ids.add(request.request_id)
         req_block_ids = [
             block_id for group in req_block_ids_groups for block_id in group
         ]
@@ -6240,6 +6318,218 @@ class Scheduler(SchedulerInterface):
                 for r in reports
             ],
         )
+
+    def _validate_hybrid_attention_report(
+        self, request: Request, report: KVLoadFailureReport
+    ) -> str | None:
+        groups = self.kv_cache_config.kv_cache_groups
+        attention = {
+            gid
+            for gid, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, FullAttentionSpec)
+        }
+        recurrent = {
+            gid
+            for gid, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        }
+        start, end = report.token_span
+        extent = report.restored_extent
+        if (
+            request.status != RequestStatus.WAITING_FOR_REMOTE_KVS
+            or request.num_in_flight_tokens
+            or request.num_output_tokens
+            or request.mm_features
+            or request.prompt_embeds is not None
+            or request.resumable
+            or request.session_id is not None
+            or request.sampling_params is None
+            or len(attention) != 1
+            or not recurrent
+            or set(report.failed_blocks_by_group) != attention
+            or set(report.healthy_recurrent_group_ids) != recurrent
+            or not report.healthy_above_span
+            or not 0
+            <= report.rollback_boundary
+            <= start
+            < end
+            <= extent
+            < request.num_prompt_tokens
+            or self._req_transfer_claim_extent.get(request.request_id) != extent
+            or extent - self._req_transfer_claim.get(request.request_id, -1)
+            != report.rollback_boundary
+        ):
+            return "invalid hybrid attention-only delivery geometry"
+        tables = self.kv_cache_manager.get_block_ids(request.request_id)
+        gid = next(iter(attention))
+        block_size = groups[gid].kv_cache_spec.block_size
+        if start % block_size or end % block_size:
+            return "hybrid attention hole is not block aligned"
+        expected = tables[gid][start // block_size : end // block_size]
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        try:
+            expected_layers = {
+                extract_layer_index(name) for name in groups[gid].layer_names
+            }
+        except (AssertionError, ValueError):
+            return "hybrid attention layer indices are ambiguous"
+        if (
+            not expected
+            or report.failed_blocks_by_group[gid] != expected
+            or report.failed_block_ids != expected
+            or set(report.observed_failed_layers) != expected_layers
+            or len(report.observed_failed_layers) != len(expected_layers)
+        ):
+            return "hybrid failure evidence does not cover the attention write set"
+        if any(
+            not self.kv_cache_manager.block_pool.is_block_writable(
+                self.kv_cache_manager.block_pool.blocks[bid]
+            )
+            for bid in expected
+        ):
+            return "hybrid attention destinations are shared or published"
+        return None
+
+    def _begin_hybrid_attention_replay(
+        self, request: Request, report: KVLoadFailureReport
+    ) -> None:
+        """Keep the certified parent parked while ordinary private prefill runs."""
+        end = report.token_span[1]
+        # A conservative all-prefix bound prevents a parked parent's private
+        # cache from making its own scratch allocation impossible.
+        needed = (
+            sum(
+                cdiv(end, group.kv_cache_spec.block_size)
+                for group in self.kv_cache_config.kv_cache_groups
+            )
+            + 2
+        )
+        if needed > self.kv_cache_manager.block_pool.get_num_free_blocks():
+            self._reject_uninterpretable_reports(
+                request,
+                [report],
+                "insufficient hybrid replay capacity",
+                set(),
+                trusted_rollback=0,
+                mark_external_untrusted=True,
+            )
+            return
+        self._next_repair_plan_id += 1
+        replay_id = f"{request.request_id}/kv-repair/{self._next_repair_plan_id}"
+        replay = request.make_attention_replay(replay_id, end, report.rollback_boundary)
+        request.num_computed_tokens = report.rollback_boundary
+        self._mark_num_computed_tokens_rewound(request)
+        plan = RecoveryPlan(
+            request_id=request.request_id,
+            repair_span=(report.rollback_boundary, end),
+            est_equivalent_tokens=end - report.rollback_boundary,
+            layer_end=self.vllm_config.model_config.get_num_layers(
+                self.parallel_config
+            ),
+            restored_extent=report.restored_extent,
+            failed_block_ids=list(report.failed_block_ids),
+            plan_id=self._next_repair_plan_id,
+            report_evidence=self._report_evidence_key(report),
+            transfer_generation=report.transfer_generation,
+            state="HYBRID_REPLAY",
+            hybrid_replay_id=replay_id,
+            hybrid_attention_groups=tuple(report.failed_blocks_by_group),
+            hybrid_hole_span=report.token_span,
+        )
+        self.recovery_plans[request.request_id] = plan
+        self.hybrid_replay_parents[replay_id] = request.request_id
+        self.add_request(replay)
+
+    def _finish_hybrid_attention_replay(self, replay: Request) -> None:
+        parent_id = self.hybrid_replay_parents.get(replay.request_id)
+        if parent_id is None:
+            return
+        plan = self.recovery_plans.get(parent_id)
+        parent = self.requests.get(parent_id)
+        if (
+            plan is None
+            or parent is None
+            or parent.is_finished()
+            or plan.hybrid_replay_id != replay.request_id
+            or plan.transfer_generation != self._req_transfer_generation.get(parent_id)
+        ):
+            self._fail_hybrid_attention_replay(replay.request_id)
+            return
+        assert plan.hybrid_hole_span is not None
+        try:
+            self.kv_cache_manager.adopt_attention_repair(
+                parent,
+                replay,
+                plan.hybrid_hole_span,
+                plan.hybrid_attention_groups,
+            )
+        except ValueError:
+            logger.exception(
+                "Hybrid attention replay ownership changed for %s", parent_id
+            )
+            self._fail_hybrid_attention_replay(replay.request_id)
+            return
+        self.hybrid_replay_parents.pop(replay.request_id)
+        parent.num_computed_tokens = plan.restored_extent
+        self._mark_num_computed_tokens_rewound(parent)
+        plan.state = "HYBRID_COMMITTED"
+        logger.info(
+            "Hybrid attention repair committed: req=%s span=%s restored=%d",
+            parent_id,
+            plan.hybrid_hole_span,
+            plan.restored_extent,
+        )
+
+    def _expire_stalled_hybrid_replays(self) -> None:
+        """Bound private cache retention if ordinary replay cannot progress."""
+        for plan in list(self.recovery_plans.values()):
+            if plan.state != "HYBRID_REPLAY" or plan.hybrid_replay_id is None:
+                continue
+            replay = self.requests.get(plan.hybrid_replay_id)
+            if (
+                replay is not None
+                and replay.num_computed_tokens > plan.hybrid_last_progress
+            ):
+                plan.hybrid_last_progress = replay.num_computed_tokens
+                plan.num_deferrals = 0
+                continue
+            plan.num_deferrals += 1
+            if plan.num_deferrals < self.REPAIR_MAX_ADMISSION_DEFERRALS:
+                continue
+            logger.warning(
+                "Hybrid replay stalled; using ordinary recompute for %s",
+                plan.request_id,
+            )
+            self._fail_hybrid_attention_replay(plan.hybrid_replay_id)
+            self.finish_requests(
+                [plan.hybrid_replay_id], RequestStatus.FINISHED_ABORTED
+            )
+
+    def _cancel_hybrid_attention_replay(self, plan: RecoveryPlan) -> None:
+        """Retire private replay through normal request fences, if still live."""
+        if plan.hybrid_replay_id is not None:
+            self.hybrid_replay_parents.pop(plan.hybrid_replay_id, None)
+            self.finish_requests(
+                [plan.hybrid_replay_id], RequestStatus.FINISHED_ABORTED
+            )
+
+    def _fail_hybrid_attention_replay(self, replay_id: str) -> None:
+        parent_id = self.hybrid_replay_parents.pop(replay_id, None)
+        if parent_id is None:
+            return
+        plan = self.recovery_plans.get(parent_id)
+        if plan is None or plan.hybrid_replay_id != replay_id:
+            return
+        self.recovery_plans.pop(parent_id)
+        self._remember_consumed_evidence(plan)
+        parent = self.requests.get(parent_id)
+        if parent is not None and not parent.is_finished():
+            parent.num_computed_tokens = 0
+            self._mark_num_computed_tokens_rewound(parent)
+            self._untrusted_external_reqs.add(parent_id)
+            self.failed_recving_kv_req_ids.add(parent_id)
+            self._req_transfer_attestations.pop(parent_id, None)
 
     def _consume_repair_result(
         self, result: RepairResultReport

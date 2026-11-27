@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_kv_cache_spec_kind,
@@ -643,7 +644,8 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        if not request.is_internal_kv_repair:
+            self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
 
@@ -813,8 +815,62 @@ class KVCacheManager:
                 that are already cached and tokens to be cached.
 
         """
-        if self.enable_caching:
+        if self.enable_caching and not request.is_internal_kv_repair:
             self.coordinator.cache_blocks(request, num_computed_tokens)
+
+    def adopt_attention_repair(
+        self,
+        request: Request,
+        replay: Request,
+        token_span: tuple[int, int],
+        group_ids: tuple[int, ...],
+    ) -> None:
+        """Atomically adopt completed private attention blocks from replay.
+
+        Recurrent state and healthy attention mappings remain untouched. Take
+        references before normal replay retirement releases its allocations.
+        Reject non-attention groups, shared destinations and incomplete/stale
+        source work without changing either request's mappings or ownership.
+        """
+        start, end = token_span
+        if (
+            not replay.is_internal_kv_repair
+            or replay.num_in_flight_tokens
+            or request.num_in_flight_tokens
+            or not 0 <= start < end <= replay.num_computed_tokens
+            or request.all_token_ids[:end] != replay.all_token_ids[:end]
+            or request.cache_salt != replay.cache_salt
+            or request.lora_request != replay.lora_request
+            or not group_ids
+            or len(set(group_ids)) != len(group_ids)
+        ):
+            raise ValueError("Invalid or incomplete attention replay")
+        destination = self.coordinator.get_blocks(request.request_id)
+        source = self.coordinator.get_blocks(replay.request_id)
+        updates: list[
+            tuple[list[KVCacheBlock], int, int, list[KVCacheBlock], list[KVCacheBlock]]
+        ] = []
+        for gid in group_ids:
+            if not 0 <= gid < len(self.kv_cache_config.kv_cache_groups):
+                raise ValueError("Invalid attention repair group")
+            spec = self.kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+            if not isinstance(spec, FullAttentionSpec):
+                raise ValueError("Repair adoption accepts full attention only")
+            if start % spec.block_size or end % spec.block_size:
+                raise ValueError("Attention repair is not block aligned")
+            lo, hi = start // spec.block_size, end // spec.block_size
+            if len(destination[gid]) < hi or len(source[gid]) < hi:
+                raise ValueError("Attention replay block table is incomplete")
+            old, new = destination[gid][lo:hi], source[gid][lo:hi]
+            if any(
+                not self.block_pool.is_block_writable(block) for block in (*old, *new)
+            ):
+                raise ValueError("Attention replay requires private unpublished blocks")
+            updates.append((destination[gid], lo, hi, old, new))
+        for blocks, lo, hi, old, new in updates:
+            self.block_pool.touch(new)
+            blocks[lo:hi] = new
+            self.block_pool.free_blocks(old)
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]

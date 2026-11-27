@@ -248,6 +248,11 @@ class KVLoadFailureReport:
     # the transfer-identity contract, which the repair policy's
     # evidence gates reject.
     transfer_generation: int | None = None
+    # Hybrid attention failures use group-qualified physical IDs. Every named
+    # recurrent group was fully delivered at restored_extent; a missing state
+    # must never be reported through this attention-only recovery contract.
+    failed_blocks_by_group: dict[int, list[int]] | None = None
+    healthy_recurrent_group_ids: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
