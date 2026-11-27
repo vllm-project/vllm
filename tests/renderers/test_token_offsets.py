@@ -39,6 +39,7 @@ def _make_base_renderer_with(tokenizer):
             # Mirror BaseRenderer.__init__: the async path offloads the sync
             # ``_tokenize_prompt`` to a thread pool.
             self._tokenize_prompt_async = make_async(self._tokenize_prompt)
+            self._tokenize_text_prompt_async = make_async(self._tokenize_text_prompt)
             self.mm_processor = None
 
         def get_tokenizer(self):

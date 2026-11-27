@@ -190,6 +190,9 @@ class BaseRenderer(ABC, Generic[_T]):
         self._tokenize_prompt_async = make_async(
             self._tokenize_prompt, executor=self._executor
         )
+        self._tokenize_text_prompt_async = make_async(
+            self._tokenize_text_prompt, executor=self._executor
+        )
         self._async_tokenizer_decode = make_async(self._decode, executor=self._executor)
 
         self.mm_processor: BaseMultiModalProcessor | None = None
@@ -732,6 +735,19 @@ class BaseRenderer(ABC, Generic[_T]):
             offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
 
+    def _tokenize_text_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> tuple[TokensPrompt, bool]:
+        """Tokenize text and report whether the tokenizer truncated it."""
+        tokenized = self._tokenize_prompt(prompt, params)
+        num_tokens = len(tokenized["prompt_token_ids"])
+        probe = params._tokenizer_truncation_probe(num_tokens)
+        if probe is None:
+            return tokenized, False
+
+        probed = self._tokenize_prompt(prompt, probe)
+        return tokenized, len(probed["prompt_token_ids"]) > num_tokens
+
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
         prompt["prompt"] = tokenizer.decode(prompt["prompt_token_ids"])
@@ -775,12 +791,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 self.tokenizer, prompt["prompt"]
             )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
-            text_prompt = prompt
-            prompt = self._tokenize_prompt(text_prompt, params)
-            num_tokens = len(prompt["prompt_token_ids"])
-            if (probe := params._tokenizer_truncation_probe(num_tokens)) is not None:
-                probed = self._tokenize_prompt(text_prompt, probe)
-                tokenizer_truncated = len(probed["prompt_token_ids"]) > num_tokens
+            prompt, tokenizer_truncated = self._tokenize_text_prompt(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
@@ -832,12 +843,9 @@ class BaseRenderer(ABC, Generic[_T]):
                 self.tokenizer, prompt["prompt"]
             )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
-            text_prompt = prompt
-            prompt = await self._tokenize_prompt_async(text_prompt, params)
-            num_tokens = len(prompt["prompt_token_ids"])
-            if (probe := params._tokenizer_truncation_probe(num_tokens)) is not None:
-                probed = await self._tokenize_prompt_async(text_prompt, probe)
-                tokenizer_truncated = len(probed["prompt_token_ids"]) > num_tokens
+            prompt, tokenizer_truncated = await self._tokenize_text_prompt_async(
+                prompt, params
+            )
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")

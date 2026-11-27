@@ -528,13 +528,11 @@ class TokenizeParams:
         return slice(0, max_length)
 
     def _tokenizer_truncation_probe(self, num_tokens: int) -> "TokenizeParams | None":
-        """Params to tell whether the tokenizer cut a text prompt to `num_tokens`.
+        """Params to re-encode a text prompt without `truncate_prompt_tokens`.
 
-        Without an explicit `truncation_side`, `get_encode_kwargs` lets the
-        tokenizer truncate, so `_truncation_slice` never sees the cut. A prompt
-        that fits exactly has the same length as a cut one, so the caller
-        encodes it again with one more token of room: it was cut only if that
-        returns more than `num_tokens` tokens. `None` means it was not cut.
+        Without an explicit `truncation_side` the tokenizer truncates by itself,
+        so a prompt cut to `max_length` tokens looks like one that fits exactly.
+        `None` unless `num_tokens == max_length`.
         """
         if (
             not self.needs_detokenization
@@ -544,14 +542,12 @@ class TokenizeParams:
             return None
 
         max_length = self.get_encode_kwargs().get("max_length")
-        if max_length is None or num_tokens < max_length:
+        if num_tokens != max_length:
             return None
 
-        # Without `max_total_tokens`, the extra token may exceed the context.
         return replace(
             self,
-            max_total_tokens=None,
-            truncate_prompt_tokens=max_length + 1,
+            truncate_prompt_tokens=None,
             return_token_offsets=False,
             needs_detokenization=False,
         )
