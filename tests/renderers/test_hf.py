@@ -1001,6 +1001,80 @@ SYSTEM_FIRST_TEMPLATE = (
 )
 
 
+# Like Muse Spark's template: renders text parts and skips unknown part types.
+TEXT_PARTS_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{'<|im_start|>' + message['role'] + '\\n'}}"
+    "{% if message['content'] is string %}{{ message['content'] }}"
+    "{% else %}{% for part in message['content'] %}"
+    "{% if part['type'] == 'text' %}{{ part['text'] }}{% endif %}"
+    "{% endfor %}{% endif %}"
+    "{{'<|im_end|>\\n'}}"
+    "{% endfor %}"
+)
+
+TOOL_REFERENCE_TEMPLATE = TEXT_PARTS_TEMPLATE.replace(
+    "{% endif %}{% endfor %}",
+    "{% elif part['type'] == 'tool_reference' %}REF:{{ part['name'] }}"
+    "{% endif %}{% endfor %}",
+)
+
+SEARCH_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "jira_add_comment",
+            "description": "Add a comment to a Jira issue.",
+            "parameters": {"type": "object", "properties": {}},
+            "defer_loading": True,
+        },
+    }
+]
+
+
+class TestSafeApplyChatTemplateToolReference:
+    """Claude Code's ToolSearch returns tool_reference parts that name tools.
+    Templates that skip them would show an empty search result, so the request
+    is rejected and Claude Code retries without tool search."""
+
+    @pytest.fixture
+    def model_config(self):
+        return ModelConfig("facebook/opt-125m", tokenizer="facebook/opt-125m")
+
+    @pytest.fixture
+    def tokenizer(self):
+        return get_tokenizer("facebook/opt-125m")
+
+    def _render(self, model_config, tokenizer, chat_template, name):
+        conversation: list[ConversationMessage] = [
+            {
+                "role": "tool",
+                "tool_call_id": "t1",
+                "content": [{"type": "tool_reference", "name": name}],
+            }
+        ]
+        return safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            tools=SEARCH_TOOLS,
+            chat_template=chat_template,
+            tokenize=False,
+        )
+
+    def test_rejected_when_template_skips_it(self, model_config, tokenizer):
+        with pytest.raises(VLLMValidationError, match="tool search"):
+            self._render(
+                model_config, tokenizer, TEXT_PARTS_TEMPLATE, "jira_add_comment"
+            )
+
+    def test_template_support_preserved(self, model_config, tokenizer):
+        result = self._render(
+            model_config, tokenizer, TOOL_REFERENCE_TEMPLATE, "jira_add_comment"
+        )
+        assert "<|im_start|>tool\nREF:jira_add_comment<|im_end|>" in result
+
+
 EFFORT_VALIDATING_TEMPLATE = (
     "{% if reasoning_effort is defined and "
     "reasoning_effort not in ['xhigh', 'medium', 'low'] %}"
