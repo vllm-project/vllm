@@ -372,10 +372,18 @@ def test_compressed_indexer_without_tokens_returns_dead_rows(
 
 
 _AITER_FP8_SWIGLU_REASON = (
-    "AITER FP8 block-scale fused MoE (AiterFp8BlockExperts) ignores "
+    "AITER < 0.1.30 FP8 block-scale fused MoE (AiterFp8BlockExperts) ignores "
     "swiglu_limit, so HY4 FP8 routed experts run unclamped SwiGLU under "
-    "VLLM_ROCM_USE_AITER=1"
+    "VLLM_ROCM_USE_AITER=1; fixed by ROCm/aiter#7019"
 )
+
+
+def _aiter_drops_fp8_swiglu_limit() -> bool:
+    from importlib.metadata import version
+
+    from packaging.version import Version
+
+    return Version(version("amd-aiter")).release < (0, 1, 30)
 
 
 @pytest.fixture(params=[False, True], ids=["triton", "aiter"])
@@ -389,6 +397,36 @@ def aiter_env(request, monkeypatch):
     yield request.param
     monkeypatch.undo()
     rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.fixture
+def moe_vllm_config(tmp_path):
+    """The current `VllmConfig` of a tiny HY4 Flash checkpoint whose SwiGLU
+    limit is small enough that the clamp is active for most tokens."""
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
+
+    config = HYV4FlashConfig(
+        hidden_size=256,
+        routed_expert_hidden_size=128,
+        n_routed_experts=16,
+        num_experts_per_tok=4,
+        moe_intermediate_size=128,
+        n_shared_experts=1,
+        routed_scaling_factor=3.998,
+        norm_topk_prob=True,
+        swiglu_limit=1.0,
+        num_hidden_layers=2,
+    )
+    config.architectures = ["HYV4FlashForCausalLM"]
+    config.save_pretrained(tmp_path)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        )
+    )
+    with set_current_vllm_config(vllm_config):
+        yield vllm_config
 
 
 def _block_fp8(weight: torch.Tensor):
@@ -456,16 +494,15 @@ def test_latent_moe_matches_reference(
     fp8,
     aiter_env,
     dist_init,
-    default_vllm_config,
+    moe_vllm_config,
     workspace_init,
-    monkeypatch,
     request,
 ):
     """`HYV4FlashMoE` routes in the full width, runs clamped-SwiGLU experts in
     the latent width between the down/up projections, adds the shared expert
     and applies the sandwich norm, matching an eager reference for BF16 and
     block-FP8 weights on the Triton and AITER expert backends."""
-    if aiter_env and fp8:
+    if aiter_env and fp8 and _aiter_drops_fp8_swiglu_limit():
         request.applymarker(
             pytest.mark.xfail(strict=True, reason=_AITER_FP8_SWIGLU_REASON)
         )
@@ -476,30 +513,9 @@ def test_latent_moe_matches_reference(
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.models.hy_v4.amd.model import _normalize_hyv4_config
     from vllm.models.hy_v4_flash.amd.moe import HYV4FlashMoE
-    from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
 
-    config = _normalize_hyv4_config(
-        HYV4FlashConfig(
-            hidden_size=256,
-            routed_expert_hidden_size=128,
-            n_routed_experts=16,
-            num_experts_per_tok=4,
-            moe_intermediate_size=128,
-            n_shared_experts=1,
-            routed_scaling_factor=3.998,
-            norm_topk_prob=True,
-            # Small enough that the clamp is active for most tokens.
-            swiglu_limit=1.0,
-            num_hidden_layers=2,
-        )
-    )
+    config = _normalize_hyv4_config(moe_vllm_config.model_config.hf_text_config)
     quant_config = Fp8Config(weight_block_size=[128, 128]) if fp8 else None
-    # FP8 layers read the activation dtype and model type from the model config.
-    monkeypatch.setattr(
-        default_vllm_config,
-        "model_config",
-        SimpleNamespace(dtype=torch.bfloat16, hf_text_config=config),
-    )
     with set_default_torch_dtype(torch.bfloat16), torch.device(DEVICE):
         moe = HYV4FlashMoE(config, quant_config, "model.layers.1.mlp")
     weights = {
@@ -523,7 +539,7 @@ def test_latent_moe_matches_reference(
             method.process_weights_after_loading(module)
     x = torch.randn(num_tokens, config.hidden_size, device=DEVICE).bfloat16()
 
-    with set_forward_context(None, default_vllm_config):
+    with set_forward_context(None, moe_vllm_config):
         out = moe(x)
 
     expected = _moe_reference(weights, x, config, fp8)

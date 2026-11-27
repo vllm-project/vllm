@@ -13,7 +13,7 @@ from vllm.v1.kv_offload.cpu.policies.base import (
     order_request_keys,
 )
 
-_HeapEntry = tuple[tuple[int, int], OffloadKey]
+_HeapEntry = tuple[bool, tuple[int, int], OffloadKey]
 
 
 @dataclass(slots=True)
@@ -67,21 +67,27 @@ class LRUCachePolicy(CachePolicy):
         self._ranks[key] = (self._next_rank, 0)
         return key in self._evictable
 
+    def _heap_entry(self, key: OffloadKey) -> _HeapEntry:
+        return self.chunks[key].retained, self._ranks[key], key
+
     def _push_evictable(self, key: OffloadKey) -> None:
-        heapq.heappush(
-            self._heap,
-            (self._ranks[key], key),
-        )
+        heapq.heappush(self._heap, self._heap_entry(key))
 
     def _is_current(self, entry: _HeapEntry) -> bool:
-        rank, key = entry
-        return key in self._evictable and self._ranks.get(key) == rank
+        retained, rank, key = entry
+        return (
+            key in self._evictable
+            and self._ranks[key] == rank
+            and self.chunks[key].retained == retained
+        )
+
+    def _rebuild_heap(self) -> None:
+        self._heap = [self._heap_entry(key) for key in self._evictable]
+        heapq.heapify(self._heap)
 
     def _maybe_compact_heap(self) -> None:
-        if len(self._heap) < max(64, 2 * len(self._evictable)):
-            return
-        self._heap = [(self._ranks[key], key) for key in self._evictable]
-        heapq.heapify(self._heap)
+        if len(self._heap) >= max(64, 2 * len(self._evictable)):
+            self._rebuild_heap()
 
     def _update_recency(self, keys: Iterable[OffloadKey]) -> None:
         updated_evictable = [key for key in keys if self._assign_new_rank(key)]
@@ -93,8 +99,7 @@ class LRUCachePolicy(CachePolicy):
         # Rebuilding is linear and substantially cheaper than k heap pushes
         # for a long prefix. Small updates retain the incremental path.
         if len(updated_evictable) >= max(64, len(self._evictable) // 4):
-            self._heap = [(self._ranks[key], key) for key in self._evictable]
-            heapq.heapify(self._heap)
+            self._rebuild_heap()
         else:
             for key in updated_evictable:
                 self._push_evictable(key)
@@ -181,9 +186,9 @@ class LRUCachePolicy(CachePolicy):
             entry = heapq.heappop(self._heap)
             if not self._is_current(entry):
                 continue
-            key = entry[1]
-            # Re-pinning without a recency change can leave an equivalent
-            # lazy entry behind. Select each cache key at most once.
+            key = entry[2]
+            # Transfer pinning or retention changes can leave equivalent
+            # lazy entries behind. Select each cache key at most once.
             if key in selected_keys:
                 continue
             if key in protected:
@@ -206,13 +211,19 @@ class LRUCachePolicy(CachePolicy):
 
         candidates: list[tuple[OffloadKey, ChunkStatus]] = []
         for entry, chunk in selected:
-            key = entry[1]
+            key = entry[2]
             self._evictable.remove(key)
             del self.chunks[key]
             del self._ranks[key]
             candidates.append((key, chunk))
         self._maybe_compact_heap()
         return candidates
+
+    @override
+    def on_retention_changed(self, key: OffloadKey, retained: bool) -> None:
+        if key in self._evictable:
+            self._push_evictable(key)
+            self._maybe_compact_heap()
 
     @override
     def mark_evictable(self, key: OffloadKey) -> None:

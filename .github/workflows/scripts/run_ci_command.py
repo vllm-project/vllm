@@ -82,6 +82,8 @@ CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 # for branches that predate .buildkite/scripts/rocm/build.sh.
 ROCM_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
 SETUP_STEP_KEYS = {"ensure-ci-base-amd", ROCM_REFRESH_STEP_KEY, "pre-commit"}
+# ci-infra adds it for the sharded steps a build runs; it is not selectable.
+SHARD_COVERAGE_STEP_KEY = "runtime-shard-coverage-check"
 # A PR to main that changes these builds a new ROCm base image. Its
 # rocm-image-cache-check step fails until reconcile_rocm_cache caches the image
 # a trusted user's CI build pushed, so main reuses it after the merge.
@@ -1226,6 +1228,7 @@ def handle_retry_failed(
         )
 
     failed_step_keys = {str(job["step_key"]) for job in failed_script_jobs}
+    failed_step_keys.discard(SHARD_COVERAGE_STEP_KEY)
     setup_failures = sorted(
         step_key
         for step_key in failed_step_keys
@@ -1587,9 +1590,10 @@ def reconcile_rocm_cache(
     promote = max(promotes, key=lambda build: build.get("created_at", ""), default=None)
     if promote is None:
         return start_rocm_promote(github, ci_buildkite, pr, source, promote_id)
-    if not promote.get("finished_at"):
+    promoted_at, promote_state = rocm_promote_result(ci_buildkite, promote)
+    if not promoted_at:
         return f"Waiting for {promote['web_url']}."
-    if promote.get("state") != "passed":
+    if promote_state != "passed":
         if len(promotes) < ROCM_PROMOTE_ATTEMPTS:
             return start_rocm_promote(github, ci_buildkite, pr, source, promote_id)
         marker = f"<!-- vllm-ci-rocm-promote-failed:{promote_id} -->"
@@ -1609,7 +1613,7 @@ def reconcile_rocm_cache(
         job
         for job in checks
         if job.get("state") in RETRY_STATES.split(",")
-        and (job.get("started_at") or "") < promote["finished_at"]
+        and (job.get("started_at") or "") < promoted_at
     ]
     check = max(failed, key=lambda job: job.get("created_at") or "", default=None)
     if check is None:
@@ -1623,6 +1627,19 @@ def reconcile_rocm_cache(
     return f"Retried the cache check of {head_build['web_url']}."
 
 
+def rocm_promote_result(
+    ci_buildkite: BuildkiteClient, promote: Mapping[str, Any]
+) -> tuple[str | None, str | None]:
+    """When a promote build's cache job finished, and how; the build's own
+    if it has none (its pipeline never uploaded). The job's status wakes the
+    bot before the build itself has finished."""
+    jobs = ci_buildkite.list_jobs(promote["number"], step_key=ROCM_CACHE_STEP_KEY)
+    job = max(jobs, key=lambda job: job.get("created_at") or "", default=None)
+    if job is None:
+        return promote.get("finished_at"), promote.get("state")
+    return job.get("finished_at"), job.get("state")
+
+
 def handle_buildkite_status(
     event: Mapping[str, Any],
     github: GitHubClient,
@@ -1630,20 +1647,20 @@ def handle_buildkite_status(
     amd_buildkite: BuildkiteClient,
     trusted_users: set[str],
 ) -> str:
-    """Reconcile the PR whose CI or ROCm promote build just finished.
+    """Reconcile the PR whose ROCm image cache check or promote job just
+    finished (the `ci/step:` statuses rocm-image-cache.yml listens to).
 
-    The status's target URL only names the build; the build itself, fetched
-    from Buildkite, says which PR it belongs to.
+    The status's target URL only names the build (and the job, after `#`);
+    the build itself, fetched from Buildkite, says which PR it belongs to.
+    The build may still be running: these jobs finish before it does.
     """
-    number = str(event.get("target_url") or "").rpartition("/builds/")[2]
+    url = str(event.get("target_url") or "").partition("#")[0]
+    number = url.rpartition("/builds/")[2]
     if not number.isdigit():
         return "The status does not link a Buildkite build."
     build = ci_buildkite.get_build(int(number))
     if build.get("source") != "api" or build.get("commit") != event.get("sha"):
         return "Not a build the bot created for this commit."
-    # Buildkite also posts failure while a failing build still runs.
-    if build.get("state") in CANCELABLE_BUILD_STATES:
-        return "The build has not finished."
     pr_number = str((build.get("pull_request") or {}).get("id") or "")
     if not pr_number and build.get("branch") == "main":
         pr_number = str((build.get("env") or {}).get("ROCM_PROMOTE_PR", ""))

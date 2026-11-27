@@ -2752,6 +2752,81 @@ def test_aiter_mxfp4_monolithic_expert_parallel_support(
         assert "parallel config" in reason
 
 
+_DP = {"tp_size": 2, "dp_size": 2}
+_DP_EP = {"dp_size": 2, "ep_size": 2, "use_ep": True}
+
+
+@pytest.mark.parametrize(
+    "parallel,activation,has_hash_routing,gfx1250,rejection",
+    [
+        (_DP, "SWIGLUOAI", False, False, None),
+        (_DP_EP, "SWIGLUOAI", False, False, None),
+        (
+            {**_DP_EP, "all2all_backend": "deepep_high_throughput"},
+            "SWIGLUOAI",
+            False,
+            False,
+            "parallel config",
+        ),
+        (_DP, "SWIGLUOAI", True, False, "hash routing"),
+        (_DP_EP, "SILU", False, True, "gfx1250"),
+    ],
+    ids=["dp", "dp_ep_ag_rs", "dp_ep_deepep", "dp_hash_routing", "ep_silu_gfx1250"],
+)
+def test_aiter_w4a16_monolithic_data_parallel_support(
+    monkeypatch: pytest.MonkeyPatch,
+    parallel: dict,
+    activation: str,
+    has_hash_routing: bool,
+    gfx1250: bool,
+    rejection: str | None,
+):
+    """DP attention reaches W4A16 through the naive allgather/reduce-scatter
+    prepare/finalize, so it is supported with and without EP. A dispatching
+    all2all, hash routing under DP (`input_ids` are not gathered) and EP with
+    SILU on gfx1250 (the a8w4 fallback takes no `expert_map`) are rejected."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+        AiterW4A16ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Static,
+    )
+
+    experts_cls = AiterW4A16ExpertsMonolithic
+    monkeypatch.setattr(experts_cls, "_supports_current_device", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: gfx1250)
+    config = make_dummy_moe_config(
+        num_experts=256,
+        experts_per_token=6,
+        hidden_dim=4096,
+        intermediate_size=2048,
+        activation=MoEActivation[activation],
+    )
+    config = replace(
+        config,
+        routing_method=RoutingMethodType.Renormalize,
+        has_hash_routing=has_hash_routing,
+        moe_parallel_config=replace(config.moe_parallel_config, **parallel),
+    )
+    supported, reason = experts_cls.is_supported_config(
+        experts_cls,
+        config,
+        kMxfp4Static,
+        None,
+        FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported is (rejection is None), reason
+    if rejection is not None:
+        assert reason is not None and rejection in reason
+
+
 @pytest.mark.parametrize(
     "all2all_backend",
     [
