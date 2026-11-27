@@ -1322,8 +1322,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RESIDUAL_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_RESIDUAL_SP_MIN_TOKENS", "1024")
     ),
-    # Disable aiter ops unless specifically enabled.
-    # Acts as a parent switch to enable the rest of the other operations.
+    # Parent switch for the AITER ops. Unset means on for CDNA3 or newer with
+    # aiter installed; `0` turns them off.
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "True").lower() in ("true", "1")
     ),
