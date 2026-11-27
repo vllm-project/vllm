@@ -363,6 +363,9 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        if self.block_quant:
+            # Here, not after loading, so pre-processed weights also fuse.
+            expose_input_quant_key(layer, self.fp8_linear)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_weights_pre_processed():
@@ -417,10 +420,6 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.input_scale = None
 
         self.fp8_linear.process_weights_after_loading(layer)
-        if self.block_quant:
-            # Lets a fused producer (e.g. SiLU-and-mul + group quant) hand the
-            # kernel a pre-quantized input.
-            expose_input_quant_key(layer, self.fp8_linear)
 
     def apply(
         self,
