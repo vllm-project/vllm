@@ -97,6 +97,58 @@ def reduce_scatter_test_worker(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
+def reduce_scatter_batch_invariant_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    from vllm.distributed import get_tp_group
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+    group = get_tp_group()
+    generator = torch.Generator().manual_seed(20261125)
+    contributions = torch.randn(tp_size, 128, generator=generator)
+    for dtype in (torch.bfloat16, torch.float16, torch.float32):
+        reference = None
+        row = contributions[rank].to(device=device, dtype=dtype)
+        for dim in (0, 1):
+            for batch in (1, 3, 32, 129):
+                input_ = row.expand(tp_size * batch, -1).contiguous()
+                if dim == 1:
+                    input_ = input_.T
+                output = group.reduce_scatter(input_, dim=dim)
+                if reference is None:
+                    reference = output[0].clone()
+                    torch.distributed.broadcast(
+                        reference, src=0, group=group.device_group
+                    )
+                expected = reference.expand(batch, -1)
+                if dim == 1:
+                    expected = expected.T
+                assert torch.equal(output, expected), (
+                    f"reduce_scatter depends on owner={rank}, batch={batch}, dim={dim}"
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = group.reduce_scatter(input_, dim=dim)
+                graph.replay()
+                torch.accelerator.synchronize()
+                assert torch.equal(captured, expected)
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-specific dispatch")
+def test_reduce_scatter_batch_invariant_across_owners(monkeypatch):
+    multi_process_parallel(monkeypatch, 4, 1, reduce_scatter_batch_invariant_worker)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
 def all_gather_test_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,

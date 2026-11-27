@@ -555,6 +555,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if pynccl_comm is None or pynccl_comm.disabled:
             # Fall back when pynccl is unavailable, e.g. an old NCCL version.
             return super().reduce_scatter(input_, dim)
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda()
+            and input_.is_floating_point()
+        ):
+            return self.reduce_scatterv(input_, dim)
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()

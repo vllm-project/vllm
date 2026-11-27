@@ -18,6 +18,7 @@ from utils import (
 )
 
 import vllm.envs as envs
+from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
@@ -1099,3 +1100,32 @@ def LLM_with_max_seqs(
         # enable_expert_parallel=True,
         **extra_kwargs,
     )
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-specific dispatch")
+def test_pcp_batch_invariance_across_request_positions(vllm_runner):
+    # PCP supports MLA only, so this cannot follow the suite's Qwen default.
+    model = "deepseek-ai/DeepSeek-V2-Lite"
+    target = "The future of artificial intelligence is"
+    fillers = [f"The future of {x} is" for x in ("medicine", "hardware", "science")]
+    sampling = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True, logprobs=5)
+    with vllm_runner(
+        model,
+        prefill_context_parallel_size=4,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=512,
+        max_num_seqs=8,
+        max_num_batched_tokens=512,
+        gpu_memory_utilization=0.45,
+        attention_config={"backend": "TRITON_MLA"},
+    ) as runner:
+        baseline = runner.llm.generate([target], sampling, use_tqdm=False)[0].outputs[0]
+        for position in range(4):
+            prompts = fillers.copy()
+            prompts.insert(position, target)
+            output = runner.llm.generate(prompts, sampling, use_tqdm=False)
+            actual = output[position].outputs[0]
+            assert actual.token_ids == baseline.token_ids, f"position={position}"
+            assert actual.logprobs == baseline.logprobs, f"position={position}"

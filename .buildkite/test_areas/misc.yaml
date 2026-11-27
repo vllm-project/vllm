@@ -1077,6 +1077,7 @@ steps:
   optional: true
   num_devices: 4
   source_file_dependencies:
+    - tests/distributed/test_comm_ops.py
     - vllm/distributed/device_communicators/
     - vllm/model_executor/determinism
     - vllm/model_executor/layers
@@ -1086,6 +1087,8 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    - pytest -v -s distributed/test_comm_ops.py::test_reduce_scatter_batch_invariant_across_owners
+    - pytest -v -s v1/determinism/test_batch_invariance.py::test_pcp_batch_invariance_across_request_positions
     - pytest -v -s v1/determinism/test_fused_allreduce_rms_norm_batch_invariant.py
     - VLLM_TEST_TP_SIZE=4 pytest -v -s v1/determinism/test_batch_invariance.py -k "bs1_vs_bsN or without_batch_invariance_should_fail"
     - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
