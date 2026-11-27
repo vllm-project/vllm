@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     kv_cache_dtype_str_to_dtype,
@@ -36,7 +37,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
     _INKLING_FA4_REL_ATTENTION_KERNEL,
-    _use_portable_sm80,
     bucket_max_seqlen_q,
     inkling_fa4_num_splits,
 )
@@ -176,7 +176,10 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
         # SM8x never runs the FA4 kernel, so there is nothing to warm up.
-        if vllm_config.kernel_config.enable_jit_warmup and not _use_portable_sm80():
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and not current_platform.is_device_capability_family(80)
+        ):
             _INKLING_FA4_REL_ATTENTION_KERNEL.register_warmup()
 
     def get_attn_backend(self) -> type[AttentionBackend]:

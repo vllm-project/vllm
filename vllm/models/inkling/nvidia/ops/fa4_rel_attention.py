@@ -33,25 +33,17 @@ def _use_sheared_bias() -> bool:
     return capability is not None and capability.major in (10, 11)
 
 
-@cache
-def _use_portable_sm80() -> bool:
-    """SM8x (Ampere/Ada) has no FA4: its score_mod path raises
-    NotImplementedError there. Use Inkling 2's paged Triton kernel instead."""
-    capability = current_platform.get_device_capability()
-    return capability is not None and capability.major == 8
-
-
 def shear_rel_logits(
     rel_logits: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cache_seqlens: torch.Tensor,
     rel_extent: int,
 ) -> torch.Tensor:
-    """Natural `(T, H, E)` relative logits -> the sheared `(T + 128, H, E + 256)`
+    """Natural `(T, H, E)` relative logits -> the sheared `(T, H, E + 256)`
     layout read by Inkling 2's paged Triton kernel: column c of token t holds
     key `c + ceil128(past + tile_end) - (E + 256)`, with tile_end the end of
-    t's 128-row query tile clipped to its request. Static shapes and no host
-    sync, so it is safe under CUDA-graph capture."""
+    t's 128-row query tile clipped to its request. Columns outside the extent
+    hold arbitrary values; the kernel masks them."""
     num_tokens, num_heads, extent = rel_logits.shape
     assert extent == rel_extent
     padded = extent + 256
@@ -69,13 +61,9 @@ def shear_rel_logits(
     dist = (past + local)[:, None] - (
         torch.arange(padded, device=dev, dtype=torch.int64)[None] + base[:, None]
     )
-    valid = (dist >= 0) & (dist < extent)
-    vals = rel_logits.gather(
-        2, dist.clamp(0, extent - 1)[:, None, :].expand(num_tokens, num_heads, padded)
+    return rel_logits.gather(
+        2, dist.clamp_(0, extent - 1)[:, None, :].expand(num_tokens, num_heads, padded)
     )
-    sheared = rel_logits.new_zeros((num_tokens + 128, num_heads, padded))
-    sheared[:num_tokens] = torch.where(valid[:, None, :], vals, torch.zeros_like(vals))
-    return sheared
 
 
 def _sm80_rel_attention(
@@ -264,7 +252,7 @@ class InklingFA4RelAttentionKernel(
 
         rel_logits = rel_logits.contiguous()
         flash_attn_varlen_func: Callable[..., Any]
-        if _use_portable_sm80():
+        if current_platform.is_device_capability_family(80):
             return _sm80_rel_attention(
                 q,
                 key_cache,
