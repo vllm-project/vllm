@@ -17,6 +17,7 @@ from starlette.background import BackgroundTask, BackgroundTasks
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -257,6 +258,15 @@ def get_max_tokens(
         if max_tokens is not None
         else default_sampling_params.get("max_tokens")
     )
+    if model_max_tokens == 0 and fallback_max_tokens != 0:
+        raise VLLMValidationError(
+            f"This model's maximum context length is {max_model_len} tokens. "
+            f"However, your prompt fills it with {input_length} input tokens, "
+            "leaving no room for output tokens. "
+            "Please reduce the length of the input prompt.",
+            parameter="input_tokens",
+            value=input_length,
+        )
 
     return min(
         val
