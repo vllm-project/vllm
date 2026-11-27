@@ -903,6 +903,7 @@ def write_producer(monkeypatch, producer_role):
         moriio_wrapper=wrapper,
         moriio_config=SimpleNamespace(transfer_timeout=30.0),
         kv_caches={"layer0": None, "layer1": None},
+        _transfer_layer_names={"layer0", "layer1"},
         _remote_agents={f"{_DECODE_HOST}:{_DECODE_PORT}_dp0": {"agent"}},
         write_ready_flags={f"{_DECODE_HOST}:{_DECODE_PORT}": True},
         _handshake_lock=threading.Lock(),
