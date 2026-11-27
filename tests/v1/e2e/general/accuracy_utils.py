@@ -5,6 +5,7 @@
 import json
 import math
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -118,6 +119,26 @@ def check_first_divergence(
         )
 
 
+@torch.inference_mode()
+def reference_witnesses(
+    hf_model: torch.nn.Module,
+    exact_model: torch.nn.Module,
+    inputs: torch.Tensor,
+    batch_sizes: tuple[int, ...] = (2, 3),
+) -> torch.Tensor:
+    """Return FP32 logits, then the model-dtype logits at other batch sizes.
+
+    The reference rounds too, and its kernels round differently per batch
+    shape. Row 0 holds `exact_model`'s logits for the one sequence in `inputs`;
+    each later row repeats `hf_model` with the sequence stacked that many times.
+    """
+    rows = [exact_model(input_ids=inputs, use_cache=False).logits[0].float()]
+    for n in batch_sizes:
+        repeated = inputs.expand(n, -1)
+        rows.append(hf_model(input_ids=repeated, use_cache=False).logits[0].float())
+    return torch.stack(rows)
+
+
 def check_logprobs(
     scores: dict[int, Logprob],
     reference: torch.Tensor,
@@ -125,8 +146,16 @@ def check_logprobs(
     requested: int,
     tolerance: AccuracyTolerance,
     context: str,
+    witnesses: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Check every score, reported rank, and the complete requested top-k."""
+    """Check every score, reported rank, and the complete requested top-k.
+
+    With `witnesses` (see `reference_witnesses`, normalized like `reference`),
+    scores are compared with FP32 and the bound grows by the farthest the
+    model-dtype reference lies from FP32 at the scored tokens. That accepts
+    every score within the bound of `reference`, and others only where the
+    reference is uncertain.
+    """
     assert all(0 <= token_id < reference.numel() for token_id in scores), context
     assert token in scores, f"{context}: missing score for token {token}"
     assert max(1, requested) <= len(scores) <= requested + 1, context
@@ -145,10 +174,16 @@ def check_logprobs(
     assert (actual[finite] <= 0).all(), f"{context}: positive log probability"
     errors = (actual[finite] - expected[finite]).abs()
     bounds = tolerance.logprob_error(expected[finite])
-    assert (errors <= bounds).all(), (
+    distance = errors
+    if witnesses is not None and finite.any():
+        exact, *resampled = witnesses[:, ids[finite]]
+        moved = torch.stack([expected[finite], *resampled]) - exact
+        distance = (actual[finite] - exact).abs()
+        bounds = bounds + moved[torch.isfinite(moved)].abs().max()
+    assert (distance <= bounds).all(), (
         f"{context}: token IDs={ids[finite].tolist()}, "
         f"actual={actual[finite].tolist()}, reference={expected[finite].tolist()}, "
-        f"error={errors.tolist()}, bound={bounds.tolist()}"
+        f"error={distance.tolist()}, bound={bounds.tolist()}"
     )
 
     for token_id, score in scores.items():
@@ -203,17 +238,27 @@ def check_greedy_token(
     token: int,
     tolerance: AccuracyTolerance,
     context: str,
+    witnesses: torch.Tensor | None = None,
 ) -> float:
+    """Require `token` to be within the near-tie bound of the best token.
+
+    With `witnesses` (see `reference_witnesses`, processed like `logits`), a
+    token whose FP32 gap is within the unchanged bound is accepted too: the
+    reference's own rounding can put a near-tie on the wrong side of it.
+    """
     assert not torch.isnan(logits).any(), context
     assert torch.isfinite(logits[token]), (
         f"{context}: selected token {token} is forbidden by the sampling parameters"
     )
     best = int(logits.argmax())
     gap = float(logits[best] - logits[token])
+    distance = gap
+    if witnesses is not None:
+        distance = min(gap, float(witnesses[0].amax(-1) - witnesses[0, token]))
     # FP32 rounding can push a true near-tie fractionally past the bound.
-    assert gap <= tolerance.greedy_atol + 1e-5, (
+    assert distance <= tolerance.greedy_atol + 1e-5, (
         f"{context}: selected token={token}, reference best={best}, "
-        f"logit gap={gap}, bound={tolerance.greedy_atol} (+1e-5 slack)"
+        f"logit gap={distance}, bound={tolerance.greedy_atol} (+1e-5 slack)"
     )
     return gap
 
@@ -251,8 +296,34 @@ def check_request_accuracy(
     params: SamplingParams,
     tolerance: AccuracyTolerance,
     context: str,
+    exact: Callable[[], torch.nn.Module] | None = None,
 ) -> None:
-    """Score the actual continuation, including positions after any divergence."""
+    """Score the actual continuation, including positions after any divergence.
+
+    A request the reference rejects is scored again with `exact()`, an FP32
+    copy of `hf.model`, so the score and greedy checks allow for the
+    reference's own rounding: scores where it is measured to be large, and
+    tokens that are near-ties in FP32. That cannot reject a request the
+    reference accepts, so those skip the second scoring.
+    Each request accepted only by the second scoring is printed.
+    """
+    try:
+        _check_request_accuracy(hf, request, params, tolerance, context, None)
+    except AssertionError as rejected:
+        if exact is None:
+            raise
+        _check_request_accuracy(hf, request, params, tolerance, context, exact())
+        print(f"REFERENCE ROUNDING ALLOWED: {rejected}")
+
+
+def _check_request_accuracy(
+    hf: HfRunner,
+    request: RequestOutput,
+    params: SamplingParams,
+    tolerance: AccuracyTolerance,
+    context: str,
+    exact: torch.nn.Module | None,
+) -> None:
     assert request.finished and len(request.outputs) == 1, context
     (completion,) = request.outputs
     prompt = request.prompt_token_ids
@@ -276,6 +347,9 @@ def check_request_accuracy(
     )
     inputs = torch.tensor([prompt + tokens], device=hf.device)
     logits = hf.model(input_ids=inputs, use_cache=False).logits[0].float()
+    witnesses = None
+    if exact is not None:
+        witnesses = reference_witnesses(hf.model, exact, inputs)
     # Use the existing byte-fallback handling with an independent request
     # history; numerical scores always come from the HF model above.
     decoder = LogprobsProcessor(
@@ -305,6 +379,7 @@ def check_request_accuracy(
                     params.prompt_logprobs,
                     tolerance,
                     f"{context}, prompt position={i}",
+                    None if witnesses is None else witnesses[:, i - 1].log_softmax(-1),
                 )
             )
         check_accuracy_budget(errors, [], tolerance, f"{context}, prompt logprobs")
@@ -328,7 +403,16 @@ def check_request_accuracy(
             logits[len(prompt) + i - 1], tokens[:i]
         )
         position = f"{context}, generated position={i}"
-        gaps.append(check_greedy_token(processed, token, tolerance, position))
+        raw_witnesses = processed_witnesses = None
+        if witnesses is not None:
+            raw_witnesses, processed_witnesses = reference.distributions(
+                witnesses[:, len(prompt) + i - 1], tokens[:i]
+            )
+        gaps.append(
+            check_greedy_token(
+                processed, token, tolerance, position, processed_witnesses
+            )
+        )
         if completion.logprobs is not None:
             _check_decoded_tokens(decoder, completion.logprobs[i], tokens[:i], position)
             errors.append(
@@ -339,6 +423,7 @@ def check_request_accuracy(
                     params.logprobs,
                     tolerance,
                     position,
+                    None if raw_witnesses is None else raw_witnesses.log_softmax(-1),
                 )
             )
     check_accuracy_budget(errors, gaps, tolerance, f"{context}, completion")
@@ -463,11 +548,12 @@ class SamplingReference:
         """Return FP32 logits before and after non-grammar sampling transforms.
 
         `raw_logits` scores the next token after the prompt and
-        `generated_ids`. Returned tensors do not alias the model's tensor.
+        `generated_ids`; leading dimensions stack several scorings of it.
+        Returned tensors do not alias the model's tensor.
         Normalize the first result to check reported completion logprobs;
         the second supplies the greedy decision reference.
         """
-        assert raw_logits.shape == (self.vocab_size,)
+        assert raw_logits.shape[-1] == self.vocab_size
         assert not self.accept_history(generated_ids), (
             "Cannot generate a distribution after grammar EOS"
         )
@@ -485,17 +571,17 @@ class SamplingReference:
         for bad_word in self.bad_words:
             prefix = bad_word[:-1]
             if not prefix or generated_ids[-len(prefix) :] == prefix:
-                processed[bad_word[-1]] = -torch.inf
+                processed[..., bad_word[-1]] = -torch.inf
 
         if len(generated_ids) < self.min_tokens and self.stop_ids:
             stop_ids = sorted(self.stop_ids)
-            stop_scores = processed[stop_ids].clone()
-            processed[stop_ids] = -torch.inf
+            stop_scores = processed[..., stop_ids].clone()
+            processed[..., stop_ids] = -torch.inf
             # A completed grammar may have no continuation except a stop token.
             if self.matcher is not None and torch.isneginf(processed).all():
-                processed[stop_ids] = stop_scores
+                processed[..., stop_ids] = stop_scores
 
         if self.frequency_penalty:
             for token, count in Counter(generated_ids).items():
-                processed[token] -= self.frequency_penalty * count
+                processed[..., token] -= self.frequency_penalty * count
         return grammar_logits, processed
