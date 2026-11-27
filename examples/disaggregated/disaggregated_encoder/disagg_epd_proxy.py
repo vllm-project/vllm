@@ -762,11 +762,9 @@ async def fanout_encoder_primer(
         }
         if "mm_processor_kwargs" in orig_request:
             encoder_req["mm_processor_kwargs"] = mm_kwargs
-        if indices[0] in video_positions and (
-            mm_kwargs is None or isinstance(mm_kwargs, dict)
-        ):
+        if indices[0] in video_positions and isinstance(mm_kwargs, dict) and mm_kwargs:
             encoder_req["mm_processor_kwargs"] = {
-                **(mm_kwargs or {}),
+                **mm_kwargs,
                 EPD_VIDEO_PARTITION_KEY: [video_positions[indices[0]], num_videos],
             }
         for key in (
@@ -1666,7 +1664,8 @@ if __name__ == "__main__":
         "--enable-per-video-kwargs-slicing",
         action="store_true",
         help=(
-            "Opt in to processor-side per-video kwargs slicing. Only enable "
+            "Opt in to processor-side slicing of request-level per-video kwargs. "
+            "Requests without overrides follow the existing trust policy. Only enable "
             "with updated encoders and compatible consumer hashing. "
             "For videos with audio, put "
             "per-video lists in mm_processor_kwargs.videos_kwargs. Off by default."

@@ -91,7 +91,7 @@ def test_hy_v4_flash_preserves_timing_across_epd_partition(configured):
         "tencent/Hy4-flash",
         model_config_kwargs={"max_model_len": 4096},
         limit_mm_per_prompt={"video": 2},
-        mm_processor_kwargs=intervals if configured else None,
+        mm_processor_kwargs={"second_per_grid_ts": [2.0, 3.0]} if configured else None,
     )
     mm_config = ctx.model_config.get_multimodal_config()
     mm_config.enable_mm_embeds = True
@@ -111,7 +111,7 @@ def test_hy_v4_flash_preserves_timing_across_epd_partition(configured):
             "video_backend": "opencv",
         },
     )
-    kwargs = {} if configured else intervals
+    kwargs = intervals
 
     def run(data, count, options):
         return processor(
@@ -124,6 +124,10 @@ def test_hy_v4_flash_preserves_timing_across_epd_partition(configured):
     parent = run([video, video], 2, kwargs)
     keys = parent["mm_hashes"]["video"]
     assert keys[0] != keys[1]
+    for item, interval in zip(
+        parent["mm_kwargs"]["video"], intervals["second_per_grid_ts"], strict=True
+    ):
+        assert float(item["video_timestamps"].data[1]) == interval
     for index in range(2):
         child = run([video], 1, {**kwargs, "_epd_video_partition": [index, 2]})
         assert child["mm_hashes"]["video"] == keys[index : index + 1]

@@ -638,10 +638,9 @@ def test_dummy_video_covers_request_when_shortest_edge_floor_exceeds_cap() -> No
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 @pytest.mark.parametrize("scoped", [False, True])
-@pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.skip_global_cleanup
 def test_processor_per_video_hashes_survive_partitioning(
-    model_id: str, scoped: bool, configured: bool, monkeypatch: pytest.MonkeyPatch
+    model_id: str, scoped: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Actual encoder children produce the corresponding parent keys and grids."""
     from examples.disaggregated.disaggregated_encoder import disagg_epd_proxy
@@ -649,16 +648,13 @@ def test_processor_per_video_hashes_survive_partitioning(
     def scoped_form(flat: dict[str, Any]) -> dict[str, Any]:
         return {"videos_kwargs": dict(flat)} if scoped else dict(flat)
 
-    options = scoped_form({"num_frames": [8, 16]})
-    kwargs = {} if configured else options
-    if scoped and not configured:
+    kwargs = scoped_form({"num_frames": [8, 16]})
+    if scoped:
         kwargs["num_frames"] = [24]  # shadowed by the scoped list
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 0, "video": 2},
-        mm_processor_kwargs=options
-        if configured
-        else scoped_form({"num_frames": [24]}),
+        mm_processor_kwargs=scoped_form({"num_frames": [24]}),
         mm_processor_cache_gb=1,
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
@@ -698,8 +694,7 @@ def test_processor_per_video_hashes_survive_partitioning(
             for i in range(2)
         ],
     }
-    if kwargs:
-        body["mm_processor_kwargs"] = kwargs
+    body["mm_processor_kwargs"] = kwargs
     asyncio.run(
         disagg_epd_proxy.fanout_encoder_primer(
             body, ["http://encoder"], "partition", enable_per_video_kwargs_slicing=True
@@ -731,20 +726,19 @@ def test_processor_per_video_hashes_survive_partitioning(
     assert partial["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
     assert torch.equal(partial["mm_kwargs"].get_data()["video_grid_thw"], full_grids)
 
-    if not configured:
-        tail = run(
-            videos[:2],
-            {**kwargs, **scoped_form({"num_frames": [8, 16, 32]})},
-            ["v0", "v1"],
-        )
-        assert tail["mm_hashes"] == full["mm_hashes"]
-        changed = run(
-            videos[:2],
-            {**kwargs, **scoped_form({"num_frames": [8, 24]})},
-            ["v0", "v1"],
-        )
-        assert changed["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
-        assert changed["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
+    tail = run(
+        videos[:2],
+        {**kwargs, **scoped_form({"num_frames": [8, 16, 32]})},
+        ["v0", "v1"],
+    )
+    assert tail["mm_hashes"] == full["mm_hashes"]
+    changed = run(
+        videos[:2],
+        {**kwargs, **scoped_form({"num_frames": [8, 24]})},
+        ["v0", "v1"],
+    )
+    assert changed["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+    assert changed["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
 
 
 @pytest.mark.parametrize("partition", [[-1, 2], [2, 2], [True, 2], None])

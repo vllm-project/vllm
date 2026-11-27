@@ -113,13 +113,16 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--ec-consumer-dp-size` | Data-parallel replicas per EC consumer (default 1). |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
-With `--enable-per-video-kwargs-slicing`, the proxy sends each encoder child its
-original position among the request's videos. Qwen3-VL selects that video's
+With `--enable-per-video-kwargs-slicing`, a request with non-empty
+`mm_processor_kwargs` carries each encoder child's original video position.
+Qwen3-VL selects that video's
 `fps` or `num_frames` from the effective processor kwargs. HYV4 and HYV4-Flash VL
 select `second_per_grid_ts` and require one interval per video. The flag defaults
-to off. Enable it only after updating all encoders to support positional requests,
-with `--trust-request-mm-kwargs` enabled and compatible video cache hashing on
-the EC consumer.
+to off. Enable it after updating encoders to support positional requests and
+EC consumers to use compatible video cache hashing. Request-level multimodal
+kwargs still follow the server's `--trust-request-mm-kwargs` policy. Ordinary
+video requests can use this proxy flag with trust disabled. For positional
+lists in server configuration alone, the proxy sends no position metadata.
 
 With audio extracted from video, put per-video `fps` or `num_frames` lists inside
 `mm_processor_kwargs.videos_kwargs` so the audio cache keys match across stages.

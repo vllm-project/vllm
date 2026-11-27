@@ -20,6 +20,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
 from vllm.multimodal.processing.inputs import ProcessorInputs
 
@@ -946,6 +948,7 @@ def test_fanout_positions_include_metadata_only_video_without_sending_it(
     seen: list = []
     monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
     body = {
+        "mm_processor_kwargs": {"fps": 2.0},
         "messages": [
             {
                 "role": "user",
@@ -962,7 +965,10 @@ def test_fanout_positions_include_metadata_only_video_without_sending_it(
         )
     )
     [(_, child)] = seen
-    assert child["mm_processor_kwargs"] == {"_epd_video_partition": [1, 2]}
+    assert child["mm_processor_kwargs"] == {
+        "fps": 2.0,
+        "_epd_video_partition": [1, 2],
+    }
     assert len(child["messages"][0]["content"]) == 1
 
 
@@ -1014,37 +1020,61 @@ def test_fanout_default_preserves_base_hash_kwargs(proxy, monkeypatch, nested, s
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
-    ("enabled", "kwargs", "invalid_at_proxy"),
+    ("enabled", "kwargs", "invalid_at_proxy", "trust"),
     [
-        (True, {"num_frames": [16]}, True),
-        (True, {"videos_kwargs": {"num_frames": [16]}}, True),
-        (True, {"fps": [2.0]}, True),
-        (True, {"videos_kwargs": {"fps": [2.0]}}, True),
-        (True, {"num_frames": [16, 32]}, False),
-        (True, {"num_frames": [99], "videos_kwargs": {"num_frames": [16, 32]}}, False),
-        (False, {"num_frames": [16]}, False),
-        (False, {"videos_kwargs": {"num_frames": [16, 32]}}, False),
-        (True, {"_epd_video_partition": [0, 2]}, True),
-        (False, {"_epd_video_partition": [0, 2]}, True),
+        (True, {"num_frames": [16]}, True, True),
+        (True, {"videos_kwargs": {"num_frames": [16]}}, True, True),
+        (True, {"fps": [2.0]}, True, True),
+        (True, {"videos_kwargs": {"fps": [2.0]}}, True, True),
+        (True, {"num_frames": [16, 32]}, False, True),
+        (
+            True,
+            {"num_frames": [99], "videos_kwargs": {"num_frames": [16, 32]}},
+            False,
+            True,
+        ),
+        (False, {"num_frames": [16]}, False, True),
+        (False, {"videos_kwargs": {"num_frames": [16, 32]}}, False, True),
+        (True, {"_epd_video_partition": [0, 2]}, True, True),
+        (False, {"_epd_video_partition": [0, 2]}, True, True),
+        pytest.param(False, ..., False, False, id="opt-out-absent-trust-off"),
+        pytest.param(True, ..., False, False, id="absent-trust-off"),
+        pytest.param(True, {}, False, False, id="empty-trust-off"),
+        pytest.param(True, None, False, False, id="null-trust-off"),
+        pytest.param(True, {"fps": 2.0}, False, False, id="nonempty-trust-off"),
         pytest.param(
-            True, {"second_per_grid_ts": [0.5]}, False, id="encoder-rejects-hy4"
+            True, {"second_per_grid_ts": [0.5]}, False, True, id="encoder-rejects-hy4"
         ),
     ],
 )
 async def test_per_video_kwargs_http_validation(
-    proxy, monkeypatch, dynamic, stream, enabled, kwargs, invalid_at_proxy
+    proxy, monkeypatch, dynamic, stream, enabled, kwargs, invalid_at_proxy, trust
 ):
     """Distinguish proxy-side 400s from encoder 400s after SSE starts."""
     seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
     expected = b"data: [DONE]\n\n" if stream else b'{"choices": []}'
-    encoder_rejects = "second_per_grid_ts" in kwargs
-    encoder_error = "second_per_grid_ts must match video count"
+    hy4_error = isinstance(kwargs, dict) and "second_per_grid_ts" in kwargs
+    trust_error = not trust and isinstance(kwargs, dict) and bool(kwargs)
+    encoder_error = (
+        "second_per_grid_ts must match video count"
+        if hy4_error
+        else "Per-request mm_processor_kwargs are disabled"
+    )
     stream_finished = False
 
     async def backend(request):
         stage = request.match_info["stage"]
-        seen[stage].append(await request.json())
-        if stage == "encode" and encoder_rejects:
+        payload = await request.json()
+        seen[stage].append(payload)
+        try:
+            validate_request_mm_kwargs(
+                mm_processor_kwargs=payload.get("mm_processor_kwargs"),
+                media_io_kwargs=payload.get("media_io_kwargs"),
+                trust_request_mm_kwargs=trust,
+            )
+        except VLLMValidationError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if stage == "encode" and hy4_error:
             return web.json_response({"error": encoder_error}, status=400)
         if stage in ("encode", "prefill"):
             return web.json_response({})
@@ -1084,9 +1114,10 @@ async def test_per_video_kwargs_http_validation(
         body = {
             "model": "served-model-alias",
             "messages": [{"role": "user", "content": [_vid("a"), _vid("b")]}],
-            "mm_processor_kwargs": kwargs,
             "stream": stream,
         }
+        if kwargs is not ...:
+            body["mm_processor_kwargs"] = kwargs
         await proxy.on_startup()
         try:
 
@@ -1132,7 +1163,7 @@ async def test_per_video_kwargs_http_validation(
             else "entries, one per video"
         ) in detail
         assert seen == {"encode": [], "prefill": [], "decode": []}
-    elif encoder_rejects:
+    elif hy4_error or trust_error:
         assert len(seen["encode"]) == 2
         assert seen["prefill"] == seen["decode"] == []
         if stream:
@@ -1150,11 +1181,12 @@ async def test_per_video_kwargs_http_validation(
         assert len(seen["encode"]) == 2
         assert len(seen["prefill"]) == len(seen["decode"]) == 1
         for stage in ("prefill", "decode"):
-            assert seen[stage][0]["mm_processor_kwargs"] == kwargs
+            assert seen[stage][0].get("mm_processor_kwargs", ...) == kwargs
         for child in seen["encode"]:
             url = child["messages"][0]["content"][0]["video_url"]["url"]
             index = 0 if url == "a" else 1
-            expected_kwargs = dict(kwargs)
-            if enabled:
+            expected_kwargs = kwargs
+            if enabled and isinstance(kwargs, dict) and kwargs:
+                expected_kwargs = dict(kwargs)
                 expected_kwargs["_epd_video_partition"] = [index, 2]
-            assert child["mm_processor_kwargs"] == expected_kwargs
+            assert child.get("mm_processor_kwargs", ...) == expected_kwargs
