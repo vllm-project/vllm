@@ -4539,30 +4539,6 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
-    def triton_fp4_gemm_dynamic_quant(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        out_dtype: torch.dtype | None = torch.bfloat16,
-        x_scales: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
-        if x_scales is None:
-            x_q, x_s = dynamic_mxfp4_quant(x)
-        else:
-            x_q = x
-            x_s = x_scales
-
-        y = torch.empty(
-            x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
-        )
-
-        gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
-        return y
-
-    @staticmethod
     def fused_qk_norm_rope_and_cache(
         qkv: torch.Tensor,
         q_weight: torch.Tensor,

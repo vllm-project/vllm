@@ -6,8 +6,14 @@ from enum import Enum
 
 import pytest
 
-from vllm.config.cache import CacheConfig
-from vllm.config.scheduler import SchedulerConfig
+from vllm.config import (
+    CacheConfig,
+    FaultToleranceConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.config.utils import (
     get_attr_docs,
     get_compile_factors,
@@ -339,13 +345,66 @@ def test_cache_config_hash_ignores_prefix_cache_retention_interval():
     assert hash_config(CacheConfig(prefix_cache_retention_interval=64)) == base_hash
 
 
-def test_cache_config_hash_ignores_runtime_offload_sizing():
-    config = CacheConfig()
-    base_hash = hash_config(config)
+def test_model_config_hash_ignores_renderer_and_quantization_validation(tmp_path):
+    """Host-only frontend and deprecation-warning flags must not bust compile
+    or tuning caches."""
+    from transformers import LlamaConfig
 
-    config.simple_cpu_offload_num_blocks = 42
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    model_path = str(tmp_path)
 
-    assert hash_config(config) == base_hash
+    def key(**kwargs) -> str:
+        return hash_config(VllmConfig(model_config=ModelConfig(model_path, **kwargs)))
+
+    base_hash = key(dtype="float16")
+    assert key(dtype="float16", renderer_num_workers=4) == base_hash
+    assert key(dtype="float16", allow_deprecated_quantization=True) == base_hash
+    assert key(dtype="float32") != base_hash
+
+
+def test_parallel_config_hash_ignores_timeouts_and_recovery_policy():
+    """Distributed timeouts and host-side FT recovery policy do not change
+    compiled graphs or collective patterns."""
+    base_hash = hash_config(ParallelConfig())
+    assert hash_config(ParallelConfig(distributed_timeout_seconds=42)) == base_hash
+    assert hash_config(ParallelConfig(cpu_distributed_timeout_seconds=30)) == base_hash
+    assert (
+        hash_config(
+            ParallelConfig(
+                fault_tolerance_config=FaultToleranceConfig(
+                    engine_recovery_timeout_sec=60
+                )
+            )
+        )
+        == base_hash
+    )
+    assert (
+        hash_config(
+            ParallelConfig(
+                fault_tolerance_config=FaultToleranceConfig(
+                    request_failure_policy="recompute"
+                )
+            )
+        )
+        == base_hash
+    )
+    assert (
+        hash_config(
+            ParallelConfig(tensor_parallel_size=2, distributed_executor_backend="mp")
+        )
+        != base_hash
+    )
+    assert hash_config(ParallelConfig(enable_fault_tolerance=True)) != base_hash
+
+
+def test_scheduler_config_hash_includes_async_scheduling_depth():
+    """async_scheduling_depth derives max_concurrent_batches for KV and GPU
+    buffer allocation, so it must stay in the compile key."""
+    base_hash = hash_config(SchedulerConfig.default_factory())
+    assert (
+        hash_config(SchedulerConfig.default_factory(async_scheduling_depth=3))
+        != base_hash
+    )
 
 
 def test_envs_compile_factors_relocation_invariant(tmp_path):

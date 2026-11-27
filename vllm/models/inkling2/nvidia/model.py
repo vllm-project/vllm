@@ -71,7 +71,7 @@ from .moe import Inkling2MoE, QuantFormat
 from .ops.allreduce import Inkling2AllReduceWorkspace
 from .ops.attention import compute_log_scaling_tau
 from .ops.attn_res import attn_res
-from .ops.gemv import sm12x_bf16_gemv, use_sm12x_bf16_gemv
+from .ops.ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 from .ops.norm import rms_norm
 from .ops.seq_parallel import SeqParallel
 from .sconv import ATTN_STREAM, MLP_STREAM, Inkling2ShortConv, conv_metadata
@@ -93,9 +93,9 @@ class Inkling2LogitsProcessor(LogitsProcessor):
                 lm_head.quant_method,
                 (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
             )
-            and use_sm12x_bf16_gemv(hidden_states, lm_head.weight, embedding_bias)
+            and use_sm12x_bf16_ll_gemm(hidden_states, lm_head.weight, embedding_bias)
         ):
-            return sm12x_bf16_gemv(
+            return sm12x_bf16_ll_gemm(
                 hidden_states, lm_head.weight, embedding_bias, out_dtype=torch.float32
             )
         return super()._apply_head(lm_head, hidden_states, embedding_bias)

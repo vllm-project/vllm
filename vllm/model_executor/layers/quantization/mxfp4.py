@@ -491,7 +491,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
 
 def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
-    """Route Kimi-K3 weight-only MXFP4 SiTU MoE to AITER A16W4 on gfx950."""
+    """Route Kimi-K3 weight-only MXFP4 SiTU MoE to AITER SiTUv2 on gfx950."""
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
@@ -665,6 +665,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
         self.experts_cls: type[mk.FusedMoEExperts] | None
         if self.is_k3_situ_aiter or self.is_k3_situ_int4_gfx942:
+            from vllm._aiter_ops import rocm_aiter_ops
+
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
             if self.is_k3_situ_int4_gfx942:
@@ -675,8 +677,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     "int4_per_group_32."
                 )
             else:
-                logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
-            from vllm._aiter_ops import rocm_aiter_ops
+                logger.info_once(
+                    "Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE, SiTUv2 "
+                    "activation mode %s (VLLM_ROCM_USE_AITER_MOE_SITUV2).",
+                    rocm_aiter_ops.get_fused_moe_situv2_activation(),
+                )
 
             if rocm_aiter_ops.is_fused_moe_situv2_enabled():
                 # a16w4 does not read this bound. Force 0 so leftover a8w4

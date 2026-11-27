@@ -4,7 +4,7 @@
 use vllm_text::Prompt;
 use vllm_text::tokenizer::DynTokenizer;
 
-use crate::error::{Result, chat_template_thrown};
+use crate::error::{Error, Result};
 
 /// Control tokens emitted by the GLM5Next template.
 const CONTROL_TOKENS: [&str; 24] = [
@@ -49,7 +49,7 @@ impl ControlTokenizer {
                 .iter()
                 .find_map(|(text, id)| (text == token).then_some(*id))
                 .ok_or_else(|| {
-                    chat_template_thrown!("GLM tokenizer lacks added token {token:?}")
+                    Error::ChatTemplate(format!("GLM tokenizer lacks added token {token:?}"))
                 })?;
         }
         Ok(Self { tokenizer, ids })

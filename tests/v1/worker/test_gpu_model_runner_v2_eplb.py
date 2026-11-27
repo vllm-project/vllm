@@ -34,6 +34,7 @@ class FakeEplbState:
         self.add_model_calls: list[tuple[Any, Any, str | None]] = []
         self.step_calls: list[tuple[bool, bool, bool]] = []
         self.async_started = False
+        self.async_stopped = 0
         self.is_async = True
         self.update_mapping_calls: list[tuple[Any, torch.Tensor]] = []
         FakeEplbState.instances.append(self)
@@ -52,6 +53,9 @@ class FakeEplbState:
 
     def start_async_loop(self) -> None:
         self.async_started = True
+
+    def stop_async_loop(self) -> None:
+        self.async_stopped += 1
 
     def update_mapping(self, model_config: Any, mapping: torch.Tensor) -> None:
         self.update_mapping_calls.append((model_config, mapping))
@@ -294,3 +298,25 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+def test_v2_shutdown_and_prepare_load_stop_eplb_async_loop(monkeypatch):
+    FakeEplbState.instances.clear()
+    monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
+    monkeypatch.setattr(mrv2, "free_before_shutdown", lambda *_: None)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+
+    runner = _make_runner(aux_output_connector=None)
+    runner.eplb.prepare_load()
+    first_state = runner.eplb_state
+    assert first_state is not None
+
+    runner.eplb.prepare_load()
+    second_state = runner.eplb_state
+    assert first_state.async_stopped == 1
+    assert second_state is not None and second_state is not first_state
+
+    mrv2.GPUModelRunner.shutdown(runner)
+    assert second_state.async_stopped == 1
+    assert runner.eplb_state is second_state

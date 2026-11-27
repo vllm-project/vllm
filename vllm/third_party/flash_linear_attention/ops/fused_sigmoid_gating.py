@@ -54,6 +54,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    BETA_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
@@ -134,10 +135,12 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
 
         # compute beta_output = sigmoid(b)
         b_beta = tl.sigmoid(b_b.to(tl.float32))
+        if BETA_SCALE != 1.0:
+            b_beta *= BETA_SCALE
 
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q * (tl.rsqrt(tl.sum(b_q * b_q) + 1e-6))
-            b_k = b_k * (tl.rsqrt(tl.sum(b_k * b_k) + 1e-6))
+            b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
         # [BV, BK]
         if not IS_KDA:
@@ -196,6 +199,7 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    beta_scale: float = 1.0,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
@@ -271,6 +275,7 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_indices_tok=stride_indices_tok,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        BETA_SCALE=beta_scale,
         IS_KDA=is_kda,
         num_warps=num_warps,
         num_stages=num_stages,
