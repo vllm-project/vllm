@@ -185,35 +185,35 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// Classify a text-pipeline submit failure: request validation failures are
-/// the client's fault and map to HTTP 400, mirroring the Python frontend. A
-/// request that cannot be taken now, such as one over a queue limit, maps to
-/// a retryable 503. Everything else stays an internal 500.
+/// Classify a text-pipeline request failure, wherever it surfaces: while
+/// preparing or submitting the request, or from its output stream. Request
+/// validation failures are the client's fault and map to HTTP 400, mirroring
+/// the Python frontend. A request that cannot be taken now, such as one over a
+/// queue limit or one whose remote worker went away, maps to a retryable 503.
+/// Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
-    match error.kind() {
-        vllm_text::ErrorKind::InvalidRequest { param } => {
-            invalid_request!(param = param, "{}", error.as_report())
-        }
-        vllm_text::ErrorKind::Internal if error.is_unavailable() => ApiError::ServiceUnavailable {
-            message: error.to_report_string(),
-        },
-        vllm_text::ErrorKind::Internal => {
-            server_error!("{}: {}", context, error.to_report_string())
-        }
-    }
+    classified_error(context, error.kind(), &error)
 }
 
 /// Like [`text_submit_error`], for the chat pipeline, which wraps the text
 /// errors.
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
-    match error.kind() {
-        vllm_chat::ErrorKind::InvalidRequest { param } => {
+    classified_error(context, error.kind(), &error)
+}
+
+fn classified_error(
+    context: &'static str,
+    kind: vllm_text::ErrorKind,
+    error: &impl std::error::Error,
+) -> ApiError {
+    match kind {
+        vllm_text::ErrorKind::InvalidRequest { param } => {
             invalid_request!(param = param, "{}", error.as_report())
         }
-        vllm_chat::ErrorKind::Internal if error.is_unavailable() => ApiError::ServiceUnavailable {
+        vllm_text::ErrorKind::Unavailable => ApiError::ServiceUnavailable {
             message: error.to_report_string(),
         },
-        vllm_chat::ErrorKind::Internal => {
+        vllm_text::ErrorKind::Internal => {
             server_error!("{}: {}", context, error.to_report_string())
         }
     }

@@ -147,12 +147,8 @@ async fn collect_responses(
                 "responses stream ended before generation completed"
             ));
         };
-        let event = event.map_err(|error| {
-            server_error!(
-                "failed to collect responses result: {}",
-                error.to_report_string()
-            )
-        })?;
+        let event = event
+            .map_err(|error| chat_submit_error("failed to collect responses result", error))?;
         // Only the final output matters here; the item events are discarded.
         items.on_event(&event);
         if let Some(terminal) = TerminalOutput::from_event(event, false) {

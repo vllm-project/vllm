@@ -191,7 +191,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     /// Classify this error as a client request-validation failure (with its
-    /// canonical OpenAI `param`, if any) or an internal server failure.
+    /// canonical OpenAI `param`, if any), a request that cannot be taken now,
+    /// or an internal server failure.
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::Text(error) => error.kind(),
@@ -258,12 +259,6 @@ impl Error {
                 ErrorKind::Internal
             }
         }
-    }
-
-    /// Whether the request could not be taken now, so retrying later may
-    /// succeed.
-    pub fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Text(error) if error.is_unavailable())
     }
 }
 

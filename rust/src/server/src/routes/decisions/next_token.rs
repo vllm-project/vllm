@@ -20,8 +20,7 @@ use vllm_text::{FinishReason, Prompt, TextDecodeOptions, TextOutputStreamExt as 
 
 use super::questions::{Question, QuestionType, label_softmax};
 use crate::error::{
-    ApiError, bail_invalid_request, chat_submit_error, engine_error, server_error,
-    text_submit_error,
+    ApiError, bail_invalid_request, chat_submit_error, engine_error, text_submit_error,
 };
 use crate::routes::generative_scoring::label_logprobs;
 
@@ -176,12 +175,10 @@ impl NextTokenReads {
             let mut streams = (text.generate_prepared_n(prepared, NonZeroU32::MIN).await)
                 .map_err(|error| text_submit_error("failed to submit a decision read", error))?;
             let stream = streams.pop().expect("one output stream per sample");
-            stream.collect_output().await.map_err(|error| {
-                server_error!(
-                    "failed to collect a decision read: {}",
-                    error.to_report_string()
-                )
-            })
+            stream
+                .collect_output()
+                .await
+                .map_err(|error| text_submit_error("failed to collect a decision read", error))
         }))
         .await?;
 

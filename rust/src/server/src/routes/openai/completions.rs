@@ -255,7 +255,7 @@ async fn collect_completion(
     let collected = stream
         .collect_output()
         .await
-        .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
+        .map_err(|error| text_submit_error("completion stream failed", error))?;
     let finish_reason = collected.finish_reason.clone();
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
@@ -670,7 +670,7 @@ async fn completion_chunk_stream(
                     error = %error.as_report(),
                     "completion stream failed"
                 );
-                bail_server_error!("{}", error.to_report_string());
+                return Err(text_submit_error("completion stream failed", error));
             }
         }
     }

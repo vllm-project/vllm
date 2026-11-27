@@ -20,7 +20,6 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::future;
-use thiserror_ext::AsReport as _;
 use tracing_futures::Instrument as _;
 use vllm_text::{
     CollectedTextOutput, FinishReason, Prompt, PromptTruncation, PromptTruncationLimit,
@@ -138,10 +137,7 @@ pub async fn generative_scoring(
             })?;
         let stream = streams.pop().expect("one output stream per sample");
         stream.collect_output().await.map_err(|error| {
-            server_error!(
-                "failed to collect generative scoring response: {}",
-                error.to_report_string()
-            )
+            text_submit_error("failed to collect generative scoring response", error)
         })
     }))
     .instrument(request_span)
