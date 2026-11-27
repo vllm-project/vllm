@@ -925,7 +925,11 @@ class MistralParser(ParserEngine):
             0 <= event.tool_index < len(self._tool_slots)
             and not self._tool_slots[event.tool_index].name.strip()
         ):
-            logger.warning("Dropping Mistral tool call with a blank function name.")
+            # Model-quality issue, not a request error: log once to avoid
+            # flooding long agentic sessions that repeat the malformed output.
+            logger.warning_once(
+                "Dropping Mistral tool call with a blank function name."
+            )
 
     def _events_to_delta(
         self,
@@ -935,6 +939,8 @@ class MistralParser(ParserEngine):
         delta = super()._events_to_delta(events, finished=finished)
         if delta and delta.tool_calls:
             # Rejected slots must not leave gaps in client-visible call indices.
+            # Every tool delta is emitted after its slot's `name_sent` is set,
+            # so each emitted index is present in the mapping.
             indices = {
                 idx: emitted_idx
                 for emitted_idx, idx in enumerate(

@@ -2928,7 +2928,7 @@ def test_extract_tool_calls_real_captured_malformed_output(mistral_tokenizer):
 @pytest.mark.parametrize("name", ["", " ", "\t\n"])
 @pytest.mark.parametrize("separator", ["", "[ARGS]"])
 def test_blank_tool_name_emits_no_stream_deltas(
-    mistral_tokenizer, name, separator, caplog
+    mistral_tokenizer, name, separator, caplog, disable_log_dedup
 ):
     """A rejected start must not leave argument continuations or tool finish reason."""
     request = _malformed_matrix_request()
