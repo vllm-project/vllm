@@ -856,6 +856,15 @@ def test_truncation_follows_truncation_side_with_and_without_escaped_tokens(
     assert cut == (full[-5:] if side == "left" else full[:5])
 
 
+def test_truncation_does_not_carry_over_to_escaped_prompts():
+    """A truncated prompt leaves its truncation on the HF backend, which the
+    plain text tokenizer must not inherit."""
+    tokenizer = get_deepseek_v41_tokenizer(_tiny_tokenizer())
+    tokenizer.apply_chat_template([_USER], tokenize=True, truncation=True, max_length=3)
+    messages = [{"role": "user", "content": "a <think> b c d e f"}]
+    assert tokenizer.apply_chat_template(messages, tokenize=True) == _tokenize(messages)
+
+
 def test_mangled_escape_is_rejected(monkeypatch):
     """A prompt whose escape markers were altered while rendering (here by the
     ensure_ascii fallback of to_json) is rejected: the reserved token would be

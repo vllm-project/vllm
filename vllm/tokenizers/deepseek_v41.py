@@ -318,10 +318,20 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 add_generation_prompt=kwargs.get("add_generation_prompt", True),
                 continue_final_message=kwargs.get("continue_final_message", False),
             )
+            tokenizer_kwargs = {
+                key: kwargs[key]
+                for key in ("truncation", "max_length")
+                if key in kwargs
+            }
+            if nonce not in prompt:
+                if not kwargs.get("tokenize", True):
+                    return prompt
+                return self.encode(prompt, add_special_tokens=False, **tokenizer_kwargs)
+
             sentinel_re = re.compile(
                 f"{_ESCAPE_OPEN}{nonce}:(.*?){_ESCAPE_CLOSE}", re.DOTALL
             )
-            if nonce in prompt and nonce in sentinel_re.sub("", prompt):
+            if nonce in sentinel_re.sub("", prompt):
                 # Defensive: the escape markers must reach the rendered prompt
                 # verbatim. If rendering altered them (e.g. the ensure_ascii
                 # fallback of to_json writes them as text), the reserved token
@@ -336,33 +346,15 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             if not kwargs.get("tokenize", True):
                 return sentinel_re.sub(lambda m: m.group(1), prompt)
 
-            tokenizer_kwargs = {
-                key: kwargs[key]
-                for key in ("truncation", "max_length")
-                if key in kwargs
-            }
-            if not sentinel_re.search(prompt):
-                return self.encode(prompt, add_special_tokens=False, **tokenizer_kwargs)
-
             # As in deepseek-recipe, only the added tokens outside a sentinel
             # are special tokens; every stretch of text between two of them,
             # escaped tokens included, is encoded as a whole without the added
             # vocabulary.
             assert added_tokens_re is not None
-            ids: list[int] = []
-            # The plain text pieces since the last special token, not yet encoded.
+            regions: list[str] = []
+            special_ids: list[int] = []
+            # The plain text pieces since the last special token.
             run: list[str] = []
-
-            def flush() -> None:
-                # Encode the whole run in one call, so that a merge across the
-                # pieces (e.g. the text next to an escaped token) is kept.
-                if run:
-                    encoding = plain_tokenizer().encode(
-                        "".join(run), add_special_tokens=False
-                    )
-                    ids.extend(encoding.ids)
-                    run.clear()
-
             # Splitting on the sentinel pattern alternates the text outside a
             # sentinel (even indices) with the escaped text (odd indices).
             for index, part in enumerate(sentinel_re.split(prompt)):
@@ -376,17 +368,27 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 # token, as the client ones are inside a sentinel.
                 pos = 0
                 for m in added_tokens_re.finditer(part):
-                    # The text before the special token ends the run: encode
-                    # it as a whole, then add the special token's id.
+                    # The text before the special token ends the run.
                     run.append(part[pos : m.start()])
-                    flush()
-                    ids.append(added_vocab[m.group(0)])
+                    regions.append("".join(run))
+                    run.clear()
+                    special_ids.append(added_vocab[m.group(0)])
                     pos = m.end()
                 # The rest of the part starts or continues a run, which goes on
                 # in the next odd part (an escaped token) if there is one.
                 run.append(part[pos:])
             # The text after the last special token.
-            flush()
+            regions.append("".join(run))
+            # Encode every run as a whole, so that a merge across the pieces
+            # (e.g. the text next to an escaped token) is kept.
+            encodings = plain_tokenizer().encode_batch_fast(
+                regions, add_special_tokens=False
+            )
+            ids: list[int] = []
+            for encoding, special_id in zip(encodings, special_ids):
+                ids.extend(encoding.ids)
+                ids.append(special_id)
+            ids.extend(encodings[-1].ids)
             max_length = tokenizer_kwargs.get("max_length")
             if tokenizer_kwargs.get("truncation") and max_length is not None:
                 if getattr(self, "truncation_side", "right") == "left":
