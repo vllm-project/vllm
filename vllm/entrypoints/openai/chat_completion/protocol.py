@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from openai.types.chat.chat_completion_audio import (
@@ -76,6 +77,24 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+
+
+def _coerce_tool_calls_to_list(tool_calls: Any) -> Any:
+    """Materialize one-shot tool_calls iterators without crashing on bad types.
+
+    Generators must be converted to lists before union-type matching, but
+    ``list()`` on a non-iterable value (for example ``tool_calls: 1``) raises
+    ``TypeError``, which escapes Pydantic as an HTTP 500. Leave strings,
+    bytes, mappings, and other non-iterables for field validation so the
+    API returns 400.
+    """
+    if tool_calls is None or isinstance(tool_calls, list):
+        return tool_calls
+    if isinstance(tool_calls, (str, bytes, bytearray, Mapping)) or not isinstance(
+        tool_calls, Iterable
+    ):
+        return tool_calls
+    return list(tool_calls)
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -604,7 +623,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+                msg["tool_calls"] = _coerce_tool_calls_to_list(tool_calls)
             reasoning_content = msg.pop("reasoning_content", None)
             if reasoning_content is not None and msg.get("reasoning") is None:
                 msg["reasoning"] = reasoning_content
@@ -625,7 +644,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+                msg["tool_calls"] = _coerce_tool_calls_to_list(tool_calls)
         return self
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
