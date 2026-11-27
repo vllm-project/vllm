@@ -408,7 +408,7 @@ def test_diarized_stream_parser_rejects_unparsable_transformers_output(vibevoice
 
 def test_flat_encoder_getters_are_preferred():
     # `get_*_embeddings` return all items' rows in one tensor; models without them
-    # (older Transformers) fall back to `get_*_features`
+    # (Transformers < 5.25) fall back to `get_*_features`
     def embeddings(*args, **kwargs):
         pass
 
@@ -427,7 +427,7 @@ def test_flat_encoder_getters_are_preferred():
 
 
 def test_split_embeddings_accepts_one_entry_per_item():
-    # `get_*_features` return one entry per item in recent Transformers
+    # `get_*_features` return one entry per item in Transformers >= 5.25
     split = TransformersMultiModalMixin._split_embeddings
     items = [torch.ones(2, 4), torch.zeros(3, 4)]
     for embeddings in (items, torch.cat(items)):

@@ -1355,7 +1355,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
     def _split_embeddings(
         self, embeddings: torch.Tensor | list[torch.Tensor], split_sizes: list[int]
     ) -> list[torch.Tensor]:
-        # `get_*_features` return one entry per item in recent Transformers
+        # `get_*_features` return one entry per item in Transformers >= 5.25
         if not isinstance(embeddings, torch.Tensor):
             embeddings = torch.cat(list(embeddings))
         total_expected = sum(split_sizes)
@@ -1404,10 +1404,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
     def _get_modality_embeddings(self, modality: str) -> Callable[..., Any]:
         # The flat `get_*_embeddings` return all items' rows in one tensor. Models
-        # without them (older Transformers) only have the `get_*_features`
-        return getattr_iter(
-            self.model, (f"get_{modality}_embeddings", f"get_{modality}_features")
-        )
+        # without them (Transformers < 5.25) only have the `get_*_features`
+        names = (f"get_{modality}_embeddings", f"get_{modality}_features")
+        return getattr_iter(self.model, names)
 
     def _process_audio_input(self, **kwargs) -> list[torch.Tensor] | None:
         input_features: torch.Tensor | None = kwargs.pop("input_features", None)
@@ -1547,9 +1546,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # padding images via boolean-mask indexing, LlavaOnevision
         # branches on per-sample batch counts).
         with gpu_sync_allowed():
-            features = self._get_modality_embeddings(modality)(
-                pixel_values, return_dict=True, **kwargs
-            )
+            get_modality_features = self._get_modality_embeddings(modality)
+            features = get_modality_features(pixel_values, return_dict=True, **kwargs)
         embeddings = features.pooler_output
         if not self.deepstack_num_levels:
             return embeddings
