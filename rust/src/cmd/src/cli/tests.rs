@@ -285,6 +285,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         tool_strict_level: None,
+                        enforce_strict_tool_calling: None,
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
@@ -2485,6 +2486,7 @@ fn frontend_args_accept_json() {
                         tool_call_parser: None,
                         reasoning_parser: None,
                         tool_strict_level: None,
+                        enforce_strict_tool_calling: None,
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
@@ -3402,6 +3404,56 @@ fn env_switches_accept_only_the_implemented_position() {
     expect!["invalid JSON arguments: use_modelscope (VLLM_USE_MODELSCOPE): only off is implemented in Rust frontend, not on"].assert_eq(&json("use_modelscope", true).unwrap_err());
 }
 
+/// The Rust frontend always constrains tool calls, so turning off
+/// `VLLM_ENFORCE_STRICT_TOOL_CALLING` fails startup on both paths.
+#[test]
+fn strict_tool_calling_cannot_be_turned_off() {
+    let serve = |value: &str| {
+        Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--enforce-strict-tool-calling",
+            value,
+        ])
+        .map(drop)
+        .map_err(|error| error.to_string())
+    };
+    for value in ["1", "true", "TRUE"] {
+        serve(value).unwrap();
+    }
+    for value in ["0", "false", "yes"] {
+        let error = serve(value).unwrap_err();
+        assert!(error.contains("only on is implemented"), "{value}: {error}");
+    }
+    // The render server builds tool grammars too.
+    let render = |value: &str| {
+        Cli::try_parse_from([
+            "vllm-rs",
+            "render",
+            "Qwen/Qwen3-0.6B",
+            "--enforce-strict-tool-calling",
+            value,
+        ])
+        .map(drop)
+    };
+    render("1").unwrap();
+    render("0").unwrap_err();
+
+    let json = |value: bool| {
+        parse_runtime_args_json(
+            &serde_json::json!({
+                "model_tag": "Qwen/Qwen3-0.6B",
+                "enforce_strict_tool_calling": value,
+            })
+            .to_string(),
+        )
+        .map(drop)
+    };
+    json(true).unwrap();
+    expect!["invalid JSON arguments: enforce_strict_tool_calling (VLLM_ENFORCE_STRICT_TOOL_CALLING): only on is implemented in Rust frontend, not off at line 1 column 67"].assert_eq(&json(false).unwrap_err());
+}
+
 #[test]
 fn frontend_args_json_rejects_malformed_json() {
     let error = Cli::try_parse_from([
@@ -3664,6 +3716,7 @@ fn serve_args_accept_handshake_aliases() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         tool_strict_level: None,
+                        enforce_strict_tool_calling: None,
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,

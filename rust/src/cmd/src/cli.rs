@@ -189,6 +189,17 @@ pub struct RenderArgs {
     /// level applies, else `auto`.
     #[arg(long)]
     tool_strict_level: Option<ToolStrictLevel>,
+    /// Whether tool calls are constrained to the tool-call format. Like
+    /// Python, it is set only through `VLLM_ENFORCE_STRICT_TOOL_CALLING`. The
+    /// Rust renderer always builds the tool-call grammar, so only on is
+    /// accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        value_parser = parse_truthy_flag.try_map(Fixed::<true>::try_from)
+    )]
+    pub enforce_strict_tool_calling: Option<Fixed<true>>,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -410,6 +421,17 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub tool_strict_level: Option<ToolStrictLevel>,
+    /// Whether tool calls are constrained to the tool-call format. Like
+    /// Python, it is set only through `VLLM_ENFORCE_STRICT_TOOL_CALLING`. The
+    /// Rust frontend always constrains them, so only on is accepted.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        value_parser = parse_truthy_flag.try_map(Fixed::<true>::try_from)
+    )]
+    #[serde(default)]
+    pub enforce_strict_tool_calling: Option<Fixed<true>>,
     /// Structured outputs configuration as a JSON object. The Rust frontend
     /// reads `backend`, which compiles every constraint (default xgrammar);
     /// the other fields are forwarded to the engine.

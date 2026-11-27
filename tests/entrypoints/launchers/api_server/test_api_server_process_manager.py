@@ -841,6 +841,7 @@ def test_rust_frontend_receives_resolved_logging_config(
                 "VLLM_ENABLE_COHERE_API": "0",
                 "VLLM_ENABLE_RESPONSES_API_STORE": "0",
                 "VLLM_USE_MODELSCOPE": "false",
+                "VLLM_ENFORCE_STRICT_TOOL_CALLING": "False",
                 "VLLM_MAX_TOKENIZE_TOKENS": " ",
                 "VLLM_API_KEY": "",
             },
@@ -849,6 +850,7 @@ def test_rust_frontend_receives_resolved_logging_config(
                 "enable_cohere_api": False,
                 "enable_responses_api_store": False,
                 "use_modelscope": False,
+                "enforce_strict_tool_calling": False,
             },
         ),
         # The CLI flag takes precedence over the environment variable.
