@@ -92,8 +92,14 @@ def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
     )
 
 
-def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
-    """Compare with fused_qk_rmsnorm_rope_gate + reshape_and_cache_flash."""
+def _check_main_outputs(
+    main: dict, q_out, gate_out, rope, positions, fp8_q_out=None
+) -> None:
+    """Compare with fused_qk_rmsnorm_rope_gate + reshape_and_cache_flash.
+
+    With `fp8_q_out`, Q rows past `q_out`'s must match the reference cast to
+    FP8, as the unfused FlashInfer FP8 prefill path casts them.
+    """
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.model_executor.layers.fused_qk_norm_rope import (
         fused_qk_rmsnorm_rope_gate,
@@ -131,7 +137,18 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         torch.tensor(main["main_k_scale"], device="cuda"),
         torch.tensor(main["main_v_scale"], device="cuda"),
     )
-    torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
+    num_bf16_rows = q_out.shape[0]
+    torch.testing.assert_close(
+        q_out.flatten(1), q[:num_bf16_rows], rtol=RTOL, atol=ATOL
+    )
+    if fp8_q_out is None:
+        assert num_bf16_rows == q.shape[0]
+    else:
+        assert fp8_q_out.dtype == torch.float8_e4m3fn
+        assert fp8_q_out.shape[0] + num_bf16_rows == q.shape[0]
+        assert_fp8_within_one_ulp(
+            fp8_q_out.flatten(1), q[num_bf16_rows:].to(torch.float8_e4m3fn)
+        )
     assert torch.equal(gate_out.flatten(1), gate)
     if fp8_cache:
         assert_fp8_within_one_ulp(kv_cache, cache.view(torch.float8_e4m3fn))
@@ -141,7 +158,16 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+# The main cache follows the indexer dtype. FP8 Q for the trailing prefill's
+# rows, as for FlashInfer FP8 prefill, comes only with an FP8 cache.
+@pytest.mark.parametrize(
+    "indexer_dtype,fp8_prefill_q",
+    [
+        pytest.param(torch.bfloat16, False, id="bf16"),
+        pytest.param(torch.float8_e4m3fn, False, id="fp8"),
+        pytest.param(torch.float8_e4m3fn, True, id="fp8-fp8q"),
+    ],
+)
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [
@@ -166,6 +192,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 )
 def test_qsa_fused_prepare_matches_unfused(
     indexer_dtype,
+    fp8_prefill_q,
     mrope,
     is_2d_positions,
     cache_rope_positions,
@@ -329,7 +356,8 @@ def test_qsa_fused_prepare_matches_unfused(
     fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
     # The main-attention cache follows the recipe's pairing with the indexer.
     main = _make_main_inputs(num_tokens, indexer_dtype == torch.float8_e4m3fn)
-    main_q_out, main_gate_out = qsa_prepare(
+    fp8_q_start = num_tokens - query_lens[-1] if fp8_prefill_q else None
+    main_q_out, main_gate_out, main_fp8_q_out = qsa_prepare(
         projected_qk[:, : HQ * D],
         projected_qk[:, HQ * D :],
         positions,
@@ -349,9 +377,12 @@ def test_qsa_fused_prepare_matches_unfused(
         compress_ratio=CR,
         mrope_section=MROPE_SECTION if mrope else None,
         rope_pos_offset=ROPE_POS_OFFSET if cache_rope_positions else None,
+        main_fp8_q_start=fp8_q_start,
         **main,
     )
-    _check_main_outputs(main, main_q_out, main_gate_out, rope, positions)
+    _check_main_outputs(
+        main, main_q_out, main_gate_out, rope, positions, main_fp8_q_out
+    )
 
     unfused_query = projected_qk[:, : HQ * D].reshape(num_tokens, HQ, D)
     unfused_query = gemma_rmsnorm(

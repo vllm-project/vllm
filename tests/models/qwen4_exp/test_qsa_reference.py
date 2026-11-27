@@ -1340,6 +1340,37 @@ def test_qsa_sparse_paged_attention_correctness(
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FlashInfer QSA prefill runs on sm_100/sm_103",
+)
+@pytest.mark.parametrize(
+    "kv_dtype, quantize_query, expected_q_dtype",
+    [
+        (torch.bfloat16, False, torch.bfloat16),
+        (torch.bfloat16, True, torch.bfloat16),
+        (torch.uint8, True, torch.float8_e4m3fn),
+        # FlashInfer 0.7.4 rejects BF16 Q over an FP8 cache: Triton runs it.
+        (torch.uint8, False, None),
+    ],
+    ids=["bf16", "bf16-quantize", "fp8-quantize", "fp8"],
+)
+def test_qsa_flashinfer_honors_prefill_query_quantization(
+    kv_dtype: torch.dtype,
+    quantize_query: bool,
+    expected_q_dtype: torch.dtype | None,
+) -> None:
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
+        flashinfer_qsa_query_dtype,
+        is_flashinfer_qsa_supported,
+    )
+
+    q_dtype = flashinfer_qsa_query_dtype(kv_dtype, quantize_query)
+    # Qwen3.8 TP1 geometry: block 4, 512 selected blocks, 24/2 heads of 256.
+    supported = is_flashinfer_qsa_supported(kv_dtype, q_dtype, 4, 512, 256, 24, 2)
+    assert (q_dtype if supported else None) == expected_q_dtype
+
+
 @requires_qsa_kernels
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -1347,9 +1378,13 @@ def test_qsa_sparse_paged_attention_correctness(
 )
 # Per-rank heads at TP1 and TP4.
 @pytest.mark.parametrize("heads, kv_heads", [(24, 2), (6, 1)], ids=["tp1", "tp4"])
-def test_qsa_flashinfer_prefill_correctness(heads: int, kv_heads: int) -> None:
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
+def test_qsa_flashinfer_prefill_correctness(
+    heads: int, kv_heads: int, fp8: bool
+) -> None:
     """FlashInfer prefill matches the dense reference. Slots past each sequence
-    hold NaN, like stale bytes of another cache group."""
+    hold NaN, like stale bytes of another cache group. The FP8 case takes FP8
+    Q over an FP8 cache with non-unit K/V scales."""
     from flashinfer.attention.prims_ts import make_q_token_kv_block_sparse_qo_indptr
 
     from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
@@ -1427,16 +1462,27 @@ def test_qsa_flashinfer_prefill_correctness(heads: int, kv_heads: int) -> None:
     qsa_indexer_ops.expand_qsa_block_indices(
         block_indices, positions, visible_blocks, ratio, budget, selected
     )
+    k_scale = v_scale = 1.0
+    if fp8:
+        # The reference sees the FP8-rounded Q, K and V.
+        k_scale, v_scale = 0.5, 2.0
+        q = q.to(torch.float8_e4m3fn)
+        k_rows, v_rows = kv_rows.split(head_dim, dim=-1)
+        kv_rows = torch.cat([k_rows / k_scale, v_rows / v_scale], dim=-1).to(
+            torch.float8_e4m3fn
+        )
     k_cache, v_cache = kv_rows.split(head_dim, dim=-1)
     expected = _qsa_sparse_paged_attention_reference(
-        q,
+        q.float(),
         k_cache,
         v_cache,
         selected[:, : budget + ratio - 1],
         block_table,
         token_to_req,
         scale,
-    ) * torch.sigmoid(output_gate)
+        k_scale,
+        v_scale,
+    ) * torch.sigmoid(output_gate.float())
 
     qo_indptr = make_q_token_kv_block_sparse_qo_indptr(
         torch.tensor([0, *itertools.accumulate(query_lens)]),
@@ -1444,10 +1490,11 @@ def test_qsa_flashinfer_prefill_correctness(heads: int, kv_heads: int) -> None:
         group_size=GROUP_SIZE,
         device="cuda",
     )
-    actual = torch.full_like(q, torch.nan)
+    actual = torch.full_like(output_gate, torch.nan)
     qsa_sparse_paged_prefill(
         q,
-        kv_rows.transpose(1, 2),
+        # The serving cache stores FP8 as uint8.
+        (kv_rows.view(torch.uint8) if fp8 else kv_rows).transpose(1, 2),
         block_table,
         num_decodes,
         seq_lens,
@@ -1467,19 +1514,27 @@ def test_qsa_flashinfer_prefill_correctness(heads: int, kv_heads: int) -> None:
             max_seq_len_kv,
             ratio,
             budget // ratio,
+            q.dtype,
+            torch.uint8 if fp8 else torch.bfloat16,
             torch.device("cuda"),
         ),
         scale,
         output_gate,
         actual,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
-    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    # FP8 Q runs the kernel's FP8 MMAs, which round beyond the FP8 inputs the
+    # reference already sees.
+    tol = 5e-2 if fp8 else 2e-2
+    torch.testing.assert_close(actual, expected.to(actual.dtype), rtol=tol, atol=tol)
 
     # Each open-block tail is zeroed, and nothing past it is written.
     for req, (prefix, n) in enumerate(requests, num_decodes):
         end = prefix + n
         tail = torch.arange(end, cdiv(end, ratio) * ratio + 1, device="cuda")
         rows = kv_rows[block_table[req, tail // page_size].long(), tail % page_size]
+        rows = rows.float()
         assert (rows[:-1] == 0).all() and rows[-1].isnan().all()
 
 

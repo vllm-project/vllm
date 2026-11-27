@@ -107,6 +107,7 @@ def _store_rotated(dst, y, o1, o2, scale):
         "num_state_blocks",
         "num_compressed_blocks",
         "num_k_work",
+        "main_fp8_q_start",
     ]
 )
 def _qsa_prepare_kernel(
@@ -159,6 +160,8 @@ def _qsa_prepare_kernel(
     main_k_norm_weight_ptr,
     main_eps,
     main_q_out_ptr,
+    main_fp8_q_out_ptr,
+    main_fp8_q_start,
     main_gate_out_ptr,
     main_cache_ptr,
     main_cache_stride_block,
@@ -171,6 +174,7 @@ def _qsa_prepare_kernel(
     MAIN_HK: tl.constexpr,
     MAIN_D: tl.constexpr,
     MAIN_PAGE_SIZE: tl.constexpr,
+    MAIN_FP8_Q: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_index_work = num_k_work + tl.cdiv(num_tokens, TILE_T_Q) * tl.cdiv(HQ, TILE_H_Q)
@@ -230,7 +234,12 @@ def _qsa_prepare_kernel(
                 tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale))
         else:
             out = (token * MAIN_HQ + head) * MAIN_D
-            _store_rotated(main_q_out_ptr + out, y, o1, o2, None)
+            if MAIN_FP8_Q and token >= main_fp8_q_start:
+                # Unit scale: the RMS-normalized Q is far inside e4m3's range.
+                fp8_out = ((token - main_fp8_q_start) * MAIN_HQ + head) * MAIN_D
+                _store_rotated(main_fp8_q_out_ptr + fp8_out, y, o1, o2, 1.0)
+            else:
+                _store_rotated(main_q_out_ptr + out, y, o1, o2, None)
             gate = tl.load(src + MAIN_D + dims)
             tl.store(main_gate_out_ptr + out + dims, gate)
         return
@@ -530,20 +539,30 @@ def qsa_prepare(
     main_slot_mapping: torch.Tensor,
     main_k_scale: float,
     main_v_scale: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    main_fp8_q_start: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Normalize Q, compress K, then update the circular raw state.
 
     Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
-    and returns its Q and gate.
+    and returns its Q, gate and FP8 Q. With `main_fp8_q_start`, Q rows from
+    that token on are written only to the FP8 Q (unit scale) and the BF16 Q
+    holds the rows before it; otherwise the FP8 Q is None.
     """
     num_tokens = q.shape[0]
     main_head_dim = main_kv_cache.shape[-1] // 2
     num_main_kv_heads = main_kv_cache.shape[2]
     num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
-    main_q_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
-    main_gate_out = torch.empty_like(main_q_out)
+    main_gate_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
+    fp8_q_start = num_tokens if main_fp8_q_start is None else main_fp8_q_start
+    assert 0 <= fp8_q_start <= num_tokens
+    main_q_out = torch.empty_like(main_gate_out[:fp8_q_start])
+    main_fp8_q_out = None
+    if main_fp8_q_start is not None:
+        main_fp8_q_out = torch.empty_like(
+            main_gate_out[fp8_q_start:], dtype=torch.float8_e4m3fn
+        )
     if num_tokens == 0:
-        return main_q_out, main_gate_out
+        return main_q_out, main_gate_out, main_fp8_q_out
     num_q_heads, head_dim = q_out.shape[1:]
     assert cos_sin_cache.shape[-1] * 2 == head_dim
     assert q.shape == (num_tokens, num_q_heads * head_dim)
@@ -630,6 +649,8 @@ def qsa_prepare(
         main_k_norm_weight_ptr=main_k_norm_weight,
         main_eps=main_eps,
         main_q_out_ptr=main_q_out,
+        main_fp8_q_out_ptr=main_q_out if main_fp8_q_out is None else main_fp8_q_out,
+        main_fp8_q_start=fp8_q_start,
         main_gate_out_ptr=main_gate_out,
         main_cache_ptr=main_kv_cache,
         main_cache_stride_block=main_kv_cache.stride(0),
@@ -642,9 +663,10 @@ def qsa_prepare(
         MAIN_HK=num_main_kv_heads,
         MAIN_D=main_head_dim,
         MAIN_PAGE_SIZE=main_kv_cache.shape[1],
+        MAIN_FP8_Q=main_fp8_q_out is not None,
         num_warps=1,
     )
-    return main_q_out, main_gate_out
+    return main_q_out, main_gate_out, main_fp8_q_out
 
 
 __all__ = ["qsa_prepare"]

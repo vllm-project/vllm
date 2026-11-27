@@ -19,6 +19,7 @@ from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
@@ -76,12 +77,15 @@ from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_flashinfer import (
     GROUP_SIZE,
+    flashinfer_qsa_query_dtype,
     get_workspace_size,
     is_flashinfer_qsa_supported,
     qsa_sparse_paged_prefill,
 )
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -237,6 +241,8 @@ class Qwen4ExpQSAFlashInferPrefillMetadata:
     max_seq_len_kv: int
     # The largest step's, so the caching allocator reuses one block.
     workspace_size: int
+    # FP8 under use_prefill_query_quantization with an FP8 cache, else BF16.
+    query_dtype: torch.dtype
 
 
 @dataclass
@@ -275,8 +281,13 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
+        self.query_dtype = flashinfer_qsa_query_dtype(
+            kv_cache_spec.dtype,
+            vllm_config.attention_config.use_prefill_query_quantization,
+        )
         self.use_flashinfer = is_flashinfer_qsa_supported(
             kv_cache_spec.dtype,
+            self.query_dtype,
             self.block_size,
             block_topk,
             kv_cache_spec.head_size,
@@ -300,6 +311,8 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
             self.max_seq_len_kv,
             self.block_size,
             block_topk,
+            self.query_dtype,
+            kv_cache_spec.dtype,
             device,
         )
 
@@ -347,6 +360,7 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
                 block_size=self.block_size,
                 max_seq_len_kv=self.max_seq_len_kv,
                 workspace_size=self.workspace_size,
+                query_dtype=self.query_dtype,
             ),
         )
 
@@ -481,8 +495,13 @@ class Qwen4ExpQSAImpl(
         output_gate: torch.Tensor,
         block_indices: torch.Tensor,
         positions: torch.Tensor,
+        prefill_query: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Run sparse attention over the owner's indexer-selected K/V rows."""
+        """Run sparse attention over the owner's indexer-selected K/V rows.
+
+        `prefill_query`, if given, is the FlashInfer prefill rows' Q in its
+        query dtype; `query` then holds only the decode rows.
+        """
         num_tokens = attn_metadata.num_actual_tokens
         # No zero fill: the kernel writes every actual row (empty selections
         # included), and padding rows only feed row-wise ops, never sampled
@@ -529,8 +548,22 @@ class Qwen4ExpQSAImpl(
                     output_gate[prefill_rows],
                 )
             else:
+                k_scale = v_scale = 1.0
+                if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+                    k_scale = layer._k_scale_float
+                    v_scale = layer._v_scale_float
+                if prefill_query is None:
+                    prefill_query = query[prefill_rows]
+                    if prefill_query.dtype != flashinfer_prefill.query_dtype:
+                        # The unfused prepare writes BF16 Q. Unit scale: Q is
+                        # RMS-normalized, far inside e4m3's range (|Q| <= 19 on
+                        # Qwen3.8).
+                        prefill_query = prefill_query.to(
+                            flashinfer_prefill.query_dtype
+                        )
+                assert prefill_query.dtype == flashinfer_prefill.query_dtype
                 qsa_sparse_paged_prefill(
-                    query[prefill_rows],
+                    prefill_query,
                     kv_cache,
                     nvidia_metadata.block_table,
                     nvidia_metadata.num_decodes,
@@ -545,6 +578,8 @@ class Qwen4ExpQSAImpl(
                     self.scale,
                     output_gate[prefill_rows],
                     out[prefill_rows],
+                    k_scale=k_scale,
+                    v_scale=v_scale,
                 )
             return output
 
@@ -830,17 +865,36 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             prefix=f"{prefix}.indexer",
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
-        self.flashinfer_qsa_supported = (
-            index_group is None
-            and is_flashinfer_qsa_supported(
+        quantize_query = vllm_config.attention_config.use_prefill_query_quantization
+        self.flashinfer_query_dtype = flashinfer_qsa_query_dtype(
+            self.kv_cache_torch_dtype, quantize_query
+        )
+
+        def flashinfer_supported(q_dtype: torch.dtype) -> bool:
+            return index_group is None and is_flashinfer_qsa_supported(
                 self.kv_cache_torch_dtype,
+                q_dtype,
                 self.indexer.compress_ratio,
                 self.block_topk,
                 self.head_dim,
                 self.num_heads,
                 self.num_kv_heads,
             )
+
+        self.flashinfer_qsa_supported = flashinfer_supported(
+            self.flashinfer_query_dtype
         )
+        if (
+            self.kv_cache_torch_dtype == torch.uint8
+            and not quantize_query
+            and flashinfer_supported(torch.float8_e4m3fn)
+        ):
+            # FlashInfer 0.7.4 takes an FP8 cache only with FP8 Q.
+            logger.info_once(
+                "QSA prefill with an FP8 KV cache runs the Triton kernel. To run "
+                "it on FlashInfer with FP8 queries, which is faster, add "
+                "--attention-config '{\"use_prefill_query_quantization\": true}'"
+            )
         # One launch does the indexer prepare, the main QK-norm/RoPE/gate and
         # the main K/V cache write (see QSAIndexer.forward); otherwise all of
         # them take the separate kernels. The fused writer receives an fp8
@@ -959,6 +1013,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                         cdiv(cfg.model_config.max_model_len, block_size) * block_size,
                         self.indexer.compress_ratio,
                         self.block_topk,
+                        self.flashinfer_query_dtype,
+                        self.kv_cache_torch_dtype,
                         output.device,
                     )
             _ = torch.empty(
@@ -994,6 +1050,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 num_tokens, slot_mapping.shape[0]
             )
             main_kv_cache = self.impl.kv_view(resident)
+        # FlashInfer FP8 prefill: the fused prepare writes the prefill rows'
+        # Q (after the decode rows) in FP8 directly.
+        flashinfer_prefill = getattr(main_metadata, "flashinfer_prefill", None)
+        main_fp8_q_start = None
+        if (
+            self.index_group is None
+            and flashinfer_prefill is not None
+            and flashinfer_prefill.query_dtype == torch.float8_e4m3fn
+        ):
+            main_fp8_q_start = main_metadata.num_decode_tokens
         selected, main_outputs = self.indexer(
             projected_qk,
             positions,
@@ -1002,12 +1068,14 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             qkv=qkv,
             slot_mapping=slot_mapping,
             main_kv_cache=main_kv_cache,
+            main_fp8_q_start=main_fp8_q_start,
             block_indices=block_indices,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         if self.index_group is not None:
             self.index_group.set_logical_topk_ready(0)
+        prefill_query = None
         if main_outputs is None:
             assert key is not None and value is not None
             num_rows = slot_mapping.shape[0]
@@ -1015,7 +1083,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 self, key[:num_rows], value[:num_rows], main_kv_cache, slot_mapping
             )
         else:
-            query, output_gate = main_outputs
+            query, output_gate, prefill_query = main_outputs
         if self.index_group is not None:
             self.index_group.cache(0).finish_kv_update()
         assert query is not None and output_gate is not None
@@ -1030,6 +1098,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             output_gate=output_gate,
             block_indices=block_indices,
             positions=indexer_metadata.logical_positions,
+            prefill_query=prefill_query,
         )
 
     def forward(

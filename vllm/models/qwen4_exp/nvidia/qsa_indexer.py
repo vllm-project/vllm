@@ -234,8 +234,12 @@ class QSAIndexer(nn.Module):
         qkv: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
         main_kv_cache: torch.Tensor | None = None,
+        main_fp8_q_start: int | None = None,
         block_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+    ) -> tuple[
+        torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None,
+    ]:
         """Update indexer caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
@@ -247,8 +251,9 @@ class QSAIndexer(nn.Module):
         With `attn.use_fused_qsa_prepare`, the same launch also writes
         `attn`'s K/V into `main_kv_cache` at `slot_mapping` and prepares
         its Q and gate from `qkv`, returned as the second element (None
-        otherwise). `qkv`, `slot_mapping` and `main_kv_cache` are only
-        read in that mode.
+        otherwise), with Q rows from `main_fp8_q_start` on in FP8 (see
+        `qsa_prepare`). `qkv`, `slot_mapping`, `main_kv_cache` and
+        `main_fp8_q_start` are only read in that mode.
 
         `block_indices` [num_tokens, token_topk // compress_ratio] receives
         the selected compressed blocks before expansion: each row's leading
@@ -295,7 +300,9 @@ class QSAIndexer(nn.Module):
         raw_key_state_cache = self.raw_key_cache
         compressed_key_cache = self.compressed_key_cache.kv_cache
 
-        main_outputs: tuple[torch.Tensor, torch.Tensor] | None = None
+        main_outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None = (
+            None
+        )
         if attn.use_fused_qsa_prepare:
             if qkv is None or slot_mapping is None or main_kv_cache is None:
                 raise ValueError(
@@ -342,6 +349,7 @@ class QSAIndexer(nn.Module):
                 main_slot_mapping=slot_mapping[:num_tokens],
                 main_k_scale=attn._k_scale_float,
                 main_v_scale=attn._v_scale_float,
+                main_fp8_q_start=main_fp8_q_start,
             )
         else:
             # Unfused reference path
