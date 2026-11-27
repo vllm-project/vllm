@@ -657,6 +657,50 @@ where
     UtilityResultEnvelope::without_type_info(rmpv::ext::to_value(value).unwrap())
 }
 
+/// Only engines that do not chunk prefills report a prompt limit, and the
+/// smallest of them applies to every request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_unchunked_prompt_len_comes_from_unchunked_engines() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let mut engines = Vec::new();
+    for (engine_id, max_unchunked_prompt_len) in [
+        ([0x00, 0x00], None),
+        ([0x01, 0x00], Some(4096)),
+        ([0x02, 0x00], Some(8192)),
+    ] {
+        engines.push(spawn_mock_engine_task_with_ready(
+            ipc.handshake_endpoint(),
+            engine_id.to_vec(),
+            EngineCoreReadyResponse {
+                max_unchunked_prompt_len,
+                ..default_ready_response()
+            },
+            |_, _| Box::pin(async {}),
+        ));
+    }
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            3,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    assert_eq!(client.max_unchunked_prompt_len(), Some(4096));
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
 /// A request may reach any engine, so prompt logprobs are supported only when
 /// every engine reports them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4389,12 +4433,14 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     legacy_ready.as_object_mut().unwrap().remove("supports_prompt_logprobs");
     legacy_ready.as_object_mut().unwrap().remove("allow_missing_mm_embeddings");
     legacy_ready.as_object_mut().unwrap().remove("max_mm_embeds_per_request");
+    legacy_ready.as_object_mut().unwrap().remove("max_unchunked_prompt_len");
     let legacy_ready: EngineCoreReadyResponse =
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
     assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(legacy_ready.supports_prompt_logprobs);
     assert!(!legacy_ready.allow_missing_mm_embeddings);
     assert!(legacy_ready.max_mm_embeds_per_request.is_none());
+    assert!(legacy_ready.max_unchunked_prompt_len.is_none());
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
@@ -4409,6 +4455,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(!ready_response.supports_prompt_logprobs);
     assert!(ready_response.allow_missing_mm_embeddings);
     assert_eq!(ready_response.max_mm_embeds_per_request, Some(16384));
+    assert_eq!(ready_response.max_unchunked_prompt_len, Some(512));
     assert_eq!(
         ready_response.cache_config_info,
         Some(BTreeMap::from([

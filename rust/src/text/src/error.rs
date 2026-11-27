@@ -154,6 +154,7 @@ impl Error {
                 LlmError::Unsupported { field } => ErrorKind::invalid_param(field),
                 LlmError::MmEmbedsExceedEncoderCache { .. }
                 | LlmError::InvalidMultimodalInput { .. }
+                | LlmError::PromptExceedsUnchunkedLimit { .. }
                 | LlmError::RemoteInvalidRequest { .. } => ErrorKind::invalid_request(),
                 LlmError::EngineCoreClient(error) => engine_core_error_kind(error),
                 LlmError::SamplingMaskTokenCountMismatch { .. }

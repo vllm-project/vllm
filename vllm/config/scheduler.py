@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
+    from vllm.config.speculative import SpeculativeConfig
     from vllm.v1.core.sched.interface import SchedulerInterface
 
 logger = init_logger(__name__)
@@ -397,6 +398,42 @@ class SchedulerConfig:
             )
 
         self.verify_max_model_len(max_model_len)
+
+    def max_unchunked_prompt_len(
+        self,
+        speculative_config: "SpeculativeConfig | None" = None,
+        is_mm_encoder_only: bool = False,
+    ) -> int | None:
+        """Longest prompt that fits in one scheduling step, or None when
+        prompts may be split across steps.
+
+        Without chunked prefill, a longer prompt can never be scheduled and
+        would block the waiting queue. The step also reserves the draft slots
+        of speculative decoding. `long_prefill_token_threshold` does not lower
+        this limit: the scheduler applies it only with chunked prefill. The
+        scheduler does not hold back multimodal encoder-only requests, so they
+        have no limit.
+
+        The engine reports this value to the frontends (Python and Rust), which
+        reject longer prompts on admission. This counts the whole prompt: with
+        prefix caching on, a prompt above the limit is rejected even when a
+        cache hit would leave few enough tokens to fit in one step (e.g. a warm
+        513-token prompt with a 512-token limit). That needs chunked prefill
+        off and a limit below `max_model_len`.
+        """
+        if self.enable_chunked_prefill or is_mm_encoder_only:
+            return None
+        num_draft_slots = (
+            speculative_config.max_num_new_slots_for_drafting
+            if speculative_config is not None
+            else 0
+        )
+        budget = (
+            self.max_num_scheduled_tokens
+            if self.max_num_scheduled_tokens is not None
+            else self.max_num_batched_tokens
+        )
+        return min(budget, self.max_num_batched_tokens - num_draft_slots)
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (

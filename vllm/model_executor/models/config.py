@@ -1067,9 +1067,21 @@ class HrmTextForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         # The prompt attends bidirectionally during prefill, so its KV is not a
         # causal function of the prefix.
-        if vllm_config.scheduler_config.enable_chunked_prefill:
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.enable_chunked_prefill:
             logger.info("HRM-Text: disabling chunked prefill (non-causal prefill).")
-            vllm_config.scheduler_config.enable_chunked_prefill = False
+            scheduler_config.enable_chunked_prefill = False
+        # As EngineArgs does with chunked prefill off, raise the step budget to
+        # --max-model-len so a full prompt fits in one step.
+        max_model_len = vllm_config.model_config.max_model_len
+        if scheduler_config.max_num_batched_tokens < max_model_len:
+            logger.info(
+                "HRM-Text: raising max_num_batched_tokens from %d to %d: each "
+                "prompt is prefilled in one step.",
+                scheduler_config.max_num_batched_tokens,
+                max_model_len,
+            )
+            scheduler_config.max_num_batched_tokens = max_model_len
         if vllm_config.cache_config.enable_prefix_caching:
             logger.info("HRM-Text: disabling prefix caching (non-causal prefill).")
             vllm_config.cache_config.enable_prefix_caching = False

@@ -157,6 +157,13 @@ pub struct EngineCoreReadyResponse {
     /// step, so a request needing more could never be scheduled.
     #[serde(default)]
     pub max_mm_embeds_per_request: Option<u64>,
+    /// Longest prompt the engine can schedule in one step when it does not
+    /// chunk prefills (Python's `SchedulerConfig.max_unchunked_prompt_len`,
+    /// which accounts for `max_num_scheduled_tokens` and speculative decoding
+    /// draft slots), or `None` when prompts may be split across steps. A
+    /// longer prompt could never be scheduled.
+    #[serde(default)]
+    pub max_unchunked_prompt_len: Option<u64>,
 }
 
 fn supports_prompt_logprobs_default() -> bool {

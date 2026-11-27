@@ -870,6 +870,75 @@ async fn mm_items_exceeding_encoder_cache_rejected_before_submission() {
     llm.shutdown().await.unwrap();
 }
 
+/// When the engine does not chunk prefills, a prompt longer than one
+/// scheduling step fails before submission instead of blocking the engine's
+/// queue; a prompt that fits still reaches the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unchunked_prompt_longer_than_step_rejected() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-unchunked".to_vec(),
+        EngineCoreReadyResponse {
+            max_unchunked_prompt_len: Some(2),
+            ..default_ready_response()
+        },
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.external_req_id.as_deref(), Some("req-fits"));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![1],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+
+    let mut too_long = sample_generate_request("req-too-long", 1);
+    too_long.prompt_token_ids = vec![11, 22, 33];
+    let error = llm.generate(too_long).await.map(|_| ()).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::PromptExceedsUnchunkedLimit {
+                prompt_len: 3,
+                max_prompt_len: 2
+            }
+        ),
+        "{error:?}"
+    );
+
+    let output = llm
+        .generate(sample_generate_request("req-fits", 1))
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
 /// When the engine reports that it does not compute prompt logprobs (under
 /// `--kv-sharing-fast-prefill`), requests asking for them fail before
 /// submission, including `prompt_logprobs=0`; other requests still reach the

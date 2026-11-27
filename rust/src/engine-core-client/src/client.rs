@@ -605,6 +605,16 @@ impl EngineCoreClient {
             .min()
     }
 
+    /// Return the longest prompt an engine can schedule when it does not
+    /// chunk prefills, or `None` when every engine chunks them. A request may
+    /// go to any engine, so the smallest limit applies to all.
+    pub fn max_unchunked_prompt_len(&self) -> Option<u64> {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.ready_response.max_unchunked_prompt_len)
+            .min()
+    }
+
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines

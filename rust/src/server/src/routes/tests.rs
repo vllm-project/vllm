@@ -7117,6 +7117,51 @@ async fn prompt_logprobs_rejected_when_engine_lacks_them() {
     engine_task.await.expect("mock engine task");
 }
 
+/// When the engine does not chunk prefills, a prompt longer than one
+/// scheduling step is a 400 with the Python frontend's message, although it
+/// fits in `max_model_len`; a prompt that fits still runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unchunked_prompt_longer_than_step_is_bad_request() {
+    let (mut app, engine_task) = test_app_with_ready_and_engine_request_check(
+        vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+            max_unchunked_prompt_len: Some(4),
+            ..default_ready_response()
+        },
+        |llm| ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new())),
+        |request| {
+            assert_eq!(
+                decode_prompt_token_ids(request).expect("prompt token ids"),
+                [1, 2]
+            );
+        },
+    )
+    .await;
+
+    // Token-ID prompts, so the lengths do not depend on special tokens.
+    let completion = |prompt: &[u32]| {
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": prompt,
+            "max_tokens": 2,
+        })
+    };
+    let (status, json) = post_json(&mut app, "/v1/completions", completion(&[1, 2, 3, 4, 5])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert_eq!(
+        json["error"]["message"],
+        "The decoder prompt (length 5) is longer than the 4 tokens this model can schedule \
+         in one step. Chunked prefill is disabled for this model, so longer prompts can never \
+         be scheduled. Increase `max_num_batched_tokens` (and `max_num_scheduled_tokens`, if \
+         set) or shorten the prompt."
+    );
+
+    let (status, json) = post_json(&mut app, "/v1/completions", completion(&[1, 2])).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
