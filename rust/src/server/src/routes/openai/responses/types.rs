@@ -9,14 +9,15 @@
 //! frontend.
 
 use std::collections::HashMap;
-use std::fmt;
 
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
     Function, FunctionChoice, ImageDetail, InputAudio, ReasoningEffort, StringOrArray,
     ToolChoiceValue, ToolReference, default_true, deserialize_request_top_k,
+    deserialize_text_or_list,
 };
-use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use itertools::Either;
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_chat::AllowedToolsMode;
@@ -36,33 +37,10 @@ impl<'de> Deserialize<'de> for ResponsesInput {
     /// Deserialize by JSON type rather than `#[serde(untagged)]`, which would
     /// replace a precise per-item error with a generic one.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct InputVisitor;
-
-        impl<'de> Visitor<'de> for InputVisitor {
-            type Value = ResponsesInput;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a string or a list of input items")
-            }
-
-            fn visit_str<E: de::Error>(self, text: &str) -> Result<Self::Value, E> {
-                Ok(ResponsesInput::Text(text.to_owned()))
-            }
-
-            fn visit_string<E: de::Error>(self, text: String) -> Result<Self::Value, E> {
-                Ok(ResponsesInput::Text(text))
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                let mut items = Vec::with_capacity(seq.size_hint().unwrap_or_default());
-                while let Some(item) = seq.next_element()? {
-                    items.push(item);
-                }
-                Ok(ResponsesInput::Items(items))
-            }
-        }
-
-        deserializer.deserialize_any(InputVisitor)
+        Ok(match deserialize_text_or_list(deserializer)? {
+            Either::Left(text) => Self::Text(text),
+            Either::Right(items) => Self::Items(items),
+        })
     }
 }
 
@@ -475,11 +453,20 @@ pub struct ResponseInputMessage {
 }
 
 /// Message content: either a plain string or a list of typed parts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ResponseMessageContent {
     Text(String),
     Parts(Vec<ResponseInputContentPart>),
+}
+
+impl<'de> Deserialize<'de> for ResponseMessageContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match deserialize_text_or_list(deserializer)? {
+            Either::Left(text) => Self::Text(text),
+            Either::Right(parts) => Self::Parts(parts),
+        })
+    }
 }
 
 /// One message content part.

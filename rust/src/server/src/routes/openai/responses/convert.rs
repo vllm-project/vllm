@@ -30,7 +30,7 @@ use super::types::{
     ServiceTier,
 };
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request, chat_submit_error};
+use crate::error::{ApiError, bail_invalid_request, chat_request_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::{
@@ -84,7 +84,7 @@ pub(crate) fn prepare_responses_request(
     lora_resolution.model_names.check(request.model.as_deref())?;
     validate::validate_request(&request)?;
 
-    let request_id = format!("resp_{}", ctx.request_id);
+    let request_id = ctx.request_id.clone();
 
     let ResponsesRequest {
         model: _,
@@ -158,7 +158,7 @@ pub(crate) fn prepare_responses_request(
         requested_tool_choice,
         parallel_tool_calls.unwrap_or(true),
     )
-    .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
+    .map_err(|error| chat_request_error("failed to resolve request tools", error))?;
 
     let tool_choice_echo = echo_tool_choice(&tool_context);
 

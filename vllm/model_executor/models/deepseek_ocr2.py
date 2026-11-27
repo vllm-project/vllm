@@ -129,9 +129,11 @@ class DeepseekOCR2ProcessingInfo(BaseProcessingInfo):
         return global_views_tokens + local_views_tokens + 1
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        if IMAGE_SIZE == 1024 and BASE_SIZE == 1280:
-            return ImageSize(width=1024 * 2, height=1024 * 2)
-        return ImageSize(width=768 * 2, height=768 * 2)
+        processor = self.get_hf_processor()
+        return ImageSize(
+            width=processor.image_size,
+            height=processor.image_size * max(processor.max_crops, 1),
+        )
 
 
 class DeepseekOCR2DummyInputsBuilder(

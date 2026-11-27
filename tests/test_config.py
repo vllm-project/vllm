@@ -2625,15 +2625,23 @@ def test_engram_config_defaults_to_none():
     assert hash_config(config)
 
 
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "DeepseekV41ForCausalLM",
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+    ],
+)
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("enable_dbo,ubatch_size", [(True, 0), (False, 2)])
-def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size):
+def test_engram_rejects_microbatching(architecture, explicit, enable_dbo, ubatch_size):
     """Reject overlapping Engram staging even without an explicit EngramConfig."""
     config = cast(
         VllmConfig,
         SimpleNamespace(
             model_config=SimpleNamespace(
-                architecture="DeepseekV41ForCausalLM",
+                architecture=architecture,
                 hf_text_config=SimpleNamespace(engram_layer_ids=[1]),
             ),
             speculative_config=None,

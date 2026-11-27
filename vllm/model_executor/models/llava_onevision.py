@@ -7,6 +7,8 @@ from typing import Annotated, Literal, Protocol, TypeAlias, TypedDict
 
 import torch
 import torch.nn as nn
+import transformers
+from packaging.version import Version
 from transformers import BatchFeature, LlavaOnevisionConfig, LlavaOnevisionProcessor
 from transformers.image_processing_utils import get_size_dict
 from transformers.image_transforms import get_size_with_aspect_ratio
@@ -60,6 +62,10 @@ from .utils import (
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
+
+# Before 5.18, Transformers sampled an explicit frame count with a float-step
+# `arange`, which can return one more index than requested.
+_FLOAT_STEP_FRAME_SAMPLING = Version(transformers.__version__) < Version("5.18.0.dev0")
 
 
 class LlavaOnevisionVideoPixelInputs(TensorSchema):
@@ -427,15 +433,22 @@ class LlavaOnevisionMultiModalProcessor(
                     metadata = make_batched_metadata(
                         [video], video_kwargs.get("video_metadata")
                     )[0]
-                    frame_count = len(
-                        video_processor.sample_frames(
-                            metadata,
-                            num_frames=video_kwargs.get(
-                                "num_frames", video_processor.num_frames
-                            ),
-                            fps=video_kwargs.get("fps", video_processor.fps),
-                        )
+                    # Length of HF's `sample_frames` output, without allocating
+                    # the indices. HF rejects invalid settings before sampling.
+                    num_frames = video_kwargs.get(
+                        "num_frames", video_processor.num_frames
                     )
+                    fps = video_kwargs.get("fps", video_processor.fps)
+                    frame_count = metadata.total_num_frames
+                    if None not in (fps, metadata.fps) and num_frames is None:
+                        num_frames = max(1, int(frame_count / metadata.fps * fps))
+                    if num_frames is not None:
+                        if _FLOAT_STEP_FRAME_SAMPLING and 0 < num_frames <= frame_count:
+                            # Length of `torch.arange(0, total, total / num_frames)`.
+                            num_frames = math.ceil(
+                                frame_count / (frame_count / num_frames)
+                            )
+                        frame_count = min(num_frames, frame_count)
                 except (ArithmeticError, AttributeError, IndexError, TypeError) as exc:
                     raise ValueError("Invalid video sampling settings.") from exc
             height, width, channels = get_video_frame_dimensions(video)
@@ -503,11 +516,14 @@ class LlavaOnevisionMultiModalProcessor(
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
                 assert isinstance(videos, VideoProcessorItems)
-                image_size = videos.get_frame_size(item_idx)
+                pixel_values = out_mm_kwargs["video"][item_idx][
+                    "pixel_values_videos"
+                ].data
+                assert isinstance(pixel_values, torch.Tensor)
                 num_video_tokens = self.info.get_num_video_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    num_frames=videos.get_num_frames(item_idx),
+                    image_width=pixel_values.shape[-1],
+                    image_height=pixel_values.shape[-2],
+                    num_frames=pixel_values.shape[0],
                 )
 
             return [video_token_id] * num_video_tokens
