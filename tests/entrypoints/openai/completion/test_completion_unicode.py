@@ -74,27 +74,55 @@ async def _get_echo_logprobs(client, model, prompt, stream, max_tokens, extra_bo
     return reference.choices[0], text, offsets, tokens
 
 
-@pytest.fixture(scope="module")
-def unicode_trimmed_server_args(tmp_path_factory):
+def _unicode_trimmed_server_args(tmp_path_factory, *, replace=False):
     tokenizer = cast(TokenizersBackend, get_tokenizer("facebook/opt-125m"))
     backend = Tokenizer.from_str(tokenizer.backend_tokenizer.to_str())
     backend.post_processor = processors.ByteLevel(trim_offsets=True)
-    backend.decoder = decoders.Sequence([backend.decoder, decoders.Fuse()])
+    steps = [backend.decoder, decoders.Fuse()]
+    if replace:
+        steps.append(decoders.Replace("\r\n", "\n"))
+    backend.decoder = decoders.Sequence(steps)
     path = tmp_path_factory.mktemp("unicode-trimmed-tokenizer")
     TokenizersBackend(tokenizer_object=backend).save_pretrained(path)
     return [*UNICODE_SERVER_ARGS, "--tokenizer", str(path)]
 
 
+@pytest.fixture(scope="module")
+def unicode_trimmed_server_args(tmp_path_factory):
+    return _unicode_trimmed_server_args(tmp_path_factory)
+
+
+@pytest.fixture(scope="module")
+def unicode_unknown_trimmed_server_args(tmp_path_factory):
+    return _unicode_trimmed_server_args(tmp_path_factory, replace=True)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "server", [("facebook/opt-125m", "unicode_trimmed_server_args")], indirect=True
+    "server,contextual",
+    [
+        (("facebook/opt-125m", "unicode_trimmed_server_args"), True),
+        (("facebook/opt-125m", "unicode_unknown_trimmed_server_args"), False),
+    ],
+    indirect=["server"],
+    scope="module",
 )
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("max_tokens", [0, 3])
 @pytest.mark.parametrize("return_token_offsets", [False, True])
-@pytest.mark.parametrize("prompt,expected", [("é x", [0, 1]), ("é  x", [0, 1, 2])])
+@pytest.mark.parametrize(
+    "prompt,expected",
+    [("é x", [0, 1]), ("é  x", [0, 1, 2]), ("𐍈 x", [0, 0, 0, 0, 1])],
+)
 async def test_echo_unicode_offsets_preserve_trimmed_spaces(
-    client, server, stream, max_tokens, return_token_offsets, prompt, expected
+    client,
+    server,
+    contextual,
+    stream,
+    max_tokens,
+    return_token_offsets,
+    prompt,
+    expected,
 ):
     model = (await client.models.list()).data[0].id
     reference, text, offsets, tokens = await _get_echo_logprobs(
@@ -106,10 +134,17 @@ async def test_echo_unicode_offsets_preserve_trimmed_spaces(
         {"add_special_tokens": False, "return_token_offsets": return_token_offsets},
     )
     count = len(expected)
+    if not contextual and prompt == "𐍈 x":
+        # Keep legacy split-character offsets for unsupported decoders, but
+        # preserve the space token's start rather than its trimmed source span.
+        expected = [0, 1, 1, 1, 1]
     assert len(reference.prompt_token_ids) == count
     assert text == prompt + (reference.text if max_tokens else "")
-    assert "".join(tokens[:count]) == prompt
     assert offsets[:count] == expected
+    assert tokens[count - 1] == " x"
+    if len(set(expected)) == count:
+        # Split UTF-8 tokens cannot reconstruct the prompt independently.
+        assert "".join(tokens[:count]) == prompt
     assert offsets[count:] == (
         [len(prompt) + o for o in reference.logprobs.text_offset] if max_tokens else []
     )

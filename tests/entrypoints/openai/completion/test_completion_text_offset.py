@@ -29,6 +29,7 @@ from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
+from vllm.tokenizers.hf import get_cached_tokenizer, maybe_make_thread_pool
 
 TOKENS = [(1, "abc"), (2, " de"), (3, "!")]
 # Text deltas as the detokenizer streams them with stop=["\n\n"]: one char is
@@ -69,15 +70,94 @@ def test_normalized_echo_offsets_preserve_special_token_boundaries(
         )
     assert offsets == [*expected, len(text)]
     if reuse_source_offsets:
-        # Stop at the first mismatching prefix, then reuse source offsets.
+        # Batch singleton decodes before reusing the source offsets.
         decode_calls = sum(
             entry.callcount
             for entry in profile.getstats()
             if entry.code == tokenizer.decode.__func__.__code__
         )
-        assert decode_calls == (
-            2 if text.startswith("</s>") and not add_special_tokens else 1
+        assert decode_calls == 0
+
+
+@pytest.mark.parametrize("num_tokens", [8192, 32768])
+@pytest.mark.parametrize("pooled", [False, True])
+def test_normalized_echo_offsets_batch_singleton_decodes(num_tokens, pooled):
+    backend = Tokenizer(
+        models.WordLevel({"x": 0, "é": 1, "[UNK]": 2}, unk_token="[UNK]")
+    )
+    backend.normalizer = normalizers.Lowercase()
+    backend.pre_tokenizer = pre_tokenizers.Split("", behavior="isolated")
+    backend.decoder = decoders.Fuse()
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+    tokenizer = get_cached_tokenizer(tokenizer)
+    if pooled:
+        tokenizer = maybe_make_thread_pool(tokenizer)
+    text = "x" * (num_tokens - 1) + "É"
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    ids = encoding["input_ids"]
+    assert len(ids) == num_tokens
+    prompt_input = tokens_input(ids, prompt=text)
+    prompt_input["prompt_token_offsets"] = encoding["offset_mapping"]
+    with Profile() as profile:
+        offsets = _get_prompt_text_offsets(
+            tokenizer, ids, text, prompt_input=prompt_input, source_text=text
         )
+    assert offsets == list(range(num_tokens + 1))
+    assert not any(
+        entry.code
+        in (tokenizer.decode.__func__.__code__, tokenizer._decode.__func__.__code__)
+        for entry in profile.getstats()
+    )
+    assert (
+        sum(
+            entry.callcount
+            for entry in profile.getstats()
+            if isinstance(entry.code, str) and "'decode_batch'" in entry.code
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("split_unicode", [False, True])
+@pytest.mark.parametrize("reuse_source_offsets", [False, True])
+@pytest.mark.parametrize("text", ["é x", "É x"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("trim", [False, True])
+def test_literal_echo_offsets_precede_trimmed_source_offsets(
+    split_unicode, reuse_source_offsets, text, nested, trim
+):
+    backend = Tokenizer(
+        models.BPE(
+            {"Ã": 0, "©": 1, "Ã©": 2, "Ġ": 3, "x": 4, "Ġx": 5},
+            ([] if split_unicode else [("Ã", "©")]) + [("Ġ", "x")],
+        )
+    )
+    backend.normalizer = normalizers.Lowercase()
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    processor = processors.ByteLevel(trim_offsets=trim)
+    backend.post_processor = processors.Sequence([processor]) if nested else processor
+    backend.decoder = decoders.Sequence(
+        [decoders.ByteLevel(), decoders.Replace("y", "Y")]
+    )
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    ids = encoding["input_ids"]
+    assert ids == ([0, 1, 5] if split_unicode else [2, 5])
+    assert encoding["offset_mapping"][-1] == (2 if trim else 1, 3)
+    prompt_input = tokens_input(ids, prompt=text)
+    if reuse_source_offsets:
+        prompt_input["prompt_token_offsets"] = encoding["offset_mapping"]
+    offsets = _get_prompt_text_offsets(
+        tokenizer, ids, text, prompt_input=prompt_input, source_text=text
+    )
+    # Unsupported contextual decoding must not replace legacy offsets with
+    # source spans that trimmed a token's leading space.
+    expected = (
+        None
+        if trim and (split_unicode or text == "É x")
+        else [0, *([0] if split_unicode else []), 1, len(text)]
+    )
+    assert offsets == expected
 
 
 def _normalized_tokenizer(special_count=1):

@@ -38,6 +38,36 @@ class ThreadSafeHFTokenizerMixin:
     pass
 
 
+def batch_decode_singleton_tokens(
+    tokenizer: TokenizerLike, token_ids: list[int]
+) -> list[str] | None:
+    """Batch HF singleton decodes without bypassing custom decoding policies."""
+    cls = type(tokenizer)
+    if isinstance(tokenizer, ThreadSafeHFTokenizerMixin):
+        # TokenizerPool only adds forwarding methods to the original class.
+        cls = cls.__bases__[0]
+    if (
+        isinstance(tokenizer, TokenizersBackend)
+        and cls.decode is TokenizersBackend.decode
+        and getattr(cls, "_decode", None) is TokenizersBackend._decode
+    ):
+        backend = tokenizer.backend_tokenizer
+        pieces = backend.decode_batch(
+            [[token_id] for token_id in token_ids], skip_special_tokens=False
+        )
+        if tokenizer.clean_up_tokenization_spaces and (
+            type(backend.model).__name__ != "BPE"
+            or getattr(
+                tokenizer,
+                "clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output",
+                True,
+            )
+        ):
+            pieces = [tokenizer.clean_up_tokenization(piece) for piece in pieces]
+        return pieces
+    return None
+
+
 def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     """If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
     in-place to make the public interface thread-safe by routing calls

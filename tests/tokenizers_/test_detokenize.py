@@ -18,6 +18,11 @@ from vllm.tokenizers.detokenizer_utils import (
     decode_token_ids_with_offsets,
     detokenize_incrementally,
 )
+from vllm.tokenizers.hf import (
+    batch_decode_singleton_tokens,
+    get_cached_tokenizer,
+    maybe_make_thread_pool,
+)
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.protocol import TokenizerLike
@@ -75,7 +80,11 @@ def _byte_tokenizer(byte_fallback=False):
     return TokenizersBackend(tokenizer_object=backend)
 
 
-@pytest.mark.parametrize("byte_fallback", [False, True], ids=["bytelevel", "fallback"])
+@pytest.mark.parametrize(
+    "byte_fallback,wrap_bytelevel",
+    [(False, False), (False, True), (True, False)],
+    ids=["bytelevel", "bytelevel-fuse", "fallback"],
+)
 @pytest.mark.parametrize(
     "raw,expected,starts",
     [
@@ -86,8 +95,13 @@ def _byte_tokenizer(byte_fallback=False):
         (b"", "", []),
     ],
 )
-def test_decode_offsets_for_split_unicode(byte_fallback, raw, expected, starts):
+def test_decode_offsets_for_split_unicode(
+    byte_fallback, wrap_bytelevel, raw, expected, starts
+):
     tokenizer = _byte_tokenizer(byte_fallback)
+    if wrap_bytelevel:
+        backend = tokenizer.backend_tokenizer
+        backend.decoder = decoders.Sequence([backend.decoder, decoders.Fuse()])
     ids = list(raw)
     assert tokenizer.decode(ids) == expected
     assert decode_token_ids_with_offsets(tokenizer, ids) == (expected, starts)
@@ -104,6 +118,37 @@ def test_decode_offsets_preserve_added_tokens_and_special_slots():
         "é🦄x",
         [0, 0, 0, 1, 2, 3],
     )
+
+
+@pytest.mark.parametrize("bpe", [False, True])
+@pytest.mark.parametrize(
+    "cleanup,force_bpe", [(False, False), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("pooled", [False, True])
+def test_batch_decode_singleton_tokens_preserves_hf_policies(
+    bpe, cleanup, force_bpe, pooled
+):
+    backend = (
+        _byte_tokenizer().backend_tokenizer
+        if bpe
+        else Tokenizer(models.WordLevel({"é": 0, " .": 1}))
+    )
+    bpe_option = (
+        "clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output"
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend,
+        clean_up_tokenization_spaces=cleanup,
+        **{bpe_option: force_bpe},
+    )
+    tokenizer.add_tokens([AddedToken(" .")])
+    tokenizer.add_special_tokens({"bos_token": "<s>"})
+    ids = [*tokenizer.get_vocab().values()]
+    expected = [tokenizer.decode([token_id]) for token_id in ids]
+    tokenizer = get_cached_tokenizer(tokenizer)
+    if pooled:
+        tokenizer = maybe_make_thread_pool(tokenizer)
+    assert batch_decode_singleton_tokens(tokenizer, ids) == expected
 
 
 def test_decode_offsets_leave_unknown_decoder_unsupported():

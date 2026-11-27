@@ -63,7 +63,12 @@ def decode_token_ids_with_offsets(
             config = get_fastokens_decoder_config(backend)
         if config is None:
             return None
-        if config["type"] != "ByteLevel":
+        steps = config["decoders"] if config["type"] == "Sequence" else [config]
+        if not (
+            steps
+            and steps[0]["type"] == "ByteLevel"
+            and all(step["type"] == "Fuse" for step in steps[1:])
+        ):
             return _decode_byte_fallback_with_offsets(tokens, config)
 
     byte_decoder = _byte_level_decoder()
