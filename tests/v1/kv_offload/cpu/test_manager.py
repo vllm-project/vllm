@@ -22,7 +22,8 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
+from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
+from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
 
@@ -683,6 +684,125 @@ def test_prepare_load_preserves_key_order():
         key_to_chunk_id[key_a],
     ]
     manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
+
+
+@pytest.fixture(params=("lru", "arc"))
+def retention_policy_name(request):
+    return request.param
+
+
+@pytest.fixture
+def retention_policy(retention_policy_name):
+    return CachePolicyFactory.get_cache_policy_cls(retention_policy_name)(6)
+
+
+def set_lease_count(policy: CachePolicy, key: OffloadKey, count: int) -> None:
+    chunk = policy.get(key)
+    assert chunk is not None
+    was_retained = chunk.retained
+    chunk.lease_cnt = count
+    if was_retained != chunk.retained:
+        policy.on_retention_changed(key, chunk.retained)
+
+
+def test_retained_chunks_are_evicted_last(retention_policy):
+    policy = retention_policy
+    old, ordinary, pinned, pending, protected, new = to_keys(list(range(6)))
+    for i, key in enumerate((old, ordinary, pinned, pending, protected, new)):
+        chunk = ChunkStatus(i)
+        assert chunk.lease_cnt == 0
+        assert not chunk.retained
+        if key != pending:
+            chunk.ref_cnt = 1 if key == pinned else 0
+        policy.insert(key, chunk, _EMPTY_REQ_CTX)
+
+    set_lease_count(policy, old, 1)
+    set_lease_count(policy, new, 1)
+    assert policy.evict(4, {protected}) is None
+
+    # The failed batch leaves both eviction classes available in policy order.
+    evicted = policy.evict(3, {protected})
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [ordinary, old, new]
+    assert all(policy.get(key) is not None for key in (pinned, pending, protected))
+
+
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_releasing_last_lease_restores_eviction_order(retention_policy, in_flight):
+    policy = retention_policy
+    old, new = to_keys([1, 2])
+    for i, key in enumerate((old, new)):
+        chunk = ChunkStatus(i)
+        chunk.ref_cnt = 0
+        policy.insert(key, chunk, _EMPTY_REQ_CTX)
+
+    set_lease_count(policy, old, 2)
+    set_lease_count(policy, old, 1)
+    chunk = policy.get(old)
+    assert chunk is not None and chunk.retained and chunk.is_ready
+    if in_flight:
+        chunk.ref_cnt = 1
+        policy.mark_non_evictable(old)
+    set_lease_count(policy, old, 0)
+    if in_flight:
+        chunk.ref_cnt = 0
+        policy.mark_evictable(old)
+
+    evicted = policy.evict(2, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [old, new]
+
+
+def test_retention_preserves_tail_first_order_within_class(retention_policy):
+    policy = retention_policy
+    head, middle, tail = to_keys([1, 2, 3])
+    ctx = make_req_context("running")
+    for i, key in enumerate((head, middle, tail)):
+        ctx.set_offload_key_position(key, (i + 1) * 16)
+        chunk = ChunkStatus(i)
+        chunk.ref_cnt = 0
+        if key != middle:
+            chunk.lease_cnt = 1
+        policy.insert(key, chunk, ctx)
+
+    evicted = policy.evict(3, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [middle, tail, head]
+
+
+def test_store_makes_room_when_every_chunk_is_retained(retention_policy_name):
+    manager = make_cpu_manager(num_chunks=2, cache_policy=retention_policy_name)
+    old_keys = to_keys([1, 2])
+    trigger = StoreTrigger.ON_COMPUTE
+    assert manager.prepare_store(old_keys, _EMPTY_REQ_CTX, trigger=trigger) is not None
+    manager.complete_store(old_keys, _EMPTY_REQ_CTX, trigger=trigger)
+    for key in old_keys:
+        set_lease_count(manager._policy, key, 1)
+
+    new_keys = to_keys([3, 4])
+    output = manager.prepare_store(new_keys, _EMPTY_REQ_CTX, trigger=trigger)
+    assert output is not None
+    assert output.keys_to_store == new_keys
+    assert output.evicted_keys == old_keys
+    manager.complete_store(new_keys, _EMPTY_REQ_CTX, trigger=trigger)
+    assert all(
+        manager.lookup(key, _EMPTY_REQ_CTX) is LookupResult.HIT for key in new_keys
+    )
+
+
+def test_arc_prefers_non_retained_t2_chunk_over_retained_t1_chunk():
+    policy = ARCCachePolicy(2)
+    recent, frequent = to_keys([1, 2])
+    for i, key in enumerate((recent, frequent)):
+        chunk = ChunkStatus(i)
+        chunk.ref_cnt = 0
+        policy.insert(key, chunk, _EMPTY_REQ_CTX)
+    policy.on_request_finished([[frequent]], set(), {frequent}, _EMPTY_REQ_CTX)
+    set_lease_count(policy, recent, 1)
+
+    evicted = policy.evict(2, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [frequent, recent]
 
 
 def test_lru_batch_eviction_failure_is_atomic():
@@ -2082,11 +2202,14 @@ def test_unfinished_prefix_survives_pressure_across_store_batches(
         assert all(manager.lookup(key, ctx) is LookupResult.HIT for key in group[:-1])
 
 
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
 @pytest.mark.parametrize("reuse_method", ["load", "store"])
-def test_unfinished_lru_reused_prefix_outlives_new_tail(reuse_method):
-    manager = make_cpu_manager(num_chunks=4)
+def test_unfinished_reused_prefix_outlives_new_tail(reuse_method, cache_policy):
+    manager = make_cpu_manager(num_chunks=4, cache_policy=cache_policy)
     head, middle, tail = to_keys([1, 2, 3])
     seed = make_req_context("seed")
+    seed.set_offload_key_position(head, 16)
+    seed.set_offload_key_position(middle, 32)
     assert (
         manager.prepare_store([head, middle], seed, trigger=StoreTrigger.ON_COMPUTE)
         is not None
