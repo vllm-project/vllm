@@ -1037,7 +1037,9 @@ async def test_per_video_kwargs_http_validation(
             )
         monkeypatch.setattr(proxy.app.state, "d_ec_urls", [], raising=False)
         monkeypatch.setattr(proxy.app.state, "ec_consumer_dp_size", 1, raising=False)
-        monkeypatch.setattr(proxy.app.state, "enable_per_video_kwargs_slicing", enabled)
+        monkeypatch.setitem(
+            proxy.app.state._state, "enable_per_video_kwargs_slicing", enabled
+        )
         monkeypatch.setattr(proxy, "NO_REWRITE", True)
         target_app = proxy.app
         if dynamic:
