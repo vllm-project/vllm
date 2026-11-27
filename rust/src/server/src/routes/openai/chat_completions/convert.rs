@@ -602,18 +602,15 @@ mod tests {
 
     #[test]
     fn chat_http_input_audio_format_accepts_only_openai_names() {
-        let input_audio = |format: Option<Value>| {
+        let request = |format: Option<Value>| {
             let mut input_audio = json!({"data": "dGVzdA=="});
             if let Some(format) = format {
                 input_audio["format"] = format;
             }
-            input_audio
-        };
-        let request = |format: Option<Value>| {
             json!({
                 "messages": [{
                     "role": "user",
-                    "content": [{"type": "input_audio", "input_audio": input_audio(format)}],
+                    "content": [{"type": "input_audio", "input_audio": input_audio}],
                 }],
             })
         };
@@ -628,14 +625,10 @@ mod tests {
             (Some(json!("MP3")), "expected `wav` or `mp3`"),
             (Some(json!("flac")), "expected `wav` or `mp3`"),
         ] {
-            let error = serde_json::from_value::<InputAudio>(input_audio(format.clone()))
+            let error = serde_json::from_value::<ChatCompletionRequest>(request(format.clone()))
                 .expect_err("format must be rejected")
                 .to_string();
             assert!(error.contains(expected), "format {format:?}: {error}");
-            assert!(
-                serde_json::from_value::<ChatCompletionRequest>(request(format.clone())).is_err(),
-                "format {format:?} must reject the request"
-            );
         }
     }
 
