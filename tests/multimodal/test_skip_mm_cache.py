@@ -54,6 +54,7 @@ def _make_features(
     mm_hashes: dict[str, list[str]],
     placeholders: dict[str, list[tuple[int, int]]],
     kwargs_data: dict[str, list[str | None]] | None = None,
+    kwargs_refs: dict[str, list[dict[str, Any] | None]] | None = None,
     mm_metadata: dict[str, list[str | None]] | None = None,
 ) -> MultiModalFeatures:
     mm_placeholders = {
@@ -67,6 +68,7 @@ def _make_features(
         mm_hashes=mm_hashes,
         mm_placeholders=mm_placeholders,
         kwargs_data=kwargs_data,
+        kwargs_refs=kwargs_refs,
         mm_metadata=mm_metadata,
     )
 
@@ -163,7 +165,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
         ):
             engine_input = cast(
-                MultiModalInput, await serving.build_engine_input(request)
+                MultiModalInput, await serving.build_engine_input(request, [])
             )
 
         validate_cache_handles.assert_called_once()
@@ -173,13 +175,69 @@ class TestBuildEngineInputSkipMmCache:
         assert rendered_item["pixel_values"].skip_mm_cache is True
 
     @pytest.mark.asyncio
+    async def test_referenced_full_tensor_sets_skip_mm_cache(self):
+        serving, _, _, _ = _make_serving_for_build_input()
+        serving._mm_tensor_refs = MagicMock()
+        serving._mm_tensor_refs.memory.reserve = AsyncMock(return_value=object())
+        features = _make_features(
+            mm_hashes={"image": ["hash-rendered-ref"]},
+            placeholders={"image": [(2, 8)]},
+            kwargs_refs={
+                "image": [
+                    {
+                        "uri": "s3://tensor-bucket/request/image-0",
+                        "format": "safetensors-v1",
+                        "nbytes": 64,
+                        "digest": "a" * 64,
+                    }
+                ]
+            },
+        )
+        request = _make_request(features=features)
+        referenced_elem = _FakeElem(data={"tensor": [1, 2, 3]})
+        fake_mm_kwargs = {"image": [{"pixel_values": referenced_elem}]}
+
+        with (
+            patch(
+                f"{SERVING_MOD}.rebuild_mm_placeholders",
+                side_effect=lambda p: p,
+            ),
+            patch(
+                f"{SERVING_MOD}.mm_kwargs_from_features",
+                return_value=fake_mm_kwargs,
+            ),
+            patch(
+                f"{SERVING_MOD}.validate_mm_tensor_request_size",
+                return_value=64,
+            ),
+            patch(
+                f"{SERVING_MOD}.run_in_read_slot",
+                new=AsyncMock(return_value=fake_mm_kwargs),
+            ),
+            patch(
+                f"{SERVING_MOD}.MultiModalKwargsItems",
+                side_effect=lambda x: x,
+            ),
+            patch(
+                f"{SERVING_MOD}.mm_input",
+                side_effect=lambda **kwargs: kwargs,
+            ),
+        ):
+            engine_input = cast(
+                MultiModalInput, await serving.build_engine_input(request, [])
+            )
+
+        serving._mm_tensor_refs.reader.validate.assert_called_once()
+        assert engine_input["mm_kwargs"]["image"][0]["pixel_values"].skip_mm_cache
+
+    @pytest.mark.asyncio
     async def test_completion_returns_single_engine_input(self):
         serving, _, _, online_renderer = _make_serving_for_build_input()
         expected = {"type": "token", "prompt_token_ids": [1, 2, 3]}
         preprocess_completion = AsyncMock(return_value=[expected])
         online_renderer.preprocess_completion = preprocess_completion
 
-        engine_input = await serving.build_engine_input(_make_request())
+        engine_input = await serving.build_engine_input(_make_request(), [])
 
         assert engine_input is expected
         preprocess_completion.assert_awaited_once()
@@ -207,7 +265,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
             pytest.raises(ValueError, match="bad cache handle"),
         ):
-            await serving.build_engine_input(request)
+            await serving.build_engine_input(request, [])
 
     @pytest.mark.asyncio
     async def test_metadata_only_does_not_set_skip_mm_cache(self):
@@ -245,7 +303,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
         ):
             engine_input = cast(
-                MultiModalInput, await serving.build_engine_input(request)
+                MultiModalInput, await serving.build_engine_input(request, [])
             )
 
         meta_item = engine_input["mm_kwargs"]["image"][0]
@@ -303,7 +361,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
         ):
             engine_input = cast(
-                MultiModalInput, await serving.build_engine_input(request)
+                MultiModalInput, await serving.build_engine_input(request, [])
             )
 
         # Tokens before start=10 preserved, followed by rendered content_parts tokens.

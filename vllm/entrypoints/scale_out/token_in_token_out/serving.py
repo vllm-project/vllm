@@ -634,14 +634,14 @@ class ServingTokens(GenerateBaseServing):
                 mm_kwargs = mm_kwargs_from_features(features)
 
             kwargs_data = features.kwargs_data or {}
+            kwargs_refs = features.kwargs_refs or {}
             for modality, items in mm_kwargs.items():
-                full_tensor_items = kwargs_data.get(modality)
-                if full_tensor_items is None:
-                    continue
-                for item, full_tensor_data in zip(
-                    items, full_tensor_items, strict=True
+                full_tensor_items = kwargs_data.get(modality, [None] * len(items))
+                tensor_references = kwargs_refs.get(modality, [None] * len(items))
+                for item, full_tensor_data, tensor_reference in zip(
+                    items, full_tensor_items, tensor_references, strict=True
                 ):
-                    if full_tensor_data is None:
+                    if full_tensor_data is None and tensor_reference is None:
                         continue
                     if item is not None:
                         for elem in item.values():
