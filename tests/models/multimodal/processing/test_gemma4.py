@@ -308,6 +308,7 @@ def test_dummy_reaches_budget_within_size_hints(
     modality: str,
     options: dict[str, int],
     expected_embeds: int,
+    caplog_vllm,
 ):
     model_config = ModelConfig(
         GEMMA4_MODEL_ID,
@@ -316,21 +317,28 @@ def test_dummy_reaches_budget_within_size_hints(
     )
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
-    dummy_data = processor.dummy_inputs.get_dummy_mm_data(
+    items = processor.dummy_inputs.get_dummy_mm_data(
         model_config.max_model_len,
         {modality: 1},
         model_config.get_multimodal_config().limit_per_prompt,
-    )[modality][0]
+    )[modality]
+    assert isinstance(items, list)
     if modality == "image":
-        width, height = dummy_data.size
+        assert isinstance(items[0], PILImage.Image)
+        width, height = items[0].size
     else:
-        height, width = dummy_data[0].shape[1:3]
+        assert isinstance(items[0], tuple)
+        frames = items[0][0]
+        assert isinstance(frames, np.ndarray)
+        assert frames.shape[0] == options["num_frames"]
+        height, width = frames.shape[1:3]
     dummy = processor.get_dummy_mm_inputs({modality: 1})
     num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"][modality])
 
     assert width <= options.get("width", width)
     assert height <= options.get("height", height)
     assert num_embeds == expected_embeds
+    assert "exceeds model's maximum" not in caplog_vllm.text
 
 
 @pytest.mark.parametrize(
@@ -344,11 +352,14 @@ def test_embedding_gemma2_dummy_video_respects_size_hints(options: dict[str, int
     )
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
-    frames, _ = processor.dummy_inputs.get_dummy_mm_data(
+    videos = processor.dummy_inputs.get_dummy_mm_data(
         model_config.max_model_len,
         {"video": 1},
         model_config.get_multimodal_config().limit_per_prompt,
-    )["video"][0]
+    )["video"]
+    assert isinstance(videos, list) and isinstance(videos[0], tuple)
+    frames = videos[0][0]
+    assert isinstance(frames, np.ndarray)
     height, width = frames.shape[1:3]
 
     assert width <= options.get("width", width)
