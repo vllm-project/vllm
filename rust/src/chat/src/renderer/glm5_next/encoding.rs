@@ -11,7 +11,10 @@ use serde_json::{Value, json};
 use thiserror_ext::AsReport as _;
 
 use super::writer::Glm5PromptWriter;
-use crate::error::{Error, Result, bail_chat_template_thrown, chat_template_thrown};
+use crate::error::{
+    Error, Result, bail_chat_template_render, bail_invalid_continue_final_message,
+    chat_template_render,
+};
 use crate::renderer::{MediaPartSource, tool_call_arguments_or_empty};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode};
 use crate::{AssistantContentBlock, AssistantMessageExt};
@@ -95,7 +98,7 @@ fn visible_text(
 
 fn tool_definition(tool: &Value) -> Result<String> {
     let Some(fields) = tool.as_object() else {
-        bail_chat_template_thrown!("Each tool must be a JSON object");
+        bail_chat_template_render!("Each tool must be a JSON object");
     };
     let mut out = String::from("{");
     for (key, value) in fields {
@@ -124,7 +127,7 @@ fn tool_references(value: &Value) -> bool {
 
 fn reference_response(out: &mut Glm5PromptWriter<'_>, refs: &Value, tools: &[Value]) -> Result<()> {
     if tools.is_empty() {
-        bail_chat_template_thrown!("Rendering a tool_reference requires tools");
+        bail_chat_template_render!("Rendering a tool_reference requires tools");
     }
     out.control("<tool_response><tools>\n")?;
     for reference in refs.as_array().into_iter().flatten() {
@@ -158,7 +161,7 @@ fn bundled_outputs(value: &Value) -> Result<bool> {
         return Ok(false);
     }
     let Some(parts) = value.as_array() else {
-        bail_chat_template_thrown!("A tool message content must be a string or a list");
+        bail_chat_template_render!("A tool message content must be a string or a list");
     };
     Ok(parts.first().is_some_and(|part| part.get("output").is_some()))
 }
@@ -244,19 +247,19 @@ fn ordered_tool_block(
 fn tool_call(out: &mut Glm5PromptWriter<'_>, call: &Value) -> Result<()> {
     let call = call.get("function").filter(|value| truthy(value)).unwrap_or(call);
     let Some(name) = call["name"].as_str() else {
-        bail_chat_template_thrown!("Each tool_call needs a string name");
+        bail_chat_template_render!("Each tool_call needs a string name");
     };
     let parsed;
     let arguments = if let Some(raw) = call["arguments"].as_str() {
         parsed = serde_json::from_str::<Value>(raw).map_err(|error| {
-            chat_template_thrown!("Invalid tool_call arguments: {}", error.as_report())
+            chat_template_render!("Invalid tool_call arguments: {}", error.as_report())
         })?;
         &parsed
     } else {
         &call["arguments"]
     };
     let Some(arguments) = arguments.as_object() else {
-        bail_chat_template_thrown!("tool_call arguments must be a JSON object");
+        bail_chat_template_render!("tool_call arguments must be a JSON object");
     };
     out.control("<tool_call>")?;
     out.ordinary(name);
@@ -376,12 +379,12 @@ fn render_inner(
                     out.ordinary(content.trim_matches(trim));
                     let original = original.trim_matches(trim);
                     if !out.text().contains(original) {
-                        return Err(Error::ChatTemplate(format!(
+                        bail_invalid_continue_final_message!(
                             "continue_final_message is set but the final message does not appear \
                              in the prompt after applying the chat template! This can happen if \
                              the chat template deletes portions of the final message. Final \
                              message to continue: {original}"
-                        )));
+                        );
                     }
                     break;
                 }
@@ -601,7 +604,10 @@ fn json(value: &Value) -> Result<String> {
     value
         .serialize(&mut Serializer::with_formatter(&mut bytes, PythonFormatter))
         .map_err(|error| {
-            chat_template_thrown!("GLM JSON serialization failed: {}", error.as_report())
+            Error::ChatTemplate(format!(
+                "GLM JSON serialization failed: {}",
+                error.as_report()
+            ))
         })?;
     Ok(String::from_utf8(bytes).expect("JSON serializer must write UTF-8"))
 }

@@ -161,10 +161,11 @@ impl InferenceServiceImpl {
                 };
                 let mm_features =
                     self.state.chat.prepare_media(media, &mut token_ids).await.map_err(
-                        |error| {
-                            if error.is_request_validation_error() {
+                        |error| match error.kind() {
+                            vllm_chat::ErrorKind::InvalidRequest { .. } => {
                                 Status::invalid_argument(error.to_report_string())
-                            } else {
+                            }
+                            vllm_chat::ErrorKind::Internal => {
                                 Status::internal(error.to_report_string())
                             }
                         },
@@ -359,6 +360,7 @@ async fn generate_stream_responses(
                         token_ids,
                         logprobs,
                         sampling_mask: delta_sampling_mask,
+                        ..
                     },
                 finished,
             }) => {
@@ -391,12 +393,10 @@ async fn generate_stream_responses(
 
 pub(super) fn text_error_to_status(error: vllm_text::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error() {
-        Status::invalid_argument(message)
-    } else if error.is_unavailable() {
-        Status::unavailable(message)
-    } else {
-        Status::internal(message)
+    match error.kind() {
+        vllm_text::ErrorKind::InvalidRequest { .. } => Status::invalid_argument(message),
+        vllm_text::ErrorKind::Internal if error.is_unavailable() => Status::unavailable(message),
+        vllm_text::ErrorKind::Internal => Status::internal(message),
     }
 }
 
@@ -448,6 +448,7 @@ mod tests {
         let delta = |token_id: u32, finished: Option<Finished>| DecodedTextEvent::TextDelta {
             decoded: DecodedText::default(),
             sampled: SampledDelta {
+                timestamp: 0.0,
                 token_ids: vec![token_id],
                 logprobs: None,
                 sampling_mask: Some(SamplingMask {
