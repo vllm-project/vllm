@@ -1592,6 +1592,17 @@ steps:
       - vllm/platforms/rocm.py
       - tests/evals/mrcr/
 
+- label: ":computer: (CPU) Logprob Drift Statistics"
+  key: logprob-drift-statistics-cpu
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 10
+  source_file_dependencies:
+  - tests/evals/logprob_drift/
+  device: cpu-small
+  commands:
+  - pytest -v -s evals/logprob_drift/test_logprob_drift_stats.py
+
 - label: ":amd: (MI355) [Nightly] LM Eval Large Models Harness"
   key: amd-lm-eval-large-models-harness
   automatic_shard: true
