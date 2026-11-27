@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 import transformers
 from packaging.version import Version
 
@@ -423,3 +424,13 @@ def test_flat_encoder_getters_are_preferred():
     per_item = SimpleNamespace(model=SimpleNamespace(get_audio_features=features))
     assert get_getter(flat, "audio") is embeddings
     assert get_getter(per_item, "audio") is features
+
+
+def test_split_embeddings_accepts_one_entry_per_item():
+    # `get_*_features` return one entry per item in recent Transformers
+    split = TransformersMultiModalMixin._split_embeddings
+    items = [torch.ones(2, 4), torch.zeros(3, 4)]
+    for embeddings in (items, torch.cat(items)):
+        chunks = split(None, embeddings, [2, 3])
+        assert [chunk.shape[0] for chunk in chunks] == [2, 3]
+        assert torch.equal(torch.cat(chunks), torch.cat(items))

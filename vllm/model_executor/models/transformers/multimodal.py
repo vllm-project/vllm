@@ -1353,8 +1353,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         )
 
     def _split_embeddings(
-        self, embeddings: torch.Tensor, split_sizes: list[int]
+        self, embeddings: torch.Tensor | list[torch.Tensor], split_sizes: list[int]
     ) -> list[torch.Tensor]:
+        # `get_*_features` return one entry per item in recent Transformers
+        if not isinstance(embeddings, torch.Tensor):
+            embeddings = torch.cat(list(embeddings))
         total_expected = sum(split_sizes)
 
         # Flatten to 2D: [total_tokens, hidden_dim]
@@ -1496,9 +1499,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             if len(vision_embeddings) == len(split_sizes):
                 return list(vision_embeddings)
             # Encoders which return one entry per batch row (Transformers >= 5.20.1)
-            return self._split_embeddings(
-                torch.cat(list(vision_embeddings)), split_sizes
-            )
+            return self._split_embeddings(vision_embeddings, split_sizes)
 
         # Items the processor left un-padded arrive as a list once their
         # shapes differ. Encode them one at a time so that none of them is
@@ -1510,9 +1511,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 item.unsqueeze(0),
                 **self._select_item_kwargs(kwargs, index, len(pixel_values)),
             )
-            # Encoders which return one entry per item return a single entry
-            if not isinstance(features, torch.Tensor):
-                features = torch.cat(list(features))
             embeddings.extend(self._split_embeddings(features, [split_sizes[index]]))
         return embeddings
 
@@ -1558,7 +1556,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # Carried alongside the embeddings so the encoder cache keeps them together
         if not (deepstack := getattr(features, "deepstack_features", None)):
             logger.warning_once(
-                "`get_%s_features` returned no `deepstack_features`, so DeepStack "
+                "The %s encoder returned no `deepstack_features`, so DeepStack "
                 "features will be ignored and outputs may be degraded.",
                 modality,
             )
