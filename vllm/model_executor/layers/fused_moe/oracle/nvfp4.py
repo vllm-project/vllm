@@ -622,8 +622,12 @@ def make_nvfp4_moe_kernel(
     per_token_activation: bool = False,
     csf_scales: bool = False,
 ) -> mk.FusedMoEKernel:
-    # Marlin consumes A16 and must not receive per-token A4 metadata.
-    if backend == NvFp4MoeBackend.MARLIN and moe_quant_config.use_nvfp4_w4a16:
+    # Marlin, and Humming without activation quantization (SM90), consume A16
+    # and must not receive per-token A4 metadata.
+    if (
+        backend in (NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.HUMMING)
+        and moe_quant_config.quant_dtype is None
+    ):
         per_token_activation = False
 
     extra_kwargs: dict[str, Any] = {}
