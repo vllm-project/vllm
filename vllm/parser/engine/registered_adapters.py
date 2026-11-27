@@ -12,6 +12,7 @@ from vllm.parser.deepseek_v32 import DeepSeekV32Parser
 from vllm.parser.deepseek_v41 import DeepSeekV41Parser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.gemma4 import Gemma4Parser
+from vllm.parser.gigachat4 import GigaChat4Parser
 from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.parser.granite import GraniteParser
 from vllm.parser.granite_thinking import GraniteThinkingParser
@@ -61,6 +62,11 @@ from vllm.parser.zaya import ZayaParser
     Gemma4ParserReasoningAdapter,
     Gemma4ParserToolAdapter,
 ) = make_adapters(Gemma4Parser)
+
+(
+    GigaChat4ParserReasoningAdapter,
+    GigaChat4ParserToolAdapter,
+) = make_adapters(GigaChat4Parser)
 
 (
     GraniteParserReasoningAdapter,

@@ -35,6 +35,7 @@ from vllm.parser.engine.registered_adapters import (
     DeepSeekV32Parser,
     DeepSeekV41Parser,
     Gemma4Parser,
+    GigaChat4Parser,
     Glm47MoeParser,
     GraniteParser,
     GraniteThinkingParser,
@@ -927,6 +928,48 @@ def _build_deepseek_v4(
     return sample
 
 
+def _build_gigachat4(scenario: Scenario, validate: bool = True) -> Sample:
+    thinking = scenario.reasoning is not None
+    chat_kwargs = {"reasoning": thinking}
+    segments: list[tuple[str, bool]] = []
+    if thinking:
+        segments.append((scenario.reasoning or "", False))
+        if scenario.content is not None or scenario.tool_calls:
+            segments.append(("</think>", True))
+    empty_block = scenario.tool_calls == []
+    expected_content = _qwen3_expected_content(scenario) or ""
+    if empty_block:
+        segments.append(("<｜GCML｜tool_calls></｜GCML｜tool_calls>", False))
+        expected_content = ""
+    if scenario.content is not None:
+        segments.append((scenario.content, False))
+    if scenario.tool_calls:
+        text = "<｜GCML｜tool_calls>\n"
+        text += "".join(
+            _dsv4_tool_text(call, "｜GCML｜") for call in scenario.tool_calls
+        )
+        text += "</｜GCML｜tool_calls>"
+        segments.append((text, False))
+    sample = _make_sample(
+        sample_id=f"gigachat4-{scenario.id}",
+        description=(
+            "Empty GCML block ends the turn; trailing content is discarded"
+            if empty_block
+            else scenario.description
+        ),
+        vocab={"<think>": 128014, "</think>": 128015},
+        segments=segments,
+        expected_reasoning=scenario.reasoning or "",
+        expected_content=expected_content,
+        expected_tool_calls=_expected_tc(scenario) or [],
+        tools=_expected_tools(scenario),
+        chat_template_kwargs=chat_kwargs,
+    )
+    if validate:
+        _validate_sample(sample, GigaChat4Parser, chat_template_kwargs=chat_kwargs)
+    return sample
+
+
 # ── DeepSeek V3.2 (DSML tool format, no reasoning) ──────────────────
 
 _DSV32_VOCAB: dict[str, int] = {
@@ -1469,6 +1512,7 @@ _BUILDERS: dict[str, Any] = {
     "deepseek_v4": _build_deepseek_v4,
     "deepseek_v41": functools.partial(_build_deepseek_v4, v41=True),
     "gemma4": _build_gemma4,
+    "gigachat4": _build_gigachat4,
     "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
     "minimax_m3": _build_minimax_m3,

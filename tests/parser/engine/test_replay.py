@@ -91,11 +91,11 @@ def _discover_parsers() -> list[_ParserInfo]:
             # it does not fit this token-terminal harness; its replay coverage
             # lives in test_granite.py.
             continue
-        tool_end = cfg.token_id_terminals.get("TOOL_END")
+        tool_end = cfg.token_id_terminals.get("TOOL_END") or cfg.terminal_literal(
+            "TOOL_END"
+        )
         if not tool_end:
-            raise RuntimeError(
-                f"{obj.__name__} config missing 'TOOL_END' in token_id_terminals"
-            )
+            raise RuntimeError(f"{obj.__name__} config missing 'TOOL_END' terminal")
         all_vals = cfg.terminal_literals | set(cfg.token_id_terminals.values())
         found.append(
             _ParserInfo(

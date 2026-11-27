@@ -276,6 +276,8 @@ def can_initialize(
         ):
             kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
 
+        speculative_model = model_info.get_speculative_model()
+
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
@@ -287,11 +289,11 @@ def can_initialize(
             enable_mm_embeds=model_info.require_embed_inputs,
             dtype=model_info.dtype,
             speculative_config={
-                "model": model_info.speculative_model,
+                "model": speculative_model,
                 "method": model_info.speculative_method,
                 "num_speculative_tokens": model_info.num_speculative_tokens,
             }
-            if model_info.speculative_model
+            if speculative_model
             else None,
             trust_remote_code=model_info.trust_remote_code,
             max_model_len=model_info.max_model_len,

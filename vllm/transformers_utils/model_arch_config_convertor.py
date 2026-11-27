@@ -325,6 +325,8 @@ class ModelArchConfigConvertorBase:
             "deepseek_v4",
             "deepseek_v41",
             "dots3_note",
+            "gigachat4",
+            "gigachat4_mtp",
             "deepseek_mtp",
             "k3_dspark",
             "glm5_next",
@@ -362,6 +364,7 @@ class ModelArchConfigConvertorBase:
                     "deepseek_v3",
                     "deepseek_v32",
                     "deepseek_mtp",
+                    "gigachat4",
                 )
                 and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
@@ -867,6 +870,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4_text": Gemma4ModelArchConfigConvertor,
     "gemma4_unified": Gemma4ModelArchConfigConvertor,
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
+    "gigachat4_mtp": DeepSeekMTPModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "longcat_flash": LongCatFlashModelArchConfigConvertor,

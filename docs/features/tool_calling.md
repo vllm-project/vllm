@@ -578,6 +578,17 @@ Supported models:
 
 Flags: `--tool-call-parser gigachat3`
 
+### GigaChat4 Models (`gigachat4`)
+
+Supported models:
+
+* `ai-sage/GigaChat4-708B-A41B`
+* `ai-sage/GigaChat4-708B-A41B-bf16`
+* `ai-sage/GigaChat4-37B-A4B`
+* `ai-sage/GigaChat4-37B-A4B-bf16`
+
+Flags: `--enable-auto-tool-choice --tool-call-parser gigachat4 --reasoning-parser gigachat4`
+
 ### Apertus Models (`apertus`)
 
 Use the chat template from the examples folder; it fixes several OpenAI compatibility issues: `--chat-template /vllm-workspace/examples/tool_chat_template_apertus.jinja`

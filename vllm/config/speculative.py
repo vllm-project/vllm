@@ -75,6 +75,7 @@ _NESTED_HF_CONFIG_KEYS = frozenset(
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "dots3_note_mtp",
+    "gigachat4_mtp",
     "mimo_mtp",
     "mimo_v2_mtp",
     "glm4_moe_mtp",
@@ -879,6 +880,26 @@ class SpeculativeConfig:
             if not is_v41:
                 overrides["architectures"] = ["DeepSeekV4MTPModel"]
             hf_config.update(overrides)
+        if initial_architecture == "GigaChat4ForCausalLM":
+            hf_config.model_type = "gigachat4_mtp"
+        if hf_config.model_type == "gigachat4_mtp":
+            n_predict = hf_config.num_nextn_predict_layers
+            if n_predict < 1:
+                raise ValueError("GigaChat4 MTP requires num_nextn_predict_layers > 0")
+            if getattr(hf_config, "nextn_is_sparse", False):
+                raise ValueError(
+                    "GigaChat4 MTP requires dense NextN feed-forward layers"
+                )
+            if getattr(hf_config, "nextn_is_linear", False):
+                raise ValueError("GigaChat4 MTP requires full NextN attention")
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["GigaChat4MTPModel"],
+                    "n_routed_experts": 0,
+                    "n_shared_experts": 0,
+                }
+            )
         if hf_config.model_type in ("pangu_ultra_moe"):
             hf_config.model_type = "pangu_ultra_moe_mtp"
         if hf_config.model_type == "pangu_ultra_moe_mtp":

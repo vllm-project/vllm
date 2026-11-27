@@ -111,6 +111,7 @@ _TEXT_GENERATION_MODELS = {
     "Rnj1ForCausalLM": ("rnj1", "Rnj1ForCausalLM"),
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
     "Gemma4ForCausalLM": ("gemma4", "Gemma4ForCausalLM"),
+    "GigaChat4ForCausalLM": ("gigachat4", "GigaChat4ForCausalLM"),
     "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
     "Qwen4ExpForCausalLM": (
         "vllm.models.qwen4_exp",
@@ -685,6 +686,15 @@ _SPECULATIVE_DECODING_MODELS = {
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "LiLiCorrDraftModel": ("lilicorr", "LiLiCorrForCausalLM"),
     "DFlash2DraftModel": ("qwen3_dflash2", "DFlash2Qwen3ForCausalLM"),
+    "GigaChat4DFlash2DraftModel": (
+        "gigachat4_dflash2",
+        "GigaChat4DFlash2ForCausalLM",
+    ),
+    "DFlashGigaChat4DFlash2DraftModel": (
+        "gigachat4_dflash2",
+        "GigaChat4DFlash2ForCausalLM",
+    ),
+    "GigaChat4MTPModel": ("gigachat4_mtp", "GigaChat4MTP"),
     "DFlash2BeamDraftModel": ("vllm.models.beam", "DFlash2BeamForCausalLM"),
     "DFlash2RicursiveDraftModel": (
         "ricursive_dflash2",
