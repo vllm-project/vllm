@@ -148,7 +148,7 @@ The Python HTTP API server exposes `/ready` for engine health, plugin readiness 
 
 Use `/ready` for Kubernetes readiness and retain `/health` for liveness. `/health`, including SageMaker `/ping`, retains its existing engine-health behavior; plugin unreadiness and draining do not change it. Existing deployments keep their behavior until their readiness probes are reconfigured. See [Kubernetes deployment](../deployment/k8s.md).
 
-These checks describe the built-in routes. Plugins retain their existing ability to override `/ready` or `/health`. Readiness applies to this API-server process; it does not aggregate across workers or change DP-supervisor or gRPC probes, and it does not detect generation stalls.
+These checks describe the built-in routes. Plugins retain their existing ability to override `/ready` or `/health`. Readiness applies to this API-server process; it does not aggregate across workers or change DP-supervisor or gRPC probes, and it does not detect generation stalls. `/health_generate` runs a generation probe but does not check plugin readiness or drain state; see [Kubernetes deployment](../deployment/k8s.md#generation-readiness-probe).
 
 ### Draining accepted work
 
