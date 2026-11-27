@@ -1299,8 +1299,13 @@ class EngineCore:
                 request.mm_features
             )
 
-        watermark_config = self.vllm_config.watermark_config
+        # The sender cache has already been updated, even for rejected requests.
+        lora_config = self.vllm_config.lora_config
         params = request.sampling_params
+        if lora_config is not None and params is not None:
+            lora_config.validate_prompt_logprobs(params)
+
+        watermark_config = self.vllm_config.watermark_config
         # Greedy decoding and trace replay cannot be watermarked; leave their
         # flag as the frontend resolved it.
         if (
