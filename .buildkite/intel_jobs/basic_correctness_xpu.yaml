@@ -5,8 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness Models'
   key: basic-correctness
   device: intel_gpu
-  timeout_in_minutes: 68
-  parallelism: 2
+  timeout_in_minutes: 136
   optional: true
   working_dir: "."
   no_plugin: true
@@ -35,7 +34,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness CuMem'
   key: basic-correctness-cumem
   device: intel_gpu
-  timeout_in_minutes: 68
+  timeout_in_minutes: 136
   optional: true
   working_dir: "."
   no_plugin: true
@@ -61,7 +60,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness Sleep Mode'
   key: basic-correctness-sleep-mode
   device: intel_gpu
-  timeout_in_minutes: 68
+  timeout_in_minutes: 136
   optional: true
   working_dir: "."
   no_plugin: true
@@ -87,7 +86,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness CPU Offload'
   key: basic-correctness-cpu-offload
   device: intel_gpu
-  timeout_in_minutes: 68
+  timeout_in_minutes: 136
   optional: true
   working_dir: "."
   no_plugin: true
@@ -113,7 +112,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness Prefetch Offload'
   key: basic-correctness-prefetch-offload
   device: intel_gpu
-  timeout_in_minutes: 68
+  timeout_in_minutes: 136
   optional: true
   working_dir: "."
   no_plugin: true

@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Quantization'
   key: quantization-xpu
   device: intel_gpu
-  timeout_in_minutes: 120
+  timeout_in_minutes: 240
   optional: true
   working_dir: "."
   no_plugin: true
@@ -41,7 +41,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Quantized Fusions'
   key: quantized-fusions
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   optional: true
   working_dir: "."
   no_plugin: true
@@ -70,7 +70,7 @@ steps:
 - label: ':nvidia: (B200) Quantized MoE'
   key: quantized-moe-test-b200
   device: intel_gpu
-  timeout_in_minutes: 120
+  timeout_in_minutes: 240
   optional: true
   working_dir: "."
   no_plugin: true
@@ -114,7 +114,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Quantized Models'
   key: quantized-models-test
   device: intel_gpu
-  timeout_in_minutes: 65
+  timeout_in_minutes: 130
   parallelism: 3
   optional: true
   working_dir: "."

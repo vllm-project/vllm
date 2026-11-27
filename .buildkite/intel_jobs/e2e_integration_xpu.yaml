@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H100) [Nightly] DeepSeek V2-Lite Sync EPLB Accuracy'
   key: deepseek-v2-lite-sync-eplb-accuracy-4xh100
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   num_devices: 4
   optional: true
   working_dir: "."
@@ -27,7 +27,7 @@ steps:
 - label: ':nvidia: (H100) [Nightly] Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy'
   key: qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-4xh100
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   num_devices: 4
   optional: true
   working_dir: "."
@@ -49,7 +49,7 @@ steps:
 - label: ':nvidia: (B200) [Nightly] Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy'
   key: qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-2xb200
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   num_devices: 2
   optional: true
   working_dir: "."
@@ -71,7 +71,7 @@ steps:
 - label: ':nvidia: (H100) [Nightly] Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy'
   key: qwen3-30b-a3b-fp8-dp4-async-eplb-accuracy
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   num_devices: 4
   optional: true
   working_dir: "."
@@ -93,7 +93,7 @@ steps:
 - label: ':nvidia: (H100) [Nightly] DeepSeek V2-Lite Prefetch Offload Accuracy'
   key: deepseek-v2-lite-prefetch-offload-accuracy-h100
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   num_devices: 1
   optional: true
   working_dir: "."

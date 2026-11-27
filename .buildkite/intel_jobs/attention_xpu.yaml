@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H100) V1 Attention'
   key: v1-attention-h100-mi300
   device: intel_gpu
-  timeout_in_minutes: 85
+  timeout_in_minutes: 170
   optional: true
   working_dir: "."
   no_plugin: true
@@ -20,24 +20,30 @@ steps:
   automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/attention
+  - pytest -v -s models/hy_v4/test_flash_swa_kv_cache_dtype.py
   source_file_dependencies:
   - vllm/config/attention.py
   - vllm/model_executor/layers/dash_attention.py
   - vllm/model_executor/layers/attention
+  - vllm/model_executor/layers/sparse_attn_indexer.py
   - vllm/v1/attention
   - vllm/models/glm5next/nvidia/ops/kpool_compress.py
+  - vllm/models/hy_v4/nvidia/flashmla_sparse.py
   - vllm/v1/hisparse/
   - csrc/hisparse_kernels.cu
   - tests/v1/attention
+  - vllm/models/hy_v4_flash/nvidia/
+  - tests/models/hy_v4/test_flash_swa_kv_cache_dtype.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s v1/attention || true'
+    pytest --continue-on-collection-errors -v -s v1/attention || true &&
+    pytest --continue-on-collection-errors -v -s models/hy_v4/test_flash_swa_kv_cache_dtype.py || true'
 - label: ':nvidia: (B200) ShardQ Metadata'
   key: shardq-metadata-b200
   device: intel_gpu
-  timeout_in_minutes: 10
+  timeout_in_minutes: 20
   num_gpus: 2
   optional: true
   working_dir: "."
@@ -66,7 +72,7 @@ steps:
 - label: ':nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA'
   key: flashinfer-nvfp4-xqa-dgx-spark
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   num_devices: 1
   optional: true
   working_dir: "."

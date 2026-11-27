@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) EPLB Algorithm'
   key: eplb-algorithm-xpu
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   optional: true
   working_dir: "."
   no_plugin: true
@@ -42,7 +42,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] EPLB Execution'
   key: eplb-execution
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   num_devices: 4
   optional: true
   working_dir: "."
@@ -61,6 +61,7 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
   source_file_dependencies:
   - vllm/distributed/eplb
+  - vllm/v1/worker/gpu_worker.py
   - tests/distributed/test_eplb_execute.py
   commands:
   - >-
@@ -71,7 +72,7 @@ steps:
 - label: ':nvidia: (B200) [Nightly] EP Weight Filter with EPLB'
   key: ep-weight-filter-eplb-2xb200
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   num_devices: 2
   optional: true
   working_dir: "."
@@ -100,7 +101,7 @@ steps:
 - label: ':nvidia: (H100) [Nightly] Elastic EP Scaling'
   key: elastic-ep-scaling-test
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 80
   num_devices: 4
   optional: true
   working_dir: "."

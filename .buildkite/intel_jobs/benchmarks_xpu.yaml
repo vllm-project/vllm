@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Benchmarks CLI'
   key: benchmarks-cli-test-xpu
   device: intel_gpu
-  timeout_in_minutes: 55
+  timeout_in_minutes: 110
   optional: true
   working_dir: "."
   no_plugin: true

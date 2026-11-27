@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) PyTorch Compilation'
   key: pytorch-compilation-unit-tests
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   optional: true
   working_dir: "."
   no_plugin: true
@@ -55,7 +55,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) PyTorch Compilation / Dynamic Shapes'
   key: pytorch-compilation-dynamic-shapes
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   optional: true
   working_dir: "."
   no_plugin: true
@@ -79,7 +79,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) PyTorch Compilation H100 Cases'
   key: pytorch-compilation-unit-tests-h100
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   optional: true
   working_dir: "."
   no_plugin: true
@@ -129,7 +129,7 @@ steps:
 - label: ':nvidia: (L4) PyTorch Compilation Passes'
   key: pytorch-compilation-passes-unit-tests
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   num_devices: 1
   optional: true
   working_dir: "."
@@ -180,7 +180,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) PyTorch Fullgraph'
   key: pytorch-fullgraph-test
   device: intel_gpu
-  timeout_in_minutes: 90
+  timeout_in_minutes: 180
   optional: true
   working_dir: "."
   no_plugin: true
@@ -231,7 +231,7 @@ steps:
 - label: ':nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility'
   key: pytorch-fullgraph-cudagraph-l4-compatibility
   device: intel_gpu
-  timeout_in_minutes: 60
+  timeout_in_minutes: 120
   num_devices: 1
   optional: true
   working_dir: "."

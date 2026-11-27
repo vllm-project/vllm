@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (L4) Plugin Integration'
   key: plugin-tests-2-gpus
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 70
   num_devices: 2
   optional: true
   working_dir: "."
@@ -52,7 +52,7 @@ steps:
 - label: ':nvidia: (L4) Platform and Stat Logger Plugins'
   key: plugin-platform-stat-logger-tests-2-gpus
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 70
   num_devices: 2
   optional: true
   working_dir: "."

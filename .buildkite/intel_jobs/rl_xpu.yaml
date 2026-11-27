@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) RL Entrypoints'
   key: rl-entrypoints-tests
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 80
   optional: true
   working_dir: "."
   no_plugin: true

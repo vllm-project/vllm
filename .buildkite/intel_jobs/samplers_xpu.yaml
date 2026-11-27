@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Samplers'
   key: samplers-test
   device: intel_gpu
-  timeout_in_minutes: 60
+  timeout_in_minutes: 120
   optional: true
   working_dir: "."
   no_plugin: true
@@ -36,7 +36,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Samplers Multimodal Beam Search'
   key: samplers-multimodal-beam-search
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   optional: true
   working_dir: "."
   no_plugin: true

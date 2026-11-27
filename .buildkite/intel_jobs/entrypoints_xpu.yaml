@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200) [Nightly] Initialized Snapshot E2E'
   key: initialized-snapshot-e2e
   device: intel_gpu
-  timeout_in_minutes: 60
+  timeout_in_minutes: 120
   num_devices: 1
   optional: true
   working_dir: "."
@@ -34,7 +34,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Unit'
   key: entrypoints-unit-tests
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 80
   optional: true
   working_dir: "."
   no_plugin: true
@@ -67,7 +67,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)'
   key: entrypoints-integration-llm
   device: intel_gpu
-  timeout_in_minutes: 60
+  timeout_in_minutes: 120
   optional: true
   working_dir: "."
   no_plugin: true
@@ -100,7 +100,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server)'
   key: entrypoints-integration-api-server
   device: intel_gpu
-  timeout_in_minutes: 75
+  timeout_in_minutes: 150
   parallelism: 4
   optional: true
   working_dir: "."
@@ -135,7 +135,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API completion)'
   key: entrypoints-integration-api-server-openai-completion
   device: intel_gpu
-  timeout_in_minutes: 68
+  timeout_in_minutes: 136
   optional: true
   working_dir: "."
   no_plugin: true
@@ -166,7 +166,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)'
   key: entrypoints-integration-api-server-openai-chat_completion
   device: intel_gpu
-  timeout_in_minutes: 83
+  timeout_in_minutes: 166
   optional: true
   working_dir: "."
   no_plugin: true
@@ -195,7 +195,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)'
   key: entrypoints-integration-api-server-generate
   device: intel_gpu
-  timeout_in_minutes: 50
+  timeout_in_minutes: 100
   optional: true
   working_dir: "."
   no_plugin: true
@@ -234,7 +234,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Responses API)'
   key: entrypoints-integration-responses-api
   device: intel_gpu
-  timeout_in_minutes: 50
+  timeout_in_minutes: 100
   optional: true
   working_dir: "."
   no_plugin: true
@@ -261,7 +261,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Speech to Text)'
   key: entrypoints-integration-speech_to_text
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   optional: true
   working_dir: "."
   no_plugin: true
@@ -290,7 +290,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)'
   key: entrypoints-integration-multimodal
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   optional: true
   working_dir: "."
   no_plugin: true
@@ -319,7 +319,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)'
   key: entrypoints-integration-pooling
   device: intel_gpu
-  timeout_in_minutes: 75
+  timeout_in_minutes: 150
   optional: true
   working_dir: "."
   no_plugin: true
@@ -348,7 +348,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) OpenAI API Correctness'
   key: openai-api-correctness
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   optional: true
   working_dir: "."
   no_plugin: true

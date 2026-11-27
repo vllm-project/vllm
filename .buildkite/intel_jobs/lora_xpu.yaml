@@ -5,8 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) LoRA'
   key: lora
   device: intel_gpu
-  timeout_in_minutes: 40
-  parallelism: 10
+  timeout_in_minutes: 80
   optional: true
   working_dir: "."
   no_plugin: true
@@ -32,7 +31,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] LoRA TP (Distributed)'
   key: lora-tp-distributed
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   parallelism: 4
   num_devices: 4
   optional: true

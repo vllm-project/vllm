@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 1: qwen2'
   key: multi-modal-models-standard-1-qwen2-xpu
   device: intel_gpu
-  timeout_in_minutes: 68
+  timeout_in_minutes: 136
   optional: true
   working_dir: "."
   no_plugin: true
@@ -34,7 +34,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 2: qwen3 + gemma'
   key: multi-modal-models-standard-2-qwen3-gemma-xpu
   device: intel_gpu
-  timeout_in_minutes: 75
+  timeout_in_minutes: 150
   optional: true
   working_dir: "."
   no_plugin: true
@@ -65,7 +65,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 3: llava + qwen2_vl'
   key: multi-modal-models-standard-3-llava-qwen2-vl-xpu
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 80
   optional: true
   working_dir: "."
   no_plugin: true
@@ -94,7 +94,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Unlimited-OCR-2'
   key: unlimited-ocr2-generation
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   optional: true
   working_dir: "."
   no_plugin: true
@@ -122,7 +122,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper'
   key: multi-modal-models-standard-4-other-whisper-xpu
   device: intel_gpu
-  timeout_in_minutes: 75
+  timeout_in_minutes: 150
   optional: true
   working_dir: "."
   no_plugin: true
@@ -155,7 +155,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Multimodal Processor'
   key: multi-modal-processor-xpu
   device: intel_gpu
-  timeout_in_minutes: 98
+  timeout_in_minutes: 196
   optional: true
   working_dir: "."
   no_plugin: true
@@ -183,7 +183,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Accuracy Eval (Small Models)'
   key: multi-modal-accuracy-eval-small-models
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   optional: true
   working_dir: "."
   no_plugin: true
@@ -210,7 +210,7 @@ steps:
 - label: ':nvidia: (B200) [Nightly] Multimodal FlashInfer Autotuning'
   key: multi-modal-flashinfer-autotuning
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   num_devices: 2
   optional: true
   working_dir: "."

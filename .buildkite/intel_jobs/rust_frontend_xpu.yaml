@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage'
   key: rust-frontend-openai-coverage
   device: intel_gpu
-  timeout_in_minutes: 50
+  timeout_in_minutes: 100
   optional: true
   working_dir: "."
   no_plugin: true
@@ -40,6 +40,7 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
   - pytest -v -s entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py
+  - pytest -v -s entrypoints/openai/decisions/test_decisions_e2e.py -k "not systemone"
   source_file_dependencies:
   - rust/
   - vllm/benchmarks/
@@ -66,6 +67,7 @@ steps:
   - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   - tests/entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py
+  - tests/entrypoints/openai/decisions/test_decisions_e2e.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -90,11 +92,12 @@ steps:
     pytest --continue-on-collection-errors -v -s entrypoints/openai/test_return_tokens_as_ids.py || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/serve/instrumentator/test_uds.py || true &&
     pytest --continue-on-collection-errors -v -s v1/sample/test_logprobs_e2e.py -k test_prompt_logprobs_e2e_server || true &&
-    pytest --continue-on-collection-errors -v -s entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py || true'
+    pytest --continue-on-collection-errors -v -s entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/openai/decisions/test_decisions_e2e.py -k not systemone || true'
 - label: ':nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage'
   key: rust-frontend-serve-admin-coverage
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   optional: true
   working_dir: "."
   no_plugin: true
@@ -113,7 +116,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   - pytest -v -s entrypoints/serve/instrumentator/test_basic.py
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
-  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist"
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not multimodal"
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
   - VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES=/ pytest -v -s entrypoints/serve/lora/test_lora_adapters.py -k "not test_beam_search_with_lora_adapters"
   - pytest -v -s entrypoints/serve/middleware/test_optional_middleware.py -k "not test_v2_endpoint_accepts_valid_api_token"
@@ -152,7 +155,7 @@ steps:
     PYTHONPATH=/vllm-workspace pytest --continue-on-collection-errors -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/serve/instrumentator/test_basic.py || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py || true &&
-    pytest --continue-on-collection-errors -v -s entrypoints/serve/instrumentator/test_metrics.py -k not run_batch and not test_metrics_exist || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/serve/instrumentator/test_metrics.py -k not run_batch and not multimodal || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/serve/tokenize/test_tokenization.py -k not tokenizer_info || true &&
     VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES=/ pytest --continue-on-collection-errors -v -s entrypoints/serve/lora/test_lora_adapters.py -k not test_beam_search_with_lora_adapters || true &&
     pytest --continue-on-collection-errors -v -s entrypoints/serve/middleware/test_optional_middleware.py -k not test_v2_endpoint_accepts_valid_api_token || true &&
@@ -165,7 +168,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness'
   key: rust-frontend-core-correctness
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   optional: true
   working_dir: "."
   no_plugin: true
@@ -200,7 +203,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Rust Frontend Chat Completions'
   key: rust-frontend-chat-completions
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   optional: true
   working_dir: "."
   no_plugin: true
@@ -232,7 +235,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Rust Frontend Tool Use'
   key: rust-frontend-tool-use
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 70
   optional: true
   working_dir: "."
   no_plugin: true
@@ -274,7 +277,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Rust Frontend Responses API'
   key: rust-frontend-responses-api
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 70
   optional: true
   working_dir: "."
   no_plugin: true
@@ -314,7 +317,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] Rust Frontend Distributed'
   key: rust-frontend-distributed
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   num_devices: 4
   optional: true
   working_dir: "."

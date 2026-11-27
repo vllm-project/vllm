@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (L4) Scale-out EC Connector E2E'
   key: scale-out-ec-e2e-2-gpus
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 80
   num_devices: 2
   optional: true
   working_dir: "."

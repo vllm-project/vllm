@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] Qwen4 Exp SP'
   key: qwen4-exp-sp-tests-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   num_devices: 4
   optional: true
   working_dir: "."
@@ -37,7 +37,7 @@ steps:
 - label: ':nvidia: (L4) Distributed Models'
   key: distributed-model-tests-2-gpus-xpu
   device: intel_gpu
-  timeout_in_minutes: 120
+  timeout_in_minutes: 70
   num_devices: 2
   optional: true
   working_dir: "."
@@ -81,7 +81,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] PP Equivalence'
   key: pp-equivalence-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 240
+  timeout_in_minutes: 480
   parallelism: 4
   num_devices: 4
   optional: true

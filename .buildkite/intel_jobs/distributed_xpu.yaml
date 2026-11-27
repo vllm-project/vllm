@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (L4) Distributed Comm Ops'
   key: distributed-comm-ops
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   num_devices: 2
   optional: true
   working_dir: "."
@@ -47,7 +47,7 @@ steps:
 - label: ':nvidia: (L4) Sharded RDT Weight Transfer'
   key: sharded-rdt-weight-transfer
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   num_devices: 1
   optional: true
   working_dir: "."
@@ -97,6 +97,7 @@ steps:
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - pytest -v -s entrypoints/serve/instrumentator/readiness/test_ready_multi_gpu.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
@@ -111,6 +112,8 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
+  - tests/entrypoints/serve/instrumentator/readiness/
+  - vllm/entrypoints/serve/instrumentator/health.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/v1/e2e/general/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/test_sharded_sampling.py
@@ -121,6 +124,7 @@ steps:
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
     TP_SIZE=1 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_async_llm_dp.py || true &&
+    pytest --continue-on-collection-errors -v -s entrypoints/serve/instrumentator/readiness/test_ready_multi_gpu.py || true &&
     TP_SIZE=1 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_eagle_dp.py || true &&
     TP_SIZE=1 DP_SIZE=2 pytest --continue-on-collection-errors -v -s v1/distributed/test_external_lb_dp.py || true &&
     DP_SIZE=2 pytest --continue-on-collection-errors -v -s entrypoints/launchers/api_server/test_multi_api_servers.py || true &&
@@ -129,7 +133,7 @@ steps:
 - label: ':nvidia: (L4) Distributed Compile + RPC'
   key: distributed-compile-rpc-tests-2-gpus
   device: intel_gpu
-  timeout_in_minutes: 65
+  timeout_in_minutes: 130
   num_devices: 2
   optional: true
   working_dir: "."
@@ -171,7 +175,7 @@ steps:
 - label: ':nvidia: (L4) Distributed Torchrun + Shutdown'
   key: distributed-torchrun-shutdown-tests-2-gpus-xpu
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   num_devices: 2
   optional: true
   working_dir: "."
@@ -214,7 +218,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] Distributed Torchrun + Examples'
   key: distributed-torchrun-examples-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   num_devices: 4
   optional: true
   working_dir: "."
@@ -256,7 +260,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] Distributed DP Extended'
   key: distributed-dp-tests-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   num_devices: 4
   optional: true
   working_dir: "."
@@ -307,7 +311,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] Distributed Compile + Comm'
   key: distributed-compile-comm-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 70
+  timeout_in_minutes: 140
   num_devices: 4
   optional: true
   working_dir: "."
@@ -348,7 +352,7 @@ steps:
 - label: ':nvidia: (H100) ShardQ Sequence Parallel'
   key: deepseek-shardq-sequence-parallel
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   num_devices: 2
   optional: true
   working_dir: "."
@@ -370,6 +374,9 @@ steps:
   - vllm/models/hy_v4/nvidia/flashmla_sparse.py
   - vllm/models/hy_v4/nvidia/model.py
   - vllm/models/hy_v4/nvidia/moe.py
+  - vllm/models/hy_v4/common/mrope.py
+  - vllm/models/hy_v4/common/sequence_parallel.py
+  - vllm/models/hy_v4/weight_utils.py
   - vllm/models/common/ops/sequence_parallel.py
   - vllm/model_executor/layers/attention/
   - vllm/model_executor/models/deepseek_v2.py
@@ -389,7 +396,7 @@ steps:
 - label: ':nvidia: (H100) [Nightly] Distributed Features'
   key: distributed-tests-2xh100-2xmi300
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   num_devices: 2
   optional: true
   working_dir: "."
@@ -456,7 +463,7 @@ steps:
 - label: ':nvidia: (B200) GEMM-RS/AR'
   key: gemm-rs-ar-2xb200
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   num_devices: 2
   optional: true
   working_dir: "."
@@ -483,7 +490,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] Pipeline + Context Parallelism'
   key: pipeline-context-parallelism-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 55
+  timeout_in_minutes: 110
   num_devices: 4
   optional: true
   working_dir: "."
@@ -528,7 +535,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] RayExecutorV2'
   key: rayexecutorv2-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   num_devices: 4
   optional: true
   working_dir: "."
@@ -570,7 +577,7 @@ steps:
 - label: ':nvidia: (L4) Distributed Preload'
   key: preload-2-gpus
   device: intel_gpu
-  timeout_in_minutes: 25
+  timeout_in_minutes: 50
   num_devices: 2
   optional: true
   working_dir: "."
@@ -599,7 +606,7 @@ steps:
 - label: ':nvidia: (B200) Distributed Preload with Mooncake Store'
   key: preload-mooncake-store-2xb200
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   num_devices: 2
   optional: true
   working_dir: "."

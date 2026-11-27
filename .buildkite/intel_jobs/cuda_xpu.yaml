@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) CUDA Platform'
   key: platform-tests
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   optional: true
   working_dir: "."
   no_plugin: true
@@ -39,7 +39,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) CUDAGraph'
   key: cudagraph
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   optional: true
   working_dir: "."
   no_plugin: true

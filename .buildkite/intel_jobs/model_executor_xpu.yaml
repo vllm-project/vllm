@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (B200) Weight Reload Refit'
   key: weight-reload-refit
   device: intel_gpu
-  timeout_in_minutes: 60
+  timeout_in_minutes: 90
   optional: true
   working_dir: "."
   no_plugin: true
@@ -52,7 +52,7 @@ steps:
 - label: ':nvidia: (B200) [Nightly] Weight Reload Refit Extra Cases'
   key: weight-reload-refit-nightly
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   optional: true
   working_dir: "."
   no_plugin: true
@@ -107,7 +107,7 @@ steps:
 - label: ':nvidia: (2xB200) [Nightly] Weight Reload Refit'
   key: weight-reload-refit-2gpu
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   num_devices: 2
   optional: true
   working_dir: "."

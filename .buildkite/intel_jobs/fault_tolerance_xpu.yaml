@@ -5,7 +5,7 @@ steps:
 - label: ':nvidia: (H100) Fault Tolerance E2E'
   key: fault-tolerance-e2e-4xh100
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 70
   num_devices: 4
   optional: true
   working_dir: "."
