@@ -93,7 +93,7 @@ def test_get_file_name_full_structure():
     path = fm.get_file_name(key)
 
     expected_path = (
-        "/tmp/cache/test-model_de3bba26cf36_r3/000/10_g2/0001020304050607.bin"
+        "/tmp/cache/test-model_feafe744f2d6_r3/000/10_g2/0001020304050607.bin"
     )
     assert path == expected_path
 
@@ -113,6 +113,7 @@ def test_get_run_config_fields():
     cfg = fm.get_run_config()
     assert cfg == {
         "model_name": "my-model",
+        "model_weights_hash": None,
         "tokens_per_hash": 64,
         "blocks_per_file": 3,
         "tp_size": 4,

@@ -4,6 +4,7 @@
 from collections.abc import Callable
 from dataclasses import InitVar, field, replace
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -168,9 +169,8 @@ class ModelConfig:
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
     model_weights: str = ""
-    """Original model weights path. Used when the model is pulled from object
-    storage (e.g., RunAI) to preserve the original URI while `model` points to
-    the local directory."""
+    """Weight source when `model` identifies a separate config. For example,
+    RunAI keeps the object storage URI here after downloading the config."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
@@ -668,6 +668,19 @@ class ModelConfig:
             hf_overrides_fn = None
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
+
+        # Identify local weights from the launch directory on every worker.
+        # Keep symlink names because loaders can find shards beside the entry point.
+        self._local_model_weights: tuple[str, str] | None = None
+        if self.model_weights and "://" not in self.model_weights:
+            weights = Path(self.model_weights)
+            if not weights.is_absolute():
+                directory = self.model_weights.rpartition(":")[0]
+                if weights.exists() or (directory and Path(directory).is_dir()):
+                    self._local_model_weights = (
+                        self.model_weights,
+                        str(weights.absolute()),
+                    )
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
         # to prevent resolving it multiple times downstream. A resolved revision
@@ -1285,6 +1298,15 @@ class ModelConfig:
     def architecture(self) -> str:
         """The architecture vllm actually used."""
         return self._architecture
+
+    @property
+    def model_weights_for_cache(self) -> str:
+        """Identify the configured weights without changing the loader's path."""
+        if self._local_model_weights is not None:
+            source, absolute = self._local_model_weights
+            if self.model_weights == source:
+                return absolute
+        return self.model_weights
 
     def maybe_pull_model_tokenizer_for_runai(self, model: str, tokenizer: str) -> None:
         """Pull model/tokenizer from Object Storage to temporary

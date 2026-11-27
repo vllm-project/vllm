@@ -74,6 +74,8 @@ class OffloadingModelConfig:
     dtype: str
     # Longest request the engine accepts, in tokens. 0 when not known.
     max_model_len: int = 0
+    # Explicit weight source when the model name identifies a separate config.
+    weights: str = ""
 
 
 @dataclass(frozen=True, slots=True)
