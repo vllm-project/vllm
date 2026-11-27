@@ -2149,6 +2149,36 @@ guide: |
 
   A correct answer is `323`.
 
+  Verify automatic tool selection separately. This non-streaming request asks the
+  model to call a synthetic function, and `jq -e` fails unless the response has the
+  expected finish reason, function name and JSON-decoded arguments:
+
+  ```bash
+  curl --fail http://localhost:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash-1017",
+         "messages":[{"role":"user","content":"Call get_weather with city exactly Singapore."}],
+         "tools":[{"type":"function","function":{"name":"get_weather",
+           "description":"Get the weather for a city.",
+           "parameters":{"type":"object","properties":{"city":{"type":"string"}},
+             "required":["city"],"additionalProperties":false}}}],
+         "tool_choice":"auto","temperature":0,"max_tokens":256,
+         "chat_template_kwargs":{"thinking":false}}' |
+    jq -e '
+      .choices[0] as $choice
+      | ($choice.finish_reason == "tool_calls")
+        and (($choice.message.tool_calls | length) == 1)
+        and ($choice.message.tool_calls[0].function.name == "get_weather")
+        and (($choice.message.tool_calls[0].function.arguments | fromjson)
+             == {"city":"Singapore"})
+    '
+  ```
+
+  If this request returns HTTP 400 while plain chat works, check that the server
+  was started with both `--enable-auto-tool-choice` and
+  `--tool-call-parser deepseek_v41`. The command builder adds both when **Tool
+  calling** is enabled.
+
   ## Performance tuning
 
   Start with vLLM's defaults and tune one parameter at a time for your workload:
