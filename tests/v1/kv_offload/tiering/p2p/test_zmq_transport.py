@@ -11,6 +11,7 @@ import time
 import pytest
 import zmq
 
+from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.control import zmq as zmq_module
 from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
     ZmqConnection,
@@ -24,10 +25,27 @@ from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
 _WEDGED_TRANSPORTS: list[ZmqTransport] = []
 
 
-def _free_port() -> int:
+def _ipv6_loopback_available() -> bool:
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+# IPv6 loopback can be unavailable on CI hosts; skip rather than fail there.
+requires_ipv6 = pytest.mark.skipif(
+    not _ipv6_loopback_available(), reason="IPv6 loopback unavailable"
+)
+_IPV6_LOOPBACK = pytest.param("::1", marks=requires_ipv6)
+
+
+def _free_port(host: str = "127.0.0.1") -> int:
     """Find a free TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
         return s.getsockname()[1]
 
 
@@ -40,7 +58,7 @@ def _make_transport(host: str = "127.0.0.1", attempts: int = 8):
     """
     last_err: Exception | None = None
     for _ in range(attempts):
-        port = _free_port()
+        port = _free_port(host)
         try:
             return ZmqTransport(f"{host}:{port}", host, port), port
         except (zmq.ZMQError, OSError) as e:
@@ -147,23 +165,75 @@ class TestZmqTransportConnectivity:
             transport_a.close()
             transport_b.close()
 
-    def test_bidirectional_messaging(self):
+    @pytest.mark.parametrize("host_a", ["127.0.0.1", _IPV6_LOOPBACK])
+    @pytest.mark.parametrize("host_b", ["127.0.0.1", _IPV6_LOOPBACK])
+    def test_bidirectional_messaging(self, host_a, host_b):
         """Both sides can send and receive after connection."""
-        transport_a, port_a = _make_transport()
-        transport_b, _ = _make_transport()
+        transport_a, port_a = _make_transport(host_a)
+        transport_b, port_b = _make_transport(host_b)
 
         try:
-            conn_b = transport_b.connect(f"127.0.0.1:{port_a}")
+            conn_b = transport_b.connect(f"{host_a}:{port_a}")
             conn_b.send({"type": "connect", "from": "b"})
 
             new_conns = _wait_for_inbound(transport_a)
             assert len(new_conns) == 1
             conn_a = new_conns[0]
+            assert conn_a.peer_id == f"{host_b}:{port_b}"
+            assert _wait_for_messages(transport_a, conn_a, 1) == [
+                {"type": "connect", "from": "b"}
+            ]
 
             conn_a.send({"type": "reply", "from": "a"})
 
             msgs = _wait_for_messages(transport_b, conn_b, 1)
             assert msgs == [{"type": "reply", "from": "a"}]
+        finally:
+            transport_a.close()
+            transport_b.close()
+
+    @requires_ipv6
+    @pytest.mark.parametrize(
+        ("configured_host", "dialed_host"),
+        [("::1", "[::1]"), ("[::1]", "::1"), ("::1", "0:0::1")],
+    )
+    def test_ipv6_spellings_share_one_identity(self, configured_host, dialed_host):
+        """Replies reach the dialing connection even when the peer's address
+        is spelled differently on each side (identities are canonicalized the
+        way ``P2PSecondaryTierManager`` builds them)."""
+
+        def make(host):
+            host = manager_module._canonical_host(host)
+            for _ in range(8):
+                port = _free_port(host)
+                try:
+                    return ZmqTransport(f"{host}:{port}", host, port), port
+                except (zmq.ZMQError, OSError):
+                    continue
+            raise RuntimeError("could not bind a ZmqTransport")
+
+        transport_a, port_a = make(configured_host)
+        transport_b, port_b = make("::1")
+
+        try:
+            peer_id = manager_module._peer_id_from_params(
+                {"remote_host": dialed_host, "remote_port": port_a}
+            )
+            assert peer_id == transport_a._local_id
+            conn_b = transport_b.connect(peer_id)
+            conn_b.send({"type": "connect", "from": "b"})
+
+            new_conns = _wait_for_inbound(transport_a)
+            assert len(new_conns) == 1
+            conn_a = new_conns[0]
+            assert conn_a.peer_id == f"::1:{port_b}"
+
+            conn_a.send({"type": "reply", "from": "a"})
+            assert _wait_for_messages(transport_b, conn_b, 1) == [
+                {"type": "reply", "from": "a"}
+            ]
+            # The reply must not surface as a new inbound connection on B.
+            assert list(transport_b.poll()) == []
         finally:
             transport_a.close()
             transport_b.close()

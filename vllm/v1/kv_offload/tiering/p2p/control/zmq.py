@@ -16,6 +16,11 @@ import zmq
 import zmq.utils.monitor
 
 from vllm.logger import init_logger
+from vllm.utils.network_utils import (
+    is_valid_ipv6_address,
+    make_zmq_path,
+    split_zmq_path,
+)
 from vllm.v1.kv_offload.tiering.p2p.control.base import (
     ControlConnection,
     ControlTransport,
@@ -67,7 +72,18 @@ for _ev in _FATAL_MONITOR_EVENTS:
 
 
 def _tcp_addr(host: str, port: int | str) -> str:
-    return f"tcp://{host}:{port}"
+    return make_zmq_path("tcp", host, int(port))
+
+
+def _enable_ipv6_if_needed(sock: zmq.Socket, addr: str) -> None:
+    """Set ZMQ_IPV6 when ``addr`` targets an IPv6 literal.
+
+    Mirrors ``make_zmq_socket``. Kept conditional: enabling it always could
+    make a ``localhost`` bind resolve to ``::1`` only.
+    """
+    _, host, _ = split_zmq_path(addr)
+    if is_valid_ipv6_address(host):
+        sock.setsockopt(zmq.IPV6, 1)
 
 
 def _apply_heartbeat(sock: zmq.Socket) -> None:
@@ -178,6 +194,7 @@ class ZmqTransport(ControlTransport):
         self._router: zmq.Socket = self._zmq_ctx.socket(zmq.ROUTER)
         _apply_heartbeat(self._router)
         bind_addr = _tcp_addr(host, port)
+        _enable_ipv6_if_needed(self._router, bind_addr)
         self._router.bind(bind_addr)
         logger.info("ZmqTransport %s: ROUTER bound on %s", self._local_id, bind_addr)
 
@@ -286,6 +303,7 @@ class ZmqTransport(ControlTransport):
 
         dealer = self._zmq_ctx.socket(zmq.DEALER)
         _apply_heartbeat(dealer)
+        _enable_ipv6_if_needed(dealer, dealer_addr)
         dealer.identity = self._local_id.encode()
         # ZMQ_IMMEDIATE stays 0: messages queue before the TCP connect
         # completes, so the ConnectMsg sent right after connect() fits.

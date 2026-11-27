@@ -8,6 +8,7 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -132,12 +133,28 @@ def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
     return val if isinstance(val, dict) else None
 
 
+def _canonical_host(host: str) -> str:
+    """Canonical spelling of a control-channel host.
+
+    The ``host:port`` identity is matched as a string, so every spelling of
+    one IP literal must collapse to a single form: brackets are stripped and
+    the address is compressed (``[::1]`` and ``0:0::1`` both become ``::1``).
+    Hostnames are returned unchanged.
+    """
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    try:
+        return ipaddress.ip_address(host).compressed
+    except ValueError:
+        return host
+
+
 def _peer_id_from_params(role_params: dict) -> str | None:
     """Build `host:port` peer_id from a role-scoped sub-dict, or None."""
     host = role_params.get("remote_host")
     port = role_params.get("remote_port")
     if host and port:
-        return f"{host}:{port}"
+        return f"{_canonical_host(host)}:{port}"
     return None
 
 
@@ -369,13 +386,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         port = int(port) + dp_index
         # Two decoupled identities:
         #   _local_id (``host:port``): the ZMQ control identity that peers
-        #     dial back, used verbatim (the socket binds this host/port and
-        #     the address is parsed back into host:port by the remote).
+        #     dial back (the socket binds this host/port and the address is
+        #     parsed back into host:port by the remote). IP literals are
+        #     canonicalized so it matches the peer_id the remote builds.
         #   _nixl_agent_name (uuid4): the NIXL agent name. It is never dialed
         #     — it travels opaquely inside the agent metadata blob — so it
         #     only needs to be globally unique. A per-process uuid guarantees
         #     that even for peers sharing a host:port (mirrors the NIXL
         #     connector; avoids the "remote agent name equals local" reject).
+        host = _canonical_host(host)
         self._local_id = f"{host}:{port}"
         self._nixl_agent_name = str(uuid.uuid4())
 

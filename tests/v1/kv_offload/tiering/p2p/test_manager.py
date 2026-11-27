@@ -305,6 +305,19 @@ class TestPeerIdFromParams:
         result = manager_module._peer_id_from_params({})
         assert result is None
 
+    @pytest.mark.parametrize("host", ["::1", "[::1]", "0:0::1", "[0:0:0:0:0:0:0:1]"])
+    def test_ipv6_spellings_canonicalized(self, host):
+        result = manager_module._peer_id_from_params(
+            {"remote_host": host, "remote_port": 8000}
+        )
+        assert result == "::1:8000"
+
+    def test_hostname_unchanged(self):
+        result = manager_module._peer_id_from_params(
+            {"remote_host": "prefill-0.svc", "remote_port": 8000}
+        )
+        assert result == "prefill-0.svc:8000"
+
 
 # ---------------------------------------------------------------------------
 # Tests for lookup
@@ -2673,10 +2686,20 @@ class TestBindHostPortDefaults:
         "bind_host", ["localhost", "127.0.0.1", "::1", "0.0.0.0", "::", "192.0.2.5"]
     )
     def test_host_used_verbatim(self, monkeypatch, bind_host):
-        # The host is never rewritten — loopbacks and wildcards alike become
-        # the dial-back identity verbatim (mirrors the NIXL connector).
+        # Canonical hosts are never rewritten — loopbacks and wildcards alike
+        # become the dial-back identity verbatim (mirrors the NIXL connector).
         mgr = self._construct(monkeypatch, host=bind_host, port=5710)
         assert mgr._local_id == f"{bind_host}:5710"
+
+    @pytest.mark.parametrize("bind_host", ["[::1]", "0:0::1"])
+    def test_ipv6_host_canonicalized(self, monkeypatch, bind_host):
+        # Non-canonical IPv6 spellings collapse to the form that
+        # _peer_id_from_params builds on the remote side.
+        calls: dict = {}
+        mgr = self._construct(monkeypatch, calls=calls, host=bind_host, port=5710)
+        assert mgr._local_id == "::1:5710"
+        assert calls["zmq_host"] == "::1"
+        assert calls["zmq_id"] == "::1:5710"
 
     def test_nixl_name_decoupled_from_identity(self, monkeypatch):
         # The ZMQ identity is the verbatim host:port; the NIXL agent name is a
