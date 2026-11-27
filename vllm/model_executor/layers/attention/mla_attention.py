@@ -339,6 +339,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
+# Batch-size loop cadence for empty_cache during fp8 BMM load warmup (not tile size).
+_FP8_BMM_WARMUP_CACHE_DRAIN_INTERVAL = 32
 
 
 def _detect_output_quant_key(
@@ -1690,6 +1692,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
                 )
+                # Async Triton launches can pin memory during load warmup.
+                if self.W_K.device.type != "cpu":
+                    torch.accelerator.synchronize()
+                    if (
+                        m % _FP8_BMM_WARMUP_CACHE_DRAIN_INTERVAL == 0
+                        or m == max_batch_size
+                    ):
+                        torch.accelerator.empty_cache()
         else:
             # Convert from (L, N, V) to (N, L, V)
             replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
