@@ -402,7 +402,13 @@ def render_message(
             )
 
     elif role == "developer":
-        assert content, f"Invalid message for role `{role}`: {msg}"
+        # Render the message without internal bookkeeping keys (e.g.
+        # `_image_indices`) so a failed assert does not leak internal state
+        # in the error body. See the discussion on #65538: whether empty
+        # content is acceptable depends on the chat template, so keep the
+        # renderer's own guard — just make its message client-safe.
+        visible = {k: v for k, v in msg.items() if not str(k).startswith("_")}
+        assert content, f"Invalid message for role `{role}`: {visible}"
 
         content_developer = USER_SP_TOKEN
         content_developer += content
