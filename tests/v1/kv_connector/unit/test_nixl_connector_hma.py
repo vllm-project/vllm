@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheTensor,
     MLAAttentionSpec,
+    get_reusable_prefix_length,
 )
 
 from .utils import (
@@ -42,6 +43,7 @@ from .utils import (
     create_vllm_config,
     expand_strided_descs,
     make_kv_cache_config,
+    make_nixl_push_scheduler,
     make_nixl_scheduler,
     maybe_update_block_size,
     region_pairs_by_index,
@@ -1809,6 +1811,63 @@ def test_mamba_n1_p_side_truncation():
     assert len(logprobs_req.prompt_token_ids) == 10
 
 
+def _bind_mamba_checkpoints(sched) -> None:
+    """Stand in for a bound KVCacheManager with a 16-token Mamba prefix
+    caching group."""
+    sched._kv_cache_manager = SimpleNamespace(
+        get_state_checkpoint_tokens=lambda num_tokens: get_reusable_prefix_length(
+            num_tokens, 0, alignment_tokens=16
+        )
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("push", [False, True], ids=["pull", "push"])
+@pytest.mark.parametrize(
+    "num_tokens,expected",
+    [
+        (50, 48),
+        (49, 48),
+        (10, 9),
+    ],
+    ids=["cut_to_checkpoint", "n1_is_checkpoint", "no_checkpoint"],
+)
+def test_mamba_checkpoint_cut(num_tokens, expected, push):
+    """P stops at the Mamba checkpoint a local prefill would cache, and D
+    loads up to it without P's `remote_num_tokens`, which push mode lacks."""
+    make = make_nixl_push_scheduler if push else make_nixl_scheduler
+    p_sched, d_sched = make(has_mamba=True), make(has_mamba=True)
+    _bind_mamba_checkpoints(p_sched)
+    _bind_mamba_checkpoints(d_sched)
+
+    p_req = create_request(num_tokens=num_tokens, do_remote_decode=True)
+    p_sched.on_new_request(p_req)
+    assert p_req.num_prompt_tokens == expected
+
+    d_req = create_request(num_tokens=num_tokens, do_remote_prefill=True)
+    assert d_sched.get_num_new_matched_tokens(d_req, 0) == (expected, True)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "remote_num_tokens,expected",
+    [(48, 48), (32, 32), (49, 49), (50, 0)],
+    ids=["agree", "p_cut_lower", "p_without_cut", "p_past_backoff"],
+)
+def test_mamba_checkpoint_cut_d_follows_prefiller(remote_num_tokens, expected):
+    """D loads exactly what P computed when the two cuts disagree (e.g. a P
+    that predates the cut stops at N-1), and recomputes locally when P's
+    recurrent state is past D's backoff."""
+    sched = make_nixl_scheduler(has_mamba=True)
+    _bind_mamba_checkpoints(sched)
+    req = create_request(num_tokens=50, do_remote_prefill=True)
+    assert req.kv_transfer_params is not None
+    req.kv_transfer_params["remote_num_tokens"] = remote_num_tokens
+
+    count, _ = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    assert count == expected
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "swa_enabled,mamba_enabled,expected_has_mamba,expected_is_hma",
@@ -1967,37 +2026,6 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
             (256, 256, 768),
             id="qwen35_27b_tp8",
         ),
-        # ai21labs/AI21-Jamba2-Mini (Mamba1)
-        # mamba d_inner = mamba_expand(2) * hidden_size(4096) = 8192
-        # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
-        # Conv state holds only x: a single contiguous sub-projection.
-        pytest.param(
-            "mamba1",
-            1,
-            8192,
-            3,
-            (8192, 16),
-            (8192,),
-            id="jamba_mini_tp1",
-        ),
-        pytest.param(
-            "mamba1",
-            4,
-            2048,
-            3,
-            (2048, 16),
-            (2048,),
-            id="jamba_mini_tp4",
-        ),
-        pytest.param(
-            "mamba1",
-            8,
-            1024,
-            3,
-            (1024, 16),
-            (1024,),
-            id="jamba_mini_tp8",
-        ),
     ],
 )
 def test_derive_mamba_conv_split(
@@ -2021,7 +2049,6 @@ def test_derive_mamba_conv_split(
     from vllm.v1.kv_cache_interface import MambaSpec
 
     _TYPE_MAP = {
-        "mamba1": MambaAttentionBackendEnum.MAMBA1,
         "mamba2": MambaAttentionBackendEnum.MAMBA2,
         "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN,
     }

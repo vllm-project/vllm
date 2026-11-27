@@ -22,7 +22,8 @@ from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
 from vllm.transformers_utils.processors.kimi_k3 import encode_k3_text_prompt
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
+from .base import HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+from .hf import BaseHfRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams, TokenizeParams
@@ -194,13 +195,15 @@ def _normalize_k3_tool_messages(
     return normalized
 
 
-class KimiK3Renderer(BaseRenderer[HfTokenizer]):
+class KimiK3Renderer(BaseHfRenderer[HfTokenizer]):
     """Render chat prompts with Kimi K3's Python XTML encoding.
 
     K3 ships no Jinja chat template; its tokenizer renders messages through
     `encoding_k3` instead. We tokenize eagerly so the structural markers keep
     their special-token ids while user- and tool-supplied text stays ordinary.
     """
+
+    _server_owned_chat_template_kwargs = HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
 
     def __init__(self, config: VllmConfig, tokenizer: HfTokenizer | None) -> None:
         super().__init__(config, tokenizer)
