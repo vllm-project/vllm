@@ -19,8 +19,8 @@ use zeromq::RouterSendHalf;
 
 use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
-    OutputReceiver, OutputSender, RequestObserver, RequestRegistry, UtilityReceiver,
-    UtilityRegistry,
+    AbortableRequest, AddSendGuard, OutputReceiver, OutputSender, RequestObserver, RequestRegistry,
+    UtilityReceiver, UtilityRegistry,
 };
 use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
@@ -134,7 +134,7 @@ impl ClientInner {
         data_parallel_rank: Option<u32>,
         stream_interval: NonZeroU32,
         observer: Option<Box<dyn RequestObserver>>,
-    ) -> Result<(EngineId, OutputReceiver)> {
+    ) -> Result<(EngineId, OutputReceiver, AddSendGuard)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
@@ -145,10 +145,15 @@ impl ClientInner {
             data_parallel_rank,
             stream_interval,
         )?;
+        let add_send_guard = registry
+            .add_send_gate(&request_id)
+            .try_lock_owned()
+            .expect("new request Add-send gate must be unlocked");
         if let Some(observer) = observer {
             registry.observe(&request_id, observer);
         }
-        Ok(registered)
+        let (engine_id, output_rx) = registered;
+        Ok((engine_id, output_rx, add_send_guard))
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
@@ -180,15 +185,15 @@ impl ClientInner {
     /// Filter the given request IDs to the subset that are still tracked as
     /// active and can be aborted, grouped by the engine that originally
     /// accepted them.
-    pub fn abortable_request_ids(
+    pub fn abortable_requests(
         &self,
         request_ids: &[String],
-    ) -> Result<BTreeMap<EngineId, Vec<String>>> {
+    ) -> Result<BTreeMap<EngineId, Vec<AbortableRequest>>> {
         let registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        Ok(registry.abortable_request_ids(request_ids))
+        Ok(registry.abortable_requests(request_ids))
     }
 
     /// Send a whole engine output batch to the request streams with one
@@ -399,6 +404,7 @@ impl ClientInner {
         engine_id: &EngineId,
         mut payload: EngineCoreRequest,
         stream: EngineCoreOutputStream,
+        add_send_guard: AddSendGuard,
     ) -> Result<EngineCoreOutputStream> {
         let aux_frames = payload.extract_aux_frames(self.msgpack_zero_copy_threshold);
         let payload = Bytes::from(encode_msgpack(&payload)?);
@@ -417,6 +423,7 @@ impl ClientInner {
                     aux_frames,
                 )
                 .await?;
+                drop(add_send_guard);
                 Ok(stream)
             })
             .await?
@@ -453,6 +460,19 @@ impl ClientInner {
         request_ids: &[String],
     ) -> Result<()> {
         self.send_to_engine(engine_id, EngineCoreRequestType::Abort, &request_ids).await
+    }
+
+    /// Submit Abort only after each request's Add send has completed.
+    pub async fn abort_requests_after_add(
+        &self,
+        engine_id: &EngineId,
+        requests: Vec<AbortableRequest>,
+    ) -> Result<()> {
+        let mut request_ids = Vec::with_capacity(requests.len());
+        for request in requests {
+            request_ids.push(request.wait_until_add_sent().await);
+        }
+        self.do_abort_requests(engine_id, &request_ids).await
     }
 
     /// Shut down by closing all active request streams and utility calls with a
@@ -728,13 +748,15 @@ mod tests {
             let (abort_tx, mut abort_rx) = mpsc::unbounded_channel();
             let (_output_tx, output_rx) = output_channel(NonZeroU32::MIN);
             let stream = EngineCoreOutputStream::new("req-1".to_string(), 0, abort_tx, output_rx);
+            let add_send_guard = Arc::new(tokio::sync::Mutex::new(())).try_lock_owned().unwrap();
             let request = EngineCoreRequest {
                 request_id: "req-1".to_string(),
                 prompt_token_ids: Some(vec![1].into()),
                 sampling_params: Some(EngineCoreSamplingParams::for_test()),
                 ..Default::default()
             };
-            let mut send = Box::pin(inner.send_request_to_engine(&engine_id, request, stream));
+            let mut send =
+                Box::pin(inner.send_request_to_engine(&engine_id, request, stream, add_send_guard));
 
             // The send runtime is not running yet, so cancellation happens
             // after spawning the send but before Add can enter the socket queue.
@@ -764,6 +786,102 @@ mod tests {
             assert_eq!(add[0], EngineCoreRequestType::Add.to_frame());
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, abort.request_id);
+        });
+    }
+
+    #[test]
+    fn explicit_abort_waits_for_add_send() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let send_runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut router = RouterSocket::new();
+            let endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap();
+            let mut dealer = DealerSocket::new();
+            dealer.connect(&endpoint.to_string()).await.unwrap();
+            dealer.send("ready".into()).await.unwrap();
+            let ready = router.recv().await.unwrap().into_vec();
+            let engine_id = EngineId::from(ready[0].to_vec());
+            let (input_send, _) = router.split();
+            let inner = Arc::new(ClientInner::new(
+                input_send,
+                send_runtime.handle().clone(),
+                "test-model".to_string(),
+                0,
+                false,
+                &[ConnectedEngine {
+                    engine_id: engine_id.clone(),
+                    ready_response: default_ready_response(),
+                }],
+            ));
+            let request_id = "req-explicit-abort".to_string();
+            let (_, output_rx, add_send_guard) = inner
+                .register_request(request_id.clone(), None, None, NonZeroU32::MIN, None)
+                .unwrap();
+            let (abort_tx, _abort_rx) = mpsc::unbounded_channel();
+            let stream = EngineCoreOutputStream::new(request_id.clone(), 0, abort_tx, output_rx);
+            let request = EngineCoreRequest {
+                request_id: request_id.clone(),
+                prompt_token_ids: Some(vec![1].into()),
+                sampling_params: Some(EngineCoreSamplingParams::for_test()),
+                ..Default::default()
+            };
+
+            let mut abortable =
+                inner.abortable_requests(std::slice::from_ref(&request_id)).unwrap();
+            inner.abort_requests_locally([&request_id]);
+            let abort_inner = Arc::clone(&inner);
+            let abort_engine = engine_id.clone();
+            let abort = tokio::spawn(async move {
+                abort_inner
+                    .abort_requests_after_add(
+                        &abort_engine,
+                        abortable.remove(&abort_engine).unwrap(),
+                    )
+                    .await
+            });
+            tokio::task::yield_now().await;
+            assert!(!abort.is_finished());
+
+            let add_inner = Arc::clone(&inner);
+            let add_engine = engine_id.clone();
+            let add = tokio::spawn(async move {
+                add_inner
+                    .send_request_to_engine(&add_engine, request, stream, add_send_guard)
+                    .await
+            });
+            tokio::task::yield_now().await;
+            assert!(!add.is_finished());
+            assert!(timeout(Duration::from_millis(20), dealer.recv()).await.is_err());
+
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            let send_thread = std::thread::spawn(move || {
+                send_runtime.block_on(async {
+                    let _ = timeout(Duration::from_secs(5), shutdown_rx).await;
+                });
+            });
+
+            let add_message = timeout(Duration::from_secs(5), dealer.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .into_vec();
+            assert_eq!(add_message[0], EngineCoreRequestType::Add.to_frame());
+            let add_request: EngineCoreRequest = rmp_serde::from_slice(&add_message[1]).unwrap();
+            assert_eq!(add_request.request_id, request_id);
+
+            let abort_message = timeout(Duration::from_secs(5), dealer.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .into_vec();
+            assert_eq!(abort_message[0], EngineCoreRequestType::Abort.to_frame());
+            let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort_message[1]).unwrap();
+            assert_eq!(aborted_ids, vec![request_id]);
+
+            drop(add.await.unwrap().unwrap());
+            abort.await.unwrap().unwrap();
+            shutdown_tx.send(()).unwrap();
+            send_thread.join().unwrap();
         });
     }
 

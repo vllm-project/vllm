@@ -790,7 +790,7 @@ impl EngineCoreClient {
         let stream_interval = (req.sampling_params.as_ref())
             .and_then(|params| params.stream_interval)
             .unwrap_or(NonZeroU32::MIN);
-        let (engine_id, rx) = self.inner.register_request(
+        let (engine_id, rx, add_send_guard) = self.inner.register_request(
             request_id.clone(),
             lora_name,
             data_parallel_rank,
@@ -819,7 +819,8 @@ impl EngineCoreClient {
             "registered request to engine"
         );
 
-        let result = self.inner.send_request_to_engine(&engine_id, req, stream).await;
+        let result =
+            self.inner.send_request_to_engine(&engine_id, req, stream, add_send_guard).await;
 
         // Failed to send the request to the engine, roll back the registration.
         if result.is_err() {
@@ -831,20 +832,25 @@ impl EngineCoreClient {
 
     /// Abort currently in-flight requests by request ID.
     pub async fn abort(&self, ids: &[String]) -> Result<()> {
-        let abortable = self.inner.abortable_request_ids(ids)?;
+        let abortable = self.inner.abortable_requests(ids)?;
 
-        trace!(request_ids = ?ids, abortable_request_ids = ?abortable, "sending abort request ids");
+        let all_request_ids: Vec<String> = abortable
+            .values()
+            .flatten()
+            .map(|request| request.request_id().to_string())
+            .collect();
+
+        trace!(request_ids = ?ids, abortable_request_ids = ?all_request_ids, "sending abort request ids");
 
         if abortable.is_empty() {
             return Ok(());
         }
 
         // Finalize the consumer streams first, before the engine round-trip.
-        let all_request_ids: Vec<String> = abortable.values().flatten().cloned().collect();
         self.inner.abort_requests_locally(&all_request_ids);
 
-        for (engine_id, request_ids) in abortable {
-            self.inner.do_abort_requests(&engine_id, &request_ids).await?;
+        for (engine_id, requests) in abortable {
+            self.inner.abort_requests_after_add(&engine_id, requests).await?;
         }
         Ok(())
     }

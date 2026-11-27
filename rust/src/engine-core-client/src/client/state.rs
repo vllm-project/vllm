@@ -3,9 +3,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::oneshot;
+use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 use tracing::trace;
 
 use crate::EngineId;
@@ -38,10 +39,34 @@ pub trait RequestObserver: Send + std::fmt::Debug {
 struct TrackedRequest {
     sender: OutputSender,
     engine_id: EngineId,
+    add_send_gate: Arc<Mutex<()>>,
     lora: Option<LoraRequestState>,
     admission_stats_generation: Option<u64>,
     observer: Option<Box<dyn RequestObserver>>,
 }
+
+#[derive(Debug)]
+pub(crate) struct AbortableRequest {
+    request_id: String,
+    add_send_gate: Arc<Mutex<()>>,
+}
+
+impl AbortableRequest {
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub async fn wait_until_add_sent(self) -> String {
+        let Self {
+            request_id,
+            add_send_gate,
+        } = self;
+        let _guard = add_send_gate.lock().await;
+        request_id
+    }
+}
+
+pub(crate) type AddSendGuard = OwnedMutexGuard<()>;
 
 /// Frontend-side view of one LoRA request's scheduling phase.
 ///
@@ -204,6 +229,7 @@ impl RequestRegistry {
             TrackedRequest {
                 sender: tx,
                 engine_id: engine_id.clone(),
+                add_send_gate: Arc::new(Mutex::new(())),
                 lora,
                 admission_stats_generation,
                 observer: None,
@@ -211,6 +237,11 @@ impl RequestRegistry {
         );
 
         Ok((engine_id, rx))
+    }
+
+    /// Return the Add-send gate for the request just registered.
+    pub(crate) fn add_send_gate(&self, request_id: &str) -> Arc<Mutex<()>> {
+        Arc::clone(&self.requests[request_id].add_send_gate)
     }
 
     /// Attach an observer to a request just registered. It sees the request's
@@ -245,16 +276,21 @@ impl RequestRegistry {
 
     /// Filter the given request IDs to the subset that are still tracked as
     /// active and can be aborted, grouped by engine.
-    pub fn abortable_request_ids(&self, request_ids: &[String]) -> BTreeMap<EngineId, Vec<String>> {
+    pub fn abortable_requests(
+        &self,
+        request_ids: &[String],
+    ) -> BTreeMap<EngineId, Vec<AbortableRequest>> {
         let mut by_engine = BTreeMap::new();
         for request_id in request_ids {
             let Some(tracked) = self.requests.get(request_id.as_str()) else {
                 continue;
             };
-            by_engine
-                .entry(tracked.engine_id.clone())
-                .or_insert_with(Vec::new)
-                .push(request_id.clone());
+            by_engine.entry(tracked.engine_id.clone()).or_insert_with(Vec::new).push(
+                AbortableRequest {
+                    request_id: request_id.clone(),
+                    add_send_gate: Arc::clone(&tracked.add_send_gate),
+                },
+            );
         }
         by_engine
     }
@@ -941,16 +977,25 @@ mod tests {
         assert_eq!(chosen_1, engine_1);
         assert_eq!(chosen_0_again, engine_0);
 
-        let grouped = registry.abortable_request_ids(&[
+        let grouped = registry.abortable_requests(&[
             "req-1".to_string(),
             "req-2".to_string(),
             "req-3".to_string(),
         ]);
         assert_eq!(
-            grouped.get(&engine_0).unwrap(),
-            &vec!["req-1".to_string(), "req-3".to_string()]
+            grouped[&engine_0]
+                .iter()
+                .map(|request| request.request_id())
+                .collect::<Vec<_>>(),
+            vec!["req-1", "req-3"]
         );
-        assert_eq!(grouped.get(&engine_1).unwrap(), &vec!["req-2".to_string()]);
+        assert_eq!(
+            grouped[&engine_1]
+                .iter()
+                .map(|request| request.request_id())
+                .collect::<Vec<_>>(),
+            vec!["req-2"]
+        );
     }
 
     #[test]
