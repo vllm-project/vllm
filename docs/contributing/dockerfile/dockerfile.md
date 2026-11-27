@@ -17,12 +17,43 @@ The edges of the build graph represent:
 
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
-The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
-requirements remain cached independently of per-commit vLLM wheels and source.
+The stages are cut by how often their inputs change, so that a build reruns,
+and a host pulls, only what a commit changed. The stage map at the top of the
+Dockerfile lists every stage with what makes it rerun.
 
-Mount only the requirement files a dependency stage reads. Mounting the entire
+The `requirement-pins` stage cuts the PyTorch and FlashInfer pins out of
+`requirements/cuda.txt` into one small file each. `base` installs only the
+PyTorch pins, so the native builds on top of it (`csrc-build`,
+`extensions-build`, `hybrid-test-wheels`) recompile when a pin changes, not on
+every edit to `requirements/`. It also passes on
+`requirements/rubin-prerelease.txt`, as an empty file unless
+`INSTALL_RUBIN_PRERELEASE=true`, so an edit to the Rubin pins rebuilds only
+the Rubin images, and extracts `[tool.uv]` and `requires-python` from
+`pyproject.toml` (verified with `tomllib`, failing closed on mismatch) so
+unrelated `pyproject.toml` edits leave `test-deps` and `csrc-build`'s
+DeepGEMM Python venvs cached. `rust-build-cache` branches from `toolchain` and
+depends on no Python requirements. `vllm-runtime-base` installs PyTorch,
+FlashInfer with its precompiled kernels, and the remaining requirements as
+three layers in that order, so a routine dependency bump rebuilds only the last.
+
+Copy into a stage only the requirement files it reads. Copying the entire
 `requirements/` directory makes unrelated changes, such as ROCm test pins,
 invalidate CUDA dependency layers and their downstream native builds.
+
+The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
+requirements remain cached independently of per-commit vLLM wheels and source.
+It ends by installing vLLM's own runtime requirements, `tests/vllm_test_utils`,
+and DeepEP, so the per-commit wheel install has nothing left to change; the
+`test-wheel` stage fails the build if it still does.
+
+The `test` image adds four `COPY --link` layers to `test-deps`: the compiled
+extensions, the Rust frontend, the Python files of the vLLM wheel, and the
+source tree. The first three come from `test-wheel`, which installs the wheel
+and sorts its files with `tools/ci/split_vllm_install.sh`; the last comes from
+`test-src` (which branches from `toolchain` and uses `COPY --exclude=.git`,
+bind-mounting `.git` only to write `.ci-merge-base`, so `.git` never enters the
+image or the `mode=max` cache). A host that has the previous commit's image
+pulls only the layers whose files changed.
 
 The `hybrid-test-wheels` stage builds the `mamba-ssm` and `causal-conv1d`
 wheels that `test-deps` installs. It branches from `base`, so it rebuilds with
@@ -33,6 +64,16 @@ The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 `ca-certificates` package so clients using the system trust store receive
 certificate removals when the image is rebuilt. This complements the Python
 `certifi` bundle used by other HTTP clients.
+
+`vllm-runtime-base` also deletes six CUDA static archives that runtime JIT
+never links: `libcublas_static.a`, `libcublasLt_static.a`,
+`libcurand_static.a`, `libnvrtc_static.a`, `libnvrtc-builtins_static.a` and
+`libnvptxcompiler_static.a`. The shared libraries stay. An image built on top
+that links one of them statically can reinstall the package that ships it,
+for example `apt-get install --reinstall libcublas-dev-<cuda version>`
+for the two cuBLAS archives, `libcurand-dev-*` or `cuda-nvrtc-dev-*`;
+`dpkg -S` on a stock `nvidia/cuda` devel image names the package for
+`libnvptxcompiler_static.a`.
 
 When `INSTALL_KV_CONNECTORS=true`, `vllm-openai-base` also installs a minimal
 AWS EFA userspace (libfabric, aws-ofi-nccl and hwloc), which NIXL's LIBFABRIC
