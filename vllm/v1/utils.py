@@ -295,6 +295,7 @@ _RUST_FRONTEND_ENV_ARGS = {
     "max_n_sequences": "VLLM_MAX_N_SEQUENCES",
     "enable_cohere_api": "VLLM_ENABLE_COHERE_API",
     "enable_responses_api_store": "VLLM_ENABLE_RESPONSES_API_STORE",
+    "use_modelscope": "VLLM_USE_MODELSCOPE",
 }
 
 

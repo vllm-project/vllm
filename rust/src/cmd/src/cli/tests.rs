@@ -274,6 +274,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             hf_config_path: None,
                             skip_tokenizer_init: false,
                             hf_token: None,
+                            use_modelscope: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -2473,6 +2474,7 @@ fn frontend_args_accept_json() {
                             hf_config_path: None,
                             skip_tokenizer_init: false,
                             hf_token: None,
+                            use_modelscope: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -3378,6 +3380,26 @@ fn env_switches_accept_only_the_implemented_position() {
         For more information, try '--help'.
     "#]].assert_eq(&serve("--enable-cohere-api", "1").unwrap_err());
     expect!["invalid JSON arguments: enable_cohere_api (VLLM_ENABLE_COHERE_API): only off is implemented in Rust frontend, not on at line 1 column 56"].assert_eq(&json("enable_cohere_api", true).unwrap_err());
+
+    // Python parses `VLLM_USE_MODELSCOPE` as
+    // `value.strip().lower() in ("1", "true")`, and `vllm-rs render` loads
+    // model files too.
+    for value in ["0", "false", "yes"] {
+        serve("--use-modelscope", value).unwrap();
+    }
+    for value in ["1", " True "] {
+        serve("--use-modelscope", value).unwrap_err();
+    }
+    Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen3-0.6B",
+        "--use-modelscope",
+        "1",
+    ])
+    .unwrap_err();
+    json("use_modelscope", false).unwrap();
+    expect!["invalid JSON arguments: use_modelscope (VLLM_USE_MODELSCOPE): only off is implemented in Rust frontend, not on"].assert_eq(&json("use_modelscope", true).unwrap_err());
 }
 
 #[test]
@@ -3631,6 +3653,7 @@ fn serve_args_accept_handshake_aliases() {
                             hf_config_path: None,
                             skip_tokenizer_init: false,
                             hf_token: None,
+                            use_modelscope: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
