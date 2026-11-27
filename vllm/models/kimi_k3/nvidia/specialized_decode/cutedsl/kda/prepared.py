@@ -3,13 +3,14 @@
 """Prepared KDA core. One packed projection supplies Q/K/V, the output gate, F_A and
 beta; per-batch policies select the gate schedule and the projection row pitch."""
 
-import os
 from functools import cache
 
 import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass.cute.runtime import make_fake_stream
+
+import vllm.envs as envs
 
 from ..common.host import fake, layout, stream, to_cute
 from ..common.policy import batch_table
@@ -38,12 +39,12 @@ SPEC_SCHEDULE = {
     12: "1:1.8.2.8,2-4:1.8.3.8,5-9:1.8.3.4,10-12:1.8.2.2,13-16:1.8.3.2",
     6: "1:1.8.2.8.0.1,2:1.8.0.8,3-12:1.8.3.8,13-16:1.8.3.4",
 }
-# VLLM_KIMI_K3_TP8_KDA_FOUR_CTA_CLUSTERS=1: TP8 verify steps of four and five requests
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: TP8 verify steps of four and five requests
 # take four-CTA clusters at two CTAs per SM (the same bits: only the CTA split of a
 # head's state rows changes); measured faster in A/B (layer chain microbenchmark: input
 # projection -> core -> o-projection and all-reduce). Default off; other shapes keep the
 # table above.
-if os.environ.get("VLLM_KIMI_K3_TP8_KDA_FOUR_CTA_CLUSTERS") == "1":
+if envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE:
     SPEC_SCHEDULE[12] = (
         "1:1.8.2.8,2-3:1.8.3.8,4-5:1.8.2.4,6-9:1.8.3.4,10-12:1.8.2.2,13-16:1.8.3.2"
     )
@@ -116,7 +117,7 @@ FUSED_SPLIT = ((48, 8), (96, 4), (192, 2), (1 << 30, 1))
 # 48.7, R16 - / 80.8 / 76.2, R64 - / 254.4 / 247.4, R128 - / 491.2 / 468.9.
 FUSED_WS_ITEMS = 192
 
-# VLLM_KIMI_K3_KDA_SPLIT_B=1: RecoverSSM verify steps that take KdaSplit, for the
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: RecoverSSM verify steps that take KdaSplit, for the
 # request counts by heads per rank in KDA_SPLIT_B_TABLE, run KdaSplitB (same bits: the
 # record slot read once and the convolution windows split over the output owners);
 # KDA_SPLIT_B_LEAN (heads -> request counts) adds the lean prologue (same bits) to
@@ -135,11 +136,7 @@ def kda_split_b_listed(spec, heads, requests):
 
 
 def kda_split_b(heads, requests, tokens, record):
-    if (
-        os.environ.get("VLLM_KIMI_K3_KDA_SPLIT_B", "0") != "1"
-        or not record
-        or tokens < 2
-    ):
+    if not envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE or not record or tokens < 2:
         return False
     return kda_split_b_listed(KDA_SPLIT_B_TABLE, heads, requests)
 

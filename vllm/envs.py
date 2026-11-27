@@ -228,6 +228,7 @@ if TYPE_CHECKING:
     VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_HYBRID_EP_MOE: bool = False
+    VLLM_KIMI_K3_LOW_LATENCY_DECODE: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
@@ -1771,6 +1772,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (EpMoeLayer) up to its FRONT_MAX tokens per rank.
     "VLLM_KIMI_K3_HYBRID_EP_MOE": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_HYBRID_EP_MOE", "0"))
+    ),
+    # Kimi K3 specialized decode: the opt-in options for low-latency TP8 x DCP8
+    # verify steps (DSpark k = 4, one to eight requests): the tensor-core sparse
+    # decode, the DCP8 value spread, top-k digits and local split, the scorer
+    # prefetch, 40-row query tiles, KdaSplitB and four-CTA KDA clusters, the o_proj
+    # options and the TP8 x DCP8 target-logits HeadGather. Some change the
+    # reduction order. Validated on GB300 only.
+    "VLLM_KIMI_K3_LOW_LATENCY_DECODE": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_LOW_LATENCY_DECODE", "0"))
     ),
     # Kimi K3 only, and unrelated to the MoE flags above. Tap the pre-norm
     # AttnRes mixture, rather than the post-mixture sum, as the auxiliary

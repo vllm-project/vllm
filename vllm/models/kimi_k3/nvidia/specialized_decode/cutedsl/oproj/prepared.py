@@ -9,7 +9,6 @@ At `twoshot_batches`, given `TwoShot` buffers, the all-reduce is `common.twoshot
 each GPU receives ~2 x 14 KB per token instead of TP x 14 KB. `bind_ahead`: fused
 rows that also compute the next layer's AttnRes statistics (`consumer` ahead)."""
 
-import os
 from functools import cache
 from typing import Any
 
@@ -18,6 +17,8 @@ import cutlass.cute as cute
 import torch
 import torch.distributed._symmetric_memory as symm_mem
 from cutlass.cute.runtime import make_fake_stream
+
+import vllm.envs as envs
 
 from ....specialized_decode.symm import multicast_rendezvous, peer_rendezvous
 from ..common.host import dynamic_fake, dynamic_view, fake, stream, to_cute
@@ -66,21 +67,17 @@ def twoshot_batches(tp):
     return {batch for batch, on in table.items() if on}
 
 
-# VLLM_KIMI_K3_TP8_OPROJ_TCGEN05_FROM_17=1: TP8 verify batches of 17-24 rows take the
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: TP8 verify batches of 17-24 rows take the
 # tcgen05 engine, as 25-40 rows do. Not bit-identical to the grouped mma.sync engine
 # (another order of the K partial sums). Opt-in; default off.
-OPU17 = os.environ.get("VLLM_KIMI_K3_TP8_OPROJ_TCGEN05_FROM_17") == "1"
+OPU17 = envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE
 
 
-# VLLM_KIMI_K3_TP8_OPROJ_FOUR_GROUPS=1: TP8 consumers of 33-36 rows (seven requests at k
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: TP8 consumers of 33-36 rows (seven requests at k
 # = 4) poll with four groups, summing every rank in rank order as one group does (the
 # same bits); measured faster in A/B (layer chain microbenchmark: input projection ->
 # core -> o-projection and all-reduce) at 35 rows, slower at 40. Default off.
-G4 = (
-    {8: "33-36:1"}
-    if os.environ.get("VLLM_KIMI_K3_TP8_OPROJ_FOUR_GROUPS") == "1"
-    else {}
-)
+G4 = {8: "33-36:1"} if envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE else {}
 
 
 def ordered_groups(batch, tp):

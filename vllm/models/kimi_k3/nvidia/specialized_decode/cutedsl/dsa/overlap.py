@@ -15,13 +15,14 @@ q_c rows of the query, so the rest of the query stage leaves the critical path:
 
 The main stream joins the side stream just before the sparse core."""
 
-import os
 from functools import cache
 
 import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass import Float32
+
+import vllm.envs as envs
 
 from ..common.policy import batch_table
 from ..common.primitives import (
@@ -83,10 +84,7 @@ from ..mla.query import Q_SENT, tiled_from
 QUERY_OVERLAP = {
     "tp": "1-20:late_front,21-1024:fork",
     "dcp": "1-1024:front",
-    # Override (runtime A/B): VLLM_KIMI_K3_DCP_SPLIT_OVERLAP, a "rows:mode,..." table.
-    "dcp_split": os.environ.get(
-        "VLLM_KIMI_K3_DCP_SPLIT_OVERLAP", "1-239:fork,240-1024:wait"
-    ),
+    "dcp_split": "1-239:fork,240-1024:wait",
     "tp1": "1-1024:fork",
 }
 # TP without the fused indexer (the late modes follow its select): the TP table the
@@ -112,10 +110,10 @@ WIDE_MODES = ("serial", "fork")
 # DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
 # decode-step A/B there.
 QUERY_AFTER_FRONT = {16: "6-8:1", 8: "5-15:1"}
-# VLLM_KIMI_K3_DCP8_QUERY_AFTER_FRONT_WIDE=1: DCP8 verify batches of 16-20 rows (four
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: DCP8 verify batches of 16-20 rows (four
 # requests at k = 4) also fork their MlaQuery after IndexFront. Only the launch order
 # changes, not what any kernel computes. Opt-in; default off.
-if os.environ.get("VLLM_KIMI_K3_DCP8_QUERY_AFTER_FRONT_WIDE") == "1":
+if envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE:
     QUERY_AFTER_FRONT[8] = "5-20:1"
 
 

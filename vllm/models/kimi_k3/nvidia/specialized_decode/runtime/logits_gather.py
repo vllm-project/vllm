@@ -31,29 +31,19 @@ logger = init_logger(__name__)
 # TP16 x DCP16 serves DSpark verify steps of one request up to 7 draft tokens
 # (chosen by an end-to-end A/B there); other pairs are not measured yet.
 HEAD_GATHER = {(16, 16): "1-8:1"}
-# TP8 x DCP8 verify steps of one to three requests (5 / 10 / 15 rows at k = 4) when
-# VLLM_KIMI_K3_TP8_HEAD_GATHER=1: measured faster than NCCL's ring all-gather in A/B
+# TP8 x DCP8 verify steps of one to eight requests (5-40 rows at k = 4) when
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: measured faster than NCCL's ring all-gather in A/B
 # (2-node microbench).
-HEAD_GATHER_ENV = "VLLM_KIMI_K3_TP8_HEAD_GATHER"
-HEAD_GATHER_OPT = {(8, 8): "1-16:1"}
-# With VLLM_KIMI_K3_TP8_HEAD_GATHER=1, VLLM_KIMI_K3_TP8_HEAD_GATHER_WIDE=1 extends that
-# entry to 32 rows (four to six requests), and with VLLM_KIMI_K3_TP8_HEAD_GATHER_40=1 to
-# 40 rows (eight requests).
-HEAD_GATHER_WIDE_ENV = "VLLM_KIMI_K3_TP8_HEAD_GATHER_WIDE"
-HEAD_GATHER_WIDE = {(8, 8): "1-32:1"}
-HEAD_GATHER_WIDE40 = {(8, 8): "1-40:1"}
+HEAD_GATHER_OPT = {(8, 8): "1-40:1"}
 
 
 def head_gather_rows(tp, dcp):
     """The HEAD_GATHER spec of this (TP, DCP) pair (with the optional entries)."""
-    import os
+    import vllm.envs as envs
 
     table = dict(HEAD_GATHER)
-    if os.environ.get(HEAD_GATHER_ENV, "0") == "1":
+    if envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE:
         table.update(HEAD_GATHER_OPT)
-        if os.environ.get(HEAD_GATHER_WIDE_ENV, "0") == "1":
-            wide40 = os.environ.get("VLLM_KIMI_K3_TP8_HEAD_GATHER_40", "0") == "1"
-            table.update(HEAD_GATHER_WIDE40 if wide40 else HEAD_GATHER_WIDE)
     return table.get((tp, dcp), "")
 
 

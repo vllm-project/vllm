@@ -95,7 +95,6 @@ from ..mla.dcp import (
     TCS_ON,
     TCS_PAIR_OWN,
     TCS_ROWS,
-    TCS_WIDE_ON,
     TCS_WIDE_ROWS,
 )
 
@@ -880,7 +879,7 @@ class SparseDcpDecodePx(SparseDcpDecode):
             store_words(q_dst, sentinel)
 
 
-# ---- Tensor-core sparse decode (VLLM_KIMI_K3_DCP8_TC_SPARSE)
+# ---- Tensor-core sparse decode (VLLM_KIMI_K3_LOW_LATENCY_DECODE)
 # --------------------------------------------- TcsDecode: a cluster of TCS_GROUP CTAs
 # per row. CTA g owns the row's keys of split g (consecutive ranges of ceil(n / G) keys,
 # as SparseDcpDecode) and latent columns 128 g .. 128 g + 127. On tcgen05 it computes S
@@ -2017,7 +2016,7 @@ class TcsDecodePair:
 
 def tcs_groups(batch, dcp):
     """CTAs per row of TcsDecode for the pushing decode of `batch` rows under DCP
-    `dcp` (TCS_ROWS, VLLM_KIMI_K3_DCP8_TC_SPARSE=1), else 0."""
+    `dcp` (TCS_ROWS, VLLM_KIMI_K3_LOW_LATENCY_DECODE=1), else 0."""
     if not TCS_ON or not dcp:
         return 0
     return batch_table(TCS_ROWS.get(dcp, "")).get(batch, 0)
@@ -2033,9 +2032,9 @@ def tcs_pair_own(batch, dcp):
 
 def tcs_carry(batch, dcp):
     """Whether TcsDecode of `batch` rows under DCP `dcp` anchors P at the running
-    maximum from its second pass on (the VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE batches)."""
+    maximum from its second pass on (the TCS_WIDE_ROWS batches)."""
     return bool(
-        TCS_WIDE_ON and dcp and batch_table(TCS_WIDE_ROWS.get(dcp, "")).get(batch, 0)
+        TCS_ON and dcp and batch_table(TCS_WIDE_ROWS.get(dcp, "")).get(batch, 0)
     )
 
 

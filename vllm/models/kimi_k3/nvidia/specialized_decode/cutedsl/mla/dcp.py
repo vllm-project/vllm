@@ -17,7 +17,6 @@ every context.
 """
 
 import math
-import os
 from functools import cache, reduce
 from operator import or_
 
@@ -27,6 +26,8 @@ import torch
 import torch.distributed._symmetric_memory as symm_mem
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32
 from cutlass.cute.runtime import make_fake_stream
+
+import vllm.envs as envs
 
 from ....specialized_decode.symm import multicast_rendezvous, peer_rendezvous
 from ..common.host import fake, to_cute
@@ -109,58 +110,43 @@ VALUE_POLL_ALL = {16: "7-8:1"}
 # thread's loads in flight before its first store), then merges R rows of its head as
 # the `rows_per_cta` merge does, instead of one CTA per head merging every row after its
 # share of the push. Same stores and the same merge operations (bit for bit).
-# VLLM_KIMI_K3_DCP8_VALUE_SPREAD=1 turns it on; SPREAD_POLL_ALL: its `poll_all` (1: on).
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1 turns it on; SPREAD_POLL_ALL: its `poll_all`
+# (1: on).
 # DCP8 (TP8 + DCP8, 1-3 requests of 5 rows): measured faster in A/B (one-GPU DcpValue
 # microbenchmark, 12 heads, 8 sources, other sources prefilled): R = 2 with poll_all
 # ahead of R = 3, 4 and of the 16-row merge at 5, 10 and 15 rows; R = 1 does not fit
 # one wave at 15 rows.
 SPREAD_ROWS = {8: "5-15:2"}
 SPREAD_POLL_ALL = {8: "5-15:1"}
-SPREAD_ON = os.environ.get("VLLM_KIMI_K3_DCP8_VALUE_SPREAD", "0") == "1"
+SPREAD_ON = envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE
 # The tensor-core sparse decode (dsa.attn_sparse.TcsDecode) of the pushing DSA decode,
-# batch tables per DCP size (value: CTAs per row). VLLM_KIMI_K3_DCP8_TC_SPARSE=1 turns
-# it on for these batches (every other batch and DCP size keeps its kernel), with
-# `poll_all` in the `pushed` merge after it. DCP8 (TP8 + DCP8, DSpark k = 4): 5, 10 and
-# 15 rows (one to three requests), measured faster in A/B (8-rank chain microbenchmark,
+# batch tables per DCP size (value: CTAs per row; 2 = TcsDecodePair, two CTAs per row,
+# so the larger batches run in one wave). VLLM_KIMI_K3_LOW_LATENCY_DECODE=1 turns it on
+# for these batches (every other batch and DCP size keeps its kernel), with `poll_all`
+# in the `pushed` merge after it. DCP8 (TP8 + DCP8, DSpark k = 4): 5, 10 and 15 rows
+# (one to three requests), measured faster in A/B (8-rank chain microbenchmark,
 # attention start to DcpValue end, against SparseDcpDecode + DcpValue at 5 rows and the
 # dense decode + reduction + DcpValue at 10 and 15 rows).
 TCS_ROWS = {8: "5:4,10:4,15:4"}
-TCS_ON = os.environ.get("VLLM_KIMI_K3_DCP8_TC_SPARSE", "0") == "1"
-# VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE=1 (with VLLM_KIMI_K3_DCP8_TC_SPARSE=1) adds these
-# DCP8 batches of 4-8 requests (20-40 rows) to TCS_ROWS, with TCS_VALUE_ROWS the
-# `pushed` merge's request rows per CTA there (absent: one CTA per (head, 16 rows)).
+TCS_ON = envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE
+# The DCP8 batches of 4-11 requests (20-55 rows) added to TCS_ROWS, with TCS_VALUE_ROWS
+# the `pushed` merge's request rows per CTA there (absent: one CTA per (head, 16 rows)).
 # Measured faster in A/B (8-rank chain microbenchmark, attention start to DcpValue end,
-# against the dense decode + reduction + DcpValue): 20 rows with 2 rows per merging CTA,
-# 25-40 rows with 4.
-TCS_WIDE_ROWS = {8: "20:4,25:4,35:4,40:4"}
-TCS_VALUE_ROWS = {8: "20:2,25:4,35:4,40:4"}
+# against the dense decode + reduction + DcpValue).
+TCS_WIDE_ROWS = {8: "20:4,25:4,30:2,35:4,40:2,45:2,50:2,55:2"}
+TCS_VALUE_ROWS = {8: "20:2,25:4,30:4,35:4,40:4,45:4"}
 # TcsDecodePair keys per CTA per pass where not the default (dsa.attn_sparse.PAIR_OWN).
 TCS_PAIR_OWN = {8: "45:128"}
-# VLLM_KIMI_K3_DCP8_TC_SPARSE_PAIR=1 (with VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE=1): the
-# wider DCP8 table of 4-11 requests (20-55 rows): value 2 = TcsDecodePair (two CTAs per
-# row, so the larger batches run in one wave) at 30 and 40-55 rows, with the `pushed`
-# merge's request rows per CTA listed, and the early trigger (TCS_EARLY_ROWS) at 5 and
-# 10 rows only. Measured faster in A/B (8-rank chain microbenchmark, attention start to
-# DcpValue end, against the dense decode + reduction + DcpValue; server profile of the
-# attention chain for the early trigger). Opt-in; default off.
-WIDE_PAIR_ON = os.environ.get("VLLM_KIMI_K3_DCP8_TC_SPARSE_PAIR", "0") == "1"
-if WIDE_PAIR_ON:
-    TCS_WIDE_ROWS = {8: "20:4,25:4,30:2,35:4,40:2,45:2,50:2,55:2"}
-    TCS_VALUE_ROWS = {8: "20:2,25:4,30:4,35:4,40:4,45:4"}
-TCS_WIDE_ON = TCS_ON and os.environ.get("VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE", "0") == "1"
-# VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE=1: at these DCP8 batches of the TcsDecode table (1:
-# on) the `pushed` merge after TcsDecode triggers its dependents before waiting on it
-# rather than after (the o-projection producer loads its weights before its PDL wait).
-# Same operations and results. Measured no slower in A/B (8-rank chain microbenchmark,
-# attention start to the o-projection producer's end).
-TCS_EARLY_ROWS = {8: "5:1,10:1,20:1,25:1,35:1"}
-if WIDE_PAIR_ON:
-    TCS_EARLY_ROWS = {8: "5:1,10:1"}
-if TCS_WIDE_ON:
-    TCS_ROWS = {
-        dcp: ",".join(filter(None, (TCS_ROWS.get(dcp, ""), TCS_WIDE_ROWS.get(dcp, ""))))
-        for dcp in sorted(set(TCS_ROWS) | set(TCS_WIDE_ROWS))
-    }
+# At these DCP8 batches of the TcsDecode table (1: on) the `pushed` merge after
+# TcsDecode triggers its dependents before waiting on it rather than after (the
+# o-projection producer loads its weights before its PDL wait). Same operations and
+# results. Measured no slower in A/B (8-rank chain microbenchmark, attention start to
+# the o-projection producer's end; server profile of the attention chain).
+TCS_EARLY_ROWS = {8: "5:1,10:1"}
+TCS_ROWS = {
+    dcp: ",".join(filter(None, (TCS_ROWS.get(dcp, ""), TCS_WIDE_ROWS.get(dcp, ""))))
+    for dcp in sorted(set(TCS_ROWS) | set(TCS_WIDE_ROWS))
+}
 
 
 def resolve_partials(spec, kind):
@@ -332,11 +318,11 @@ class DcpValue:
     and those never wait on DcpValue.
 
     `spread` R (not `pushed`, `per_row`; SPREAD_ROWS under
-    VLLM_KIMI_K3_DCP8_VALUE_SPREAD=1): the `rows_per_cta` grid and merge, each CTA first
-    pushing its share of this rank's rows, LSEs and q mailbox re-arm (`push_share`: the
-    stores of push_rows over every CTA of the grid). A CTA polls only after its own
-    pushes, and the grid is at most one CTA per SM, so as above every CTA's pushes land
-    while the others poll."""
+    VLLM_KIMI_K3_LOW_LATENCY_DECODE=1): the `rows_per_cta` grid and merge, each CTA
+    first pushing its share of this rank's rows, LSEs and q mailbox re-arm
+    (`push_share`: the stores of push_rows over every CTA of the grid). A CTA polls only
+    after its own pushes, and the grid is at most one CTA per SM, so as above every
+    CTA's pushes land while the others poll."""
 
     # `spread`: push_share (every load of a thread's share before its first store);
     # False: push_rows' loop over the same grid (A/B reference).
@@ -377,7 +363,7 @@ class DcpValue:
         poll a row's sources together (None: VALUE_POLL_ALL of the DCP size and
         batch). `spread` (not `pushed`, `per_row` only): request rows per pushing
         and merging CTA (None: SPREAD_ROWS of the DCP size and batch when
-        VLLM_KIMI_K3_DCP8_VALUE_SPREAD=1, else off; 0: off), `spread_poll_all` its
+        VLLM_KIMI_K3_LOW_LATENCY_DECODE=1, else off; 0: off), `spread_poll_all` its
         `poll_all` (None: SPREAD_POLL_ALL)."""
         self.heads, self.size, self.batch = heads, size, batch
         self.spread = False
@@ -417,7 +403,7 @@ class DcpValue:
         self.grid = (heads, tiles, pushers)
         if pushed and rows_per_cta is None:
             rows_per_cta = batch_table(VALUE_ROWS.get(size, "")).get(batch, 0)
-            if TCS_WIDE_ON and batch_table(TCS_WIDE_ROWS.get(size, "")).get(batch, 0):
+            if TCS_ON and batch_table(TCS_WIDE_ROWS.get(size, "")).get(batch, 0):
                 rows_per_cta = batch_table(TCS_VALUE_ROWS.get(size, "")).get(batch, 0)
         if pushed and rows_per_cta:
             # 128 threads per row slot; at most 64 rows (16-row tiles above).
@@ -430,9 +416,8 @@ class DcpValue:
         if pushed and TCS_ON and self.rows_per_cta:  # noqa: SIM102
             if batch_table(TCS_ROWS.get(size, "")).get(batch, 0):
                 self.poll_all = True
-                if TCS_WIDE_ON:
-                    early = batch_table(TCS_EARLY_ROWS.get(size, "")).get(batch, 0)
-                    self.early_trigger = early == 1
+                early = batch_table(TCS_EARLY_ROWS.get(size, "")).get(batch, 0)
+                self.early_trigger = early == 1
         if not pushed and per_row and spread is None:
             spread = 0
             if SPREAD_ON:

@@ -38,7 +38,6 @@ with unit MX scales and the BF16 head weights that fold its scale (DsaIndex).
 """
 
 import functools
-import os
 
 import cutlass
 import cutlass.cute as cute
@@ -50,6 +49,7 @@ from cutlass import BFloat16, Float32, Int32, Int64, Uint32, Uint64
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.runtime import make_fake_stream
 
+import vllm.envs as envs
 from vllm.cute_utils import recast_val
 
 from ..common.host import dynamic_fake, dynamic_view, fake, stream, to_cute
@@ -1998,21 +1998,21 @@ LOCAL_ABOVE_BITS = 10  # a scanned count: keys above the threshold (< n), then t
 # decode-step A/B there.
 LOCAL_CLUSTER = {16: "8:4", 8: "5-15:4"}
 LOCAL_SPLIT_FROM = 1024  # 8-key vectors: shorter rows select on CTA 0; tunable
-# VLLM_KIMI_K3_DCP8_LOCAL_SPLIT=1: the local select per DCP size and batch "rows:C.S": C
-# CTAs per row (one cluster) and the split threshold S (8-key vectors; at least
-# LOCAL_SPLIT_FROM): rows of at least S vectors split over the C CTAs, shorter ones
-# select on CTA 0 alone, as one CTA per row does. Every setting selects the same keys in
-# the same slots. Long rows (several hundred thousand tokens of context) then no longer
-# run on one SM. Measured faster in A/B (8-rank LocalTopk -> merge chain, synthetic
-# 131K-600K and mixed contexts, and real logits). Opt-in; default off.
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: the local select per DCP size and batch
+# "rows:C.S": C CTAs per row (one cluster) and the split threshold S (8-key vectors; at
+# least LOCAL_SPLIT_FROM): rows of at least S vectors split over the C CTAs, shorter
+# ones select on CTA 0 alone, as one CTA per row does. Every setting selects the same
+# keys in the same slots. Long rows (several hundred thousand tokens of context) then no
+# longer run on one SM. Measured faster in A/B (8-rank LocalTopk -> merge chain,
+# synthetic 131K-600K and mixed contexts, and real logits). Opt-in; default off.
 LOCAL_SPLIT = {8: "25-35:4.2048,40:3.2048"}
-LOCAL_SPLIT_ON = os.environ.get("VLLM_KIMI_K3_DCP8_LOCAL_SPLIT", "0") == "1"
-# VLLM_KIMI_K3_DSA_SCORE_PREFETCH=1 (DCP scorer, `pitch` > 0): the producer issues the
+LOCAL_SPLIT_ON = envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1 (DCP scorer, `pitch` > 0): the producer issues the
 # first item's key tiles that hold only keys from before this step (their pages, scales
 # and block-table entries are fixed for the step) ahead of the PDL wait, so they are in
 # flight while the kernel before (DsaIndex: this step's keys and query) finishes. The
 # same tiles and stages in the same order, so the same logits. Opt-in; default off.
-SCORE_PREFETCH = os.environ.get("VLLM_KIMI_K3_DSA_SCORE_PREFETCH", "0") == "1"
+SCORE_PREFETCH = envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE
 # A cluster's shared words (CTA 0's copy is the cluster's): this CTA's candidate count
 # and pass-4 count, then the shares' candidate prefix and total (CTA-local).
 XC_COUNT, XC_SLOTS, XC_PREFIX = 0, 1, 2

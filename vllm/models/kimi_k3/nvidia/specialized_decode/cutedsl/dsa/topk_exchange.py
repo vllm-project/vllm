@@ -57,6 +57,7 @@ import torch
 from cutlass import Int32, Int64, Uint16, Uint32, Uint64
 from cutlass.cute.runtime import make_fake_stream
 
+import vllm.envs as envs
 from vllm.cute_utils import recast_val
 from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
     LOCAL_INDEX_BITS,
@@ -95,18 +96,18 @@ TABLE_CAP = 1024  # block-table columns staged in shared memory
 # after another, so pairs landing late cost one reload round, not one each. The same
 # words (bit for bit). DCP16: set by a 16-rank decode-step A/B.
 MERGE_SETTLE_ALL = {16: "1-8:1"}
-# VLLM_KIMI_K3_DCP8_TOPK_DIGITS_HALF=1: the "digits" round 1 (with the re-poll of all
+# VLLM_KIMI_K3_LOW_LATENCY_DECODE=1: the "digits" round 1 (with the re-poll of all
 # pairs) also where the DCP world is half the CTA's warps (DCP8): warp w < W owns source
 # rank w, the other warps read this rank's own source (it lands first) and drop its
 # keys, so they only take part in the scans. The same rows, counts, saturation word and
 # rescue (bit for bit). Rows up to DIGITS_HALF_ROWS. Opt-in; default off.
-DIGITS_HALF = os.environ.get("VLLM_KIMI_K3_DCP8_TOPK_DIGITS_HALF", "0") == "1"
+DIGITS_HALF = envs.VLLM_KIMI_K3_LOW_LATENCY_DECODE
 DIGITS_HALF_ROWS = 48
 
 
 def digits_half(world) -> bool:
     """Whether the "digits" form serves `world` ranks on half the warps
-    (VLLM_KIMI_K3_DCP8_TOPK_DIGITS_HALF)."""
+    (VLLM_KIMI_K3_LOW_LATENCY_DECODE)."""
     return DIGITS_HALF and 2 * world == TB // _WARP
 
 

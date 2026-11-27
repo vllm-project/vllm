@@ -3,7 +3,6 @@
 """Per-layer attention providers (input projection, KDA/MLA core, o-projection) and
 the helpers `SpecializedDecode.build_providers` uses."""
 
-import os
 from typing import Any
 
 import torch
@@ -32,9 +31,7 @@ PREPARED_MAX = BATCHES[-1]
 # requests and up to this many rows run the wide step (specialized attention, stock
 # o-projection, AttnRes and dense MLP); wider steps run the stock layers. The scratch,
 # mailboxes and fused indexer buffers are sized from it when the runtime is built.
-# Override with VLLM_KIMI_K3_ATTENTION_MAX (64-1024).
-ATTENTION_MAX = int(os.environ.get("VLLM_KIMI_K3_ATTENTION_MAX", "480"))
-assert 64 <= ATTENTION_MAX <= 1024, ATTENTION_MAX  # moe.experts.WIDE_ROWS
+ATTENTION_MAX = 480  # at most moe.experts.WIDE_ROWS (1024)
 # Rows up to which the specialized attention layer beats the stock one at every measured
 # context (8K, 32K, 128K, AgentX; GB300, DSpark q5, fp8 KV, input projection through
 # o_proj, us per layer), per (layer kind, DCP):
