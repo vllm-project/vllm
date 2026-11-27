@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
     MegaMoEWeightSpec,
-    deep_gemm_supports_sm90_nvfp4,
 )
 from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
@@ -1713,7 +1712,7 @@ def _nvfp4_checkpoint(e: int, n: int, k: int, device: torch.device):
 
 
 @pytest.mark.skipif(
-    not (has_sm90_mega_moe and deep_gemm_supports_sm90_nvfp4()),
+    not (has_sm90_mega_moe and hasattr(_import_deep_gemm(), "bf16_nvfp4_mega_moe")),
     reason="The SM90 NVFP4 MegaMoE kernel requires SM90 and DeepGEMM",
 )
 def test_deep_gemm_mega_moe_nvfp4_sm90_matches_reference(dist_init):

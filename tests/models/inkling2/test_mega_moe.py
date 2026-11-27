@@ -18,15 +18,13 @@ if not current_platform.is_device_capability(90):
     pytest.skip("NVFP4 MegaMoE runs on SM90", allow_module_level=True)
 
 from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config  # noqa: E402
-from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (  # noqa: E402
-    deep_gemm_supports_sm90_nvfp4,
-)
 from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.moe_sm90 import select_experts  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.moe_sm90_mega import (  # noqa: E402
     Inkling2LocalMegaMoEExperts,
     Inkling2MegaMoEExperts,
 )
+from vllm.utils.deep_gemm import _import_deep_gemm  # noqa: E402
 
 MODEL = "thinkingmachines/Inkling-2-Mini"
 E2M1 = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
@@ -38,7 +36,7 @@ def checkpoint_path():
 
     from vllm.transformers_utils.repo_utils import hf_api
 
-    if not deep_gemm_supports_sm90_nvfp4():
+    if not hasattr(_import_deep_gemm(), "bf16_nvfp4_mega_moe"):
         pytest.skip("DeepGEMM has no SM90 NVFP4 MegaMoE")
     try:
         return hf_api().snapshot_download(

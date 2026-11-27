@@ -79,9 +79,7 @@ class MegaMoEActivation:
 
     def kernel_kwargs(self) -> dict[str, Any]:
         # Defaults stay implicit so DeepGEMM builds without alpha/beta still work.
-        kwargs: dict[str, Any] = {}
-        if self.clamp is not None:
-            kwargs["activation_clamp"] = self.clamp
+        kwargs: dict[str, Any] = {"activation_clamp": self.clamp}
         if self.name != "swiglu":
             kwargs["activation"] = self.name
         if self.alpha != 1.0:
@@ -225,16 +223,6 @@ MEGA_MOE_NVFP4_SM90 = MegaMoEWeightFormat(
 )
 
 
-def deep_gemm_supports_sm90_nvfp4() -> bool:
-    """Whether the installed DeepGEMM runs NVFP4 experts on SM90."""
-    from vllm.utils.deep_gemm import _import_deep_gemm
-
-    deep_gemm = _import_deep_gemm()
-    return hasattr(deep_gemm, "bf16_nvfp4_mega_moe") and hasattr(
-        deep_gemm, "transform_nvfp4_weights_for_sm90_mega_moe"
-    )
-
-
 def check_deep_gemm_mega_moe_supported(
     device: torch.device,
     hidden_size: int,
@@ -364,12 +352,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
             raise NotImplementedError(
                 f"DeepGEMM MegaMoE {weight_format.name} experts support "
                 f"{sorted(weight_format.activations)}, not {activation.name!r}."
-            )
-        if weight_format == MEGA_MOE_NVFP4_SM90 and not deep_gemm_supports_sm90_nvfp4():
-            raise NotImplementedError(
-                "DeepGEMM MegaMoE NVFP4 experts on SM90 need a DeepGEMM with "
-                "`bf16_nvfp4_mega_moe` and "
-                "`transform_nvfp4_weights_for_sm90_mega_moe`."
             )
 
         self.prefix = prefix
@@ -1085,6 +1067,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 eplb_state=self.eplb_state,
             )
         if fmt == MEGA_MOE_NVFP4_SM90:
+            del kwargs["activation_clamp"]
             kwargs.update(
                 l1_global_scales=self.w13_weight_scale_2,
                 l2_global_scales=self.w2_weight_scale_2,

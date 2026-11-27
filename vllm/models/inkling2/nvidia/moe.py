@@ -9,6 +9,7 @@ gets the output of its own tokens. Checkpoint names under
 `model.llm.layers.N.mlp` map 1:1 to parameters.
 """
 
+import functools
 from collections.abc import Callable, Sequence
 from typing import Literal, Protocol, cast
 
@@ -24,7 +25,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -44,8 +44,6 @@ from .ops.moe_sm90_mega import (
 from .ops.moe_sm120 import bmm as bmm_sm120
 from .ops.seq_parallel import SeqParallel
 from .ops.trtllm_bmm import bmm, expert_plan, load_kernels
-
-logger = init_logger(__name__)
 
 QuantFormat = Literal["nvfp4", "mxfp8"]
 
@@ -162,9 +160,28 @@ class Inkling2Experts(nn.Module):
                 )
 
         start = self.ep_rank * self.num_experts
+        stop = start + self.num_experts
+        self.make_mega: Callable[..., Inkling2MegaMoEExperts] | None = None
+        if (
+            current_platform.is_device_capability(90)
+            and self.nvfp4
+            and vllm_config is not None
+            and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        ):
+            if self.dp_ep or get_ep_group().world_size == 1:
+                mega_cls = Inkling2MegaMoEExperts
+                # The launch over the EP group takes global expert ids.
+                start, stop = 0, config.n_routed_experts
+            else:
+                mega_cls = Inkling2LocalMegaMoEExperts
+                # Collective: every rank builds the same layers.
+                mega_rank_group()
+            self.make_mega = functools.partial(mega_cls, vllm_config)
+        self.mega: Inkling2MegaMoEExperts | None = None
+        self.token_rows: torch.Tensor | None = None
         self.register_buffer(
             "expert_bounds",
-            torch.tensor([start, start + self.num_experts], dtype=torch.int32),
+            torch.tensor([start, stop], dtype=torch.int32),
             persistent=False,
         )
         # Rows per local expert of the routing kernels (reset by the kernels).
@@ -184,20 +201,6 @@ class Inkling2Experts(nn.Module):
             and vllm_config.kernel_config.moe_backend == "humming"
         )
         self.humming: HummingExperts | None = None
-        self.mega_vllm_config = None
-        if (
-            current_platform.is_device_capability(90)
-            and self.nvfp4
-            and vllm_config is not None
-            and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        ):
-            self.mega_vllm_config = vllm_config
-            self.mega_cls = Inkling2MegaMoEExperts
-            if not self.dp_ep and get_ep_group().world_size > 1:
-                self.mega_cls = Inkling2LocalMegaMoEExperts
-                # Collective: every rank builds the same layers.
-                mega_rank_group()
-        self.mega: Inkling2MegaMoEExperts | None = None
         if self.sm100:
             load_kernels(
                 (self.w13_weight, self.w2_weight),
@@ -258,29 +261,24 @@ class Inkling2Experts(nn.Module):
                 getattr(self, f"{name}_weight_scale").data,
                 global_scale,
             )
-        if self.mega_vllm_config is not None:
-            try:
-                l1, l2 = transform_nvfp4_weights_for_sm90_mega_moe(
-                    weights["w13"], weights["w2"]
+        if self.make_mega is not None:
+            l1, l2 = transform_nvfp4_weights_for_sm90_mega_moe(
+                weights["w13"], weights["w2"]
+            )
+            self.mega = self.make_mega(
+                l1,
+                l2,
+                top_k=self.topk,
+                gate_cap=self.gate_cap,
+                up_cap=self.up_cap,
+                prefix=f"{self.prefix}.mega",
+            )
+            if not self.dp_ep and self.ep_size > 1:
+                # The launch writes 0 to the rows of tokens with no local expert.
+                self.token_rows = torch.arange(
+                    self.mega.max_num_tokens, dtype=torch.int32, device=l1[0].device
                 )
-            except ValueError as e:
-                logger.warning("%s runs on Humming: %s", self.prefix, e)
-            else:
-                self.mega = self.mega_cls(
-                    self.mega_vllm_config,
-                    l1,
-                    l2,
-                    top_k=self.topk,
-                    gate_cap=self.gate_cap,
-                    up_cap=self.up_cap,
-                    prefix=f"{self.prefix}.mega",
-                )
-                if not self.dp_ep and self.ep_size > 1:
-                    # The launch writes 0 to the rows of tokens with no local expert.
-                    self.token_rows = torch.arange(
-                        self.mega.max_num_tokens, dtype=torch.int32, device=l1[0].device
-                    )
-        if self.mega is None:
+        else:
             self.humming = (
                 HummingNVFP4Experts(weights, self.shapes)
                 if self.humming_nvfp4
@@ -359,7 +357,7 @@ class Inkling2Experts(nn.Module):
             ids, gammas, src2dst = routing
             if self.mega is not None:
                 down = self.mega(x, gammas.view(ids.shape), ids)
-                if self.dp_ep or self.ep_size == 1:
+                if self.token_rows is None:
                     return down
                 # This rank's partial sum, one row per token.
                 topk, src2dst = 1, self.token_rows[: ids.shape[0]]
@@ -495,17 +493,13 @@ class Inkling2MoE(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None:
         gate, experts = self.gate, self.experts
         if not (experts.sm100 or experts.sm120):
-            # A MegaMoE launch over data-parallel ranks takes global expert ids.
-            bounds = experts.expert_bounds
-            if experts.dp_ep and experts.mega is not None:
-                bounds = self.all_experts
             selected = select_experts(
                 x,
                 gate.weight,
                 gate.bias,
                 gate.topk,
                 gate.route_scale,
-                bounds,
+                experts.expert_bounds,
                 is_padding,
             )
             return experts(x, selected, None, None, reduce, push)
