@@ -103,6 +103,12 @@ python examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py \
 combined PD instances). For data-parallel consumers, list each replica
 consecutively and set `--ec-consumer-dp-size`.
 
+For Qwen3-VL requests with list-valued `fps` or `num_frames` in
+`mm_processor_kwargs`, add `--enable-per-video-kwargs-slicing` to the proxy
+command. It is off by default. Enable it only when every encoder and consumer
+uses compatible per-video hashing. Video children receive the entries they
+need, and non-video children keep the original kwargs and cache keys.
+
 ### Correctness script
 
 ```bash

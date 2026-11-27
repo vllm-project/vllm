@@ -850,7 +850,7 @@ def test_fanout_keeps_kwargs_for_image_only_request(proxy, monkeypatch, nested):
 
 @pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
 def test_fanout_interleaved_media_and_two_encoders(proxy, monkeypatch, nested):
-    """Video positions count videos only; image children drop per-video keys."""
+    """Video positions count videos only; image children preserve all kwargs."""
     seen: list = []
     monkeypatch.setattr(proxy, "encode_session", _FanoutSession(seen))
     monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
@@ -888,8 +888,7 @@ def test_fanout_interleaved_media_and_two_encoders(proxy, monkeypatch, nested):
             assert scope["num_frames"] == expected
             assert not images
         else:
-            assert "num_frames" not in scope
-            assert scope["do_sample_frames"] is True
+            assert batch["mm_processor_kwargs"] == kwargs
     covered = {
         (i["type"], (i.get("video_url") or i.get("image_url"))["url"])
         for _, b in seen
@@ -927,17 +926,14 @@ def test_fanout_preserves_scoped_precedence(proxy, scoped_value):
     kwargs = {"num_frames": [99], "videos_kwargs": {"num_frames": scoped_value}}
     original = copy.deepcopy(kwargs)
     for index in range(2):
-        child = proxy._slice_mm_processor_kwargs(kwargs, [index], 2)
+        child = proxy._slice_mm_processor_kwargs(kwargs, [index])
         expected = [scoped_value[index]] if isinstance(scoped_value, list) else 16
         assert child == {
             "num_frames": [99],
             "videos_kwargs": {"num_frames": expected},
         }
-    image = proxy._slice_mm_processor_kwargs(kwargs, [], 2)
-    assert image["num_frames"] == [99]
-    assert image["videos_kwargs"] == (
-        {} if isinstance(scoped_value, list) else {"num_frames": 16}
-    )
+    image = proxy._slice_mm_processor_kwargs(kwargs, [])
+    assert image == kwargs
     assert kwargs == original
 
 
@@ -984,7 +980,7 @@ def test_fanout_default_preserves_base_hash_kwargs(proxy, monkeypatch, nested, s
         child_hash = hashes([item["uuid"]], child["mm_processor_kwargs"])[0]
         assert child_hash == parent_hashes[index]
         if not short:
-            sliced = proxy._slice_mm_processor_kwargs(kwargs, [index], 2)
+            sliced = proxy._slice_mm_processor_kwargs(kwargs, [index])
             assert hashes([item["uuid"]], sliced)[0] != parent_hashes[index]
 
 

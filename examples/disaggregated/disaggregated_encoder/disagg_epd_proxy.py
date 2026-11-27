@@ -615,20 +615,16 @@ def _validate_per_video_request(req_data: dict) -> None:
     _validate_per_video_kwargs(req_data.get("mm_processor_kwargs"), num_videos)
 
 
-def _slice_mm_processor_kwargs(
-    mm_kwargs: Any, video_indices: list[int], num_videos: int
-) -> Any:
+def _slice_mm_processor_kwargs(mm_kwargs: Any, video_indices: list[int]) -> Any:
     """Slice per-video list kwargs down to the videos a child carries.
 
     `video_indices` are the positions of those videos among the original
     request's videos. Scalars and unrelated kwargs pass through unchanged, in
-    whatever scope (flat or `videos_kwargs`) the request used; a child
-    without videos drops the per-video lists if the original request has videos.
-    An image-only original request retains its kwargs. `mm_kwargs` itself is
-    never modified, and the sliced value stays a list so both sides of the
-    transfer fold the same element into the cache hash.
+    whatever scope (flat or `videos_kwargs`) the request used. Children without
+    videos keep the original kwargs. The sliced value stays a list so both
+    sides of the transfer fold the same element into the cache hash.
     """
-    if not isinstance(mm_kwargs, dict) or not num_videos:
+    if not isinstance(mm_kwargs, dict) or not video_indices:
         return mm_kwargs
 
     child = dict(mm_kwargs)
@@ -638,10 +634,7 @@ def _slice_mm_processor_kwargs(
 
     # Keep shadowed values intact; the effective list alone is partitioned.
     for scope, key, value in _per_video_list_options(child):
-        if video_indices:
-            scope[key] = [value[i] for i in video_indices]
-        else:
-            scope.pop(key)
+        scope[key] = [value[i] for i in video_indices]
     return child
 
 
@@ -761,7 +754,6 @@ async def fanout_encoder_primer(
                 kwargs = _slice_mm_processor_kwargs(
                     kwargs,
                     [video_positions[idx] for idx in indices if idx in video_positions],
-                    len(video_positions),
                 )
             encoder_req["mm_processor_kwargs"] = kwargs
         for key in (

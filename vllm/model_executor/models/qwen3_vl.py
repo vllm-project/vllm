@@ -1360,9 +1360,21 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             scope = videos_kwargs if key in videos_kwargs else kwargs
             if isinstance(scope.get(key), list):
                 scope.pop(key)
-        hashes = dict(
-            super()._get_mm_hashes(replace(inputs, hf_processor_mm_kwargs=kwargs))
-        )
+        # Non-video children keep the original kwargs and cache identity.
+        hashes: dict[str, list[str]] = {}
+        for modality in inputs.mm_data_items:
+            modality_kwargs = (
+                kwargs if modality == "video" else inputs.hf_processor_mm_kwargs
+            )
+            hashes.update(
+                super()._get_mm_hashes(
+                    replace(
+                        inputs,
+                        mm_data_items=inputs.mm_data_items.select({modality}),
+                        hf_processor_mm_kwargs=modality_kwargs,
+                    )
+                )
+            )
         per_video_kwargs = self._get_per_video_kwargs(
             inputs.hf_processor_mm_kwargs, len(hashes["video"])
         )
