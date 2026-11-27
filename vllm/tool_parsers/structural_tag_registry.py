@@ -1079,16 +1079,21 @@ _GLM_4_7_VALUE_EXCLUDES = [
 _GLM_4_7_JSON_SCALAR_TYPES = frozenset({"integer", "number", "boolean", "null"})
 
 
-def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
-    if "enum" in prop:
+def _glm_4_7_value_format(prop: Any) -> Any:
+    if not isinstance(prop, dict):
+        return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
+    enum_values = prop.get("enum")
+    if isinstance(enum_values, list) and enum_values:
         values = [
             ConstStringFormat(value=v if isinstance(v, str) else json.dumps(v))
-            for v in prop["enum"]
+            for v in enum_values
         ]
         return values[0] if len(values) == 1 else OrFormat(elements=values)
     prop_type = prop.get("type")
     types = prop_type if isinstance(prop_type, list) else [prop_type]
-    if not types or not all(t in _GLM_4_7_JSON_SCALAR_TYPES for t in types):
+    if not types or not all(
+        isinstance(t, str) and t in _GLM_4_7_JSON_SCALAR_TYPES for t in types
+    ):
         return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
     formats = [JSONSchemaFormat(json_schema={"type": t}) for t in types]
     return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
