@@ -198,6 +198,9 @@ class InklingConvState(nn.Module, AttentionLayerBase):
             head_size_v=0,  # all 4 streams packed into head_size
             dtype=self._dtype,
         )
+        # One launch writes the current tokens' conv inputs and reads the
+        # earlier ones (see `ops/sconv.py`): no hits on blocks other requests
+        # fill in the same step.
         return SlidingWindowManager.layer_config(
-            spec, sliding_window=self.sliding_window
+            spec, sliding_window=self.sliding_window, same_step_hits=False
         )

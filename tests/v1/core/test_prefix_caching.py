@@ -3103,6 +3103,56 @@ def test_prefill_hybrid_model_mamba_align():
     manager.free(req0)
 
 
+@pytest.mark.parametrize("same_step_hits", [True, False])
+def test_sliding_window_same_step_hits(same_step_hits: bool):
+    """A request whose prompt another request scheduled in the same step
+    prefills hits that request's blocks before they are computed. Attention
+    windows (the default) take the hit at once; a state one launch writes and
+    reads (`same_step_hits=False`, Inkling's short conv) waits a step."""
+    block_size = 16
+    spec = AttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=30,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["attn"], spec),
+            new_kv_cache_group(
+                ["conv"],
+                sliding_window_layer(spec, 4, same_step_hits=same_step_hits),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt = list(range(3 * block_size + 5))
+    first = make_request("0", prompt, block_size, sha256)
+    copy = make_request("1", prompt, block_size, sha256)
+
+    manager.new_step_starts()
+    blocks, num_computed, _ = manager.get_computed_blocks(first)
+    assert manager.allocate_slots(first, len(prompt), num_computed, blocks)
+    blocks, num_computed, _ = manager.get_computed_blocks(copy)
+    assert num_computed == 3 * block_size
+    allocated = manager.allocate_slots(
+        copy, len(prompt) - num_computed, num_computed, blocks
+    )
+    assert (allocated is not None) == same_step_hits
+
+    if not same_step_hits:
+        manager.new_step_starts()
+        blocks, num_computed, _ = manager.get_computed_blocks(copy)
+        assert num_computed == 3 * block_size
+        assert manager.allocate_slots(
+            copy, len(prompt) - num_computed, num_computed, blocks
+        )
+
+
 def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """Test shared prefix detection heuristic for mamba align cache mode
 
