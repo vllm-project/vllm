@@ -3,13 +3,11 @@
 from collections.abc import Mapping
 from typing import Any
 
-TENT_METRICS_BASE_PORT = 9100
-
 SUPPORTED_PROTOCOLS = ("rdma", "tcp")
 
 # TENT installs these by itself depending on how it was built, so a deployment
 # that asked for one transport would still serve the others. NVLink stays
-# available: TENT registers it next to RDMA and picks it for same-host peers.
+# available next to RDMA and is picked for same-host peers.
 DISABLED_TRANSPORTS = ("gds", "hp_tcp", "io_uring", "mnnvl", "shm")
 
 
@@ -18,7 +16,6 @@ def build_tent_config(
     hostname: str,
     protocol: str,
     device_name: str,
-    metrics_port: int,
     enable_sleep_mode: bool = False,
     overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -33,13 +30,9 @@ def build_tent_config(
             f"{' and '.join(SUPPORTED_PROTOCOLS)}, got protocol {protocol!r}."
         )
     disabled = set(DISABLED_TRANSPORTS)
-    if protocol != "rdma":
-        # NVLink is a same-host RDMA path, so it only makes sense with RDMA.
-        disabled.add("nvlink")
-    elif enable_sleep_mode:
-        # NVLink folds sub-allocated buffers into the enclosing cudaMalloc
-        # until kvcache-ai/Mooncake#5886, which breaks unregistering the KV
-        # caches that sleep mode moves around.
+    if protocol != "rdma" or enable_sleep_mode:
+        # NVLink is only used with RDMA, and sleep mode disables it until
+        # kvcache-ai/Mooncake#5886 preserves sub-allocated buffer ranges.
         disabled.add("nvlink")
     config: dict[str, Any] = {
         # Peers are addressed through the connector, so no metadata service.
@@ -50,7 +43,7 @@ def build_tent_config(
             "tcp": {"enable": protocol == "tcp"},
             "rdma": {"enable": protocol == "rdma"},
         },
-        "metrics": {"enabled": metrics_port > 0, "http_port": metrics_port},
+        "metrics": {"enabled": False, "http_port": 0},
     }
     devices = [name.strip() for name in device_name.split(",") if name.strip()]
     if devices:

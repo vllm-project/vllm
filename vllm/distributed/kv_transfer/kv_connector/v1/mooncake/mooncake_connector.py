@@ -1967,7 +1967,6 @@ class MooncakeConnectorWorker:
                 else MooncakeXferResponseStatus.FINISH
             )
             ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
-            sending_reqs: list[tuple[ReqId, SendBlockMeta]] = []
             try:
                 for task in done:
                     d_req_id, send_meta = task.result()
@@ -1976,12 +1975,11 @@ class MooncakeConnectorWorker:
                     if send_meta.transfer_id in self.reqs_need_send:
                         # Mark it sending to avoid expiration.
                         send_meta.sending += 1
-                        sending_reqs.append((d_req_id, send_meta))
+                        ready_reqs.append((d_req_id, send_meta))
                         if not send_meta.need_send:
                             self.resolve_need_send(
                                 send_meta, remote_tp_ranks, meta.remote_pp_size
                             )
-                        ready_reqs.append((d_req_id, send_meta))
                     else:
                         # Otherwise (expired, very unlikely), just forget it.
                         logger.warning(
@@ -2029,10 +2027,7 @@ class MooncakeConnectorWorker:
                             err_req_set.add(d_req_id)
                         ok_ready_reqs = []
 
-                while sending_reqs:
-                    d_req_id, send_meta = sending_reqs.pop(0)
-                    send_meta.sending -= 1
-
+                for d_req_id, send_meta in ready_reqs:
                     if d_req_id in err_req_set:
                         continue
 
@@ -2048,7 +2043,7 @@ class MooncakeConnectorWorker:
                     task.cancel()
                 raise
             finally:
-                for _, send_meta in sending_reqs:
+                for _, send_meta in ready_reqs:
                     send_meta.sending -= 1
 
             response = MooncakeXferResponse(

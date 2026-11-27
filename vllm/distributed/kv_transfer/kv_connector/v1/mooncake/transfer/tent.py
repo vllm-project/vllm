@@ -44,9 +44,7 @@ _TENT_BUILD_HINT = (
     "PyPI wheels ship no top-level 'tent' module."
 )
 
-# How long `shutdown` waits for transfers that are still running.
 SHUTDOWN_TIMEOUT_S = 5.0
-
 POLL_INTERVAL_MIN_S = 0.00002
 POLL_INTERVAL_MAX_S = 0.00005
 
@@ -65,7 +63,6 @@ class TentTransferBackend(TransferBackend):
         hostname: str,
         protocol: str,
         device_name: str,
-        metrics_port: int = 0,
         transfer_timeout_s: float = DEFAULT_TRANSFER_TIMEOUT_S,
         enable_sleep_mode: bool = False,
         overrides: Mapping[str, Any] | None = None,
@@ -87,7 +84,6 @@ class TentTransferBackend(TransferBackend):
             hostname=hostname,
             protocol=protocol,
             device_name=device_name,
-            metrics_port=metrics_port,
             enable_sleep_mode=enable_sleep_mode,
             overrides=overrides,
         )
@@ -135,26 +131,23 @@ class TentTransferBackend(TransferBackend):
                 f"{_TENT_BUILD_HINT}"
             )
         self._pending = int(self._tent.TransferStatusEnum.PENDING)
-        # Newer builds submit and wait in one call, which keeps the Python side
-        # out of the per-range loop below.
+        # Prefer the single-call array binding when it honors transfer_timeout_s.
+        self._sync_arrays = None
+        self._sync_arrays_timed = False
         sync_arrays = getattr(self._engine, "transfer_sync_arrays", None)
-        self._sync_arrays = sync_arrays if callable(sync_arrays) else None
-        self._sync_arrays_timed = (
-            _supports_timeout_ms(self._sync_arrays)
-            if self._sync_arrays is not None
-            else False
-        )
-        self._use_sync_arrays = self._sync_arrays is not None and (
-            self._sync_arrays_timed or self._timeout_ms == 0
-        )
-        if self._sync_arrays is not None and not self._use_sync_arrays:
-            logger.warning(
-                "This Mooncake build exposes transfer_sync_arrays without "
-                "timeout_ms; using batch submission so transfer_timeout_s=%.3gs "
-                "remains enforced. Set transfer_timeout_s=0 or build Mooncake "
-                "with kvcache-ai/Mooncake#5882 to use the array binding.",
-                self._timeout_s,
-            )
+        if callable(sync_arrays):
+            timed = _supports_timeout_ms(sync_arrays)
+            if timed or self._timeout_ms == 0:
+                self._sync_arrays = sync_arrays
+                self._sync_arrays_timed = timed
+            else:
+                logger.warning(
+                    "This Mooncake build exposes transfer_sync_arrays without "
+                    "timeout_ms; using batch submission so transfer_timeout_s=%.3gs "
+                    "remains enforced. Set transfer_timeout_s=0 or build Mooncake "
+                    "with kvcache-ai/Mooncake#5882 to use the array binding.",
+                    self._timeout_s,
+                )
         wait_transfer = getattr(self._engine, "wait_transfer", None)
         self._wait_transfer = wait_transfer if callable(wait_transfer) else None
         self._segment_lock = threading.Lock()
@@ -301,10 +294,14 @@ class TentTransferBackend(TransferBackend):
                     return
                 self._drain.wait(remaining)
         with self._segment_lock:
-            peers = list(self._segments)
+            segments = list(self._segments.items())
+            self._segments.clear()
             self._open_locks.clear()
-        for peer in peers:
-            self._close_segment(peer)
+        for peer, segment in segments:
+            try:
+                self._engine.close_segment(segment)
+            except Exception as error:
+                logger.debug("TENT failed to close the segment to %s: %s", peer, error)
 
     def _submit(
         self,
@@ -314,49 +311,34 @@ class TentTransferBackend(TransferBackend):
         remote_addrs: NDArray[np.uint64],
         lengths: NDArray[np.uint64],
     ) -> NDArray[np.uint8]:
-        self._begin_transfer()
+        with self._drain:
+            if self._closing:
+                raise RuntimeError("The TENT transfer backend is shutting down.")
+            self._inflight += 1
         try:
-            if self._use_sync_arrays:
-                return self._submit_arrays(peer, op, local_addrs, remote_addrs, lengths)
-            return self._submit_lists(peer, op, local_addrs, remote_addrs, lengths)
+            segment = self._segment(peer)
+            if self._sync_arrays is not None:
+                args = (local_addrs, remote_addrs, lengths, segment, self._opcodes[op])
+                if self._sync_arrays_timed:
+                    states = self._sync_arrays(*args, self._timeout_ms)
+                else:
+                    states = self._sync_arrays(*args)
+                return np.asarray(states, dtype=np.uint8)
+            return self._submit_lists(segment, op, local_addrs, remote_addrs, lengths)
         finally:
-            self._end_transfer()
-
-    def _submit_arrays(
-        self,
-        peer: str,
-        op: TransferOp,
-        local_addrs: NDArray[np.uint64],
-        remote_addrs: NDArray[np.uint64],
-        lengths: NDArray[np.uint64],
-    ) -> NDArray[np.uint8]:
-        assert self._sync_arrays is not None
-        segment = self._segment(peer)
-        opcode = self._opcodes[op]
-        if self._sync_arrays_timed:
-            states = self._sync_arrays(
-                local_addrs,
-                remote_addrs,
-                lengths,
-                segment,
-                opcode,
-                self._timeout_ms,
-            )
-        else:
-            states = self._sync_arrays(
-                local_addrs, remote_addrs, lengths, segment, opcode
-            )
-        return np.asarray(states, dtype=np.uint8)
+            with self._drain:
+                self._inflight -= 1
+                if self._inflight == 0:
+                    self._drain.notify_all()
 
     def _submit_lists(
         self,
-        peer: str,
+        segment: Any,
         op: TransferOp,
         local_addrs: NDArray[np.uint64],
         remote_addrs: NDArray[np.uint64],
         lengths: NDArray[np.uint64],
     ) -> NDArray[np.uint8]:
-        segment = self._segment(peer)
         count = int(local_addrs.size)
         batch = self._engine.allocate_transfer_batch(count)
         if batch <= 0:
@@ -394,18 +376,6 @@ class TentTransferBackend(TransferBackend):
             delay = min(delay * 2, POLL_INTERVAL_MAX_S)
         return self._engine.get_transfer_status_list(batch)
 
-    def _begin_transfer(self) -> None:
-        with self._drain:
-            if self._closing:
-                raise RuntimeError("The TENT transfer backend is shutting down.")
-            self._inflight += 1
-
-    def _end_transfer(self) -> None:
-        with self._drain:
-            self._inflight -= 1
-            if self._inflight == 0:
-                self._drain.notify_all()
-
     def _segment(self, peer: str) -> Any:
         with self._segment_lock:
             segment = self._segments.get(peer)
@@ -421,16 +391,6 @@ class TentTransferBackend(TransferBackend):
                     self._segments[peer] = segment
                     self._open_locks.pop(peer, None)
             return segment
-
-    def _close_segment(self, peer: str) -> None:
-        with self._segment_lock:
-            segment = self._segments.pop(peer, None)
-        if segment is None:
-            return
-        try:
-            self._engine.close_segment(segment)
-        except Exception as error:
-            logger.debug("TENT failed to close the segment to %s: %s", peer, error)
 
     def _state_name(self, code: int) -> str:
         return self._state_names.get(code, str(code))
