@@ -157,9 +157,9 @@ The following Prometheus metrics are exported when MooncakeConnector is active, 
 | `vllm:mooncake_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). |
 
 !!! note
-    Mooncake is push-based: the prefiller (P) performs the transfer, so the
-    three histograms are only populated on P instances, while the decoder (D)
-    reports only the failures it observes.
+    The side that issues the transfer records the three histograms: P with
+    `MooncakeConnector` (push), D with `MooncakePullConnector` (pull). Both
+    sides record the failures they observe.
 
 !!! tip
     High `vllm:mooncake_num_kv_expired_reqs` indicates that the prefiller's

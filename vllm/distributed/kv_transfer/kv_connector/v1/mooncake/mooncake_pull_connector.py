@@ -2,25 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Mooncake pull connector: the decoder reads the prefill KV cache itself.
 
-`MooncakeConnector` has the prefiller write into the decoder's registered
-memory, so every decode batch carries the decoder's KV region table to the
-prefiller. This connector turns the transfer around: the decoder asks each
-paired prefiller worker for its registered regions (once per peer, then cached)
-and for the block ids of the requests it is about to read, then reads the bytes
-with `batch_transfer_sync_read` at its own scheduling pace. The prefiller holds
-the blocks until every reader reports the read as finished.
-
-Both connectors share the scheduler, the request metadata, the registered
-regions and the response envelope; only the transfer direction and the
-side-channel messages differ.
+The prefiller holds the blocks it hands out until every reader reports the
+read finished. Both connectors share the scheduler, metadata and response
+envelope.
 """
 
 import asyncio
+import contextlib
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import msgspec
 import numpy as np
@@ -29,9 +23,11 @@ import zmq.asyncio
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
-    BlockTransferRequest,
+    _PULL_HEARTBEAT_IVL_MS,
+    _PULL_HEARTBEAT_TIMEOUT_MS,
     MooncakeBaseConnector,
     MooncakeConnectorMetadata,
     MooncakeConnectorWorker,
@@ -43,18 +39,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferId,
     TransferRegion,
+    TransferRequest,
     _compute_sender_transfer_plan,
+    _lost_peer_monitor,
+    _recv_unless_lost,
     _validate_asymmetric_region_lengths,
-    plan_block_descriptors,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.pull_protocol import (
-    MooncakePullDone,
-    MooncakePullReading,
-    MooncakePullRequest,
-    PullMessage,
-    ReaderKey,
+    plan_transfer_descriptors,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.read_leases import (
+    ReaderKey,
     ReadLeases,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
@@ -68,6 +61,82 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+
+class MooncakePullRequest(
+    msgspec.Struct,
+    tag="read",
+    tag_field="kind",
+    omit_defaults=True,  # type: ignore[call-arg]
+):
+    """Decoder to prefiller: these requests are about to be read."""
+
+    engine_id: EngineId
+    tp_rank: int
+    tp_size: int
+    pp_rank: int
+    pp_size: int
+    # d_req_id -> (transfer_id, whether this reader needs any bytes)
+    reqs: dict[ReqId, tuple[TransferId, bool]]
+    # The reader asks for the registered regions on its first pull from this
+    # peer and reuses them afterwards.
+    want_regions: bool = False
+
+
+class MooncakePullDone(
+    msgspec.Struct,
+    tag="done",
+    tag_field="kind",
+    omit_defaults=True,  # type: ignore[call-arg]
+):
+    """Decoder to prefiller: these transfers are finished on the reader."""
+
+    engine_id: EngineId
+    tp_rank: int
+    pp_rank: int
+    transfer_ids: list[TransferId]
+
+
+class MooncakePullReading(
+    msgspec.Struct,
+    tag="reading",
+    tag_field="kind",
+    omit_defaults=True,  # type: ignore[call-arg]
+):
+    """Decoder to prefiller: the read of these transfers is still running."""
+
+    engine_id: EngineId
+    tp_rank: int
+    pp_rank: int
+    transfer_ids: list[TransferId]
+
+
+PullMessage = MooncakePullRequest | MooncakePullDone | MooncakePullReading
+
+
+class _PeerLostError(RuntimeError):
+    """The prefiller's connection disappeared before it finished answering."""
+
+
+class _PeerLayout(NamedTuple):
+    """One prefiller's validated layout, reusable across waves and batches."""
+
+    layout_id: int
+    consumer_regions: list[TransferRegion]
+    producer_regions: list[TransferRegion]
+
+
+@dataclass(slots=True)
+class _ReadWave:
+    """Descriptors of one prefiller response, read in arrival order."""
+
+    reqs: dict[ReqId, TransferId]
+    local_ptrs: np.ndarray
+    remote_ptrs: np.ndarray
+    lengths: np.ndarray
+    remote_session: str
+    err_reqs: list[ReqId]
+    err_msg: str | None
 
 
 def _consume_task_result(task: asyncio.Task) -> None:
@@ -117,10 +186,13 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
 
         # Prefiller side: the leases of the readers that were handed block ids.
         self._leases = ReadLeases()
+        # Prefiller side: registered regions stay fixed until the layout id
+        # changes, and every pull asks for them.
+        self._local_regions_layout_id = -1
+        self._local_regions_cache: tuple[list[TransferRegion], str | None] | None = None
 
-        # Decoder side: peer worker address -> the regions and layout it
-        # reported, kept until that peer reports another layout.
-        self._peer_layouts: dict[str, MooncakeXferMetadata] = {}
+        # Decoder side: peer worker address -> the layout it reported once.
+        self._peer_layouts: dict[str, _PeerLayout] = {}
 
         if self.is_kv_producer:
             return
@@ -137,10 +209,6 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         reader_executor = getattr(self, "_reader_executor", None)
         if reader_executor is not None:
             reader_executor.shutdown(wait=False)
-        # A socket parked in a receive never lets the context terminate, and the
-        # reader holds one open, so close every socket before the base class
-        # stops the loops.
-        self.async_zmq_ctx.destroy(linger=0)
         super().shutdown()
 
     ############################################################
@@ -151,11 +219,9 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         self, send_meta: SendBlockMeta, reader_tp_size: int, reader_pp_size: int
     ) -> None:
         """How many reader workers a set of blocks is served to."""
-        expected = len(self.transfer_topo.handshake_target_ranks(reader_tp_size))
-        if reader_pp_size > 1 and reader_pp_size != self.pp_size:
-            # Every reader PP stage reads every producer stage, including peers
-            # with no shared layers.
-            expected *= reader_pp_size
+        expected = self._expected_peer_workers(
+            self.transfer_topo.handshake_target_ranks(reader_tp_size), reader_pp_size
+        )
         if send_meta.need_send and send_meta.need_send != expected:
             raise RuntimeError(
                 f"Transfer {send_meta.transfer_id} is read by "
@@ -186,31 +252,22 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         self._complete_transfer_if_read_by_all(send_meta)
 
     async def fetch_finished_sending_reqs(self) -> set[ReqId]:
-        """Report released transfers, and forget the ones already released.
-
-        A transfer can leave `reqs_need_send` through completion or through the
-        prefiller's expiry. The lease bookkeeping has to follow both, or a
-        released transfer would keep looking like one a reader still holds.
-        """
+        """Report released transfers and forget leases that ended with them."""
         finished = await super().fetch_finished_sending_reqs()
         for transfer_id in self._leases:
             if transfer_id not in self.reqs_need_send:
                 self._leases.forget(transfer_id)
         return finished
 
+    def _read_lease_timeout(self) -> float:
+        return self._kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+
     def _send_idle(self, transfer_id: TransferId) -> bool:
         """Whether the blocks of a transfer are free to be released."""
-        return self._leases.may_release(
-            transfer_id, envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-        )
+        return self._leases.may_release(transfer_id, self._read_lease_timeout())
 
     async def record_send_reqs(self, metadata: MooncakeConnectorMetadata) -> None:
-        """Register the prefiller's finished requests, then re-check completion.
-
-        A reader with a full local prefix hit reports completion before the
-        prefiller's own scheduler registers the transfer, so completion has to
-        be re-checked once the blocks show up.
-        """
+        """Register finished requests, then re-check completions reported early."""
         await super().record_send_reqs(metadata)
         for send_meta in list(self.reqs_need_send.values()):
             self._complete_transfer_if_read_by_all(send_meta)
@@ -218,12 +275,7 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
     async def _handle_control_message(
         self, identity: bytes, payload: bytes, sock: zmq.asyncio.Socket
     ) -> bool:
-        """Handle lease traffic ahead of the queued pull requests.
-
-        A sender worker can be waiting for prefills, and a report that shared
-        its queue could reach the prefiller after the blocks it releases were
-        reclaimed.
-        """
+        """Handle lease traffic ahead of the queued pull requests."""
         if await super()._handle_control_message(identity, payload, sock):
             return True
         try:
@@ -274,6 +326,16 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
                 task.cancel()
         return d_req_id, send_meta
 
+    def _cached_local_transfer_regions(
+        self,
+    ) -> tuple[list[TransferRegion], str | None]:
+        """Expand the registered regions once per layout id."""
+        if self._local_regions_layout_id != self._kv_layout_id:
+            self._local_regions_cache = self._local_transfer_regions()
+            self._local_regions_layout_id = self._kv_layout_id
+        assert self._local_regions_cache is not None
+        return self._local_regions_cache
+
     async def _handle_pull_request(
         self,
         identity: bytes,
@@ -286,9 +348,14 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         # head, so the reader's TP degree has to be a layout this cache can
         # serve. Only this side holds the registered layer specs the check
         # needs, so it runs here.
-        head_err = self._validate_head_resharding_layout(
-            request.tp_size, self._local_transfer_regions()
-        )
+        local_regions, local_err = self._cached_local_transfer_regions()
+        if local_err is not None:
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR, err_msg=local_err
+            )
+            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return
+        head_err = self._validate_head_resharding_layout(request.tp_size, local_regions)
         if head_err is not None:
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR, err_msg=head_err
@@ -299,7 +366,7 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         resolved: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
-        pending: list[tuple[ReqId, SendBlockMeta]] = []
+        waiters: dict[asyncio.Task, tuple[ReqId, SendBlockMeta]] = {}
 
         for d_req_id, (transfer_id, needs_data) in request.reqs.items():
             send_meta = self.reqs_need_send.get(transfer_id)
@@ -337,18 +404,11 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
                 resolved[d_req_id] = (transfer_id, [])
                 self._mark_reader_done(send_meta, readers_key)
                 continue
-            pending.append((d_req_id, send_meta))
-
-        # One waiter per request that still needs its blocks, reused across
-        # responses, so a batch that becomes ready piecemeal never piles up
-        # waiters for requests it is already waiting on.
-        waiters: dict[asyncio.Task, tuple[ReqId, SendBlockMeta]] = {
-            asyncio.create_task(self._wait_for_blocks(d_req_id, send_meta)): (
+            waiters[asyncio.create_task(self._wait_for_blocks(d_req_id, send_meta))] = (
                 d_req_id,
                 send_meta,
             )
-            for d_req_id, send_meta in pending
-        }
+
         include_regions = request.want_regions
         try:
             while True:
@@ -386,13 +446,23 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
                     if err_msg is None:
                         err_msg = "Timeout waiting for P side ready."
                     for task in waiters:
+                        d_req_id, send_meta = waiters[task]
+                        if send_meta.p_req_id == "" and not self._leases.holders(
+                            send_meta.transfer_id
+                        ):
+                            self.reqs_need_send.pop(send_meta.transfer_id, None)
+                            self._leases.forget(send_meta.transfer_id)
                         task.cancel()
                     waiters.clear()
                     continue
 
                 for task in done:
                     d_req_id, send_meta = waiters.pop(task)
-                    if send_meta.aborted.is_set():
+                    if (
+                        send_meta.aborted.is_set()
+                        or self.reqs_need_send.get(send_meta.transfer_id)
+                        is not send_meta
+                    ):
                         err_reqs.append(d_req_id)
                         if err_msg is None:
                             err_msg = (
@@ -400,47 +470,32 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
                                 "handing out its blocks."
                             )
                         continue
+                    if not self._leases.hand_out(send_meta.transfer_id, readers_key):
+                        err_reqs.append(d_req_id)
+                        if err_msg is None:
+                            err_msg = "This reader already reported the transfer."
+                        continue
                     resolved[d_req_id] = (
                         send_meta.transfer_id,
                         send_meta.local_block_ids,
                     )
-                    self._leases.hand_out(send_meta.transfer_id, readers_key)
         finally:
             for task in waiters:
                 task.cancel()
 
     def _handle_read_lease(self, message: MooncakePullReading) -> None:
-        """Extend the lease of transfers this reader is still reading.
-
-        The prefiller reclaims blocks from a reader it has not heard from within
-        the abort timeout, so a reader whose engine call outlives that timeout
-        reports in while it waits. Nothing is answered here: the reader's socket
-        only carries requests that expect a response.
-        """
+        """Extend the lease of transfers this reader is still reading."""
         readers_key: ReaderKey = (message.engine_id, message.tp_rank, message.pp_rank)
         for transfer_id in message.transfer_ids:
             self._leases.renew(transfer_id, readers_key)
 
     def _handle_read_done(self, message: MooncakePullDone) -> None:
-        """Release the blocks a reader reported, and forget the transfers.
-
-        Nothing is answered: the reader needs no acknowledgement to credit its
-        own requests, and a reply would share its socket with the responses of
-        the next pull of the same batch.
-        """
+        """Release the blocks a reader reported. Nothing is answered."""
         readers_key: ReaderKey = (message.engine_id, message.tp_rank, message.pp_rank)
         for transfer_id in message.transfer_ids:
             send_meta = self.reqs_need_send.get(transfer_id)
-            if send_meta is None:
-                # Already released: every reader of this transfer reported in.
-                continue
-            if message.failed_transfers and transfer_id in message.failed_transfers:
-                logger.warning(
-                    "Reader %s failed to read transfer %s; releasing its blocks.",
-                    readers_key,
-                    transfer_id,
-                )
-            self._mark_reader_done(send_meta, readers_key)
+            if send_meta is not None:
+                self._mark_reader_done(send_meta, readers_key)
 
     ############################################################
     # Decoder side: read the peer's blocks
@@ -451,14 +506,10 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         worker_addr: str,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
-        """Read this peer's share of the batch, and settle it when it is over.
+        """Read this peer's share of a batch, and settle it when it is over.
 
-        Settling means crediting every request of the batch once, which is what
-        lets the scheduler reuse the decoder's blocks. The engine call runs in a
-        thread that cannot be cancelled, so cancelling this coroutine must not
-        settle: the read would keep writing into blocks another request may
-        already own. The work therefore runs in its own shielded task and is
-        settled from its completion, whatever happens to this coroutine.
+        The engine call cannot be cancelled, so a cancelled caller defers
+        settling to the read itself and never frees blocks still being written.
         """
         work = asyncio.create_task(self._read_from_peer(worker_addr, pull_metas))
         deferred = False
@@ -492,6 +543,11 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         pull_metas: dict[ReqId, PullReqMeta],
     ):
         req_ids = set(pull_metas)
+        needs_data = {
+            req_id: any(self._filter_host_block_ids(pull_meta.local_block_ids))
+            for req_id, pull_meta in pull_metas.items()
+        }
+        settled_reqs = {req_id for req_id, needs in needs_data.items() if not needs}
         request = MooncakePullRequest(
             engine_id=self.engine_id,
             tp_rank=self.tp_rank,
@@ -499,37 +555,111 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
             pp_rank=self.pp_rank,
             pp_size=self.pp_size,
             reqs={
-                req_id: (
-                    pull_meta.transfer_id,
-                    any(len(group) > 0 for group in pull_meta.local_block_ids),
-                )
+                req_id: (pull_meta.transfer_id, needs_data[req_id])
                 for req_id, pull_meta in pull_metas.items()
             },
             want_regions=worker_addr not in self._peer_layouts,
         )
-        encoded_data = self._encoder.encode(request)
         logger.debug(
             "Reading kv_caches for %s from producer worker %s", req_ids, worker_addr
         )
 
+        queue: asyncio.Queue[_ReadWave | None] = asyncio.Queue()
+        active: set[TransferId] = set()
+        done_sent: set[TransferId] = set()
+        read_over = asyncio.Event()
+        lease_task: asyncio.Task | None = None
+        reader: asyncio.Task | None = None
+
         try:
-            with make_zmq_socket(
-                self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
-            ) as sock:
+            with (
+                make_zmq_socket(
+                    self.async_zmq_ctx,
+                    worker_addr,
+                    zmq.DEALER,
+                    bind=False,
+                    linger=0,
+                    heartbeat_ivl_ms=_PULL_HEARTBEAT_IVL_MS,
+                    heartbeat_timeout_ms=_PULL_HEARTBEAT_TIMEOUT_MS,
+                ) as sock,
+                _lost_peer_monitor(sock) as monitor,
+            ):
                 # If something goes wrong, let the prefiller wait for its own
                 # timeout before we give up on the request.
                 sock.setsockopt(
                     zmq.RCVTIMEO, (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000
                 )
-                await sock.send(encoded_data)
-                while True:
-                    response = self._xfer_resp_decoder.decode(await sock.recv())
-                    if not await self._handle_pull_response(
-                        sock, worker_addr, pull_metas, response
-                    ):
-                        return
-                    if response.status == MooncakeXferResponseStatus.FINISH:
-                        break
+                await sock.send(self._encoder.encode(request))
+                reader = asyncio.create_task(
+                    self._read_pending(sock, queue, pull_metas, active, done_sent)
+                )
+                try:
+                    while True:
+                        ret_msg = await _recv_unless_lost(sock, monitor)
+                        if ret_msg is None:
+                            raise _PeerLostError(
+                                f"lost connection to prefill worker {worker_addr}"
+                            )
+                        response = self._xfer_resp_decoder.decode(ret_msg)
+                        if response.status == MooncakeXferResponseStatus.ERROR:
+                            await self._abandon_batch(
+                                sock,
+                                pull_metas,
+                                needs_data,
+                                active,
+                                done_sent,
+                                response.err_msg or "transfer error",
+                            )
+                            return
+                        wave, layout_err = self._prepare_wave(
+                            worker_addr, response, pull_metas, needs_data
+                        )
+                        if layout_err is not None:
+                            await self._abandon_batch(
+                                sock,
+                                pull_metas,
+                                needs_data,
+                                active,
+                                done_sent,
+                                layout_err,
+                            )
+                            return
+                        if response.err_reqs:
+                            settled_reqs.update(response.err_reqs)
+                            self._fail_requests(
+                                pull_metas,
+                                response.err_reqs,
+                                response.err_msg or "unknown error",
+                            )
+                        if response.metadata is not None:
+                            settled_reqs.update(response.metadata.req_blocks)
+                        if wave is not None:
+                            if lease_task is None:
+                                lease_task = asyncio.create_task(
+                                    self._hold_read_lease(
+                                        worker_addr, active, read_over
+                                    )
+                                )
+                                lease_task.add_done_callback(_consume_task_result)
+                            active.update(wave.reqs.values())
+                            await queue.put(wave)
+                        if response.status == MooncakeXferResponseStatus.FINISH:
+                            missing = req_ids - settled_reqs
+                            if missing:
+                                self._fail_requests(
+                                    pull_metas,
+                                    missing,
+                                    "prefiller finished without resolving request",
+                                )
+                            break
+                finally:
+                    await queue.put(None)
+                    if reader is not None:
+                        await reader
+        except _PeerLostError as e:
+            self._peer_layouts.pop(worker_addr, None)
+            self._forget_peer_agents(worker_addr)
+            self._fail_requests(pull_metas, req_ids, str(e))
         except msgspec.DecodeError as e:
             self._fail_requests(
                 pull_metas,
@@ -541,6 +671,175 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
         except Exception as e:
             self._fail_requests(pull_metas, req_ids, f"pull failed: {e}")
+        finally:
+            read_over.set()
+            if lease_task is not None:
+                await asyncio.gather(lease_task, return_exceptions=True)
+
+    def _forget_peer_agents(self, worker_addr: str) -> None:
+        """Drop a lost peer's engine so the next request queries it again."""
+        for engine_id, agents in list(self._remote_agents.items()):
+            if any(worker_addr in pp_addrs.values() for pp_addrs in agents.values()):
+                del self._remote_agents[engine_id]
+
+    def _prepare_wave(
+        self,
+        worker_addr: str,
+        response: MooncakeXferResponse,
+        pull_metas: dict[ReqId, PullReqMeta],
+        needs_data: dict[ReqId, bool],
+    ) -> tuple[_ReadWave | None, str | None]:
+        """Validate one response and plan the reads it asks for."""
+        meta = response.metadata
+        if meta is None:
+            return (
+                None,
+                f"producer worker {worker_addr} answered without its KV layout",
+            )
+
+        layout = self._peer_layouts.get(worker_addr)
+        if layout is None:
+            if not meta.kv_caches_base_addr:
+                return (
+                    None,
+                    f"producer worker {worker_addr} did not send its KV layout, "
+                    "so its blocks cannot be addressed",
+                )
+            layout_err, consumer_regions, producer_regions = self._prepare_layout(meta)
+            if layout_err is not None:
+                return None, layout_err
+            layout = _PeerLayout(meta.layout_id, consumer_regions, producer_regions)
+            self._peer_layouts[worker_addr] = layout
+        elif layout.layout_id != meta.layout_id:
+            # Drop the stale layout so the recomputed request asks for the new
+            # one instead of failing the same way again.
+            self._peer_layouts.pop(worker_addr)
+            return (
+                None,
+                f"producer worker {worker_addr} changed its KV layout "
+                f"({layout.layout_id} -> {meta.layout_id}); it restarted and "
+                "the KV of this request must be recomputed",
+            )
+
+        # A full local hit was already reported by the prefiller.
+        resolved = {
+            req_id: entry
+            for req_id, entry in meta.req_blocks.items()
+            if needs_data.get(req_id, False)
+        }
+        if not resolved:
+            return None, None
+        local_ptrs, remote_ptrs, lengths, err_reqs, err_msg = self._plan_reads(
+            meta,
+            pull_metas,
+            resolved,
+            layout.consumer_regions,
+            layout.producer_regions,
+        )
+        return (
+            _ReadWave(
+                reqs={
+                    req_id: transfer_id for req_id, (transfer_id, _) in resolved.items()
+                },
+                local_ptrs=local_ptrs,
+                remote_ptrs=remote_ptrs,
+                lengths=lengths,
+                remote_session=f"{meta.remote_hostname}:{meta.remote_port}",
+                err_reqs=err_reqs,
+                err_msg=err_msg,
+            ),
+            None,
+        )
+
+    async def _read_pending(
+        self,
+        sock: zmq.asyncio.Socket,
+        queue: asyncio.Queue[_ReadWave | None],
+        pull_metas: dict[ReqId, PullReqMeta],
+        active: set[TransferId],
+        done_sent: set[TransferId],
+    ) -> None:
+        """Read each wave in arrival order, then report the transfers."""
+        loop = asyncio.get_running_loop()
+        while True:
+            wave = await queue.get()
+            if wave is None:
+                return
+            try:
+                if wave.err_reqs:
+                    self._fail_requests(
+                        pull_metas,
+                        wave.err_reqs,
+                        wave.err_msg or "read planning failed",
+                    )
+                if len(wave.local_ptrs):
+                    ret_value = await loop.run_in_executor(
+                        self._reader_executor,
+                        partial(
+                            self._read_blocks,
+                            wave.remote_session,
+                            wave.local_ptrs,
+                            wave.remote_ptrs,
+                            wave.lengths,
+                        ),
+                    )
+                    if ret_value != 0:
+                        self._fail_requests(
+                            pull_metas,
+                            list(wave.reqs),
+                            f"Mooncake transfer engine returned {ret_value}",
+                        )
+                await self._report_done(sock, wave.reqs.values(), done_sent)
+                active.difference_update(wave.reqs.values())
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._fail_requests(pull_metas, list(wave.reqs), f"read failed: {e}")
+                await self._report_done(sock, wave.reqs.values(), done_sent)
+                active.difference_update(wave.reqs.values())
+                raise
+
+    async def _report_done(
+        self,
+        sock: zmq.asyncio.Socket,
+        transfer_ids: Iterable[TransferId],
+        done_sent: set[TransferId],
+    ) -> None:
+        """Tell the prefiller which transfers this reader is finished with."""
+        fresh = [
+            transfer_id for transfer_id in transfer_ids if transfer_id not in done_sent
+        ]
+        if not fresh:
+            return
+        done = MooncakePullDone(
+            engine_id=self.engine_id,
+            tp_rank=self.tp_rank,
+            pp_rank=self.pp_rank,
+            transfer_ids=fresh,
+        )
+        await sock.send(self._encoder.encode(done))
+        done_sent.update(fresh)
+
+    async def _abandon_batch(
+        self,
+        sock: zmq.asyncio.Socket,
+        pull_metas: dict[ReqId, PullReqMeta],
+        needs_data: dict[ReqId, bool],
+        active: set[TransferId],
+        done_sent: set[TransferId],
+        reason: str,
+    ) -> None:
+        """Fail this batch locally, then release the blocks the peer holds.
+
+        A transfer still being read reports through `_read_pending` instead.
+        """
+        self._fail_requests(pull_metas, set(pull_metas), reason)
+        transfer_ids = [
+            pull_meta.transfer_id
+            for req_id, pull_meta in pull_metas.items()
+            if needs_data.get(req_id, False) and pull_meta.transfer_id not in active
+        ]
+        await self._report_done(sock, transfer_ids, done_sent)
 
     def _fail_requests(
         self,
@@ -578,117 +877,6 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
                 )
         self.finished_recving_reqs.add(pull_meta.d_req_id)
 
-    async def _abandon_batch(
-        self,
-        sock: zmq.asyncio.Socket,
-        pull_metas: dict[ReqId, PullReqMeta],
-        reason: str,
-    ) -> None:
-        """Fail this batch locally, then release the blocks the peer holds.
-
-        The prefiller hands out block ids before the decoder can validate the
-        response, so it holds those blocks until this reader reports in. An
-        abandoned batch has to report as well, or the blocks would wait for the
-        prefiller's own timeout.
-        """
-        self._fail_requests(pull_metas, set(pull_metas), reason)
-        transfer_ids = [meta.transfer_id for meta in pull_metas.values()]
-        done = MooncakePullDone(
-            engine_id=self.engine_id,
-            tp_rank=self.tp_rank,
-            pp_rank=self.pp_rank,
-            transfer_ids=transfer_ids,
-            failed_transfers=transfer_ids,
-        )
-        await sock.send(self._encoder.encode(done))
-
-    async def _handle_pull_response(
-        self,
-        sock: zmq.asyncio.Socket,
-        worker_addr: str,
-        pull_metas: dict[ReqId, PullReqMeta],
-        response: MooncakeXferResponse,
-    ) -> bool:
-        """Act on one prefiller response; False ends this peer's read."""
-        if response.status == MooncakeXferResponseStatus.ERROR:
-            await self._abandon_batch(
-                sock, pull_metas, response.err_msg or "transfer error"
-            )
-            return False
-
-        meta = response.metadata
-        if meta is None:
-            await self._abandon_batch(
-                sock,
-                pull_metas,
-                f"producer worker {worker_addr} answered without its KV layout",
-            )
-            return False
-
-        cached = self._peer_layouts.get(worker_addr)
-        if cached is None:
-            if not meta.kv_caches_base_addr:
-                await self._abandon_batch(
-                    sock,
-                    pull_metas,
-                    f"producer worker {worker_addr} did not send its KV layout, "
-                    "so its blocks cannot be addressed",
-                )
-                return False
-            layout_err, _, _ = self._prepare_layout(meta)
-            if layout_err is not None:
-                await self._abandon_batch(sock, pull_metas, layout_err)
-                return False
-            self._peer_layouts[worker_addr] = meta
-        elif cached.layout_id != meta.layout_id:
-            # Drop the stale layout so the recomputed request asks for the new
-            # one instead of failing the same way again.
-            self._peer_layouts.pop(worker_addr)
-            await self._abandon_batch(
-                sock,
-                pull_metas,
-                f"producer worker {worker_addr} changed its KV layout "
-                f"({cached.layout_id} -> {meta.layout_id}); it restarted and the "
-                "KV of this request must be recomputed",
-            )
-            return False
-        else:
-            # Later waves carry only the blocks, so the regions come from the
-            # layout this peer already reported.
-            meta = msgspec.structs.replace(cached, req_blocks=meta.req_blocks)
-
-        if meta.req_blocks:
-            await self._read_batch(sock, worker_addr, meta, pull_metas)
-
-        if response.err_reqs:
-            self._fail_requests(
-                pull_metas, response.err_reqs, response.err_msg or "unknown error"
-            )
-        return True
-
-    def _local_transfer_regions(self) -> list[TransferRegion]:
-        registered_layers = len(self.registered_layer_names)
-        shared_groups = (
-            None
-            if len(self.region_shared_groups) != registered_layers
-            else self.region_shared_groups
-        )
-        row_offsets = (
-            None
-            if len(self.region_row_offsets) != registered_layers
-            else self.region_row_offsets
-        )
-        return self._get_transfer_regions(
-            base_addrs=self.kv_caches_base_addr,
-            block_lens=self.block_len_per_layer,
-            kv_block_lens=self.kv_block_len_per_layer,
-            layer_names=self.registered_layer_names,
-            layer_indices=self.registered_layer_indices,
-            group_indices=self.registered_group_indices,
-            shared_group_ids=shared_groups,
-            row_offsets=row_offsets,
-        )
-
     def _total_num_kv_heads(self) -> int | None:
         if self.use_mla or self.kv_cache_config.has_mamba_layers:
             return None
@@ -699,7 +887,7 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
     ) -> tuple[str | None, list[TransferRegion], list[TransferRegion]]:
         """Prepare this peer's regions and say why they cannot describe a read."""
         consumer_regions, producer_regions, prepare_err = (
-            self._prepare_transfer_regions(meta)
+            self._prepare_transfer_regions(meta, is_pull=True)
         )
         if prepare_err is not None:
             return prepare_err, [], []
@@ -718,25 +906,19 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         meta: MooncakeXferMetadata,
         pull_metas: dict[ReqId, PullReqMeta],
         resolved: dict[ReqId, tuple[TransferId, list[list[int]]]],
-    ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
-        """Plan the reads of one response batch.
-
-        Returns:
-            Local pointers to read into, remote pointers to read from, lengths,
-            requests that failed planning, and the failure reason.
-
-        """
-        validation_err, consumer_regions, producer_regions = self._prepare_layout(meta)
-        if validation_err is not None:
-            return [], [], [], list(resolved), validation_err
-
+        consumer_regions: list[TransferRegion],
+        producer_regions: list[TransferRegion],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[ReqId], str | None]:
+        """Plan one response batch into local and remote descriptors."""
         total_num_kv_heads = self._total_num_kv_heads()
 
         requests = [
-            BlockTransferRequest(
+            TransferRequest(
                 key=d_req_id,
                 src_block_ids=producer_block_ids,
-                dst_block_ids=pull_metas[d_req_id].local_block_ids,
+                dst_block_ids=self._filter_host_block_ids(
+                    pull_metas[d_req_id].local_block_ids
+                ),
             )
             for d_req_id, (_, producer_block_ids) in resolved.items()
             if d_req_id in pull_metas
@@ -758,7 +940,7 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
             )
 
         # The prefiller holds the bytes, so its blocks are the source side.
-        remote_ptrs, local_ptrs, lengths, err_reqs, err_msg = plan_block_descriptors(
+        remote_ptrs, local_ptrs, lengths, err_reqs, err_msg = plan_transfer_descriptors(
             requests,
             src_regions=producer_regions,
             dst_regions=consumer_regions,
@@ -768,146 +950,70 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         )
         return local_ptrs, remote_ptrs, lengths, err_reqs, err_msg
 
-    async def _read_batch(
-        self,
-        sock: zmq.asyncio.Socket,
-        worker_addr: str,
-        meta: MooncakeXferMetadata,
-        pull_metas: dict[ReqId, PullReqMeta],
-    ) -> None:
-        """Read one response batch and report it back to the prefiller."""
-        resolved = meta.req_blocks
-        (
-            local_ptrs,
-            remote_ptrs,
-            lengths,
-            err_reqs,
-            err_msg,
-        ) = self._plan_reads(meta, pull_metas, resolved)
-
-        failed_transfers: list[TransferId] = []
-        if err_reqs:
-            failed_set = set(err_reqs)
-            self._fail_requests(pull_metas, err_reqs, err_msg or "read planning failed")
-            failed_transfers.extend(
-                transfer_id
-                for d_req_id, (transfer_id, _) in resolved.items()
-                if d_req_id in failed_set
-            )
-
-        if local_ptrs:
-            remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
-            read_over = asyncio.Event()
-            loop = asyncio.get_running_loop()
-
-            def read_blocks() -> int:
-                try:
-                    return self._read_blocks(
-                        remote_session, local_ptrs, remote_ptrs, lengths
-                    )
-                finally:
-                    # The lease covers the engine call, and the call outlives the
-                    # await below, so the thread ends the lease, not the await.
-                    loop.call_soon_threadsafe(read_over.set)
-
-            lease_task = asyncio.create_task(
-                self._hold_read_lease(
-                    worker_addr,
-                    [transfer_id for transfer_id, _ in resolved.values()],
-                    read_over,
-                )
-            )
-            # A cancelled await leaves the engine call running, so this task
-            # can outlive the coroutine that would otherwise await it.
-            lease_task.add_done_callback(_consume_task_result)
-            ret_value = await loop.run_in_executor(self._reader_executor, read_blocks)
-            # Waiting for the lease orders the last renewal before the report.
-            await asyncio.gather(lease_task, return_exceptions=True)
-            if ret_value != 0:
-                # Every request in this batch shares the failed engine call.
-                read_reqs = [
-                    d_req_id
-                    for d_req_id, (_, producer_blocks) in resolved.items()
-                    if any(len(group) > 0 for group in producer_blocks)
-                    and d_req_id in pull_metas
-                ]
-                read_req_set = set(read_reqs)
-                self._fail_requests(
-                    pull_metas,
-                    read_reqs,
-                    f"Mooncake transfer engine returned {ret_value}",
-                )
-                failed_transfers.extend(
-                    transfer_id
-                    for d_req_id, (transfer_id, _) in resolved.items()
-                    if d_req_id in read_req_set
-                )
-
-        # Report the batch so the prefiller can release these blocks.
-        done = MooncakePullDone(
-            engine_id=self.engine_id,
-            tp_rank=self.tp_rank,
-            pp_rank=self.pp_rank,
-            transfer_ids=[transfer_id for transfer_id, _ in resolved.values()],
-            failed_transfers=failed_transfers or None,
-        )
-        await sock.send(self._encoder.encode(done))
-
     async def _hold_read_lease(
         self,
         worker_addr: str,
-        transfer_ids: list[TransferId],
+        active_transfers: set[TransferId],
         read_over: asyncio.Event,
     ) -> None:
-        """Tell the prefiller this read is still running, until it finishes.
+        """Tell the prefiller the transfers still being read are alive.
 
-        The prefiller reclaims the blocks of a reader it has not heard from
-        within the abort timeout, which is how a dead decoder's blocks come
-        back. An engine call that outlives that timeout therefore reports in
-        while it waits, so a slow read is never mistaken for a gone reader.
+        The socket opens on the first report, so a read that finishes early
+        sends nothing.
         """
-        interval = max(envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT / 3, 0.5)
-        payload = self._encoder.encode(
-            MooncakePullReading(
-                engine_id=self.engine_id,
-                tp_rank=self.tp_rank,
-                pp_rank=self.pp_rank,
-                transfer_ids=transfer_ids,
-            )
-        )
-        # One socket for the whole read: closing it after every renewal would
-        # drop the message that has just been queued.
-        with make_zmq_socket(
-            self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
-        ) as sock:
+        interval = max(self._read_lease_timeout() / 3, 0.5)
+        sock: zmq.asyncio.Socket | None = None
+        try:
             while not read_over.is_set():
-                await sock.send(payload)
-                try:
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(read_over.wait(), interval)
-                except TimeoutError:
+                if read_over.is_set():
+                    return
+                if not active_transfers:
                     continue
+                if sock is None:
+                    sock = make_zmq_socket(
+                        self.async_zmq_ctx,
+                        worker_addr,
+                        zmq.DEALER,
+                        bind=False,
+                        linger=0,
+                    )
+                payload = self._encoder.encode(
+                    MooncakePullReading(
+                        engine_id=self.engine_id,
+                        tp_rank=self.tp_rank,
+                        pp_rank=self.pp_rank,
+                        transfer_ids=sorted(active_transfers),
+                    )
+                )
+                await sock.send(payload)
+        finally:
+            if sock is not None:
+                sock.close(linger=0)
 
     def _read_blocks(
         self,
         remote_session: str,
-        local_ptrs: list[int],
-        remote_ptrs: list[int],
-        lengths: list[int],
+        local_ptrs: np.ndarray,
+        remote_ptrs: np.ndarray,
+        lengths: np.ndarray,
     ) -> int:
         start_time = time.perf_counter()
         result = self.transfer_backend.transfer_sync_arrays(
             remote_session,
             TransferOp.READ,
-            np.asarray(local_ptrs, dtype=np.uint64),
-            np.asarray(remote_ptrs, dtype=np.uint64),
-            np.asarray(lengths, dtype=np.uint64),
+            local_ptrs,
+            remote_ptrs,
+            lengths,
         )
         ret_value = 0 if result.state is TransferState.COMPLETED else -1
         duration = time.perf_counter() - start_time
+        total_bytes = int(lengths.sum())
         if ret_value == 0:
             self.xfer_stats.record_transfer(
                 duration_s=duration,
-                total_bytes=sum(lengths),
+                total_bytes=total_bytes,
                 num_descs=len(local_ptrs),
             )
             logger.debug(
@@ -915,7 +1021,7 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
                 remote_session,
                 duration,
                 len(local_ptrs),
-                sum(lengths),
+                total_bytes,
             )
         else:
             self.xfer_stats.record_failed_transfer()
@@ -925,6 +1031,6 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
                 ret_value,
                 duration,
                 len(local_ptrs),
-                sum(lengths),
+                total_bytes,
             )
         return ret_value

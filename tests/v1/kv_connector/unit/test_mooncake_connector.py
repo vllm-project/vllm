@@ -487,7 +487,7 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
             lengths,
             err_reqs,
             err_msg,
-        ) = worker._build_transfer_params(
+        ) = await worker._build_transfer_params(
             ready_reqs=[("d-req-pp", send_meta)],
             agent_meta=xfer_meta,
             local_regions=aligned_local,
@@ -1406,7 +1406,7 @@ async def test_transfer_arrays_and_legacy_list_fallback(
                 ready=asyncio.Event(),
             )
             xfer = _xfer_meta(remote_regions, {"d-array": ("xfer-array", [[7, 9]])})
-            src, dst, lengths, errors, error = worker._build_transfer_params(
+            src, dst, lengths, errors, error = await worker._build_transfer_params(
                 [("d-array", meta)], xfer, local_regions, remote_regions
             )
             assert errors == [] and error is None
@@ -1432,7 +1432,7 @@ async def test_transfer_arrays_and_legacy_list_fallback(
             assert stats["bytes_transferred"] == [1024]
             assert type(stats["bytes_transferred"][0]) is int
             assert stats["num_descriptors"] == [4]
-            empty = worker._build_transfer_params([], xfer, [], [])
+            empty = await worker._build_transfer_params([], xfer, [], [])
             for values in empty[:3]:
                 assert values.shape == (0,) and values.dtype == np.uint64
         finally:
@@ -2832,7 +2832,7 @@ async def test_build_transfer_params_sends_packed_region_once(
         lengths,
         err_reqs,
         err_msg,
-    ) = worker._build_transfer_params(
+    ) = await worker._build_transfer_params(
         ready_reqs=[("d-packed", send_meta)],
         agent_meta=xfer_meta,
         local_regions=[local_region],
@@ -2917,7 +2917,7 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
         lengths,
         err_reqs,
         err_msg,
-    ) = worker._build_transfer_params(
+    ) = await worker._build_transfer_params(
         ready_reqs=[("d-fragmented", send_meta)],
         agent_meta=xfer_meta,
         local_regions=local_regions,
@@ -3526,7 +3526,7 @@ async def _copy_packed_slices(
         ready=asyncio.Event(),
     )
     p_worker.kv_cache_config = p_config
-    src, dst, lengths, err_reqs, err_msg = p_worker._build_transfer_params(
+    src, dst, lengths, err_reqs, err_msg = await p_worker._build_transfer_params(
         ready_reqs=[("d-slices", send_meta)],
         agent_meta=_xfer_meta(coalesced_d, {"d-slices": (transfer_id, remote_ids)}),
         local_regions=coalesced_p,

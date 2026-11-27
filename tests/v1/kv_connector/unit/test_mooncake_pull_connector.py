@@ -3,37 +3,39 @@
 """Tests for the Mooncake pull connector.
 
 The transfer engine is the only thing simulated: `FakeCopyEngine` copies bytes
-between the very descriptor lists the connector hands it and keeps the memory
-registration table, so a descriptor that points outside registered memory fails
-the test instead of silently moving the wrong bytes.
+between the very descriptor arrays the connector hands it and keeps one memory
+registration table per engine, so a descriptor that points at memory the reader
+or its peer never registered fails the test instead of moving wrong bytes.
 """
 
 import asyncio
 import contextlib
 import ctypes
+import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import partial
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config, make_kv_cache_group
 from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     MooncakeConnectorMetadata,
     MooncakeXferMetadata,
+    MooncakeXferResponse,
+    MooncakeXferResponseStatus,
     PullReqMeta,
     SendBlockMeta,
+    TransferRegion,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_pull_connector import (  # noqa: E501
     MooncakePullConnector,
     MooncakePullConnectorWorker,
-    MooncakePullDone,
-    MooncakePullReading,
     MooncakePullRequest,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
@@ -43,79 +45,126 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.read_leases import (
     ReadLeases,
 )
 from vllm.utils.network_utils import get_open_port, make_zmq_path
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
+
+from .utils import create_vllm_config, make_kv_cache_group
 
 BASE_WORKER = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
 LAYER = "model.layers.0.self_attn"
+MAMBA_LAYER = "model.layers.1.linear_attn"
 BLOCK_SIZE = 16
 HEAD_SIZE = 64
 KV_HEADS = 4
 
-# Memory registered with any engine in this test module, which is what the RDMA
-# fabric knows about, in contrast to one engine's own registration.
-REGISTERED_MEMORY: list[tuple[int, int]] = []
-
 
 class FakeCopyEngine:
-    """Mooncake TransferEngine stand-in that copies between registered buffers."""
+    """Mooncake TransferEngine stand-in that copies between registered buffers.
+
+    Every instance owns the memory it registered, and instances find each other
+    by the session string a read targets, so a reader can only touch memory its
+    peer really registered.
+    """
+
+    _engines: dict[str, "FakeCopyEngine"] = {}
+    _next_port = 20000
 
     def __init__(self, *args, **kwargs):
+        self.registered: list[tuple[int, int]] = []
         self.reads: list[tuple[str, list[int], list[int], list[int]]] = []
         self.fail_reads = 0
-        # Seconds one read takes, so a test can outlive the abort timeout.
-        self.read_delay = 0.0
+        # A gate blocks one read until the test releases it, and `read_started`
+        # says when the engine is inside that read.
+        self.read_gates: list[threading.Event | None] = []
+        self.read_started: list[threading.Event] = []
+        self.port = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        cls._engines.clear()
+        cls._next_port = 20000
 
     def initialize(self, local_hostname, metadata_server, protocol, device_name) -> int:
+        self.port = FakeCopyEngine._next_port
+        FakeCopyEngine._next_port += 1
+        FakeCopyEngine._engines[f"{local_hostname}:{self.port}"] = self
         return 0
 
     def get_rpc_port(self) -> int:
-        return 12345
+        return self.port
 
     def batch_register_memory(self, buffer_addresses, capacities) -> int:
-        REGISTERED_MEMORY.extend(
+        self.registered.extend(
             (base, base + capacity)
             for base, capacity in zip(buffer_addresses, capacities, strict=True)
         )
         return 0
 
-    def _check_registered(self, addr: int, length: int) -> None:
+    def batch_unregister_memory(self, buffer_addresses) -> int:
+        removed = set(buffer_addresses)
+        self.registered = [
+            (base, limit) for base, limit in self.registered if base not in removed
+        ]
+        return 0
+
+    @staticmethod
+    def _check_registered(
+        table: list[tuple[int, int]], addr: int, length: int, owner: str
+    ) -> None:
         end = addr + length
-        assert any(
-            base <= addr and end <= limit for base, limit in REGISTERED_MEMORY
-        ), (
-            f"descriptor [{addr}, {end}) is not inside the registered memory "
-            f"{REGISTERED_MEMORY}"
+        assert any(base <= addr and end <= limit for base, limit in table), (
+            f"descriptor [{addr}, {end}) is not inside {owner} registered "
+            f"memory {table}"
         )
 
     def batch_transfer_sync_read(
         self, target_hostname, buffers, peer_buffer_addresses, lengths
     ) -> int:
+        index = len(self.reads)
         self.reads.append(
             (target_hostname, list(buffers), list(peer_buffer_addresses), list(lengths))
         )
-        if self.read_delay:
-            time.sleep(self.read_delay)
+        peer = FakeCopyEngine._engines.get(target_hostname)
+        assert peer is not None, f"no fake engine is listening at {target_hostname}"
+        started = threading.Event()
+        started.set()
+        self.read_started.append(started)
+        if index < len(self.read_gates) and self.read_gates[index] is not None:
+            self.read_gates[index].wait()
         if self.fail_reads:
             self.fail_reads -= 1
             return -1
         for local, remote, length in zip(
             buffers, peer_buffer_addresses, lengths, strict=True
         ):
-            self._check_registered(remote, length)
-            self._check_registered(local, length)
+            self._check_registered(peer.registered, remote, length, "the peer's")
+            self._check_registered(self.registered, local, length, "the reader's")
             ctypes.memmove(local, remote, length)
         return 0
 
 
 @pytest.fixture(autouse=True)
-def _clear_registered_memory():
-    REGISTERED_MEMORY.clear()
+def _reset_fake_engines():
+    FakeCopyEngine.reset()
     yield
-    REGISTERED_MEMORY.clear()
+    FakeCopyEngine.reset()
+
+
+@pytest.fixture(autouse=True)
+def _cpu_device():
+    """Keep device selection valid for worker threads on CPU-only hosts."""
+    with (
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch(f"{BASE_WORKER}.current_platform.set_device"),
+    ):
+        yield
 
 
 @contextlib.contextmanager
-def patch_pull_worker_dependencies(tp_size: int = 1, tp_ranks: list[int] | None = None):
+def patch_pull_worker_dependencies(
+    tp_size: int = 1, tp_ranks: list[int] | None = None
+) -> Iterator[None]:
     """Patch everything a pull worker needs from the distributed runtime."""
     rank_patch = (
         patch(f"{BASE_WORKER}.get_tensor_model_parallel_rank", side_effect=tp_ranks)
@@ -125,6 +174,13 @@ def patch_pull_worker_dependencies(tp_size: int = 1, tp_ranks: list[int] | None 
     with (
         patch(f"{BASE_WORKER}.TransferEngine", FakeCopyEngine),
         patch(f"{BASE_WORKER}.get_ip", return_value="127.0.0.1"),
+        patch(f"{BASE_WORKER}.get_current_attn_backends", return_value=[]),
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch(f"{BASE_WORKER}.current_platform.set_device"),
+        patch(
+            "vllm.v1.hisparse.runtime.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
         rank_patch,
         patch(
             f"{BASE_WORKER}.get_tensor_model_parallel_world_size",
@@ -151,7 +207,8 @@ def make_kv_cache_config(
     block_size: int = BLOCK_SIZE,
     num_kv_heads: int = KV_HEADS,
     page_size_padded: int | None = None,
-):
+    host_resident: bool = False,
+) -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -165,6 +222,7 @@ def make_kv_cache_config(
                     dtype=torch.float16,
                     page_size_padded=page_size_padded,
                 ),
+                host_resident=host_resident,
             )
         ],
     )
@@ -214,6 +272,14 @@ async def fetch_recved(worker: MooncakePullConnectorWorker) -> set[str]:
 
 async def fetch_sent(worker: MooncakePullConnectorWorker) -> set[str]:
     return await run_on(worker.sender_loop, worker.fetch_finished_sending_reqs())
+
+
+async def wait_read_start(engine: FakeCopyEngine, index: int) -> None:
+    await wait_for(lambda: _read_started(engine, index))
+
+
+async def _read_started(engine: FakeCopyEngine, index: int) -> bool:
+    return len(engine.read_started) > index
 
 
 def register_ready_transfer(
@@ -269,24 +335,6 @@ def pull_meta(
     )
 
 
-def make_decoder_worker(
-    base_addr: int = 0x2000, block_len: int = 4096
-) -> MooncakePullConnectorWorker:
-    """A decoder worker with hand-written region metadata, for planning tests."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakePullConnector", kv_role="kv_consumer"
-    )
-    with patch_pull_worker_dependencies():
-        worker = make_worker(vllm_config, make_kv_cache_config())
-    worker.kv_caches_base_addr = [base_addr]
-    worker.block_len_per_layer = [block_len]
-    worker.kv_block_len_per_layer = [block_len]
-    worker.registered_layer_names = [LAYER]
-    worker.registered_layer_indices = [0]
-    worker.registered_group_indices = [0]
-    return worker
-
-
 def producer_layout(block_len: int = 4096, base_addr: int = 0x1000):
     return MooncakeXferMetadata(
         remote_hostname="producer-host",
@@ -307,20 +355,68 @@ def producer_layout(block_len: int = 4096, base_addr: int = 0x1000):
     )
 
 
+def region(
+    layer_name: str,
+    group_index: int,
+    base_addr: int,
+    block_len: int,
+    layer_index: int = 0,
+) -> TransferRegion:
+    return TransferRegion(
+        layer_name=layer_name,
+        layer_index=layer_index,
+        base_addr=base_addr,
+        block_len=block_len,
+        kv_block_len=block_len,
+        group_index=group_index,
+    )
+
+
+@contextlib.contextmanager
+def decoder_worker(
+    kv_cache_config: KVCacheConfig | None = None,
+) -> Iterator[MooncakePullConnectorWorker]:
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakePullConnector", kv_role="kv_consumer"
+    )
+    with patch_pull_worker_dependencies():
+        worker = make_worker(vllm_config, kv_cache_config or make_kv_cache_config())
+        worker.kv_caches_base_addr = [0x2000]
+        worker.block_len_per_layer = [4096]
+        worker.kv_block_len_per_layer = [4096]
+        worker.registered_layer_names = [LAYER]
+        worker.registered_layer_indices = [0]
+        worker.registered_group_indices = [0]
+        try:
+            yield worker
+        finally:
+            worker.shutdown()
+
+
 @dataclass
 class Pair:
-    """A producer and a decoder over one fake engine, caches registered."""
+    """Producers and a decoder over fake engines, caches registered."""
 
-    producer: MooncakePullConnectorWorker
+    producers: list[MooncakePullConnectorWorker]
     decoder: MooncakePullConnectorWorker
-    producer_kv: torch.Tensor
+    producer_kvs: list[torch.Tensor]
     decoder_kv: torch.Tensor
-    block_bytes: int
+    producer_block_bytes: int
+    decoder_block_bytes: int
     port: int
+
+    @property
+    def producer(self) -> MooncakePullConnectorWorker:
+        assert len(self.producers) == 1
+        return self.producers[0]
+
+    @property
+    def engine(self) -> FakeCopyEngine:
+        return self.decoder.transfer_backend.engine
 
     def fill(self, start: int = 0, stop: int = 8) -> None:
         for block_id in range(start, stop):
-            self.producer_kv[block_id].fill_(block_id + 1)
+            self.producer_kvs[0][block_id].fill_(block_id + 1)
 
     def ready(
         self,
@@ -329,289 +425,315 @@ class Pair:
         block_ids: list[list[int]],
         *,
         ready: bool = True,
+        producer_index: int = 0,
     ) -> SendBlockMeta:
         return register_ready_transfer(
-            self.producer, transfer_id, p_req_id, block_ids, ready=ready
+            self.producers[producer_index],
+            transfer_id,
+            p_req_id,
+            block_ids,
+            ready=ready,
         )
 
-    def read(self, requests: dict[str, tuple[str, list[list[int]]]]) -> None:
+    def read(
+        self, requests: dict[str, tuple[str, list[list[int]]]]
+    ) -> dict[str, PullReqMeta]:
         """Start a read of the given local block ids per request."""
         metas = {
             d_req_id: pull_meta(
-                d_req_id, transfer_id, block_ids, self.producer.engine_id, self.port
+                d_req_id,
+                transfer_id,
+                block_ids,
+                self.producers[0].engine_id,
+                self.port,
             )
             for d_req_id, (transfer_id, block_ids) in requests.items()
         }
         asyncio.run_coroutine_threadsafe(
-            self.decoder._start_load_kv({self.producer.engine_id: metas}),
+            self.decoder._start_load_kv({self.producers[0].engine_id: metas}),
             self.decoder.receiver_loop,
         )
+        return metas
+
+
+@contextlib.contextmanager
+def pair_factory(
+    *,
+    bootstrap_port: int,
+    producer_block_size: int = BLOCK_SIZE,
+    decoder_block_size: int = BLOCK_SIZE,
+    producer_kv_heads: int = KV_HEADS,
+    decoder_kv_heads: int = KV_HEADS,
+    producer_page_size_padded: int | None = None,
+    producer_tp_size: int = 1,
+    producer_tp_ranks: list[int] | None = None,
+    num_producers: int = 1,
+    num_producer_blocks: int = 8,
+    num_decoder_blocks: int = 32,
+) -> Iterator[Pair]:
+    """Build a registered producer/decoder pair and tear every worker down."""
+    producer_page = page_bytes(producer_kv_heads, producer_block_size)
+    decoder_page = page_bytes(decoder_kv_heads, decoder_block_size)
+    producer_storage = producer_page
+    if producer_page_size_padded is not None:
+        producer_storage = producer_page_size_padded
+
+    producer_config = create_vllm_config(
+        kv_connector="MooncakePullConnector",
+        kv_role="kv_producer",
+        block_size=producer_block_size,
+    )
+    decoder_config = create_vllm_config(
+        kv_connector="MooncakePullConnector",
+        kv_role="kv_consumer",
+        block_size=decoder_block_size,
+    )
+    if num_producers > 1:
+        producer_config.kv_transfer_config.engine_id = "p-engine"
+
+    producer_cache_config = make_kv_cache_config(
+        block_size=producer_block_size,
+        num_kv_heads=producer_kv_heads,
+        page_size_padded=producer_page_size_padded,
+    )
+    decoder_cache_config = make_kv_cache_config(
+        block_size=decoder_block_size,
+        num_kv_heads=decoder_kv_heads,
+    )
+
+    with patch_pull_worker_dependencies(producer_tp_size, producer_tp_ranks):
+        producers = [
+            make_worker(producer_config, producer_cache_config)
+            for _ in range(num_producers)
+        ]
+        producer_kvs = [
+            make_kv_tensor(num_producer_blocks, producer_storage)
+            for _ in range(num_producers)
+        ]
+        for producer, producer_kv in zip(producers, producer_kvs, strict=True):
+            producer.register_kv_caches({LAYER: producer_kv})
+
+    with patch_pull_worker_dependencies():
+        decoder = make_worker(decoder_config, decoder_cache_config)
+        decoder_kv = make_kv_tensor(num_decoder_blocks, decoder_page)
+        decoder.register_kv_caches({LAYER: decoder_kv})
+
+    try:
+        yield Pair(
+            producers,
+            decoder,
+            producer_kvs,
+            decoder_kv,
+            producer_page,
+            decoder_page,
+            bootstrap_port,
+        )
+    finally:
+        # A failing test may leave a read parked on its gate; release it so the
+        # reader thread can exit instead of keeping the process alive.
+        for gate in decoder.transfer_backend.engine.read_gates:
+            if gate is not None:
+                gate.set()
+        with patch_pull_worker_dependencies():
+            decoder.shutdown()
+        with patch_pull_worker_dependencies(producer_tp_size, producer_tp_ranks):
+            for producer in producers:
+                producer.shutdown()
 
 
 @pytest.fixture
 def pair(monkeypatch, bootstrap_server, request):
-    """A registered producer/decoder pair, torn down with the test.
-
-    Parametrize indirectly with the abort timeout in seconds when a test needs
-    a different one.
-    """
+    """A registered producer/decoder pair, torn down with the test."""
     monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(bootstrap_server.port))
     monkeypatch.setenv(
         "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", str(getattr(request, "param", 5))
     )
-    block_bytes = page_bytes()
-    with patch_pull_worker_dependencies():
-        producer = make_worker(
-            create_vllm_config(
-                kv_connector="MooncakePullConnector", kv_role="kv_producer"
-            ),
-            make_kv_cache_config(),
-        )
-        decoder = make_worker(
-            create_vllm_config(
-                kv_connector="MooncakePullConnector", kv_role="kv_consumer"
-            ),
-            make_kv_cache_config(),
-        )
-        try:
-            producer_kv = make_kv_tensor(8, block_bytes)
-            producer.register_kv_caches({LAYER: producer_kv})
-            decoder_kv = make_kv_tensor(32, block_bytes)
-            decoder.register_kv_caches({LAYER: decoder_kv})
-            yield Pair(
-                producer,
-                decoder,
-                producer_kv,
-                decoder_kv,
-                block_bytes,
-                bootstrap_server.port,
-            )
-        finally:
-            decoder.shutdown()
-            producer.shutdown()
+    with pair_factory(bootstrap_port=bootstrap_server.port) as workers:
+        yield workers
 
 
-# ---------------------------------------------------------------------------
-#  Read planning
-# ---------------------------------------------------------------------------
-def test_plan_reads_points_at_producer_blocks_and_local_blocks():
-    """A read takes the producer's bytes into this worker's own blocks."""
-    worker = make_decoder_worker()
+@pytest.mark.parametrize(
+    "resolved_ids, expected_remote, expected_lengths",
+    [
+        ([[2, 3]], [0x1000 + 2 * 4096], [2 * 4096]),
+        ([[1, 2, 3, 4]], [0x1000 + 3 * 4096], [2 * 4096]),
+    ],
+    ids=["coalesced", "trimmed-tail"],
+)
+def test_plan_reads_addresses_producer_and_local_blocks(
+    resolved_ids, expected_remote, expected_lengths
+):
     block_len = 4096
     pull_metas = {"d-req": pull_meta("d-req", "xfer", [[10, 11]], "p-engine", 1)}
-    resolved = {"d-req": ("xfer", [[2, 3]])}
+    consumer = [region(LAYER, 0, 0x2000, block_len)]
+    producer = [region(LAYER, 0, 0x1000, block_len)]
 
-    local_ptrs, remote_ptrs, lengths, err_reqs, err_msg = worker._plan_reads(
-        producer_layout(block_len), pull_metas, resolved
-    )
-
-    assert (err_reqs, err_msg) == ([], None)
-    # Homogeneous TP: the contiguous pair is coalesced into one descriptor.
-    assert remote_ptrs == [0x1000 + 2 * block_len]
-    assert local_ptrs == [0x2000 + 10 * block_len]
-    assert lengths == [2 * block_len]
-
-
-def test_plan_reads_trims_the_producer_tail():
-    """A partial local prefix hit reads only the newest producer blocks."""
-    worker = make_decoder_worker()
-    block_len = 4096
-    pull_metas = {"d-req": pull_meta("d-req", "xfer", [[10, 11]], "p-engine", 1)}
-    resolved = {"d-req": ("xfer", [[1, 2, 3, 4]])}
-
-    _, remote_ptrs, lengths, err_reqs, err_msg = worker._plan_reads(
-        producer_layout(block_len), pull_metas, resolved
-    )
+    with decoder_worker() as worker:
+        local_ptrs, remote_ptrs, lengths, err_reqs, err_msg = worker._plan_reads(
+            producer_layout(block_len),
+            pull_metas,
+            {"d-req": ("xfer", resolved_ids)},
+            consumer,
+            producer,
+        )
 
     assert (err_reqs, err_msg) == ([], None)
-    assert remote_ptrs == [0x1000 + 3 * block_len]
-    assert lengths == [2 * block_len]
+    np.testing.assert_array_equal(remote_ptrs, expected_remote)
+    np.testing.assert_array_equal(local_ptrs, [0x2000 + 10 * block_len])
+    np.testing.assert_array_equal(lengths, expected_lengths)
 
 
-def test_plan_reads_reports_a_producer_with_too_few_blocks():
-    """The decoder cannot read more blocks than the producer holds."""
-    worker = make_decoder_worker()
-    pull_metas = {"d-req": pull_meta("d-req", "xfer", [[10, 11, 12]], "p-engine", 1)}
-    resolved = {"d-req": ("xfer", [[2, 3]])}
+@pytest.mark.parametrize(
+    "local_ids, producer_ids, expected_msg",
+    [
+        ([[10, 11, 12]], [[2, 3]], "P num blocks less than D"),
+        ([[10]], [[2], [3]], "KV group count mismatch"),
+    ],
+    ids=["too-few", "group-count"],
+)
+def test_plan_reads_reports_bad_block_counts(local_ids, producer_ids, expected_msg):
+    pull_metas = {"d-req": pull_meta("d-req", "xfer", local_ids, "p-engine", 1)}
+    consumer = [region(LAYER, 0, 0x2000, 4096)]
+    producer = [region(LAYER, 0, 0x1000, 4096)]
 
-    local_ptrs, remote_ptrs, lengths, err_reqs, err_msg = worker._plan_reads(
-        producer_layout(), pull_metas, resolved
-    )
-
-    assert (local_ptrs, remote_ptrs, lengths) == ([], [], [])
-    assert err_reqs == ["d-req"]
-    assert err_msg == "P num blocks less than D"
-
-
-def test_plan_reads_rejects_mismatched_group_counts():
-    worker = make_decoder_worker()
-    pull_metas = {"d-req": pull_meta("d-req", "xfer", [[10]], "p-engine", 1)}
-    resolved = {"d-req": ("xfer", [[2], [3]])}
-
-    _, _, _, err_reqs, err_msg = worker._plan_reads(
-        producer_layout(), pull_metas, resolved
-    )
-
-    assert err_reqs == ["d-req"]
-    assert err_msg == "KV group count mismatch"
-
-
-def test_plan_reads_rejects_mismatched_region_lengths():
-    """A layout whose region sizes cannot describe this cache is refused."""
-    worker = make_decoder_worker()
-    pull_metas = {"d-req": pull_meta("d-req", "xfer", [[10]], "p-engine", 1)}
-    resolved = {"d-req": ("xfer", [[2]])}
-
-    _, _, _, err_reqs, err_msg = worker._plan_reads(
-        producer_layout(block_len=1234), pull_metas, resolved
-    )
+    with decoder_worker() as worker:
+        _, _, _, err_reqs, err_msg = worker._plan_reads(
+            producer_layout(),
+            pull_metas,
+            {"d-req": ("xfer", producer_ids)},
+            consumer,
+            producer,
+        )
 
     assert err_reqs == ["d-req"]
-    assert "region length mismatch" in err_msg
+    assert err_msg == expected_msg
 
 
-# ---------------------------------------------------------------------------
-#  End to end: the decoder reads what the prefiller holds
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_pull_reads_producer_blocks_byte_for_byte(pair):
-    """The decoder's blocks hold the producer's bytes afterwards."""
-    pair.fill()
-    pair.ready("xfer-1", "p-req-1", [[2, 3]])
-    pair.read({"d-req-1": ("xfer-1", [[10, 11]])})
-
-    assert await wait_for(lambda: fetch_recved(pair.decoder)) == {"d-req-1"}
-    assert await wait_for(lambda: fetch_sent(pair.producer)) == {"p-req-1"}
-
-    assert pair.decoder_kv[10].tolist() == [3] * pair.block_bytes
-    assert pair.decoder_kv[11].tolist() == [4] * pair.block_bytes
-    # Untouched blocks stay empty.
-    assert pair.decoder_kv[12].sum().item() == 0
-    # The reader asked for the address book once.
-    layout = pair.decoder._peer_layouts[
-        f"tcp://127.0.0.1:{pair.producer.side_channel_port}"
+def test_plan_reads_drops_mamba_placeholders_in_multiple_groups():
+    """A Mamba null placeholder is skipped without shifting the other group."""
+    attention_bytes = page_bytes(1, BLOCK_SIZE)
+    mamba_bytes = 512
+    consumer = [
+        region(LAYER, 0, 0x2000, attention_bytes),
+        region(MAMBA_LAYER, 1, 0x4000, mamba_bytes, layer_index=1),
     ]
-    assert layout.layout_id
-    assert layout.kv_caches_base_addr == pair.producer.kv_caches_base_addr
-    assert "xfer-1" not in pair.producer.reqs_need_send
-
-
-@pytest.mark.asyncio
-async def test_pull_waits_for_a_later_ready_producer(pair):
-    """A reader waits while the prefiller is still computing the request."""
-    pair.producer_kv[5].fill_(42)
-    send_meta = pair.ready("xfer-late", "p-req-late", [[5]], ready=False)
-    pair.read({"d-req-late": ("xfer-late", [[20]])})
-
-    # The reader cannot read before the producer's blocks are ready.
-    await asyncio.sleep(0.3)
-    assert pair.decoder_kv[20].sum().item() == 0
-
-    await run_on(pair.producer.sender_loop, mark_producer_ready(send_meta))
-
-    assert await wait_for(lambda: fetch_recved(pair.decoder)) == {"d-req-late"}
-    assert pair.decoder_kv[20].tolist() == [42] * pair.block_bytes
-    assert await wait_for(lambda: fetch_sent(pair.producer)) == {"p-req-late"}
-
-
-@pytest.mark.asyncio
-async def test_piecemeal_ready_requests_keep_one_waiter_each(pair):
-    """Requests that become ready one by one do not multiply prefiller waiters."""
-    producer = pair.producer
-
-    active_waiters = 0
-    peak_waiters = 0
-    original = producer._wait_for_blocks
-
-    async def counting_wait(d_req_id, send_meta):
-        nonlocal active_waiters, peak_waiters
-        active_waiters += 1
-        peak_waiters = max(peak_waiters, active_waiters)
-        try:
-            return await original(d_req_id, send_meta)
-        finally:
-            active_waiters -= 1
-
-    producer._wait_for_blocks = counting_wait  # type: ignore[method-assign]
-
-    send_metas = [
-        pair.ready(f"xfer-{index}", f"p-req-{index}", [[index]], ready=False)
-        for index in (1, 2, 3)
+    producer = [
+        region(LAYER, 0, 0x1000, attention_bytes),
+        region(MAMBA_LAYER, 1, 0x3000, mamba_bytes, layer_index=1),
     ]
-    pair.read(
-        {f"d-req-{index}": (f"xfer-{index}", [[10 + index]]) for index in (1, 2, 3)}
-    )
-
-    for send_meta in send_metas:
-        await asyncio.sleep(0.1)
-        await run_on(producer.sender_loop, mark_producer_ready(send_meta))
-
-    received: set[str] = set()
-
-    async def all_read() -> bool:
-        received.update(await fetch_recved(pair.decoder))
-        return len(received) == 3
-
-    assert await wait_for(all_read)
-    assert received == {"d-req-1", "d-req-2", "d-req-3"}
-    assert peak_waiters == 3
-    assert active_waiters == 0
-
-
-@pytest.mark.asyncio
-async def test_second_wave_landing_during_a_read_still_completes(pair):
-    """A second wave can answer while the decoder is inside the first read."""
-    producer = pair.producer
-    pair.fill()
-    # Long enough that the prefiller's next response lands mid-read.
-    pair.decoder.transfer_backend.engine.read_delay = 0.5
-
-    send_metas = [
-        pair.ready(f"xfer-{index}", f"p-req-{index}", [[index]], ready=False)
-        for index in (1, 2)
-    ]
-    pair.read({f"d-req-{index}": (f"xfer-{index}", [[10 + index]]) for index in (1, 2)})
-
-    await run_on(producer.sender_loop, mark_producer_ready(send_metas[0]))
-    # The reader is now inside the 0.5 s read of the first wave.
-    await asyncio.sleep(0.1)
-    await run_on(producer.sender_loop, mark_producer_ready(send_metas[1]))
-
-    assert await wait_for(lambda: fetch_recved(pair.decoder)) == {
-        "d-req-1",
-        "d-req-2",
+    pull_metas = {"d-req": pull_meta("d-req", "xfer", [[10, 11], [6]], "p-engine", 1)}
+    resolved = {
+        "d-req": ("xfer", [[2, 3], [NULL_BLOCK_ID, 5]]),
     }
-    assert pair.decoder_kv[11].tolist() == [2] * pair.block_bytes
-    assert pair.decoder_kv[12].tolist() == [3] * pair.block_bytes
+
+    with decoder_worker(make_hybrid_gdn_kv_cache_config(BLOCK_SIZE)) as worker:
+        local_ptrs, remote_ptrs, lengths, err_reqs, err_msg = worker._plan_reads(
+            producer_layout(), pull_metas, resolved, consumer, producer
+        )
+
+    assert (err_reqs, err_msg) == ([], None)
+    np.testing.assert_array_equal(
+        remote_ptrs,
+        np.array(
+            [0x1000 + 2 * attention_bytes, 0x3000 + 5 * mamba_bytes],
+            dtype=np.uint64,
+        ),
+    )
+    np.testing.assert_array_equal(
+        local_ptrs,
+        np.array(
+            [0x2000 + 10 * attention_bytes, 0x4000 + 6 * mamba_bytes],
+            dtype=np.uint64,
+        ),
+    )
+    np.testing.assert_array_equal(
+        lengths, np.array([2 * attention_bytes, mamba_bytes], dtype=np.uint64)
+    )
+
+
+def make_hybrid_gdn_kv_cache_config(block_size: int) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                [LAYER],
+                AttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            make_kv_cache_group(
+                [MAMBA_LAYER],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((6, 3), (1, 2, 2)),
+                    dtypes=(torch.float16, torch.float16),
+                    mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+                ),
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1], ids=["leader", "non-leader"])
+def test_hisparse_pull_reads_only_the_host_groups_this_rank_owns(tp_rank):
+    """A non-leader rank never hands the shared host group to a read."""
+    host_group = make_kv_cache_group(
+        [LAYER],
+        AttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=KV_HEADS,
+            head_size=HEAD_SIZE,
+            dtype=torch.float16,
+        ),
+        host_resident=True,
+    )
+    device_group = make_kv_cache_group(
+        [MAMBA_LAYER],
+        AttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=KV_HEADS,
+            head_size=HEAD_SIZE,
+            dtype=torch.float16,
+        ),
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[host_group, device_group],
+        hisparse_shared_host_pool=True,
+    )
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakePullConnector", kv_role="kv_consumer"
+    )
+    with (
+        patch_pull_worker_dependencies(tp_size=2, tp_ranks=[tp_rank]),
+        patch(f"{BASE_WORKER}.get_hisparse_host_leader_rank", return_value=0),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = make_worker(vllm_config, kv_cache_config)
+        worker.tp_rank = tp_rank
+        try:
+            block_ids = [[1, 2], [3, 4]]
+            filtered = worker._filter_host_block_ids(block_ids)
+            if tp_rank == 0:
+                assert filtered == block_ids
+            else:
+                assert filtered == [[], [3, 4]]
+
+            req_meta = {"d-req": pull_meta("d-req", "xfer", block_ids, "p-engine", 1)}
+            meta = worker._build_pull_metadata(req_meta, include_layout=False)
+            assert meta.req_blocks["d-req"][1] == filtered
+        finally:
+            worker.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_pull_caches_the_address_book_between_reads(pair):
-    """Only the first request to a peer carries the address book."""
-    producer = pair.producer
-    seen: list[MooncakePullRequest] = []
-    original = producer._handle_pull_request
-
-    async def spy(identity, sock, request):
-        seen.append(request)
-        await original(identity, sock, request)
-
-    producer._handle_pull_request = spy  # type: ignore[method-assign]
-
-    pair.fill()
-    for index in (1, 2):
-        pair.ready(f"xfer-{index}", f"p-req-{index}", [[index]])
-        pair.read({f"d-req-{index}": (f"xfer-{index}", [[index + 10]])})
-        assert await wait_for(lambda: fetch_recved(pair.decoder)) == {f"d-req-{index}"}
-
-    assert [request.want_regions for request in seen] == [True, False]
-    assert pair.decoder_kv[11].tolist() == [2] * pair.block_bytes
-    assert pair.decoder_kv[12].tolist() == [3] * pair.block_bytes
-
-
-@pytest.mark.asyncio
-async def test_pull_recovers_from_a_restarted_producer(pair):
-    """A new producer address book fails that request, then reads work again."""
+async def test_pull_reads_and_reuses_a_validated_layout(pair):
+    """The decoder reads bytes, caches the layout, and drops it on a restart."""
     producer = pair.producer
     decoder = pair.decoder
     seen: list[MooncakePullRequest] = []
@@ -623,117 +745,51 @@ async def test_pull_recovers_from_a_restarted_producer(pair):
 
     producer._handle_pull_request = spy  # type: ignore[method-assign]
 
-    async def read(index: int, p_block: int, d_block: int) -> None:
-        pair.ready(f"xfer-{index}", f"p-req-{index}", [[p_block]])
-        pair.read({f"d-req-{index}": (f"xfer-{index}", [[d_block]])})
-        assert await wait_for(lambda: fetch_recved(decoder)) == {f"d-req-{index}"}
+    pair.fill()
+    pair.ready("xfer-1", "p-req-1", [[2, 3]])
+    pair.read({"d-req-1": ("xfer-1", [[10, 11]])})
+    assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-1"}
+    assert pair.decoder_kv[10].tolist() == [3] * pair.decoder_block_bytes
+    assert pair.decoder_kv[11].tolist() == [4] * pair.decoder_block_bytes
 
-    pair.producer_kv[2].fill_(7)
-    pair.producer_kv[3].fill_(9)
-    worker_addr = f"tcp://127.0.0.1:{producer.side_channel_port}"
+    worker_addr = make_zmq_path("tcp", producer.hostname, producer.side_channel_port)
+    layout = decoder._peer_layouts[worker_addr]
+    assert layout.layout_id
 
-    await read(1, 2, 10)
-    assert pair.decoder_kv[10].tolist() == [7] * pair.block_bytes
+    pair.ready("xfer-2", "p-req-2", [[4]])
+    pair.read({"d-req-2": ("xfer-2", [[12]])})
+    assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-2"}
+    assert pair.decoder_kv[12].tolist() == [5] * pair.decoder_block_bytes
 
-    # The prefiller comes back with a different address book.
+    # The prefiller comes back with another layout, so the cached one is stale.
     producer._kv_layout_id += 1
-
-    await read(2, 3, 11)
-    assert pair.decoder_kv[11].sum().item() == 0
-    assert decoder.get_block_ids_with_load_errors() == {11}
+    pair.ready("xfer-3", "p-req-3", [[5]])
+    pair.read({"d-req-3": ("xfer-3", [[13]])})
+    assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-3"}
+    assert decoder.get_block_ids_with_load_errors() == {13}
     assert worker_addr not in decoder._peer_layouts
 
-    await read(3, 3, 12)
-    assert pair.decoder_kv[12].tolist() == [9] * pair.block_bytes
-    assert [request.want_regions for request in seen] == [True, False, True]
-
-
-@pytest.mark.asyncio
-async def test_pull_heterogeneous_tp_reads_both_producer_ranks(
-    monkeypatch, bootstrap_server
-):
-    """One decoder TP rank reads the slices two producer ranks hold."""
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(bootstrap_server.port))
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    producer_block_bytes = page_bytes(num_kv_heads=2)
-    decoder_block_bytes = page_bytes(num_kv_heads=4)
-
-    with patch_pull_worker_dependencies(tp_size=2, tp_ranks=[0, 1]):
-        p_config = create_vllm_config(
-            kv_connector="MooncakePullConnector", kv_role="kv_producer"
-        )
-        # Both producer ranks belong to one engine.
-        p_config.kv_transfer_config.engine_id = "p-engine"
-        producers = [
-            make_worker(p_config, make_kv_cache_config(num_kv_heads=2))
-            for _ in range(2)
-        ]
-
-    with patch_pull_worker_dependencies():
-        d_config = create_vllm_config(
-            kv_connector="MooncakePullConnector", kv_role="kv_consumer"
-        )
-        decoder = make_worker(d_config, make_kv_cache_config(num_kv_heads=4))
-
-    try:
-        for rank, producer in enumerate(producers):
-            producer_kv = make_kv_tensor(8, producer_block_bytes)
-            producer_kv[3].fill_(rank + 1)
-            producer.register_kv_caches({LAYER: producer_kv})
-            register_ready_transfer(producer, "xfer-tp", f"p-req-{rank}", [[3]])
-
-        decoder_kv = make_kv_tensor(32, decoder_block_bytes)
-        decoder.register_kv_caches({LAYER: decoder_kv})
-
-        metas = {
-            "d-req-tp": pull_meta(
-                "d-req-tp",
-                "xfer-tp",
-                [[7]],
-                producers[0].engine_id,
-                bootstrap_server.port,
-            )
-        }
-        asyncio.run_coroutine_threadsafe(
-            decoder._start_load_kv({producers[0].engine_id: metas}),
-            decoder.receiver_loop,
-        )
-
-        assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-tp"}
-        # Producer rank 0 fills the first slice, rank 1 the second.
-        assert decoder_kv[7][:producer_block_bytes].tolist() == [1] * (
-            producer_block_bytes
-        )
-        assert decoder_kv[7][producer_block_bytes:].tolist() == [2] * (
-            producer_block_bytes
-        )
-        sent = [await wait_for(partial(fetch_sent, producer)) for producer in producers]
-        assert sent == [{"p-req-0"}, {"p-req-1"}]
-    finally:
-        with patch_pull_worker_dependencies():
-            decoder.shutdown()
-            for producer in producers:
-                producer.shutdown()
+    pair.ready("xfer-4", "p-req-4", [[6]])
+    pair.read({"d-req-4": ("xfer-4", [[14]])})
+    assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-4"}
+    assert pair.decoder_kv[14].tolist() == [7] * pair.decoder_block_bytes
+    assert [request.want_regions for request in seen] == [True, False, False, True]
 
 
 @pytest.mark.asyncio
 async def test_pull_releases_the_producer_on_a_local_prefix_hit(pair):
-    """A full local hit releases the producer without moving any bytes."""
+    """A full local hit releases the producer without a duplicate done."""
     producer = pair.producer
     decoder = pair.decoder
 
     # The producer's scheduler has not registered the transfer yet, so the
     # reader's completion has to be accounted for once it does.
     pair.read({"d-req-hit": ("xfer-hit", [])})
-
-    # An empty read moves no bytes and the decoder never enters
-    # WAITING_FOR_REMOTE_KVS, so the reader reports the transfer as done for
-    # the prefiller without reporting a local completion.
     assert await wait_for(
         lambda: run_on(producer.sender_loop, has_read_done(producer, "xfer-hit"))
     )
     assert await fetch_recved(decoder) == set()
-    assert decoder.transfer_backend.engine.reads == []
+    assert pair.engine.reads == []
 
     await run_on(
         producer.sender_loop,
@@ -744,34 +800,40 @@ async def test_pull_releases_the_producer_on_a_local_prefix_hit(pair):
     assert pair.decoder_kv[2].sum().item() == 0
 
 
-# ---------------------------------------------------------------------------
-#  Failure paths
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("pair", [1], indirect=True)
 @pytest.mark.asyncio
-async def test_slow_read_keeps_the_producer_blocks(pair):
-    """A read that outlives the abort timeout is not mistaken for a dead reader."""
+async def test_a_slow_second_wave_is_kept_alive_by_lease_renewal(pair):
+    """A later wave is not expired while its read is still running."""
     producer = pair.producer
-    pair.producer_kv[2].fill_(7)
+    pair.producer_kvs[0][2].fill_(7)
+    pair.producer_kvs[0][3].fill_(9)
+    gates = [threading.Event(), threading.Event()]
+    pair.engine.read_gates = gates
+    send_metas = [
+        pair.ready("xfer-1", "p-req-1", [[2]], ready=False),
+        pair.ready("xfer-2", "p-req-2", [[3]], ready=False),
+    ]
+    pair.read({"d-req-1": ("xfer-1", [[10]]), "d-req-2": ("xfer-2", [[11]])})
+    await run_on(producer.sender_loop, mark_producer_ready(send_metas[0]))
+    await wait_read_start(pair.engine, 0)
+    # The second response arrives while the first read is blocked.
+    await run_on(producer.sender_loop, mark_producer_ready(send_metas[1]))
+    gates[0].set()
+    await wait_read_start(pair.engine, 1)
 
-    send_meta = pair.ready("xfer-slow", "p-req-slow", [[2]])
-    # The prefiller's own request is already over, so its expiry is due.
-    send_meta.expire_time = time.perf_counter() - 100
-    # The decoder performs the read, so its engine is the slow one.
-    pair.decoder.transfer_backend.engine.read_delay = 2.5
+    # Past the abort timeout, only a renewal keeps wave 2's blocks alive.
+    await asyncio.sleep(1.2)
+    assert "p-req-2" not in await fetch_sent(producer)
+    assert "xfer-2" in producer.reqs_need_send
 
-    pair.read({"d-req-slow": ("xfer-slow", [[10]])})
-
-    # Well past the abort timeout the read is still running, so the prefiller
-    # must keep holding the blocks it handed out.
-    await asyncio.sleep(1.8)
-    assert await fetch_sent(producer) == set()
-    assert "xfer-slow" in producer.reqs_need_send
-    assert producer._leases.holders("xfer-slow")
-
-    assert await wait_for(lambda: fetch_recved(pair.decoder)) == {"d-req-slow"}
-    assert pair.decoder_kv[10].tolist() == [7] * pair.block_bytes
-    assert await wait_for(lambda: fetch_sent(producer)) == {"p-req-slow"}
+    gates[1].set()
+    assert await wait_for(lambda: fetch_recved(pair.decoder)) == {
+        "d-req-1",
+        "d-req-2",
+    }
+    assert pair.decoder_kv[10].tolist() == [7] * pair.decoder_block_bytes
+    assert pair.decoder_kv[11].tolist() == [9] * pair.decoder_block_bytes
+    assert "p-req-2" in await wait_for(lambda: fetch_sent(producer))
 
 
 @pytest.mark.asyncio
@@ -781,481 +843,145 @@ async def test_cancelled_read_reports_only_after_the_engine_returns(
     """A cancelled receiver cannot free the blocks the engine is still writing."""
     monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(bootstrap_server.port))
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "10")
-    block_bytes = page_bytes()
-
-    with patch_pull_worker_dependencies():
-        p_config = create_vllm_config(
-            kv_connector="MooncakePullConnector", kv_role="kv_producer"
-        )
-        d_config = create_vllm_config(
-            kv_connector="MooncakePullConnector", kv_role="kv_consumer"
-        )
-        producer = make_worker(p_config, make_kv_cache_config())
-        decoder = make_worker(d_config, make_kv_cache_config())
-
-        try:
-            producer_kv = make_kv_tensor(8, block_bytes)
-            producer_kv[4].fill_(5)
-            producer.register_kv_caches({LAYER: producer_kv})
-            decoder_kv = make_kv_tensor(32, block_bytes)
-            decoder.register_kv_caches({LAYER: decoder_kv})
-
-            register_ready_transfer(producer, "xfer-cancel", "p-req-cancel", [[4]])
-            decoder.transfer_backend.engine.read_delay = 1.5
-
-            metas = {
-                "d-req-cancel": pull_meta(
-                    "d-req-cancel",
-                    "xfer-cancel",
-                    [[10]],
-                    producer.engine_id,
-                    bootstrap_server.port,
-                )
-            }
-            worker_addr = make_zmq_path(
-                "tcp", producer.hostname, producer.side_channel_port
-            )
-
-            async def read_then_cancel():
-                task = asyncio.create_task(
-                    decoder.receive_kv_from_single_worker(worker_addr, metas)
-                )
-                await asyncio.sleep(0.5)
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-
-            await run_on(decoder.receiver_loop, read_then_cancel())
-
-            # The engine thread runs on after the cancellation, so reporting the
-            # request now would let the scheduler hand block 10 to another
-            # request while this read still writes into it.
-            assert await fetch_recved(decoder) == set()
-            assert producer._leases.holders("xfer-cancel")
-
-            assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-cancel"}
-            assert decoder.get_block_ids_with_load_errors() == {10}
-            assert await wait_for(lambda: fetch_sent(producer)) == {"p-req-cancel"}
-        finally:
-            decoder.shutdown()
-            producer.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_failed_peer_waits_for_the_other_peer_read(monkeypatch, bootstrap_server):
-    """A failed peer cannot report the request while another peer still writes."""
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(bootstrap_server.port))
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "10")
-    producer_block_bytes = page_bytes(num_kv_heads=2)
-    decoder_block_bytes = page_bytes(num_kv_heads=4)
-
-    with patch_pull_worker_dependencies(tp_size=2, tp_ranks=[0, 1]):
-        p_config = create_vllm_config(
-            kv_connector="MooncakePullConnector", kv_role="kv_producer"
-        )
-        p_config.kv_transfer_config.engine_id = "p-engine"
-        producers = [
-            make_worker(p_config, make_kv_cache_config(num_kv_heads=2))
-            for _ in range(2)
-        ]
-
-    with patch_pull_worker_dependencies():
-        d_config = create_vllm_config(
-            kv_connector="MooncakePullConnector", kv_role="kv_consumer"
-        )
-        decoder = make_worker(d_config, make_kv_cache_config(num_kv_heads=4))
-
-    try:
-        decoder_kv = make_kv_tensor(32, decoder_block_bytes)
-        decoder.register_kv_caches({LAYER: decoder_kv})
-        producer_kv = make_kv_tensor(8, producer_block_bytes)
-        for producer in producers:
-            producer.register_kv_caches({LAYER: producer_kv})
-        # The first peer refuses the handshake; the second is still computing
-        # the request it was asked for.
-        producers[0]._validate_head_resharding_layout = (
-            lambda *args, **kwargs: "refused for this test"
-        )
-        late = register_ready_transfer(
-            producers[1], "xfer-mix", "p-req-1", [[3]], ready=False
-        )
-
+    with pair_factory(bootstrap_port=bootstrap_server.port) as pair:
+        producer = pair.producer
+        decoder = pair.decoder
+        gate = threading.Event()
+        decoder.transfer_backend.engine.read_gates = [gate]
+        producer_kv = pair.producer_kvs[0]
+        producer_kv[4].fill_(5)
+        register_ready_transfer(producer, "xfer-cancel", "p-req-cancel", [[4]])
         metas = {
-            "d-req-mix": pull_meta(
-                "d-req-mix",
-                "xfer-mix",
-                [[7]],
-                producers[0].engine_id,
+            "d-req-cancel": pull_meta(
+                "d-req-cancel",
+                "xfer-cancel",
+                [[10]],
+                producer.engine_id,
                 bootstrap_server.port,
             )
         }
-        asyncio.run_coroutine_threadsafe(
-            decoder._start_load_kv({producers[0].engine_id: metas}),
-            decoder.receiver_loop,
+        worker_addr = make_zmq_path(
+            "tcp", producer.hostname, producer.side_channel_port
         )
 
-        # One peer has already failed; the other has not started writing yet, so
-        # nothing may be reported while its read can still land.
-        await asyncio.sleep(0.6)
+        async def read_then_cancel():
+            task = asyncio.create_task(
+                decoder.receive_kv_from_single_worker(worker_addr, metas)
+            )
+            await wait_read_start(decoder.transfer_backend.engine, 0)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        await run_on(decoder.receiver_loop, read_then_cancel())
+
+        # The engine thread runs on after the cancellation, so reporting the
+        # request now would let the scheduler hand block 10 to another request.
         assert await fetch_recved(decoder) == set()
+        assert producer._leases.holders("xfer-cancel")
+        gate.set()
 
-        await run_on(producers[1].sender_loop, mark_producer_ready(late))
-
-        # Once both peers are done the request is reported as failed.
-        assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-mix"}
-        assert decoder.get_block_ids_with_load_errors() == {7}
-    finally:
-        with patch_pull_worker_dependencies():
-            decoder.shutdown()
-            for producer in producers:
-                producer.shutdown()
+        assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-cancel"}
+        assert decoder.get_block_ids_with_load_errors() == {10}
+        assert await wait_for(lambda: fetch_sent(producer)) == {"p-req-cancel"}
 
 
+@pytest.mark.parametrize("pair", [30], indirect=True)
 @pytest.mark.asyncio
-async def test_reader_failure_releases_the_producer(pair):
-    """A failed read fails the request and still frees the producer's blocks."""
-    pair.decoder.transfer_backend.engine.fail_reads = 1
-
-    pair.ready("xfer-fail", "p-req-fail", [[2]])
-    pair.read({"d-req-fail": ("xfer-fail", [[10]])})
-
-    assert await wait_for(lambda: fetch_recved(pair.decoder)) == {"d-req-fail"}
-    assert pair.decoder.get_block_ids_with_load_errors() == {10}
-    assert await wait_for(lambda: fetch_sent(pair.producer)) == {"p-req-fail"}
-
-
-@pytest.mark.parametrize("pair", [60], indirect=True)
-@pytest.mark.asyncio
-async def test_producer_abort_fails_the_reader(pair):
-    """A dropped producer request fails instead of waiting for the timeout."""
+async def test_abort_before_pull_fails_at_once_without_a_placeholder(pair):
+    """An aborted transfer has a tombstone, so a later pull does not wait."""
     producer = pair.producer
-    pair.ready("xfer-abort", "p-req-abort", [], ready=False)
-    pair.read({"d-req-abort": ("xfer-abort", [[10]])})
-
-    # Wait until the producer's reader is registered, then drop the request the
-    # way an abort does.
-    await wait_for(lambda: reader_registered(producer, "xfer-abort"), timeout=5.0)
-    metadata = send_metadata("p-req-abort", "xfer-abort")
-    metadata.reqs_to_send.clear()
-    metadata.reqs_not_processed = {"xfer-abort"}
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_not_processed = {"xfer-gone"}
     await run_on(producer.sender_loop, producer.record_send_reqs(metadata))
+    assert "xfer-gone" in producer._expired_transfer_ids
 
-    assert await wait_for(lambda: fetch_recved(pair.decoder)) == {"d-req-abort"}
+    pair.read({"d-req-gone": ("xfer-gone", [[10]])})
+    # The abort timeout is 30 s, so only the tombstone can answer this fast.
+    assert await wait_for(lambda: fetch_recved(pair.decoder), timeout=3.0) == {
+        "d-req-gone"
+    }
     assert pair.decoder.get_block_ids_with_load_errors() == {10}
-
-
-async def reader_registered(producer: MooncakePullConnectorWorker, transfer_id: str):
-    return await run_on(
-        producer.sender_loop, has_expected_readers(producer, transfer_id)
-    )
-
-
-async def has_expected_readers(producer: MooncakePullConnectorWorker, transfer_id: str):
-    send_meta = producer.reqs_need_send.get(transfer_id)
-    return send_meta is not None and send_meta.need_send > 0
+    assert "xfer-gone" not in producer.reqs_need_send
 
 
 async def has_read_done(producer: MooncakePullConnectorWorker, transfer_id: str):
     return producer._leases.reported(transfer_id) > 0
 
 
-@pytest.mark.parametrize("pair", [1], indirect=True)
+@pytest.mark.parametrize(
+    "factory_kwargs,hands_out_blocks",
+    [
+        pytest.param(
+            {"producer_block_size": BLOCK_SIZE, "decoder_block_size": BLOCK_SIZE * 2},
+            True,
+            id="block-size",
+        ),
+        pytest.param(
+            {
+                "producer_kv_heads": 2,
+                "decoder_kv_heads": 2,
+                "producer_page_size_padded": 2 * 16 * 64 * 2 * 2 + 64,
+                "producer_tp_size": 2,
+                "producer_tp_ranks": [0],
+            },
+            False,
+            id="padded-heads",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_producer_timeout_fails_the_reader(pair):
-    """A request the prefiller never finishes fails the reader."""
-    pair.ready("xfer-stuck", "p-req-stuck", [], ready=False)
-    pair.read({"d-req-stuck": ("xfer-stuck", [[10]])})
-
-    assert await wait_for(lambda: fetch_recved(pair.decoder), timeout=15.0) == {
-        "d-req-stuck"
-    }
-    assert pair.decoder.get_block_ids_with_load_errors() == {10}
-
-
-@pytest.mark.asyncio
-async def test_decoder_rejects_an_incompatible_block_size(
-    monkeypatch, bootstrap_server
+async def test_decoder_rejects_an_unaddressable_layout(
+    monkeypatch, bootstrap_server, factory_kwargs, hands_out_blocks
 ):
-    """A producer whose pages do not line up fails the request with a reason."""
+    """A layout whose regions cannot describe this cache fails the request."""
     monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(bootstrap_server.port))
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    with pair_factory(bootstrap_port=bootstrap_server.port, **factory_kwargs) as pair:
+        producer = pair.producer
+        decoder = pair.decoder
+        register_ready_transfer(producer, "xfer-size", "p-req-size", [[2]])
+        pair.read({"d-req-size": ("xfer-size", [[10]])})
 
-    with patch_pull_worker_dependencies():
-        p_config = create_vllm_config(
-            kv_connector="MooncakePullConnector",
-            kv_role="kv_producer",
-            block_size=BLOCK_SIZE,
-        )
-        d_config = create_vllm_config(
-            kv_connector="MooncakePullConnector",
-            kv_role="kv_consumer",
-            block_size=BLOCK_SIZE * 2,
-        )
-        producer = make_worker(p_config, make_kv_cache_config())
-        decoder = make_worker(d_config, make_kv_cache_config(block_size=BLOCK_SIZE * 2))
-
-        try:
-            producer_kv = make_kv_tensor(8, page_bytes())
-            producer.register_kv_caches({LAYER: producer_kv})
-            decoder_kv = make_kv_tensor(32, page_bytes(block_size=BLOCK_SIZE * 2))
-            decoder.register_kv_caches({LAYER: decoder_kv})
-
-            register_ready_transfer(producer, "xfer-size", "p-req-size", [[2]])
-            metas = {
-                "d-req-size": pull_meta(
-                    "d-req-size",
-                    "xfer-size",
-                    [[10]],
-                    producer.engine_id,
-                    bootstrap_server.port,
-                )
-            }
-            asyncio.run_coroutine_threadsafe(
-                decoder._start_load_kv({producer.engine_id: metas}),
-                decoder.receiver_loop,
-            )
-
-            assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-size"}
-            assert decoder.get_block_ids_with_load_errors() == {10}
-            assert decoder.transfer_backend.engine.reads == []
-            assert not decoder._peer_layouts
-            # Rejecting the layout has to release the blocks already handed out.
+        assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-size"}
+        assert decoder.get_block_ids_with_load_errors() == {10}
+        assert pair.engine.reads == []
+        assert not decoder._peer_layouts
+        if hands_out_blocks:
+            # Rejecting the layout has to release the blocks it handed out.
             assert await wait_for(lambda: fetch_sent(producer)) == {"p-req-size"}
             assert "xfer-size" not in producer.reqs_need_send
             assert not producer._leases.holders("xfer-size")
-        finally:
-            decoder.shutdown()
-            producer.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_producer_rejects_head_resharding_a_padded_cache(
-    monkeypatch, bootstrap_server
-):
-    """A reader with another TP degree cannot slice a padded KV page."""
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(bootstrap_server.port))
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    producer_block_bytes = page_bytes(num_kv_heads=2)
-    padded_block_bytes = producer_block_bytes + 64
-
-    with patch_pull_worker_dependencies(tp_size=2, tp_ranks=[0, 1]):
-        p_config = create_vllm_config(
-            kv_connector="MooncakePullConnector", kv_role="kv_producer"
-        )
-        producer = make_worker(
-            p_config,
-            make_kv_cache_config(num_kv_heads=2, page_size_padded=padded_block_bytes),
-        )
-    with patch_pull_worker_dependencies():
-        d_config = create_vllm_config(
-            kv_connector="MooncakePullConnector", kv_role="kv_consumer"
-        )
-        decoder = make_worker(d_config, make_kv_cache_config(num_kv_heads=2))
-
-    try:
-        producer_kv = make_kv_tensor(8, padded_block_bytes)
-        producer.register_kv_caches({LAYER: producer_kv})
-        decoder_kv = make_kv_tensor(32, producer_block_bytes)
-        decoder.register_kv_caches({LAYER: decoder_kv})
-
-        register_ready_transfer(producer, "xfer-pad", "p-req-pad", [[2]])
-        metas = {
-            "d-req-pad": pull_meta(
-                "d-req-pad",
-                "xfer-pad",
-                [[10]],
-                producer.engine_id,
-                bootstrap_server.port,
-            )
-        }
-        asyncio.run_coroutine_threadsafe(
-            decoder._start_load_kv({producer.engine_id: metas}),
-            decoder.receiver_loop,
-        )
-
-        assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-pad"}
-        assert decoder.get_block_ids_with_load_errors() == {10}
-        assert decoder.transfer_backend.engine.reads == []
-        # The prefiller refuses before handing out block ids, so nothing is held.
-        assert not producer._leases.holders("xfer-pad")
-    finally:
-        with patch_pull_worker_dependencies():
-            decoder.shutdown()
-            producer.shutdown()
-
-
-# ---------------------------------------------------------------------------
-#  Prefiller bookkeeping
-# ---------------------------------------------------------------------------
-def test_read_leases_hold_blocks_until_reported_or_quiet():
-    """The release rule: a lease ends when its reader reports or goes quiet."""
+def test_read_leases_do_not_reopen_reported_readers():
     leases = ReadLeases()
-    reader, other = ("d-engine", 0, 0), ("d-engine", 1, 0)
-    timeout = 10.0
-    start = 1000.0
-
-    assert leases.may_release("xfer", timeout, now=start)
-    assert not leases.renew("xfer", reader, now=start)
-
-    leases.hand_out("xfer", reader, now=start)
-    leases.hand_out("xfer", other, now=start)
-    assert leases.holders("xfer") == [reader, other]
-    assert not leases.may_release("xfer", timeout, now=start + 5)
-
-    leases.report("xfer", reader)
-    assert leases.reported("xfer") == 1
-    assert not leases.may_release("xfer", timeout, now=start + 5)
-
-    # A reader that keeps renewing holds its blocks past the timeout.
-    assert leases.renew("xfer", other, now=start + 9)
-    assert not leases.may_release("xfer", timeout, now=start + 15)
-
-    # Neglect ends the lease, and the transfer is free to be released.
-    assert leases.may_release("xfer", timeout, now=start + 25)
-    assert not leases.holders("xfer")
-
-    leases.forget("xfer")
-    assert leases.reported("xfer") == 0
-
-
-def test_expiry_skips_transfers_a_reader_is_still_reading():
-    """Blocks handed out to a reader are never expired underneath it."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakePullConnector", kv_role="kv_producer"
-    )
-    with patch_pull_worker_dependencies():
-        producer = make_worker(vllm_config, make_kv_cache_config())
-
     reader = ("d-engine", 0, 0)
-    fresh = SendBlockMeta(
-        p_req_id="p-req-fresh",
-        transfer_id="xfer-fresh",
-        local_block_ids=[[1]],
-        ready=asyncio.Event(),
-        expire_time=time.perf_counter() - 100,
-    )
-    producer.reqs_need_send["xfer-fresh"] = fresh
-    producer._leases.hand_out("xfer-fresh", reader)
-
-    expired = SendBlockMeta(
-        p_req_id="p-req-expired",
-        transfer_id="xfer-expired",
-        local_block_ids=[[2]],
-        ready=asyncio.Event(),
-        expire_time=time.perf_counter() - 100,
-    )
-    producer.reqs_need_send["xfer-expired"] = expired
-
-    finished = asyncio.run(producer.fetch_finished_sending_reqs())
-
-    assert finished == {"p-req-expired"}
-    assert "xfer-fresh" in producer.reqs_need_send
-    assert "xfer-expired" not in producer.reqs_need_send
+    assert leases.hand_out("xfer", reader)
+    leases.report("xfer", reader)
+    assert not leases.hand_out("xfer", reader)
+    # A transfer known only from its report still needs forgetting.
+    assert "xfer" in set(leases)
+    leases.forget("xfer")
+    assert "xfer" not in set(leases)
 
 
-def test_a_reader_that_never_reports_stops_holding_blocks(monkeypatch):
-    """A reader that dies after taking block ids cannot pin them forever."""
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakePullConnector", kv_role="kv_producer"
-    )
-    with patch_pull_worker_dependencies():
-        producer = make_worker(vllm_config, make_kv_cache_config())
-        try:
-            producer.reqs_need_send["xfer-silent"] = SendBlockMeta(
-                p_req_id="p-req-silent",
-                transfer_id="xfer-silent",
-                local_block_ids=[[1]],
-                ready=asyncio.Event(),
-                expire_time=time.perf_counter() - 100,
-            )
-            reader = ("d-engine", 0, 0)
-            producer._leases.hand_out("xfer-silent", reader)
-            assert producer._send_idle("xfer-silent") is False
-
-            # Backdate the lease: the reader never reported and never renewed.
-            producer._leases.hand_out(
-                "xfer-silent", reader, now=time.perf_counter() - 6
-            )
-            assert asyncio.run(producer.fetch_finished_sending_reqs()) == {
-                "p-req-silent"
-            }
-            assert "xfer-silent" not in producer.reqs_need_send
-        finally:
-            producer.shutdown()
-
-
-def test_lease_reports_never_wait_for_a_sender_worker():
-    """Lease traffic is answered by the listener, not by a queued pull."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakePullConnector", kv_role="kv_producer"
-    )
-    with patch_pull_worker_dependencies():
-        producer = make_worker(vllm_config, make_kv_cache_config())
-
-    reader = (producer.engine_id, 0, 0)
-    send_meta = SendBlockMeta(
-        p_req_id="p-req-report",
-        transfer_id="xfer-report",
-        local_block_ids=[[1]],
-        ready=asyncio.Event(),
-    )
-    producer.reqs_need_send["xfer-report"] = send_meta
-    producer._resolve_expected_readers(send_meta, 1, 1)
-    producer._leases.hand_out("xfer-report", reader)
-
-    encoding = producer._encoder
-    reading = encoding.encode(
-        MooncakePullReading(
-            engine_id=reader[0], tp_rank=0, pp_rank=0, transfer_ids=["xfer-report"]
-        )
-    )
-    done = encoding.encode(
-        MooncakePullDone(
-            engine_id=reader[0], tp_rank=0, pp_rank=0, transfer_ids=["xfer-report"]
-        )
-    )
-    pull = encoding.encode(
-        MooncakePullRequest(
-            engine_id=reader[0],
-            tp_rank=0,
-            tp_size=1,
-            pp_rank=0,
-            pp_size=1,
-            reqs={"d-req": ("xfer-report", True)},
-        )
-    )
-
-    assert asyncio.run(producer._handle_control_message(b"reader", reading, None))
-    assert producer._send_idle("xfer-report") is False
-
-    assert asyncio.run(producer._handle_control_message(b"reader", done, None))
-    assert "xfer-report" not in producer.reqs_need_send
-    assert producer.finished_sending_reqs == {"p-req-report"}
-
-    # Pull requests still wait for the prefiller's blocks, in a worker.
-    assert not asyncio.run(producer._handle_control_message(b"reader", pull, None))
-
-
-@pytest.mark.parametrize("pair", [30], indirect=True)
 @pytest.mark.asyncio
-async def test_a_pull_after_the_kv_expired_fails_instead_of_waiting(pair):
-    """A transfer the prefiller freed is reported, not waited for."""
+async def test_finish_without_resolving_a_request_fails_it(pair):
     producer = pair.producer
-    send_meta = pair.ready("xfer-gone", "p-req-gone", [[2]])
-    send_meta.expire_time = time.perf_counter() - 100
-    assert await fetch_sent(producer) == {"p-req-gone"}
-    assert "xfer-gone" in producer._expired_transfer_ids
+    decoder = pair.decoder
 
-    async def holds_a_placeholder() -> bool:
-        return "xfer-gone" in producer.reqs_need_send
+    async def finish_early(identity, sock, request):
+        response = MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.FINISH,
+            layout_id=producer._kv_layout_id,
+            metadata=producer._build_xfer_metadata({}, include_regions=True),
+        )
+        await sock.send_multipart((identity, producer._encoder.encode(response)))
 
-    pair.read({"d-req-gone": ("xfer-gone", [[10]])})
+    producer._handle_pull_request = finish_early  # type: ignore[method-assign]
+    pair.ready("xfer-missing", "p-req-missing", [[2]])
+    pair.read({"d-req-missing": ("xfer-missing", [[10]])})
 
-    # The abort timeout is 30s here, so a placeholder would keep the read
-    # waiting far past this bound.
-    assert await wait_for(lambda: fetch_recved(pair.decoder), timeout=3.0) == {
-        "d-req-gone"
-    }
-    assert pair.decoder.get_block_ids_with_load_errors() == {10}
-    assert not await run_on(producer.sender_loop, holds_a_placeholder())
+    assert await wait_for(lambda: fetch_recved(decoder)) == {"d-req-missing"}
+    assert decoder.get_block_ids_with_load_errors() == {10}

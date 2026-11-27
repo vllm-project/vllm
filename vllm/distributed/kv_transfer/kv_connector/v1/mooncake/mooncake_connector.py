@@ -645,7 +645,7 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
 
 
 @dataclass(frozen=True)
-class BlockTransferRequest:
+class TransferRequest:
     """One request's blocks on the two sides of a transfer.
 
     Attributes:
@@ -700,19 +700,88 @@ def _drop_mamba_placeholders(
     ]
 
 
-def plan_block_descriptors(
-    requests: Sequence[BlockTransferRequest],
+def _grouped_block_pairs(
+    src_block_ids: list[list[int]],
+    dst_block_ids: list[list[int]],
+    group_specs: Sequence["KVCacheGroup"],
+    blocks_per_logical: int,
+) -> tuple[list[list[int]], list[list[int]], str | None]:
+    """Trim both sides to the blocks this transfer covers, then expand them."""
+    src_groups = _drop_mamba_placeholders(src_block_ids, group_specs)
+    dst_groups = _drop_mamba_placeholders(dst_block_ids, group_specs)
+    trimmed_src: list[list[int]] = []
+    trimmed_dst: list[list[int]] = []
+    for src_group, dst_group in zip(src_groups, dst_groups):
+        if len(src_group) < len(dst_group):
+            return [], [], "P num blocks less than D"
+        if len(src_group) > len(dst_group):
+            # The destination already holds a prefix of the request, so the
+            # transfer covers the source's last blocks.
+            src_group = src_group[-len(dst_group) :] if dst_group else []
+        trimmed_src.append(src_group)
+        trimmed_dst.append(dst_group)
+    # Normalize before kernel expansion so _contiguous_runs can coalesce the
+    # resulting ascending kernel runs.
+    for index, (src_group, dst_group) in enumerate(zip(trimmed_src, trimmed_dst)):
+        if src_group:
+            trimmed_src[index], trimmed_dst[index] = _normalize_paired_block_order(
+                src_group, dst_group
+            )
+    return (
+        _kernel_block_ids(trimmed_src, group_specs, blocks_per_logical),
+        _kernel_block_ids(trimmed_dst, group_specs, blocks_per_logical),
+        None,
+    )
+
+
+def _region_mapped_pair(
+    src_block_ids: list[list[int]],
+    dst_block_ids: list[list[int]],
+    src_region: TransferRegion,
+    dst_region: TransferRegion,
+) -> tuple[list[int], list[int], str | None]:
+    """Pick the blocks one source and destination region pair maps to."""
+    source_group = src_region.group_index
+    destination_group = dst_region.group_index
+    if source_group < 0 or destination_group < 0:
+        return [], [], "Opaque groups cannot use region-mapped planning"
+    if not (
+        0 <= source_group < len(src_block_ids)
+        and 0 <= destination_group < len(dst_block_ids)
+    ):
+        return [], [], "Region-mapped imports reference a missing KV group"
+    src_ids = src_block_ids[source_group]
+    dst_ids = dst_block_ids[destination_group]
+    if len(src_ids) < len(dst_ids):
+        return [], [], "Producer has fewer pages than the destination"
+    if any(block <= 0 for block in src_ids + dst_ids):
+        return [], [], "Region-mapped imports cannot transfer null pages"
+    src_ids = src_ids[-len(dst_ids) :] if dst_ids else []
+    src_ids, dst_ids = _normalize_paired_block_order(src_ids, dst_ids)
+    return src_ids, dst_ids, None
+
+
+def plan_transfer_descriptors(
+    requests: Sequence[TransferRequest],
     *,
     src_regions: Sequence[TransferRegion],
     dst_regions: Sequence[TransferRegion],
     group_specs: Sequence["KVCacheGroup"],
     blocks_per_logical: int,
     plan: Callable[[TransferRegion, TransferRegion], tuple[bool, int, int, int]],
-) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
+) -> tuple[
+    NDArray[np.uint64],
+    NDArray[np.uint64],
+    NDArray[np.uint64],
+    list[ReqId],
+    str | None,
+]:
     """Plan one transfer per request into source and destination descriptors.
 
     The source side holds the bytes: the prefiller in both connector modes, so
-    a push plans from its local regions and a pull from the peer's.
+    a push plans from its local regions and a pull from the peer's. Pairing
+    covers both handshakes: group-indexed regions, and the region-mapped
+    regions of a HiSparse producer.
 
     Args:
         requests: Requests to transfer, each carrying both sides' block ids.
@@ -724,109 +793,97 @@ def plan_block_descriptors(
             offset, the destination byte offset and the copy length.
 
     Returns:
-        Source descriptors, destination descriptors, copy lengths, the request
-        ids that cannot be transferred, and the reason for those failures.
+        Source pointers, destination pointers, copy lengths, the request ids
+        that cannot be transferred, and the reason for those failures.
 
     """
-    src_ptrs: list[int] = []
-    dst_ptrs: list[int] = []
-    lengths: list[int] = []
+    src_chunks: list[NDArray[np.uint64]] = []
+    dst_chunks: list[NDArray[np.uint64]] = []
+    length_chunks: list[NDArray[np.uint64]] = []
     err_reqs: list[ReqId] = []
     err_msg: str | None = None
+    groups_match = _groups_match(src_regions, dst_regions)
 
     for request in requests:
         if not any(request.dst_block_ids):
             # No blocks to copy: the transfer only releases the source's blocks.
             continue
 
-        if len(request.src_block_ids) != len(request.dst_block_ids):
-            logger.error(
-                "req %s: KV group count mismatch: src=%d, dst=%d",
-                request.key,
-                len(request.src_block_ids),
-                len(request.dst_block_ids),
-            )
-            err_reqs.append(request.key)
-            if err_msg is None:
-                err_msg = "KV group count mismatch"
-            continue
-
-        assert len(request.dst_block_ids) == len(group_specs), (
-            "A transfer must carry one block list per local KV cache group."
-        )
-
-        src_groups = _drop_mamba_placeholders(request.src_block_ids, group_specs)
-        dst_groups = _drop_mamba_placeholders(request.dst_block_ids, group_specs)
-
-        trimmed_src: list[list[int]] = []
-        trimmed_dst: list[list[int]] = []
-        for src_group, dst_group in zip(src_groups, dst_groups):
-            if len(src_group) < len(dst_group):
+        if groups_match:
+            if len(request.src_block_ids) != len(request.dst_block_ids):
                 logger.error(
-                    "req %s: src blocks(%d) < dst blocks(%d) in a KV cache group",
+                    "req %s: KV group count mismatch: src=%d, dst=%d",
                     request.key,
-                    len(src_group),
-                    len(dst_group),
+                    len(request.src_block_ids),
+                    len(request.dst_block_ids),
                 )
                 err_reqs.append(request.key)
-                if err_msg is None:
-                    err_msg = "P num blocks less than D"
-                break
-            if len(src_group) > len(dst_group):
-                # The destination already holds a prefix of the request, so the
-                # transfer covers the source's last blocks.
-                src_group = src_group[-len(dst_group) :] if dst_group else []
-            trimmed_src.append(src_group)
-            trimmed_dst.append(dst_group)
+                err_msg = err_msg or "KV group count mismatch"
+                continue
+            if len(request.dst_block_ids) != len(group_specs):
+                logger.error(
+                    "req %s: KV group count mismatch: request=%d, local=%d",
+                    request.key,
+                    len(request.dst_block_ids),
+                    len(group_specs),
+                )
+                err_reqs.append(request.key)
+                err_msg = err_msg or "KV group count mismatch"
+                continue
+            src_groups, dst_groups, error = _grouped_block_pairs(
+                request.src_block_ids,
+                request.dst_block_ids,
+                group_specs,
+                blocks_per_logical,
+            )
         else:
-            src_groups, dst_groups = trimmed_src, trimmed_dst
-
-        if err_reqs and err_reqs[-1] == request.key:
+            # Region-mapped peers can hold a different number of groups; the
+            # region group indices say which pair feeds which.
+            src_groups = request.src_block_ids
+            dst_groups = request.dst_block_ids
+            error = None
+        if error is not None:
+            logger.error("req %s: %s", request.key, error)
+            err_reqs.append(request.key)
+            err_msg = err_msg or error
             continue
 
-        for group_index, (src_group, dst_group) in enumerate(
-            zip(src_groups, dst_groups)
-        ):
-            if src_group:
-                # Normalize before kernel expansion so _contiguous_runs can
-                # coalesce the resulting ascending kernel runs.
-                src_groups[group_index], dst_groups[group_index] = (
-                    _normalize_paired_block_order(src_group, dst_group)
-                )
-
-        src_groups = _kernel_block_ids(src_groups, group_specs, blocks_per_logical)
-        dst_groups = _kernel_block_ids(dst_groups, group_specs, blocks_per_logical)
-
-        # Regions of the same KV group share block ids; group them once.
-        block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
+        # Regions of one group pair share block ids; pair them once.
+        runs: dict[tuple, tuple[np.ndarray, ...]] = {}
+        request_src: list[NDArray[np.uint64]] = []
+        request_dst: list[NDArray[np.uint64]] = []
+        request_len: list[NDArray[np.uint64]] = []
         for src_region, dst_region in zip(src_regions, dst_regions):
-            assert src_region.group_index == dst_region.group_index, (
-                "Aligned Mooncake transfer regions must belong to the same KV group."
+            group_key = (
+                src_region.group_index,
+                src_region.shared_group_ids,
+                dst_region.group_index,
+                dst_region.shared_group_ids,
             )
-            group_key = (src_region.group_index, src_region.shared_group_ids)
-            if group_key not in block_runs:
-                src_ids = np.asarray(
-                    _block_ids_for_region(
+            pair = runs.get(group_key)
+            if pair is None:
+                if groups_match:
+                    src_ids = _block_ids_for_region(
                         src_groups,
                         src_region.group_index,
                         src_region.shared_group_ids,
-                    ),
-                    dtype=np.int64,
-                )
-                dst_ids = np.asarray(
-                    _block_ids_for_region(
+                    )
+                    dst_ids = _block_ids_for_region(
                         dst_groups,
                         dst_region.group_index,
                         src_region.shared_group_ids,
-                    ),
-                    dtype=np.int64,
-                )
-                block_runs[group_key] = (
-                    src_ids,
-                    dst_ids,
-                    *_contiguous_runs(src_ids, dst_ids),
-                )
-            src_ids, dst_ids, run_starts, run_lens = block_runs[group_key]
+                    )
+                else:
+                    src_ids, dst_ids, error = _region_mapped_pair(
+                        src_groups, dst_groups, src_region, dst_region
+                    )
+                    if error is not None:
+                        break
+                src_array = np.asarray(src_ids, dtype=np.int64)
+                dst_array = np.asarray(dst_ids, dtype=np.int64)
+                pair = (src_array, dst_array, *_contiguous_runs(src_array, dst_array))
+                runs[group_key] = pair
+            src_ids, dst_ids, run_starts, run_lens = pair
             if len(dst_ids) == 0:
                 continue
 
@@ -845,32 +902,46 @@ def plan_block_descriptors(
             )
             # Collapse a contiguous block run into one larger descriptor when
             # every block in it copies the same byte range.
-            can_coalesce = _can_coalesce_block_transfers(
+            if _can_coalesce_block_transfers(
                 local_region_block_len=src_region.block_len,
                 remote_region_block_len=dst_region.block_len,
                 src_region_offset=src_offset,
                 dst_region_offset=dst_offset,
                 transfer_len=transfer_len,
-            )
-
-            if can_coalesce:
+            ):
                 src_ids = src_ids[run_starts]
                 dst_ids = dst_ids[run_starts]
-                lengths.extend((run_lens * transfer_len).tolist())
+                request_len.append(run_lens.astype(np.uint64) * np.uint64(transfer_len))
             else:
-                lengths.extend([transfer_len] * len(src_ids))
-            src_ptrs.extend(
-                (
-                    src_ids * src_region.block_len + (src_region.base_addr + src_offset)
-                ).tolist()
+                request_len.append(np.full(len(src_ids), transfer_len, dtype=np.uint64))
+            request_src.append(
+                src_ids.astype(np.uint64) * np.uint64(src_region.block_len)
+                + np.uint64(src_region.base_addr + src_offset)
             )
-            dst_ptrs.extend(
-                (
-                    dst_ids * dst_region.block_len + (dst_region.base_addr + dst_offset)
-                ).tolist()
+            request_dst.append(
+                dst_ids.astype(np.uint64) * np.uint64(dst_region.block_len)
+                + np.uint64(dst_region.base_addr + dst_offset)
             )
 
-    return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
+        if error is not None:
+            logger.error("req %s: %s", request.key, error)
+            err_reqs.append(request.key)
+            err_msg = err_msg or error
+            continue
+        src_chunks.extend(request_src)
+        dst_chunks.extend(request_dst)
+        length_chunks.extend(request_len)
+
+    if not src_chunks:
+        empty = np.empty(0, dtype=np.uint64)
+        return empty, empty.copy(), empty.copy(), err_reqs, err_msg
+    return (
+        np.concatenate(src_chunks),
+        np.concatenate(dst_chunks),
+        np.concatenate(length_chunks),
+        err_reqs,
+        err_msg,
+    )
 
 
 class MooncakeXferMetadata(
@@ -1210,7 +1281,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """The Mooncake connectors do not do layerwise saving."""
+        """MooncakeConnector does not do layerwise saving."""
         pass
 
     def save_kv_layer(
@@ -1220,7 +1291,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
-        """The Mooncake connectors do not save explicitly."""
+        """MooncakeConnector does not save explicitly."""
         pass
 
     def wait_for_save(self):
@@ -1897,21 +1968,28 @@ class MooncakeConnectorWorker:
         shared_engine = getattr(self, "_shared_engine", None)
         if shared_engine is not None:
             clear_shared_transfer_engine(shared_engine)
-        self.async_zmq_ctx.term()
         if not self.is_kv_consumer:
             self._sender_executor.shutdown(wait=False)
-            if self.sender_loop.is_running():
-                self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
-                self._sender_listener_t.join()
-            if should_launch_bootstrap_server(self.vllm_config) and hasattr(
-                self, "bootstrap_server"
+            self._stop_loop(self.sender_loop, self._sender_listener_t)
+            if hasattr(self, "bootstrap_server") and should_launch_bootstrap_server(
+                self.vllm_config
             ):
                 self.bootstrap_server.shutdown()
-        if not self.is_kv_producer and self.receiver_loop.is_running():
-            self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
-            self._mooncake_receiver_t.join()
+        if not self.is_kv_producer:
+            self._stop_loop(self.receiver_loop, self._mooncake_receiver_t)
+        self.async_zmq_ctx.term()
         if hasattr(self, "transfer_backend"):
             self.transfer_backend.shutdown()
+
+    @staticmethod
+    def _stop_loop(loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
+        """Cancel a background loop's tasks before stopping its thread."""
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(_cancel_loop_tasks(), loop).result()
+            loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        if not loop.is_closed():
+            loop.close()
 
     async def register_worker_with_bootstrap(self):
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
@@ -2256,7 +2334,7 @@ class MooncakeConnectorWorker:
                 lengths,
                 err_reqs,
                 err_msg,
-            ) = self._build_transfer_params(
+            ) = await self._build_transfer_params(
                 ready_reqs,
                 meta,
                 local_regions,
@@ -2313,6 +2391,16 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
+    def _expected_peer_workers(
+        self, remote_tp_ranks: Collection[int], remote_pp_size: int
+    ) -> int:
+        expected = len(remote_tp_ranks)
+        if remote_pp_size > 1 and remote_pp_size != self.pp_size:
+            # Every consumer PP stage pairs with every producer stage,
+            # including peers with no shared layers.
+            expected *= remote_pp_size
+        return expected
+
     def resolve_need_send(
         self,
         send_meta: SendBlockMeta,
@@ -2320,11 +2408,9 @@ class MooncakeConnectorWorker:
         remote_pp_size: int = 1,
     ):
         # Prepare for heterogeneous TP (one P pairs to multiple D)
-        send_meta.need_send = len(remote_tp_ranks)
-        if remote_pp_size > 1 and remote_pp_size != self.pp_size:
-            # Each consumer PP stage pulls every producer stage, including
-            # peers with no shared layers.
-            send_meta.need_send *= remote_pp_size
+        send_meta.need_send = self._expected_peer_workers(
+            remote_tp_ranks, remote_pp_size
+        )
         logger.debug(
             "Mooncake request %s will be served by %d consumer workers: TP ranks=%s",
             send_meta.transfer_id,
@@ -2332,7 +2418,7 @@ class MooncakeConnectorWorker:
             remote_tp_ranks,
         )
 
-    def _build_transfer_params(
+    async def _build_transfer_params(
         self,
         ready_reqs: list[tuple[ReqId, SendBlockMeta]],
         agent_meta: MooncakeXferMetadata,
@@ -2345,266 +2431,52 @@ class MooncakeConnectorWorker:
         list[ReqId],
         str | None,
     ]:
-        src_chunks: list[NDArray[np.uint64]] = []
-        dst_chunks: list[NDArray[np.uint64]] = []
-        length_chunks: list[NDArray[np.uint64]] = []
+        requests: list[TransferRequest] = []
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
-        remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
         for d_req_id, send_meta in ready_reqs:
-            try:
-                remote_block_ids = agent_meta.req_blocks[d_req_id][1]
-                # Full D hits still acknowledge every rank to release P's pages.
-                if not any(remote_block_ids):
-                    continue
-                region_runs = self._get_request_block_runs(
-                    d_req_id, send_meta, agent_meta, local_regions, remote_regions
-                )
-            except (ValueError, IndexError, KeyError) as error:
-                logger.exception(
-                    "Failed to plan Mooncake transfer for request %s "
-                    "(transfer_id=%s) to %s: local TP rank=%d/%d, "
-                    "remote TP rank=%d/%d, local blocks per group=%s, "
-                    "remote blocks per group=%s: %s",
-                    d_req_id,
-                    send_meta.transfer_id,
-                    remote_session,
-                    self.tp_rank,
-                    self.tp_size,
-                    agent_meta.remote_tp_rank,
-                    agent_meta.remote_tp_size,
-                    [len(group) for group in send_meta.local_block_ids],
-                    [
-                        len(group)
-                        for group in agent_meta.req_blocks.get(d_req_id, ("", []))[1]
-                    ],
-                    error,
-                )
+            entry = agent_meta.req_blocks.get(d_req_id)
+            if entry is None:
                 err_reqs.append(d_req_id)
-                if err_msg is None:
-                    err_msg = str(error)
+                err_msg = err_msg or "KV group count mismatch"
                 continue
-            descriptor_count = 0
-            for local_region, remote_region, runs in zip(
-                local_regions, remote_regions, region_runs
-            ):
-                local_ids, remote_ids, run_starts, run_lens = runs
-                if len(local_ids) == 0:
-                    continue
-                (
-                    should_transfer,
-                    src_region_offset,
-                    dst_region_offset,
-                    transfer_len,
-                ) = self._get_sender_transfer_plan(
-                    local_kv_block_len=local_region.kv_block_len,
-                    remote_kv_block_len=remote_region.kv_block_len,
-                    remote_tp_rank=agent_meta.remote_tp_rank,
-                    remote_tp_size=agent_meta.remote_tp_size,
+            requests.append(
+                TransferRequest(
+                    key=d_req_id,
+                    src_block_ids=send_meta.local_block_ids,
+                    dst_block_ids=entry[1],
                 )
-                if not should_transfer:
-                    # Replicated KV cache: only one producer rank in the TP group
-                    # needs to send the actual bytes for this paired decoder rank.
-                    # TODO: Account for replicated producer KV in
-                    # get_target_remote_ranks() so we can avoid sending
-                    # unnecessary ZMQ requests and remove this branch.
-                    continue
-
-                assert src_region_offset + transfer_len <= local_region.kv_block_len, (
-                    "Computed source transfer region exceeds local KV block size."
-                )
-                assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
-                    "Destination transfer region exceeds remote KV block size."
-                )
-                # Collapse one contiguous block group into a single larger
-                # transfer descriptor when the per-block copy is identical.
-                can_coalesce = _can_coalesce_block_transfers(
-                    local_region_block_len=local_region.block_len,
-                    remote_region_block_len=remote_region.block_len,
-                    src_region_offset=src_region_offset,
-                    dst_region_offset=dst_region_offset,
-                    transfer_len=transfer_len,
-                )
-
-                if can_coalesce:
-                    local_ids = local_ids[run_starts]
-                    remote_ids = remote_ids[run_starts]
-                    length_chunks.append(
-                        run_lens.astype(np.uint64) * np.uint64(transfer_len)
-                    )
-                else:
-                    length_chunks.append(
-                        np.full(len(local_ids), transfer_len, dtype=np.uint64)
-                    )
-                descriptor_count += len(local_ids)
-                src_chunks.append(
-                    local_ids.astype(np.uint64) * np.uint64(local_region.block_len)
-                    + np.uint64(local_region.base_addr + src_region_offset)
-                )
-                dst_chunks.append(
-                    remote_ids.astype(np.uint64) * np.uint64(remote_region.block_len)
-                    + np.uint64(remote_region.base_addr + dst_region_offset)
-                )
-
-            logger.debug(
-                "Sending kv_caches for request %s (%d descriptors) to %s",
-                d_req_id,
-                descriptor_count,
-                remote_session,
             )
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            plan_err_reqs,
+            plan_err_msg,
+        ) = plan_transfer_descriptors(
+            requests,
+            src_regions=local_regions,
+            dst_regions=remote_regions,
+            group_specs=self.kv_cache_config.transfer_groups,
+            blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            plan=lambda src, dst: self._get_sender_transfer_plan(
+                local_kv_block_len=src.kv_block_len,
+                remote_kv_block_len=dst.kv_block_len,
+                remote_tp_rank=agent_meta.remote_tp_rank,
+                remote_tp_size=agent_meta.remote_tp_size,
+            ),
+        )
+        err_reqs.extend(plan_err_reqs)
+        return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg or plan_err_msg
 
-        if not src_chunks:
-            src_ptrs = np.empty(0, dtype=np.uint64)
-            dst_ptrs = np.empty(0, dtype=np.uint64)
-            lengths = np.empty(0, dtype=np.uint64)
-        elif len(src_chunks) == 1:
-            src_ptrs = src_chunks[0]
-            dst_ptrs = dst_chunks[0]
-            lengths = length_chunks[0]
-        else:
-            src_ptrs = np.concatenate(src_chunks)
-            dst_ptrs = np.concatenate(dst_chunks)
-            lengths = np.concatenate(length_chunks)
-        return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
-
-    def _get_request_block_runs(
-        self,
-        d_req_id: ReqId,
-        send_meta: SendBlockMeta,
-        agent_meta: MooncakeXferMetadata,
-        local_regions: list[TransferRegion],
-        remote_regions: list[TransferRegion],
-    ) -> list[tuple[np.ndarray, ...]]:
-        """Pair pages once per endpoint group pair, retaining region order."""
-        remote_block_ids_per_group = agent_meta.req_blocks[d_req_id][1]
-        local_block_ids_by_group = send_meta.local_block_ids
-        remote_block_ids_by_group = remote_block_ids_per_group
-        groups_match = _groups_match(local_regions, remote_regions)
-        if groups_match:
-            if len(send_meta.local_block_ids) != len(remote_block_ids_per_group):
-                raise ValueError("KV group count mismatch")
-            # Keep KV-cache group identity. Hybrid/HMA groups can carry
-            # different semantics (e.g. full-attention KV pages vs GDN/Mamba
-            # inner-state slots), so their block IDs must not be flattened and
-            # reused for every registered region.
-            local_block_ids_by_group = []
-            remote_block_ids_by_group = []
-            group_specs = self.kv_cache_config.transfer_groups
-            for group_index, (local_group, remote_group) in enumerate(
-                zip(send_meta.local_block_ids, remote_block_ids_per_group)
-            ):
-                is_mamba_group = issubclass(
-                    group_specs[group_index].manager_cls, MambaManager
-                )
-                if is_mamba_group:
-                    # Mamba/GDN prefix caching can use null blocks only as
-                    # placeholders. They do not carry transferable
-                    # state, so skip them on both producer and consumer sides.
-                    local_group = [
-                        block_id
-                        for block_id in local_group
-                        if block_id != NULL_BLOCK_ID
-                    ]
-                    remote_group = [
-                        block_id
-                        for block_id in remote_group
-                        if block_id != NULL_BLOCK_ID
-                    ]
-
-                n_local = len(local_group)
-                n_remote = len(remote_group)
-                if n_local < n_remote:
-                    logger.error(
-                        "req %s: local blocks(%d) < remote blocks(%d) "
-                        "in a KV cache group (is_mamba_group=%s)",
-                        d_req_id,
-                        n_local,
-                        n_remote,
-                        is_mamba_group,
-                    )
-                    raise ValueError("P num blocks less than D")
-                elif n_local > n_remote:
-                    # Partial prefix cache hit: just read uncomputed blocks.
-                    local_group = local_group[-n_remote:] if n_remote > 0 else []
-                local_block_ids_by_group.append(local_group)
-                remote_block_ids_by_group.append(remote_group)
-
-            # Normalize before kernel expansion so _contiguous_runs can
-            # coalesce the resulting ascending kernel runs.
-            for group_index, (local_group, remote_group) in enumerate(
-                zip(local_block_ids_by_group, remote_block_ids_by_group)
-            ):
-                if local_group:
-                    (
-                        local_block_ids_by_group[group_index],
-                        remote_block_ids_by_group[group_index],
-                    ) = _normalize_paired_block_order(local_group, remote_group)
-
-            local_block_ids_by_group = _kernel_block_ids(
-                local_block_ids_by_group,
-                self.kv_cache_config.transfer_groups,
-                self._physical_blocks_per_logical_kv_block,
-            )
-            remote_block_ids_by_group = _kernel_block_ids(
-                remote_block_ids_by_group,
-                self.kv_cache_config.transfer_groups,
-                self._physical_blocks_per_logical_kv_block,
-            )
-
-        block_runs: dict[
-            tuple[int, tuple[int, ...], int, tuple[int, ...]],
-            tuple[np.ndarray, ...],
-        ] = {}
-        region_runs: list[tuple[np.ndarray, ...]] = []
-        for local_region, remote_region in zip(local_regions, remote_regions):
-            group_key = (
-                local_region.group_index,
-                local_region.shared_group_ids,
-                remote_region.group_index,
-                remote_region.shared_group_ids,
-            )
-            if group_key not in block_runs:
-                if not groups_match:
-                    source_group = local_region.group_index
-                    destination_group = remote_region.group_index
-                    if source_group < 0 or destination_group < 0:
-                        raise ValueError(
-                            "Opaque groups cannot use region-mapped planning"
-                        )
-                    local_ids = local_block_ids_by_group[source_group]
-                    remote_ids = remote_block_ids_by_group[destination_group]
-                    if len(local_ids) < len(remote_ids):
-                        raise ValueError(
-                            "Producer has fewer pages than the destination"
-                        )
-                    if any(block <= 0 for block in local_ids + remote_ids):
-                        raise ValueError(
-                            "Region-mapped imports cannot transfer null pages"
-                        )
-                    local_ids = local_ids[-len(remote_ids) :] if remote_ids else []
-                    local_ids, remote_ids = _normalize_paired_block_order(
-                        local_ids, remote_ids
-                    )
-                else:
-                    local_ids = _block_ids_for_region(
-                        local_block_ids_by_group,
-                        local_region.group_index,
-                        local_region.shared_group_ids,
-                    )
-                    remote_ids = _block_ids_for_region(
-                        remote_block_ids_by_group,
-                        remote_region.group_index,
-                        local_region.shared_group_ids,
-                    )
-                local_array = np.asarray(local_ids, dtype=np.int64)
-                remote_array = np.asarray(remote_ids, dtype=np.int64)
-                block_runs[group_key] = (
-                    local_array,
-                    remote_array,
-                    *_contiguous_runs(local_array, remote_array),
-                )
-            region_runs.append(block_runs[group_key])
-        return region_runs
+    def _logical_to_kernel_block_ids(
+        self, block_ids: list[list[int]]
+    ) -> list[list[int]]:
+        return _kernel_block_ids(
+            block_ids,
+            self.kv_cache_config.transfer_groups,
+            self._physical_blocks_per_logical_kv_block,
+        )
 
     def _validate_region_mapped_layout(
         self,
@@ -3480,6 +3352,11 @@ class MooncakeConnectorWorker:
             if send_meta is not None:
                 assert not send_meta.ready.is_set()
                 send_meta.aborted.set()
+            # A pull that arrives after the abort must fail at once instead of
+            # creating a placeholder that waits for blocks that never come.
+            expired = getattr(self, "_expired_transfer_ids", None)
+            if expired is not None:
+                expired[transfer_id] = time.perf_counter()
 
     async def _send_lease_heartbeats(
         self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]
@@ -3509,17 +3386,56 @@ class MooncakeConnectorWorker:
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache
 
-    def _prepare_transfer_regions(
-        self, meta: MooncakeXferMetadata
-    ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
-        """Align and coalesce once per peer layout.
+    def _local_transfer_regions(self) -> tuple[list[TransferRegion], str | None]:
+        """Expand this worker's registered cache views into transfer regions."""
+        shared_groups: list[tuple[int, ...]] | None = self.region_shared_groups
+        if len(self.region_shared_groups) != len(self.registered_layer_names):
+            if _SHARED_REGION_GROUP_ID in self.registered_group_indices:
+                return [], (
+                    "Mooncake shared-group metadata does not match "
+                    "registered layers, so a shared packed region cannot "
+                    "be transferred."
+                )
+            shared_groups = None
+        row_offsets: list[int] | None = self.region_row_offsets
+        if len(self.region_row_offsets) != len(self.registered_layer_names):
+            row_offsets = None
+        return (
+            self._get_transfer_regions(
+                self.kv_caches_base_addr,
+                self.block_len_per_layer,
+                self.kv_block_len_per_layer,
+                self.registered_layer_names,
+                self.registered_layer_indices,
+                self.registered_group_indices,
+                shared_groups,
+                row_offsets,
+            ),
+            None,
+        )
 
-        `send_kv_to_decode` runs on every scheduler batch. The registered
-        layout does not change until the next `register_kv_caches`.
-        """
-        if meta.requires_draft_context_kv and not self.projects_draft_context_kv:
+    def _prepare_transfer_regions(
+        self, meta: MooncakeXferMetadata, *, is_pull: bool = False
+    ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
+        """Align and coalesce once per peer layout and transfer direction."""
+        consumer_needs_draft = (
+            self.projects_draft_context_kv
+            if is_pull
+            else meta.requires_draft_context_kv
+        )
+        producer_has_draft = (
+            meta.requires_draft_context_kv
+            if is_pull
+            else self.projects_draft_context_kv
+        )
+        if consumer_needs_draft and not producer_has_draft:
             msg = "Missing draft context KV. Configure the same drafter on prefill."
             return [], [], msg
+        producer_replicated = (
+            meta.producer_cache_replicated
+            if is_pull
+            else self._producer_cache_is_replicated()
+        )
         cache_key = (
             meta.remote_hostname,
             meta.remote_port,
@@ -3534,11 +3450,14 @@ class MooncakeConnectorWorker:
             tuple(meta.registered_group_indices),
             tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
             tuple(meta.registered_row_offsets),
+            is_pull,
+            producer_replicated,
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
             # A new layout_id can carry a layout this cache already holds.
-            self._remember_peer_layout(meta, cached)
+            if not is_pull:
+                self._remember_peer_layout(meta, cached)
             return cached
 
         def finish(
@@ -3550,32 +3469,9 @@ class MooncakeConnectorWorker:
             self._prepared_transfer_regions[cache_key] = prepared
             return prepared
 
-        shared_groups: list[tuple[int, ...]] | None = self.region_shared_groups
-        if len(self.region_shared_groups) != len(self.registered_layer_names):
-            if _SHARED_REGION_GROUP_ID in self.registered_group_indices:
-                return finish(
-                    [],
-                    [],
-                    (
-                        "Mooncake shared-group metadata does not match "
-                        "registered layers, so a shared packed region cannot "
-                        "be transferred."
-                    ),
-                )
-            shared_groups = None
-        local_rows: list[int] | None = self.region_row_offsets
-        if len(self.region_row_offsets) != len(self.registered_layer_names):
-            local_rows = None
-        local_regions = self._get_transfer_regions(
-            self.kv_caches_base_addr,
-            self.block_len_per_layer,
-            self.kv_block_len_per_layer,
-            self.registered_layer_names,
-            self.registered_layer_indices,
-            self.registered_group_indices,
-            shared_groups,
-            local_rows,
-        )
+        local_regions, local_err = self._local_transfer_regions()
+        if local_err is not None:
+            return finish([], [], local_err)
         remote_shared_groups = [
             tuple(groups) for groups in meta.registered_shared_group_ids
         ]
@@ -3607,8 +3503,11 @@ class MooncakeConnectorWorker:
             return finish([], [], align_err)
         groups_match = _groups_match(local_regions, remote_regions)
         if not groups_match:
+            # The local side is the destination of a pull read.
             layout_err = self._validate_region_mapped_layout(
-                meta, pre_align_local, pre_align_remote
+                meta,
+                pre_align_remote if is_pull else pre_align_local,
+                pre_align_local if is_pull else pre_align_remote,
             )
             if layout_err is not None:
                 return finish([], [], layout_err)
@@ -3624,7 +3523,7 @@ class MooncakeConnectorWorker:
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if groups_match and (tp_ratio == 1 or self._producer_cache_is_replicated()):
+        if groups_match and (tp_ratio == 1 or producer_replicated):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
@@ -3641,7 +3540,8 @@ class MooncakeConnectorWorker:
             )
         prepared = (local_regions, remote_regions, None)
         self._prepared_transfer_regions[cache_key] = prepared
-        self._remember_peer_layout(meta, prepared)
+        if not is_pull:
+            self._remember_peer_layout(meta, prepared)
         return prepared
 
     def _peer_layout_key(self, meta: MooncakeXferMetadata) -> tuple:
@@ -3677,28 +3577,31 @@ class MooncakeConnectorWorker:
             self._layout_by_peer.move_to_end(key)
         return stored
 
+    def _filter_host_block_ids(self, block_ids: list[list[int]]) -> list[list[int]]:
+        """Empty the host-resident groups a non-leader rank does not own."""
+        if not self.kv_cache_config.hisparse_shared_host_pool or (
+            self.tp_rank == get_hisparse_host_leader_rank(self.vllm_config)
+        ):
+            return block_ids
+        return [
+            [] if group.host_resident else ids
+            for group, ids in zip(self.kv_cache_config.transfer_groups, block_ids)
+        ]
+
     def _build_pull_metadata(
         self,
         pull_metas: dict[ReqId, PullReqMeta],
         *,
         include_layout: bool,
     ) -> MooncakeXferMetadata:
-        skip_host = self.kv_cache_config.hisparse_shared_host_pool and (
-            self.tp_rank != get_hisparse_host_leader_rank(self.vllm_config)
-        )
         # Filter the wire request only; all ranks retain their completion state.
-        req_blocks = {}
-        for req_id, pull_meta in pull_metas.items():
-            block_ids = pull_meta.local_block_ids
-            if skip_host:
-                block_ids = [
-                    [] if group.host_resident else ids
-                    for group, ids in zip(
-                        self.kv_cache_config.transfer_groups,
-                        block_ids,
-                    )
-                ]
-            req_blocks[req_id] = (pull_meta.transfer_id, block_ids)
+        req_blocks = {
+            req_id: (
+                pull_meta.transfer_id,
+                self._filter_host_block_ids(pull_meta.local_block_ids),
+            )
+            for req_id, pull_meta in pull_metas.items()
+        }
         return self._build_xfer_metadata(req_blocks, include_regions=include_layout)
 
     def _build_xfer_metadata(
@@ -3899,6 +3802,16 @@ async def _recv_unless_lost(
 def _async_loop(loop: asyncio.AbstractEventLoop):
     asyncio.set_event_loop(loop)
     loop.run_forever()
+
+
+async def _cancel_loop_tasks() -> None:
+    """Cancel every task of a background loop, then let it stop."""
+    current = asyncio.current_task()
+    tasks = [task for task in asyncio.all_tasks() if task is not current]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:

@@ -17,13 +17,14 @@ free. This module owns the whole state machine:
 import time
 from collections.abc import Iterator
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.pull_protocol import (
-    ReaderKey,
-    TransferId,
-)
+from vllm.distributed.kv_transfer.kv_connector.utils import EngineId
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+TransferId = str
+# Identifies one reader worker: (engine_id, tp_rank, pp_rank).
+ReaderKey = tuple[EngineId, int, int]
 
 
 class ReadLeases:
@@ -41,11 +42,14 @@ class ReadLeases:
 
     def hand_out(
         self, transfer_id: TransferId, reader: ReaderKey, now: float | None = None
-    ) -> None:
+    ) -> bool:
         """Record that `reader` was given `transfer_id`'s block ids."""
+        if reader in self._reported.get(transfer_id, ()):
+            return False
         self._held.setdefault(transfer_id, {})[reader] = (
             time.perf_counter() if now is None else now
         )
+        return True
 
     def renew(
         self, transfer_id: TransferId, reader: ReaderKey, now: float | None = None
@@ -102,4 +106,4 @@ class ReadLeases:
         self._reported.pop(transfer_id, None)
 
     def __iter__(self) -> Iterator[TransferId]:
-        return iter(list(self._held))
+        return iter(set(self._held) | set(self._reported))
