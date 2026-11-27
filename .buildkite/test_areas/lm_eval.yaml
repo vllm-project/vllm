@@ -1556,9 +1556,12 @@ steps:
       - vllm/v1/kv_offload/
       - vllm/v1/simple_kv_offload/
       - tests/evals/gsm8k/test_gsm8k_offloading.py
+      - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+      - tests/v1/kv_connector/umbp_test_utils.py
+      - vllm/models/qwen4_exp/
       - vllm/platforms/rocm.py
       commands:
-      - VLLM_ROCM_USE_AITER=1 pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
+      - VLLM_ROCM_USE_AITER=1 pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash or umbp-qwen3.8"
 
 - label: ":nvidia: (H200 MIG 35GB) MRCR Eval Small Models"
   key: mrcr-eval-small-models
