@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -1477,7 +1477,7 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
 def test_transfer_polling_needs_every_child():
     multi = _make_multi_connector(["MockConnector", "MockConnector"])
     assert multi.supports_transfer_polling is False
-    first, second = multi._connectors
+    first, second = cast(list[MagicMock], multi._connectors)
     first.supports_transfer_polling = True
     assert multi.supports_transfer_polling is False
     second.supports_transfer_polling = True

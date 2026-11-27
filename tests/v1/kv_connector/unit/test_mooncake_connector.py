@@ -2107,7 +2107,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
         )
 
         prefill_worker._expire_sends()
-        finished_reqs, _ = prefill_worker.get_finished()
+        finished_reqs = prefill_worker.get_transfer_results().finished_sending
 
         assert "p-req-expired" in finished_reqs
         assert "p-req-active" not in finished_reqs
@@ -2127,6 +2127,7 @@ def test_transfer_results_do_not_wait_for_the_sender_loop():
         producer = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert producer is not None
         unblock = threading.Event()
         try:
             producer.finished_sending_reqs.add("p-req-sent")
