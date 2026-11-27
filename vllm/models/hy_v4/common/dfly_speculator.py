@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -126,6 +127,9 @@ class HYV4DFlySpeculator(DraftModelSpeculator):
         if (
             kv_transfer is not None
             and kv_transfer.kv_connector != "DecodeBenchConnector"
+            and not KVConnectorFactory.get_connector_class(
+                kv_transfer
+            ).restores_only_local_kv(kv_transfer)
         ):
             raise ValueError("DFly does not support PD disaggregation")
         if (

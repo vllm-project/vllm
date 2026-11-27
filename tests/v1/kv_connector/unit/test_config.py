@@ -251,3 +251,27 @@ def test_nixl_connector_transfer_mode(mode, expected):
             KVConnectorFactory.get_connector_class(ktc)
     else:
         assert KVConnectorFactory.get_connector_class(ktc).__name__ == expected
+
+
+@pytest.mark.parametrize(
+    ("connectors", "expected"),
+    [
+        (["SimpleCPUOffloadConnector"], True),
+        (["NixlConnector"], False),
+        (["SimpleCPUOffloadConnector", "SimpleCPUOffloadConnector"], True),
+        (["SimpleCPUOffloadConnector", "NixlConnector"], False),
+    ],
+)
+def test_restores_only_local_kv(connectors, expected):
+    children = [{"kv_connector": c, "kv_role": "kv_both"} for c in connectors]
+    config = (
+        KVTransferConfig(**children[0])
+        if len(children) == 1
+        else KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"connectors": children},
+        )
+    )
+    connector_cls = KVConnectorFactory.get_connector_class(config)
+    assert connector_cls.restores_only_local_kv(config) is expected

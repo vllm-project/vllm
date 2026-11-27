@@ -42,6 +42,7 @@ from vllm.v1.simple_kv_offload.worker import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.block_pool import BlockPool
@@ -66,6 +67,10 @@ _DISK_ONLY_KEYS = (
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
+
+    @classmethod
+    def restores_only_local_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        return True
 
     @property
     def requires_kv_delivery(self) -> bool:

@@ -295,6 +295,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @classmethod
+    def restores_only_local_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).restores_only_local_kv(c)
+            for c in children
+        )
+
+    @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
     ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
