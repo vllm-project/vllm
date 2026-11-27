@@ -581,8 +581,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
         requests to this per-layer FA3/FA4 selection. For other configurations,
         force FA4 for all layers to avoid the mixed
         FA3+FA4 penalty.
-        When FA4 is unavailable or batch invariance disables it, fall back to
-        Triton, or to FlashInfer for a plain Gemma4 with an NVFP4 KV cache.
+        When FA4 is not available, fall back to Triton, or to FlashInfer for a
+        plain Gemma4 with an NVFP4 KV cache, which Triton cannot read.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
