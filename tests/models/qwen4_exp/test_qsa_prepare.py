@@ -158,8 +158,6 @@ def _check_main_outputs(
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
-# The main cache follows the indexer dtype. FP8 Q for the trailing prefill's
-# rows, as for FlashInfer FP8 prefill, comes only with an FP8 cache.
 @pytest.mark.parametrize(
     "indexer_dtype,fp8_prefill_q",
     [
