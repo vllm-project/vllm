@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    PinnedBlockSet,
     generate_block_hash_extra_keys,
     generate_lookahead_block_hash_extra_keys,
     get_block_hash,
@@ -33,6 +34,11 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _on_pinned_reuse(block: KVCacheBlock) -> None:
+    """Default `on_reuse` callback for a released prefetch reservation."""
+    return None
 
 
 class BlockHashToBlockMap:
@@ -747,6 +753,112 @@ class BlockPool:
             if block.ref_cnt == 0:
                 released.append(block)
         self.free_block_queue.append_n(released)
+
+    def pin_blocks_by_hash(
+        self,
+        block_hashes: Sequence[BlockHash],
+        kv_cache_group_ids: Sequence[int],
+        block_size: int,
+        max_fraction: float = 0.25,
+    ) -> list[PinnedBlockSet] | None:
+        """Reserve blocks for KV that is loaded ahead of its request.
+
+        This is `get_new_blocks` for data that is on its way into the pool
+        before the request that will consume it exists: the caller gets blocks
+        it may fill from an external tier, and `publish_pinned_hashes` is what
+        makes them visible to prefix caching. Nothing here is request-scoped,
+        so no `Request` is involved; the handover is the ordinary hit path, in
+        which the arriving request `touch`es the published blocks.
+
+        Args:
+            block_hashes: The hashes to reserve, in token order.
+            kv_cache_group_ids: Groups to reserve in. Every group named here
+                must be served, because a prefix-cache hit needs all of them.
+            block_size: Tokens per block of those groups.
+            max_fraction: Upper bound on the share of the free queue a single
+                reservation may take, so a prefetch cannot starve admissions.
+
+        Returns:
+            One set per group, or None when the pool declines the reservation.
+            Hashes that every group already serves cost nothing and are not
+            part of any returned set.
+        """
+        if self.enable_kv_cache_events:
+            # A reservation cannot be described on the event stream: BlockStored
+            # carries the request's token ids. A silently diverging stream is
+            # worse than no prefetch, so decline instead.
+            logger.debug("Skipping prefetch reservation: KV cache events are on")
+            return None
+        if not kv_cache_group_ids:
+            return None
+
+        group_ids = list(kv_cache_group_ids)
+        wanted = list(dict.fromkeys(block_hashes))
+        if not wanted:
+            return []
+        covered = {
+            block_hash
+            for block_hash in wanted
+            if self.get_cached_block(block_hash, group_ids) is not None
+        }
+        missing = [h for h in wanted if h not in covered]
+        if not missing:
+            return []
+
+        needed = len(missing) * len(group_ids)
+        limit = int(self.get_num_free_blocks() * max_fraction)
+        if needed > limit:
+            logger.debug(
+                "Skipping prefetch reservation of %d blocks: limit is %d",
+                needed,
+                limit,
+            )
+            return None
+
+        return [
+            PinnedBlockSet(
+                kv_cache_group_id=group_id,
+                block_hashes=list(missing),
+                blocks=self.get_new_blocks(len(missing)),
+                block_size=block_size,
+            )
+            for group_id in group_ids
+        ]
+
+    def publish_pinned_hashes(self, pinned: PinnedBlockSet) -> None:
+        """Publish a reserved set, making it hittable.
+
+        Call this only once the KV actually reached the blocks: a hit before
+        that reads uninitialised memory.
+        """
+        for i, (block_hash, block) in enumerate(
+            zip(pinned.block_hashes, pinned.blocks)
+        ):
+            if block.is_null:
+                continue
+            if block.block_hash is not None:
+                # Handed out of the cached tail: the stale entries go first.
+                self._emit_block_removed_events(
+                    self._remove_cached_block_hashes(block)
+                )
+            self._insert_block_hash(
+                make_block_hash_with_group_id(block_hash, pinned.kv_cache_group_id),
+                block,
+                num_tokens=pinned.block_size if i == 0 else None,
+            )
+
+    def release_pinned(
+        self,
+        pinned: PinnedBlockSet,
+        on_reuse: Callable[[KVCacheBlock], None] | None = None,
+    ) -> None:
+        """Give a reserved set back to the pool, keeping it readable.
+
+        The blocks keep their hashes, so a request that arrives after this call
+        still hits them; `on_reuse` fires when the pool hands one of them to
+        somebody else, which is the signal to stop reading it.
+        """
+        self.unpin_blocks(pinned.blocks, on_reuse or _on_pinned_reuse)
 
     def deprioritize_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
         """Deprioritize free blocks so they are evicted after uncached blocks
