@@ -189,19 +189,6 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
-HY4-Flash keeps this off by default. On CUDA, each TP-local table (BF16 or
-FP8 embedding rows, plus BF16 row scales for FP8) uses one `/dev/shm` mapping
-per co-located Engram DP group. Only the group leader loads checkpoint values.
-All replicas must load the same logical Engram tensors in the same order;
-a mismatch fails explicitly instead of mapping the wrong table. On other
-platforms, HY4-Flash warns and keeps private offloaded tables.
-
-```bash
-vllm serve tencent/Hy4-flash-FP8 \
-  --tensor-parallel-size 2 --data-parallel-size 4 \
-  --engram-config '{"cpu_offload": true, "dp_shared_memory": true}'
-```
-
 On ROCm, `VLLM_ROCM_ENGRAM_HIP_VMM=1` places the shared tables in HIP VMM host
 memory instead, which is faster to fill than `/dev/shm`. It is off by default:
 on affected amdgpu drivers (for example 6.16.6) the tables' host memory is not
