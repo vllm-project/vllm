@@ -229,7 +229,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # A local request on a decode node: a later pull may land in its
             # blocks while its last step's drafter still writes them.
             if self._defers_release(block_ids):
-                self._reqs_to_release.append(request.request_id)
+                self._reqs_to_release.add(request.request_id)
                 return True, None
             return False, None
 
@@ -262,7 +262,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                 # The next pull may RDMA into these blocks while this step's GPU
                 # work (e.g. the MTP drafter) still writes them. A request still
                 # receiving keeps the upstream path: it is freed on recv done.
-                self._reqs_to_release.append(request.request_id)
+                self._reqs_to_release.add(request.request_id)
                 return True, None
             return False, None
 

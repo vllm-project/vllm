@@ -97,7 +97,7 @@ def test_abort_during_recv_is_freed_once_on_recv():
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
-    assert connector._reqs_to_release == []
+    assert connector._reqs_to_release == set()
     assert request.request_id in scheduler.requests  # the NIC may still write
     assert connector._reqs_receiving == set()  # cleared when the request ended
 
@@ -124,11 +124,11 @@ def test_finished_request_is_released_by_the_worker():
         scheduler_output, create_model_runner_output([request], use_eos=True)
     )
     assert request.status == RequestStatus.FINISHED_STOPPED
-    assert connector._reqs_to_release == [request.request_id]
+    assert connector._reqs_to_release == {request.request_id}
     assert request.request_id in scheduler.requests
 
     scheduler_output = scheduler.schedule()
-    assert connector._reqs_to_release == []  # handed to the worker
+    assert connector._reqs_to_release == set()  # handed to the worker
     output = _with_kv_output(finished_sending={request.request_id})
     scheduler.update_from_output(scheduler_output, output)
     assert request.request_id not in scheduler.requests
@@ -150,7 +150,7 @@ def test_cpu_kv_buffer_is_not_deferred():
     scheduler.update_from_output(
         scheduler_output, create_model_runner_output([request], use_eos=True)
     )
-    assert connector._reqs_to_release == []
+    assert connector._reqs_to_release == set()
     assert request.request_id not in scheduler.requests
 
 
@@ -164,10 +164,10 @@ def _received(scheduler, request):
 
 def _release_by_worker(scheduler, connector, request):
     """The worker reports the deferred release; the blocks are then freed once."""
-    assert connector._reqs_to_release == [request.request_id]
+    assert connector._reqs_to_release == {request.request_id}
     assert request.request_id in scheduler.requests
     scheduler_output = scheduler.schedule()
-    assert connector._reqs_to_release == []
+    assert connector._reqs_to_release == set()
     output = _with_kv_output(finished_sending={request.request_id})
     scheduler.update_from_output(scheduler_output, output)
     assert request.request_id not in scheduler.requests
@@ -229,7 +229,7 @@ def test_local_request_on_producer_node_is_not_deferred():
     scheduler, connector = _host_pinned_d_scheduler(kv_role="kv_producer")
     request = create_request(request_id=8, num_tokens=40, max_tokens=1)
     _finish_locally(scheduler, request)
-    assert connector._reqs_to_release == []
+    assert connector._reqs_to_release == set()
     assert request.request_id not in scheduler.requests
 
 

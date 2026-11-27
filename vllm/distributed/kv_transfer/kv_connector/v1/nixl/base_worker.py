@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -240,7 +240,7 @@ class DeferredBlockRelease:
     def __init__(self) -> None:
         self._pending: list[tuple[ReqId, torch.cuda.Event]] = []
 
-    def on_step(self, finished: list[ReqId]) -> None:
+    def on_step(self, finished: Collection[ReqId]) -> None:
         if not finished:
             return
         event = torch.cuda.Event()
@@ -3702,7 +3702,7 @@ class NixlBaseConnectorWorker:
         self._sync_device_after_direct_recv(direct_device_recving)
 
         if self.deferred_recv_report is not None:
-            self.deferred_recv_report.on_step(sorted(post_processed))
+            self.deferred_recv_report.on_step(post_processed)
             done_recving = (
                 done_recving - post_processed
             ) | self.deferred_recv_report.ready()

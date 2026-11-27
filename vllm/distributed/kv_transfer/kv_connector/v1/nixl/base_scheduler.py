@@ -78,7 +78,7 @@ class NixlBaseConnectorScheduler:
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
         self._host_pinned_kv = vllm_config.cache_config.kv_cache_host_pinned
-        self._reqs_to_release: list[ReqId] = []
+        self._reqs_to_release: set[ReqId] = set()
         # D side: requests whose pull is still in flight (cleared on recv done).
         self._reqs_receiving: set[ReqId] = set()
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
@@ -603,7 +603,7 @@ class NixlBaseConnectorScheduler:
         meta.reqs_to_send = self._reqs_need_send
         if self._host_pinned_kv:
             meta.reqs_to_release = self._reqs_to_release
-            self._reqs_to_release = []
+            self._reqs_to_release = set()
         # Clock reference for reqs_to_send: deadlines above are in this
         # process's perf_counter domain; workers (possibly on other nodes,
         # where perf_counter has a different epoch) rebase against this.
