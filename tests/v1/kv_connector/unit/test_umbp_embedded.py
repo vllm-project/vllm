@@ -580,6 +580,7 @@ def test_two_phase_lookup_stays_within_each_data_parallel_replica(socket_dir):
                 UMBPRuntimeConfig.from_vllm(vllm_config)
             )
             handle = runtime.create_scheduler_handle(namespace, topology, None)
+            assert isinstance(handle, _MoriSchedulerHandle)
             for rank, pool in zip(topology.all_namespaces(), rank_pools, strict=True):
                 server = _MoriLookupServer(handle._paths[rank], pool)
                 server.start()
