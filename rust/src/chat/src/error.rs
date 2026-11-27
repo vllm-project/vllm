@@ -77,6 +77,17 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    /// The prompt has no placeholder left for some media items: the request's
+    /// token IDs or chat template leave it out, or the media sits where the
+    /// template renders none. Python's `PromptUpdateMismatchError`.
+    #[error(
+        "placeholder token `{placeholder}` was not found in tokenized prompt for {remaining} remaining `{modality}` item(s)"
+    )]
+    MissingMultimodalPlaceholder {
+        placeholder: String,
+        remaining: usize,
+        modality: llm_multimodal::Modality,
+    },
     #[error(
         "failed to prepare media after the last preprocessed feature range, ending at offset {offset}"
     )]
@@ -227,6 +238,7 @@ impl Error {
             | Self::UnsupportedModality { .. }
             | Self::RustFrontendUnsupportedModality { .. }
             | Self::MmLimitExceeded { .. }
+            | Self::MissingMultimodalPlaceholder { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => {
                 ErrorKind::invalid_request()
