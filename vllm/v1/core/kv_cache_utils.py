@@ -286,6 +286,9 @@ class FreeKVCacheBlockQueue:
         # in the queue has prev and next blocks.
         self.fake_free_list_head = KVCacheBlock(block_id=-1)
         self.fake_free_list_tail = KVCacheBlock(block_id=-1)
+        # First block inserted via append/append_n (the cached/evict-last tail).
+        # Maintained so middle-tier blocks can be spliced before it in O(1).
+        self._cached_head: KVCacheBlock | None = None
         if self.num_free_blocks > 0:
             # Connect fake_head and fake_tail to the first and last block
             # respectively.
@@ -328,6 +331,11 @@ class FreeKVCacheBlockQueue:
         head.next_free_block = next_block
         next_block.prev_free_block = head
 
+        if first_block is self._cached_head:
+            self._cached_head = (
+                next_block if next_block is not self.fake_free_list_tail else None
+            )
+
         # Remove the block from the linked list.
         first_block.prev_free_block = first_block.next_free_block = None
 
@@ -358,6 +366,10 @@ class FreeKVCacheBlockQueue:
             if next_block is not None:
                 self.fake_free_list_head.next_free_block = next_block
                 next_block.prev_free_block = self.fake_free_list_head
+            if curr_block is self._cached_head:
+                self._cached_head = (
+                    next_block if next_block is not self.fake_free_list_tail else None
+                )
             return [curr_block]
 
         # Pop n blocks from the head of the list
@@ -376,6 +388,10 @@ class FreeKVCacheBlockQueue:
             # the new first block.
             self.fake_free_list_head.next_free_block = curr_block
             curr_block.prev_free_block = self.fake_free_list_head
+        if self._cached_head is not None and self._cached_head.prev_free_block is None:
+            self._cached_head = (
+                curr_block if curr_block is not self.fake_free_list_tail else None
+            )
         return ret
 
     def remove(self, block: KVCacheBlock) -> None:
@@ -396,6 +412,11 @@ class FreeKVCacheBlockQueue:
         prev_block.next_free_block = next_block
         # Link the next block to the previous block.
         next_block.prev_free_block = prev_block
+
+        if block is self._cached_head:
+            self._cached_head = (
+                next_block if next_block is not self.fake_free_list_tail else None
+            )
 
         # Remove the block from the linked list.
         block.prev_free_block = block.next_free_block = None
@@ -422,6 +443,9 @@ class FreeKVCacheBlockQueue:
         # Connect the fake tail after the new block.
         block.next_free_block = tail
         tail.prev_free_block = block
+
+        if self._cached_head is None:
+            self._cached_head = block
 
         self.num_free_blocks += 1
 
@@ -471,7 +495,33 @@ class FreeKVCacheBlockQueue:
         last_block.next_free_block = tail
         tail.prev_free_block = last_block
 
+        if self._cached_head is None:
+            self._cached_head = blocks[0]
+
         self.num_free_blocks += len(blocks)
+
+    def insert_before_cached(self, blocks: list[KVCacheBlock]) -> None:
+        """Insert blocks right before the first appended block (or at the tail
+        if none exist), preserving FIFO order among inserted blocks."""
+        if not blocks:
+            return
+        target = (
+            self._cached_head
+            if self._cached_head is not None
+            else self.fake_free_list_tail
+        )
+        prev_block = target.prev_free_block
+        assert prev_block is not None
+        for block in blocks:
+            block.prev_free_block = prev_block
+            prev_block.next_free_block = block
+            prev_block = block
+        prev_block.next_free_block = target
+        target.prev_free_block = prev_block
+        self.num_free_blocks += len(blocks)
+
+    def reset_cached_head(self) -> None:
+        self._cached_head = None
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.

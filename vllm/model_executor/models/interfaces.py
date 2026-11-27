@@ -103,6 +103,13 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int],
         tuple[int, int, int],
     ]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+    ]
 )
 
 
@@ -982,7 +989,7 @@ class HasInnerState(Protocol):
     """
         A flag that indicates this model has inner state.
         Models that has inner state usually need access to the scheduler_config
-        for max_num_seqs, etc. True for e.g. both Mamba and Jamba.
+        for max_num_seqs, etc. True for e.g. both Mamba2 and Zamba2.
     """
 
 
@@ -1009,7 +1016,7 @@ class IsAttentionFree(Protocol):
     """
         A flag that indicates this model has no attention.
         Used for block manager and attention backend selection.
-        True for Mamba but not Jamba.
+        True for Mamba2 but not Zamba2.
     """
 
 
@@ -1029,7 +1036,7 @@ def is_attention_free(
 
 @runtime_checkable
 class IsHybrid(Protocol):
-    """The interface required for all models like Jamba that have both
+    """The interface required for all models like Zamba2 that have both
     attention and mamba blocks, indicates that
     hf_config has 'layers_block_type'"""
 

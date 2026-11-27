@@ -159,16 +159,12 @@ impl InferenceServiceImpl {
                         "multimodal gRPC requests must provide token_ids input",
                     ));
                 };
-                let mm_features =
-                    self.state.chat.prepare_media(media, &mut token_ids).await.map_err(
-                        |error| {
-                            if error.is_request_validation_error() {
-                                Status::invalid_argument(error.to_report_string())
-                            } else {
-                                Status::internal(error.to_report_string())
-                            }
-                        },
-                    )?;
+                let mm_features = self
+                    .state
+                    .chat
+                    .prepare_media(media, &mut token_ids)
+                    .await
+                    .map_err(chat_error_to_status)?;
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
             }
@@ -359,6 +355,7 @@ async fn generate_stream_responses(
                         token_ids,
                         logprobs,
                         sampling_mask: delta_sampling_mask,
+                        ..
                     },
                 finished,
             }) => {
@@ -390,11 +387,20 @@ async fn generate_stream_responses(
 }
 
 pub(super) fn text_error_to_status(error: vllm_text::Error) -> Status {
-    let message = error.to_report_string();
-    if error.is_request_validation_error() {
-        Status::invalid_argument(message)
-    } else {
-        Status::internal(message)
+    kind_to_status(error.kind(), error.to_report_string())
+}
+
+/// Like [`text_error_to_status`], for the chat pipeline, which wraps the text
+/// errors.
+pub(super) fn chat_error_to_status(error: vllm_chat::Error) -> Status {
+    kind_to_status(error.kind(), error.to_report_string())
+}
+
+fn kind_to_status(kind: vllm_text::ErrorKind, message: String) -> Status {
+    match kind {
+        vllm_text::ErrorKind::InvalidRequest { .. } => Status::invalid_argument(message),
+        vllm_text::ErrorKind::Unavailable => Status::unavailable(message),
+        vllm_text::ErrorKind::Internal => Status::internal(message),
     }
 }
 
@@ -423,6 +429,22 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn llm_errors_map_to_status_codes() {
+        let code = |error| text_error_to_status(vllm_text::Error::Llm(error)).code();
+        let message = "no engine can take the request".to_string();
+        assert_eq!(
+            code(vllm_llm::Error::Unavailable {
+                message: message.clone()
+            }),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(
+            code(vllm_llm::Error::RemoteInvalidRequest { message }),
+            tonic::Code::InvalidArgument
+        );
+    }
+
     /// The terminal output carries the sampling-mask rows of every update, and
     /// earlier outputs none.
     #[tokio::test]
@@ -430,6 +452,7 @@ mod tests {
         let delta = |token_id: u32, finished: Option<Finished>| DecodedTextEvent::TextDelta {
             decoded: DecodedText::default(),
             sampled: SampledDelta {
+                timestamp: 0.0,
                 token_ids: vec![token_id],
                 logprobs: None,
                 sampling_mask: Some(SamplingMask {

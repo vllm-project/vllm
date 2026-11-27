@@ -12,7 +12,7 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import MoEBackend, validate_moe_backend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import (
@@ -531,8 +531,9 @@ class SpeculativeConfig:
     # Advanced control
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
-    and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
-    activation scales on the platform's FP8 linear kernel; "nvfp4" is
+    and DeepSeek-V4/V4.1 DSpark), or, with "fp8", the Muse Spark DSpark
+    drafter's own lm_head and Markov head on ROCm. "fp8" uses per-row weight
+    and per-token activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The target verifies with its
     own head, so only the acceptance length can change."""
     use_local_argmax_reduction: bool = False
@@ -1918,6 +1919,13 @@ class SpeculativeConfig:
                 sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
                 vllm_config = replace(vllm_config, **{config_name: sub_config})
         return self.apply_draft_eplb_overrides(vllm_config)
+
+    @field_validator("moe_backend")
+    @classmethod
+    def _validate_moe_backend(cls, value: str | None) -> str | None:
+        if value is not None:
+            validate_moe_backend(value)
+        return value
 
     @field_validator("method")
     @classmethod

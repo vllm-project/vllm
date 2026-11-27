@@ -37,9 +37,9 @@ from vllm.config.attention import HiSparseConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
+    _estimate_max_model_len_from_groups,
     can_share_block_table,
-    check_enough_kv_cache_memory,
-    estimate_max_model_len,
     get_kv_cache_groups,
     get_pipeline_stages,
     kv_cache_groups_tp_replicas,
@@ -124,7 +124,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             distributed_executor_backend="mp",
         ),
         cache_config=SimpleNamespace(
-            num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
             kv_cache_layout=KVCacheLayout.BLHNC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
@@ -134,7 +133,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
     )
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, get_hisparse_kv_cache_groups(config, specs), available_memory=2**30
+        config, get_hisparse_kv_cache_groups(config, specs), num_blocks=7
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
@@ -248,7 +247,6 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch)
             distributed_executor_backend="mp",
         ),
         cache_config=SimpleNamespace(
-            num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
             enable_prefix_caching=False,
             kv_cache_layout=KVCacheLayout.BLNHC.name,
@@ -270,7 +268,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch)
     }
     layer_configs = resolve_hisparse_specs(config, layer_configs, layers)
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, get_kv_cache_groups(config, layer_configs), available_memory=2**20
+        config, get_kv_cache_groups(config, layer_configs), num_blocks=7
     )
 
     # A logical block has 2 layers x 16 tokens x 2 unique heads x K/V x
@@ -873,7 +871,7 @@ def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
         ),
     )
     kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, groups, available_memory=2**20
+        config, groups, num_blocks=16
     )
     assert [tensor.layers for tensor in kv_cache_config.kv_cache_tensors] == [
         ["layer2"]
@@ -925,7 +923,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignm
         del specs["draft"]
     groups = get_kv_cache_groups(config, specs)
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, groups, available_memory=8 * 1024 * 1024
+        config, groups, num_blocks=16
     )
     caches = allocate_kv_cache(
         cache_config, torch.device("cpu"), KVCacheLayout.BLHNC, [64] * len(groups)
@@ -976,7 +974,12 @@ def test_layers_group_by_manager_policy_not_layout():
         },
     )
     assert [g.layer_names for g in groups] == [["swa8.0"], ["swa16.0"]]
-    assert [g.manager_config.params.sliding_window for g in groups] == [8, 16]
+    windows = []
+    for group in groups:
+        params = group.manager_config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        windows.append(params.sliding_window)
+    assert windows == [8, 16]
 
     # Same policy, different layouts: one group keeping each layer's spec.
     groups = get_kv_cache_groups(
@@ -1025,6 +1028,7 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
         model_config=model_config,
         scheduler_config=scheduler_config,
     )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
 
     # Create KV cache specs
     kv_cache_spec = {}
@@ -1036,14 +1040,15 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
             )
         )
     # Estimate the maximum model length, 16384 model_len need 8GB
-    estimated_max_len = estimate_max_model_len(
-        vllm_config, kv_cache_spec, 8 * GiB_bytes
+    groups = get_kv_cache_groups(vllm_config, kv_cache_spec)
+    estimated_max_len = _estimate_max_model_len_from_groups(
+        DefaultKVCacheConfigBuilder(), vllm_config, groups, 8 * GiB_bytes
     )
     assert estimated_max_len == want_estimated_max_len
 
 
 def test_get_kv_cache_config_one_worker():
-    # pass max_model_len to pass check_enough_kv_cache_memory
+    # pass max_model_len to pass _check_enough_kv_cache_memory
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
@@ -1497,7 +1502,7 @@ def test_packed_groups_glm5_like_hybrid():
     assert sum(len(g.layer_names) for g in mamba) == 34
 
     kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * 1024**3
+        vllm_config, groups, num_blocks=16
     )
     strides = {t.block_stride for t in kv_cache_config.kv_cache_tensors}
     assert len(strides) == 1
@@ -1640,7 +1645,7 @@ def test_multi_run_layer_compact_strides_place_hoisted_heads():
             new_kv_cache_group(["full.0", "full.1"], full),
             new_kv_cache_group(["swa.0", "swa.1"], swa),
         ],
-        available_memory=4 * page * 8,
+        num_blocks=16,
     )
 
     num_blocks = config.num_blocks
@@ -1790,6 +1795,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm, d
     assert groups[0].manager_cls is FullAttentionManager
     assert groups[0].block_size == 64
     promoted_draft = groups[0].kv_cache_specs["draft.0"]
+    assert isinstance(promoted_draft, AttentionSpec)
     assert promoted_draft == replace(
         draft.spec,
         block_size=64,
@@ -2006,6 +2012,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
 
     assert unified_specs["target_attn"].spec == target_spec
     unified_draft_spec = unified_specs["draft_attn"].spec
+    assert isinstance(unified_draft_spec, AttentionSpec)
     assert unified_draft_spec.block_size == draft_spec.block_size
     assert unified_draft_spec.real_page_size_bytes == draft_spec.real_page_size_bytes
     assert unified_draft_spec.page_size_padded == target_spec.page_size_bytes
@@ -2135,13 +2142,17 @@ def test_unify_kv_cache_spec_page_size_mamba():
         }
     )
     # Mamba page is padded; block_size (caching granularity) is unchanged.
-    assert unified["mamba_layer"].spec.page_size_bytes == 32768
-    assert unified["mamba_layer"].spec.page_size_padded == 32768
-    assert unified["mamba_layer"].spec.block_size == mamba_spec.block_size
+    unified_mamba = unified["mamba_layer"].spec
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
+    assert unified_mamba.block_size == mamba_spec.block_size
     # Attention layer with smaller page still unifies by scaling block_size.
-    assert unified["main_attn_layer"].spec.page_size_bytes == 32768
-    assert unified["main_attn_layer"].spec.block_size == 2 * main_attn_spec.block_size
-    assert unified["main_attn_layer"].spec.page_size_padded is None
+    unified_main = unified["main_attn_layer"].spec
+    assert isinstance(unified_main, AttentionSpec)
+    assert unified_main.page_size_bytes == 32768
+    assert unified_main.block_size == 2 * main_attn_spec.block_size
+    assert unified_main.page_size_padded is None
     # Layer already at max page size is unchanged.
     assert unified["draft_attn_layer"].spec == draft_attn_spec
 
@@ -2157,8 +2168,10 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": full_layer(draft_attn_spec),
         }
     )
-    assert unified["mamba_layer"].spec.page_size_bytes == 32768
-    assert unified["mamba_layer"].spec.page_size_padded == 32768
+    unified_mamba = unified["mamba_layer"].spec
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
 
     # 3. Mamba page that does not evenly divide the maximum page size is
     # padded as well (the divisibility constraint only applies to block_size
@@ -2183,9 +2196,11 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": full_layer(draft_attn_spec),  # 32768
         }
     )
-    assert unified["attn_layer"].spec.page_size_padded == 32768
-    assert unified["attn_layer"].spec.page_size_bytes == 32768
-    assert unified["attn_layer"].spec.block_size == 24
+    unified_attn = unified["attn_layer"].spec
+    assert isinstance(unified_attn, AttentionSpec)
+    assert unified_attn.page_size_padded == 32768
+    assert unified_attn.page_size_bytes == 32768
+    assert unified_attn.block_size == 24
 
     # 5. Uniform page sizes are returned unchanged.
     specs = {
@@ -2222,6 +2237,16 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
             vllm_config, [{"layer1": full_layer(spec)}], available_memory
         )
 
+    # 33 blocks -> 32 usable after the null block -> accept.
+    if use_override:
+        vllm_config.cache_config.num_gpu_blocks_override = 33
+    else:
+        available_memory = [spec.page_size_bytes * 33]
+    configs = get_kv_cache_configs(
+        vllm_config, [{"layer1": full_layer(spec)}], available_memory
+    )
+    assert configs[0].num_blocks == 33
+
 
 def test_auto_fit_max_model_len_reserves_null_block():
     """Auto-fit (max_model_len=-1) must size max_model_len against usable
@@ -2242,31 +2267,6 @@ def test_auto_fit_max_model_len_reserves_null_block():
     get_kv_cache_configs(vllm_config, [{"layer1": full_layer(spec)}], available_memory)
 
     assert vllm_config.model_config.max_model_len == 63 * block_size
-
-
-def test_check_enough_kv_cache_memory_reserves_null_block():
-    """The public admission check must reject a KV cache sized to exactly the
-    blocks a max_model_len request needs. BlockPool keeps one block as the
-    null block, so only num_blocks - 1 are usable; accepting
-    num_blocks == needed would leave the request unschedulable and hang the
-    engine.
-    """
-    block_size = 16
-    max_model_len = 512  # needs 512 / 16 = 32 blocks
-    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
-    vllm_config.cache_config.kv_cache_layout = "LBNHC"
-    spec = new_kv_cache_spec(block_size=block_size)
-
-    # 32 blocks -> only 31 usable after the null block: one short -> reject.
-    with pytest.raises(ValueError, match="max seq len"):
-        check_enough_kv_cache_memory(
-            vllm_config, {"layer1": full_layer(spec)}, spec.page_size_bytes * 32
-        )
-
-    # 33 blocks -> 32 usable after the null block -> accept.
-    check_enough_kv_cache_memory(
-        vllm_config, {"layer1": full_layer(spec)}, spec.page_size_bytes * 33
-    )
 
 
 @pytest.mark.parametrize(
@@ -2450,7 +2450,7 @@ def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+        vllm_config, groups, num_blocks=16
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
     assert config.num_blocks == 16
@@ -2485,7 +2485,7 @@ def test_finalize_extensible_kv_cache_keeps_measured_count():
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     capacity = 1000
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * capacity
+        vllm_config, groups, num_blocks=capacity
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
 
@@ -2516,7 +2516,7 @@ def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+        vllm_config, groups, num_blocks=32
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
 
@@ -2550,7 +2550,7 @@ def test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short(
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+        vllm_config, groups, num_blocks=32
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
 
@@ -2586,7 +2586,7 @@ def test_finalize_extensible_kv_cache_auto_max_model_len_no_room():
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+        vllm_config, groups, num_blocks=32
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
 
@@ -2608,7 +2608,7 @@ def test_shrink_kv_cache_configs_leaves_host_resident_tensors():
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+        vllm_config, groups, num_blocks=16
     )
     host_tensor = KVCacheTensor(
         size=16 * 3000,

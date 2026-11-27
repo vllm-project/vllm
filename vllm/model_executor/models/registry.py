@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
+from transformers.models.auto.modeling_auto import MODEL_MAPPING_NAMES
 
 from vllm import envs
 from vllm.config import (
@@ -76,7 +77,6 @@ _TEXT_GENERATION_MODELS = {
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "AliceAIForCausalLM": ("alice_ai", "AliceAIForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
-    "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
@@ -88,7 +88,6 @@ _TEXT_GENERATION_MODELS = {
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2MoeForCausalLM": ("cohere2_moe", "Cohere2MoeForCausalLM"),
-    "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
@@ -101,12 +100,10 @@ _TEXT_GENERATION_MODELS = {
     "DomynEdgeForCausalLM": ("domyn_edge", "DomynEdgeForCausalLM"),
     "DoryForCausalLM": ("dory", "DoryForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
-    "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
     "ExaoneMoeForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "ExaoneMoEForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
-    "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
     "FlintForCausalLM": ("vllm.models.flint", "FlintForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
@@ -126,7 +123,6 @@ _TEXT_GENERATION_MODELS = {
     "Glm5NextForCausalLM": ("vllm.models.glm5next", "Glm5NextForCausalLM"),
     "GptOssForCausalLM": ("gpt_oss", "GptOssForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
-    "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
     "GraniteForCausalLM": ("granite", "GraniteForCausalLM"),
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
     "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),
@@ -140,10 +136,7 @@ _TEXT_GENERATION_MODELS = {
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
     "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
-    "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
-    "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
-    "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "K2HorizonForCausalLM": ("k2_horizon", "K2HorizonForCausalLM"),
     "KimiLinearForCausalLM": (
         "vllm.models.kimi_k3",
@@ -159,7 +152,6 @@ _TEXT_GENERATION_MODELS = {
         "longcat_flash_ngram",
         "LongcatFlashNgramForCausalLM",
     ),
-    "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
@@ -210,14 +202,11 @@ _TEXT_GENERATION_MODELS = {
     "Qwen3_5ForCausalLM": ("vllm.models.qwen3_5", "Qwen3_5ForCausalLM"),
     "Qwen3_5MoeForCausalLM": ("vllm.models.qwen3_5", "Qwen3_5MoeForCausalLM"),
     "RicursiveForCausalLM": ("ricursive", "RicursiveForCausalLM"),
-    "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
-    "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
     "Step1ForCausalLM": ("step1", "Step1ForCausalLM"),
     "Step3TextForCausalLM": ("step3_text", "Step3TextForCausalLM"),
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
-    "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
     "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),
@@ -323,7 +312,6 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
-    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
@@ -799,16 +787,21 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
+    "AXK1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "ArceeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "CwmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Ernie4_5ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "ExaoneForCausalLM": ("transformers", "TransformersForCausalLM"),
     "FlexOlmoForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "GemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GlmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "GPTJForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GPTNeoXForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "InternLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "IQuestCoderForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Jais2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Kolibri1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "LlamaForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -823,6 +816,8 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Phi3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Qwen2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Qwen2MoeForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "SarvamMLAForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "SarvamMoEForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "SeedOssForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "StableLmForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -849,6 +844,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "HunYuanVLForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
+    ),
+    "OmniASRForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForTranscription",
     ),
     "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
@@ -977,6 +976,12 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "KeyeVL1_5ForConditionalGeneration": "0.33.0",
     "TeleChat2ForCausalLM": "0.34.0",
     "TeleChat3ForCausalLM": "0.34.0",
+    "FalconMambaForCausalLM": "0.34.0",
+    "JambaForCausalLM": "0.34.0",
+    "JambaForSequenceClassification": "0.34.0",
+    "MambaForCausalLM": "0.34.0",
+    "TeleFLMForCausalLM": "0.34.0",
+    "DbrxForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
@@ -1388,6 +1393,15 @@ class _ModelRegistry:
     ) -> str | None:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
+        if supported := _TRANSFORMERS_SUPPORTED_MODELS.get(architecture):
+            return supported[1]
+
+        if not model_config.trust_remote_code:
+            # `architectures` may name a class that Transformers doesn't have, so use
+            # the class `AutoModel` builds for the config instead.
+            model_type = model_config.hf_config.model_type
+            if name := MODEL_MAPPING_NAMES.get(model_type):
+                architecture = name[0] if isinstance(name, tuple) else name
 
         auto_map: dict[str, str] = (
             getattr(model_config.hf_config, "auto_map", None) or dict()
@@ -1637,14 +1651,6 @@ class _ModelRegistry:
         """Check support for HC SP without changing MoE parallelism."""
         model_info, _ = self.inspect_model_cls(architectures, model_config)
         return model_info.supports_hc_sp
-
-    def is_transcription_only_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.supports_transcription_only
 
 
 def _resolve_module_name(mod_relname: str) -> str:

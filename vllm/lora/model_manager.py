@@ -485,6 +485,17 @@ class LoRAModelManager:
         # Layers that share a suffix with a LoRA layer but are not wrapped,
         # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
         self.unsupported_lora_modules: set[str] = set()
+        self.disabled_embedding_modules: set[str] = set()
+        if (
+            self.lora_config.target_modules is None
+            and not self.lora_config.enable_embedding_modules
+        ):
+            # Use model declarations so every pipeline rank can check adapter
+            # weights, even when the corresponding layer is on another rank.
+            for module in self.model.modules():
+                self.disabled_embedding_modules.update(
+                    getattr(module, "embedding_modules", None) or ()
+                )
 
         named_modules = list(self.model.named_modules(remove_duplicate=False))
         runners = [f"{n}." for n, m in named_modules if isinstance(m, MoERunner)]
@@ -498,6 +509,8 @@ class LoRAModelManager:
                 continue
             if module_name.startswith(unsupported):
                 self.unsupported_lora_modules.add(module_name)
+                continue
+            if module_name.rsplit(".", 1)[-1] in self.disabled_embedding_modules:
                 continue
 
             is_classifier_head = module_name in self.supported_modules_to_save
@@ -1272,6 +1285,20 @@ class LoRAModelManager:
             if text_name is not None:
                 org_module_name = text_name
         return lora_model.get_lora(org_module_name)
+
+    def warn_disabled_embedding_modules(self, lora_model: LoRAModel) -> None:
+        if not self.disabled_embedding_modules:
+            return
+        disabled = self.disabled_embedding_modules.intersection(
+            name.rsplit(".", 1)[-1] for name in lora_model.loras
+        )
+        if disabled:
+            logger.warning_once(
+                "Ignoring weights for disabled embedding modules in LoRA adapter "
+                "ID %d: %s. Enable them with --enable-lora-embedding-modules.",
+                lora_model.id,
+                ", ".join(sorted(disabled)),
+            )
 
     def _pop_lora_weights(self, lora_model: LoRAModel, module_names: list[str]) -> None:
         for module in module_names:
