@@ -30,7 +30,12 @@ from .ops.activation import swiglu_quantize
 from .ops.block_scales import shuffle_rows, swizzle_block_scales
 from .ops.moe import NUM_COUNTERS, combine, combine_push, route
 from .ops.moe_humming import HummingNVFP4Experts
-from .ops.moe_sm90 import HummingExperts, select_experts
+from .ops.moe_sm90 import (
+    HummingExperts,
+    select_experts,
+    select_experts_aligned,
+    use_aligned_routing,
+)
 from .ops.moe_sm120 import bmm as bmm_sm120
 from .ops.seq_parallel import SeqParallel
 from .ops.trtllm_bmm import bmm, expert_plan, load_kernels
@@ -149,6 +154,8 @@ class Inkling2Experts(nn.Module):
         # Humming weights are repacked after loading.
         self.sm100 = use_sm100_kernels()
         self.sm120 = current_platform.is_device_capability_family(120)
+        # One-launch routing: measured on an RTX 3080, other SM8x untested.
+        self.fused_routing = current_platform.is_device_capability(86)
         vllm_config = get_current_vllm_config_or_none()
         self.humming_nvfp4 = (
             self.sm120
@@ -266,6 +273,7 @@ class Inkling2Experts(nn.Module):
         plan,
         reduce: bool = True,
         push: SeqParallel | None = None,
+        alignment: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None:
         """`routing` and `quantized` (`x` in the expert layout) are from
         `ops.moe.route` (on Hopper, `routing` is from
@@ -300,6 +308,7 @@ class Inkling2Experts(nn.Module):
                 self.num_experts * self.ep_size,
                 self.gate_cap,
                 self.up_cap,
+                alignment,
             )
         if push is not None:
             # Each rank's fp32 combine is rounded once to bf16.
@@ -383,6 +392,33 @@ class Inkling2MoE(nn.Module):
         if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
             is_padding = get_forward_context().is_padding
         if not (experts.sm100 or experts.sm120):
+            humming = experts.humming
+            block_size = None
+            if (
+                humming is not None
+                and experts.fused_routing
+                and use_aligned_routing(
+                    x.shape[0], gate.weight.shape[0], x.shape[1], x.device
+                )
+            ):
+                block_size = humming.block_size(
+                    (x.shape[0], gate.topk), experts.num_experts * experts.ep_size
+                )
+            if block_size is not None:
+                # One launch for the router GEMM, top-k and row alignment.
+                selected, alignment = select_experts_aligned(
+                    x,
+                    gate.weight,
+                    gate.bias,
+                    gate.topk,
+                    gate.route_scale,
+                    experts.expert_bounds,
+                    experts.num_experts,
+                    gate.counters,
+                    block_size,
+                    is_padding,
+                )
+                return experts(x, selected, None, None, reduce, push, alignment)
             selected = select_experts(
                 x,
                 gate.weight,
