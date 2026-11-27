@@ -187,6 +187,15 @@ class TentTransferBackend(TransferBackend):
             (item.length for item in ranges), dtype=np.uint64, count=len(ranges)
         )
         states = self._submit(peer, op, local_addrs, remote_addrs, lengths)
+        if int(states.size) != len(ranges):
+            return [
+                TransferEvent(
+                    TransferState.FAILED,
+                    f"TENT reported {int(states.size)} terminal states for "
+                    f"{len(ranges)} ranges",
+                )
+                for _ in ranges
+            ]
         events: list[TransferEvent] = []
         for index in range(len(ranges)):
             code = int(states[index])

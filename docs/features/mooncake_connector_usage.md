@@ -105,7 +105,7 @@ With `transfer_engine: "tent"`, vLLM submits the KV ranges of one request as one
 - `shutdown` stops accepting transfers, waits up to 5 s for the in-flight ones to finish, then closes the peers' segments.
 - The engine names its segment after the configured `rpc_server_hostname`; that name has to be the address peers reach this worker by.
 - TENT metrics are off by default because the connector passes no metrics port; set `tent_config: {"metrics": {"http_port": 9100 + rank}}` to enable the engine's own HTTP metrics without colliding with other ranks on the host.
-- `mooncake_protocol` and `device_name` keep their meaning: the protocol selects the TENT transport, and the whitelist becomes `topology/rdma_whitelist`. NVLink stays enabled next to RDMA so same-host peers use it; sleep mode turns it off until [Mooncake #5886](https://github.com/kvcache-ai/Mooncake/pull/5886) keeps the logical ranges of moved buffers.
+- `mooncake_protocol` and `device_name` keep their meaning: the protocol selects the TENT transport, and the whitelist becomes `topology/rdma_whitelist`. With `rdma`, NVLink stays enabled next to it so same-host peers use it; sleep mode and `tcp` turn it off. Sleep mode also waits for [Mooncake #5886](https://github.com/kvcache-ai/Mooncake/pull/5886), which keeps the logical ranges of moved buffers.
 
 ## Prometheus metrics
 

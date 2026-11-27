@@ -24,8 +24,8 @@ def build_tent_config(
 ) -> dict[str, Any]:
     """Builds the TENT config vLLM owns.
 
-    Only the requested transport is installed, so the engine cannot answer on a
-    network the peers did not agree on.
+    Only the selected transports are installed, so the engine cannot answer on a
+    network the peers did not agree on. NVLink joins RDMA for same-host peers.
     """
     if protocol not in SUPPORTED_PROTOCOLS:
         raise RuntimeError(
@@ -33,7 +33,10 @@ def build_tent_config(
             f"{' and '.join(SUPPORTED_PROTOCOLS)}, got protocol {protocol!r}."
         )
     disabled = set(DISABLED_TRANSPORTS)
-    if enable_sleep_mode:
+    if protocol != "rdma":
+        # NVLink is a same-host RDMA path, so it only makes sense with RDMA.
+        disabled.add("nvlink")
+    elif enable_sleep_mode:
         # NVLink folds sub-allocated buffers into the enclosing cudaMalloc
         # until kvcache-ai/Mooncake#5886, which breaks unregistering the KV
         # caches that sleep mode moves around.

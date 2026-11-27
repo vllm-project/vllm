@@ -310,16 +310,32 @@ def test_transfers_are_rejected_after_shutdown(engine) -> None:
         backend.transfer("peer", TransferOp.WRITE, two_ranges())
 
 
-def test_nvlink_is_enabled_unless_sleep_mode(engine) -> None:
-    backend = make_backend()
-    assert "nvlink" not in backend._engine.config["transports"]
+def test_nvlink_follows_the_rdma_protocol(engine) -> None:
+    rdma = TentTransferBackend(
+        hostname="127.0.0.1",
+        protocol="rdma",
+        device_name="",
+        transfer_timeout_s=5.0,
+    )
+    assert "nvlink" not in rdma._engine.config["transports"]
+    tcp = make_backend()
+    assert tcp._engine.config["transports"]["nvlink"] == {"enable": False}
     sleeping = TentTransferBackend(
         hostname="127.0.0.1",
-        protocol="tcp",
+        protocol="rdma",
         device_name="",
         enable_sleep_mode=True,
     )
     assert sleeping._engine.config["transports"]["nvlink"] == {"enable": False}
+
+
+def test_short_status_list_fails_every_range(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "tent", fake_tent_module(ArrayEngine))
+    backend = make_backend()
+    backend._engine.statuses = [Status.COMPLETED]
+    events = backend.transfer("peer", TransferOp.WRITE, two_ranges())
+    assert [event.state for event in events] == [TransferState.FAILED] * 2
+    assert "terminal states" in events[0].error
 
 
 def test_register_and_unregister_delegate(engine) -> None:
