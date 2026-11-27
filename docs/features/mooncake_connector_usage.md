@@ -69,6 +69,10 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - When `kv_lease_duration` is set, the lease decides when those blocks are released instead. This timeout still bounds how long a pull waits for a prefill that has not finished.
     - A decoder does not wait out this timeout for a prefill worker that is gone. A pull fails as soon as its connection to the worker closes or is refused, as when the prefill process exits, or after the worker leaves ZMQ heartbeats unanswered for 10 seconds, as when it hangs or its host drops off the network. The failure is handled per `kv_load_failure_policy`.
 
+Compression uses the existing Mooncake sender and receiver loops. A bounded
+pool of GPU buffers allows multiple chunks to be encoded, transferred, and
+decoded concurrently.
+
 ## KV Transfer Config
 
 ### KV Role Options
@@ -118,3 +122,87 @@ Refer to these example scripts in the vLLM repository:
 
 - [run_mooncake_connector.sh](../../examples/disaggregated/mooncake_connector/run_mooncake_connector.sh)
 - [mooncake_connector_proxy.py](../../examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py)
+
+## Optional KV compression
+
+Both P and D must run the compression-enabled connector and the same fixed
+profile. Disabled compression uses the native Mooncake path and needs no
+compression dependencies.
+
+The current implementation supports dense BF16 FullAttention KV caches.
+Models combining FullAttention with other cache types are rejected at startup.
+Compressed P/D requires identical TP and PP sizes and a common logical
+block size across FullAttention groups. `kv_both`, MLA, and FP16/FP8
+compressed KV are unsupported and fail explicitly. No adaptive selection or
+Mooncake Store compression is implemented here.
+Sleep mode is unsupported when compression is enabled;
+disabled compression retains native Mooncake's RDMA sleep support.
+`kv_lease_duration` is also unsupported with compression;
+leave it unset to retain the existing session timeout. Native Mooncake keeps
+its lease-renewal support.
+The compression pipeline requires the connector's `LBHNC` (`HND`) layout;
+`LBNHC` (`NHD`) is unsupported and rejected before pipeline initialization.
+Backend-specific K/V packing (such as B12x planes) and pooled token/state
+layouts are rejected. Padding and strided layer views of dense K/V are supported.
+
+The compression runtime, algorithms, Python/CUDA backends and kernel tests are
+maintained in [KVServe](https://github.com/hpdss-group/KVServe), outside vLLM.
+vLLM adapts cache geometry and retains Mooncake transfer and session ownership.
+The adapter requires KVServe runtime API v2 with `resource_requirements` and
+`ChunkIO`. Install the same revision on both endpoints in the vLLM environment.
+
+```bash
+# CUDA 13; use runtime-cu12 for CUDA 12. Keep the installed vLLM/Torch versions.
+uv pip install 'kvserve_v1[runtime,runtime-cu13] @ https://github.com/hpdss-group/KVServe/archive/5efa848bef363a47d82fac0951ccddac409f74f7.tar.gz'
+```
+
+The P/D endpoints exchange a versioned descriptor and valid buffer lengths.
+Both endpoints must use the same compression profile and transfer protocol
+version. Disabled compression imports no KVServe code.
+
+Use the same lossless profile on both workers. Set `kv_role=kv_producer` on P
+and `kv_role=kv_consumer` on D.
+
+```json
+{
+  "kv_connector": "MooncakeConnector",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {
+    "compression": {
+      "enable-compression-pipeline": true,
+      "split_type": "layer",
+      "pipeline": ["codec"],
+      "slot_count": 2,
+      "logical_blocks_per_chunk": 64
+    }
+  }
+}
+```
+
+`logical_blocks_per_chunk` trades codec and transfer overhead against workspace size
+and the quantization range. Its current default is 1; the example explicitly
+uses 64. `slot_count` controls reusable in-flight buffers. Connector GPU memory
+is reserved before automatic KV-cache sizing. With explicit
+`kv_cache_memory_bytes`, that value continues to specify KV-cache bytes only;
+the connector pool requires additional memory.
+
+Head profiles use `split_type=head` and `score_path` pointing to a finite
+layer-by-global-KV-head score matrix. Both workers need identical profile
+contents. Channel, token, and tensor quantization axes are supported by Python.
+The optional CUDA backend (`KVSERVE_COMPRESSION_BACKEND=cpp`) supports one
+FullAttention group and channel/token axes. It needs a matching CUDA toolkit,
+C++ compiler, and Ninja, and compiles during cache binding before requests.
+It preserves the wire profile of compatible Python configurations.
+Its startup probe does not invoke the Python Hadamard stage.
+
+The receiver holds each slot until its network write and GPU decode finish.
+If a transfer fails, it waits for the producer to drain pending writes before
+reusing slots. If draining cannot be confirmed, the worker fails closed.
+Native RDMA submissions are unchanged. TCP submissions use at most 1,024
+descriptors and a 64 MiB aggregate target; a larger individual region stays intact.
+
+The supported stage order is `transformer`, `quantizer`, `codec`; stages may
+be omitted. ANS alone preserves the KV values exactly. Adding a quantizer is
+lossy and can change model outputs. Omitting the pipeline selects a preset
+that includes quantization. Evaluate quality with the intended profile.
+Setting `enable-compression-pipeline=false` restores native raw transfer.

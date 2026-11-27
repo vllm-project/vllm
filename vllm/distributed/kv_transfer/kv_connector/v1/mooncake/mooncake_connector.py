@@ -12,7 +12,7 @@ import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Final
 
@@ -39,7 +39,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    KVConnectorWorkerMemoryPlan,
     SupportsHMA,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.compression import (
+    BufferSpan,
+    CompressedChunk,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -101,6 +106,14 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.utils import select_common_block_size
 
+from .compression.adapter import create_worker_runtime, get_compression_config
+from .compression.inline import InlineCompression
+from .compression.protocol import (
+    MooncakeXferMetadata,
+    ReqId,
+    TransferId,
+)
+
 logger = init_logger(__name__)
 
 _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
@@ -115,6 +128,19 @@ _PULL_LOST_EVENTS: Final[int] = zmq.EVENT_DISCONNECTED | zmq.EVENT_CONNECT_RETRI
 # answering, such as a frozen process or an unreachable host.
 _PULL_HEARTBEAT_IVL_MS: Final[int] = 2000
 _PULL_HEARTBEAT_TIMEOUT_MS: Final[int] = 10000
+
+_RAW_TRANSFER_MAX_DESCRIPTORS = 1024
+_RAW_TRANSFER_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _align_transfer_blocks(local_group, remote_group, is_mamba):
+    if is_mamba:
+        local_group = [block for block in local_group if block != NULL_BLOCK_ID]
+        remote_group = [block for block in remote_group if block != NULL_BLOCK_ID]
+    if len(local_group) > len(remote_group):
+        local_group = local_group[-len(remote_group) :] if remote_group else []
+    return local_group, remote_group
+
 
 try:
     from mooncake.engine import TransferEngine
@@ -131,8 +157,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-ReqId = str  # Internal scheduler request ID
-TransferId = str  # KV transfer coordination ID (shared by P/D)
 
 # Follow NIXL (`nixl/base_worker.py`): HMA packed pages can put more than one
 # KV group on a single allocation. group_index=-1 flattens every group's block
@@ -653,34 +677,6 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
-class MooncakeXferMetadata(
-    msgspec.Struct,
-    omit_defaults=True,  # type: ignore[call-arg]
-):
-    remote_hostname: str
-    remote_port: int
-    remote_tp_size: int
-    remote_tp_rank: int
-    req_blocks: dict[ReqId, tuple[TransferId, list[list[int]]]]
-    kv_caches_base_addr: list[int]
-    block_lens: list[int]
-    kv_block_lens: list[int]
-    registered_layer_names: list[str] = msgspec.field(default_factory=list)
-    registered_layer_indices: list[int] = msgspec.field(default_factory=list)
-    registered_group_indices: list[int] = msgspec.field(default_factory=list)
-    # Parallel to registered regions. Each entry is the groups that share
-    # that region. Empty means the peer did not send the field.
-    registered_shared_group_ids: list[list[int]] = msgspec.field(default_factory=list)
-    # Byte offset of each registered view from its block row. -1 means the
-    # peer did not send the field, so the run must not be promoted.
-    registered_row_offsets: list[int] = msgspec.field(default_factory=list)
-    remote_pp_size: int = 1
-    # Random per register_kv_caches, so ids never repeat across restarts.
-    # 0 means the peer sends the layout on every pull.
-    layout_id: int = 0
-    requires_draft_context_kv: bool = False
-
-
 class MooncakeXferResponseStatus(IntEnum):
     # Transfer finished
     FINISH = 0
@@ -752,6 +748,8 @@ class PullReqMeta:
     # A failure is sticky; still settle later peer results before releasing
     # destination blocks to prevent write-after-free from delayed peer writes.
     failed: bool = False
+    failed_blocks: set[int] = field(default_factory=set)
+    num_tokens: int | None = None
 
 
 @dataclass(slots=True)
@@ -764,6 +762,7 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    num_tokens: int | None = None
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -773,6 +772,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
         self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
         self.reqs_not_processed: set[TransferId] = set()
+        self.num_tokens: dict[ReqId, int | None] = {}
         # D side: lease renewals to send this step, by remote P engine.
         self.lease_heartbeats: dict[EngineId, LeaseHeartbeat] = {}
 
@@ -782,8 +782,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[list[int]],
         kv_transfer_params: dict[str, Any],
         load_remote_cache: bool = True,
+        num_tokens: int | None = None,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
+        self.num_tokens[request_id] = num_tokens
         if load_remote_cache:
             remote_engine_id = kv_transfer_params["remote_engine_id"]
             self.reqs_to_recv[remote_engine_id][request_id] = PullReqMeta(
@@ -792,6 +794,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
                 remote_engine_id=remote_engine_id,
                 remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
                 transfer_id=transfer_id,
+                num_tokens=num_tokens,
             )
         else:
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
@@ -935,6 +938,13 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         ):
             return False
         extra_config = kv_transfer_config.kv_connector_extra_config
+        aggregate = extra_config.get("raw_aggregate", extra_config.get("raw_agg"))
+        compression = extra_config.get("compression") or {}
+        # The compression pool and helper do not participate in sleep/wake.
+        if (aggregate is not None and aggregate is not False) or compression.get(
+            "enable-compression-pipeline", False
+        ):
+            return False
         return extra_config.get("mooncake_protocol", "rdma") == "rdma"
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -1021,6 +1031,32 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
+    @classmethod
+    def build_worker_memory_plan(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_specs: dict[str, Any],
+    ) -> KVConnectorWorkerMemoryPlan:
+        from .compression.adapter import build_memory_plan
+
+        plan = build_memory_plan(vllm_config, kv_cache_specs)
+        if plan is None:
+            return KVConnectorWorkerMemoryPlan()
+        return KVConnectorWorkerMemoryPlan(
+            reserved_bytes=plan.reserved_bytes,
+            connector_data=plan,
+        )
+
+    def initialize_worker_memory(
+        self, memory_plan: KVConnectorWorkerMemoryPlan | None
+    ) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.initialize_worker_memory(memory_plan)
+
+    def shutdown(self):
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods."""
@@ -1063,6 +1099,7 @@ class MooncakeConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]]]] = {}
         self._reqs_need_send: dict[ReqId, tuple[Request, list[list[int]]]] = {}
+        self._reqs_send_num_tokens: dict[ReqId, int] = {}
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
@@ -1285,6 +1322,9 @@ class MooncakeConnectorScheduler:
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    num_tokens=self._get_remote_prefill_token_count(
+                        req.num_prompt_tokens
+                    ),
                 )
             self._reqs_need_recv.clear()
 
@@ -1313,6 +1353,7 @@ class MooncakeConnectorScheduler:
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
                     load_remote_cache=False,
+                    num_tokens=self._reqs_send_num_tokens.pop(req_id, None),
                 )
             self._reqs_need_send.clear()
             meta.reqs_not_processed = self._reqs_not_processed
@@ -1368,6 +1409,10 @@ class MooncakeConnectorScheduler:
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
 
         if delay_free_blocks:
+            self._reqs_send_num_tokens[request.request_id] = min(
+                request.num_computed_tokens - request.num_in_flight_tokens,
+                request.num_prompt_tokens,
+            )
             self._reqs_need_send[request.request_id] = (
                 request,
                 self.get_sw_clipped_blocks(block_ids),
@@ -1398,7 +1443,8 @@ class MooncakeConnectorWorker:
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
-        current_platform.set_device(self.device_id)
+        device = torch.device(current_platform.device_type, self.device_id)
+        current_platform.set_device(device)
 
         self.hostname = get_ip()
 
@@ -1415,6 +1461,7 @@ class MooncakeConnectorWorker:
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
+        self._bound_raw_submissions = protocol == "tcp"
         if vllm_config.cache_config.enable_extensible_kv_cache:
             # Default to DMA-BUF before initializing the transfer engine.
             use_peermem = os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
@@ -1437,12 +1484,15 @@ class MooncakeConnectorWorker:
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        self.transfer_backend: TransferBackend = TransferEngineBackend(
-            engine_cls=TransferEngine,
-            hostname=self.hostname,
-            protocol=protocol,
-            device_name=device_name,
-        )
+        try:
+            self.transfer_backend: TransferBackend = TransferEngineBackend(
+                engine_cls=TransferEngine,
+                hostname=self.hostname,
+                protocol=protocol,
+                device_name=device_name,
+            )
+        finally:
+            current_platform.set_device(device)
         self.rpc_port = self.transfer_backend.rpc_port
 
         logger.debug(
@@ -1516,6 +1566,19 @@ class MooncakeConnectorWorker:
         # instead of waiting for a prefill that already happened.
         self._expired_transfer_ids: OrderedDict[TransferId, float] = OrderedDict()
 
+        compression_config = get_compression_config(
+            kv_transfer_config.kv_connector_extra_config
+        )
+        if compression_config is not None and kv_transfer_config.kv_role == "kv_both":
+            raise ValueError(
+                "Mooncake compression does not support kv_both yet; use raw "
+                "transport or separate producer/consumer workers."
+            )
+        self._compression_configured = compression_config is not None
+        self._inline_compression: InlineCompression | None = None
+        self.sender_loop: asyncio.AbstractEventLoop | None = None
+        self.receiver_loop: asyncio.AbstractEventLoop | None = None
+
         # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
             # Background threads for sending kvcaches to D.
@@ -1539,11 +1602,12 @@ class MooncakeConnectorWorker:
             )
             self._sender_listener_t.start()
 
-            # Start bootstrap server on global rank 0.
-            if should_launch_bootstrap_server(vllm_config):
-                _, port = get_mooncake_bootstrap_addr(vllm_config)
-                self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
-                self.bootstrap_server.start()
+        if not self.is_kv_consumer and should_launch_bootstrap_server(vllm_config):
+            # Start bootstrap server on global rank 0.  The session helper
+            # registers with it instead of the engine listener.
+            _, port = get_mooncake_bootstrap_addr(vllm_config)
+            self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
+            self.bootstrap_server.start()
 
         if not self.is_kv_producer:
             self.receiver_loop = asyncio.new_event_loop()
@@ -1553,15 +1617,6 @@ class MooncakeConnectorWorker:
             self._mooncake_receiver_t.start()
             logger.debug("Mooncake Decoder: start receiver thread")
 
-        self.finished_sending_reqs: set[ReqId] = set()
-        self.finished_recving_reqs: set[ReqId] = set()
-        # Written from the receiver loop, drained from the worker thread.
-        self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
-        self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
-        # Block IDs are only unique within a group, so with multiple groups
-        # load failures are reported per request instead.
-        self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
-
         self.xfer_stats = MooncakeKVConnectorStats()
 
         self.block_size = vllm_config.cache_config.block_size
@@ -1569,14 +1624,13 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
-        self._physical_blocks_per_logical_kv_block = 1
-        self._sync_block_size_with_kernel()
-
         self.attn_backends = get_current_attn_backends(vllm_config)
+        self.kv_cache_layout = kv_cache_config.kv_cache_layout or "LBHNC"
         logger.debug(
             "Detected attention backends %s",
             [backend.get_name() for backend in self.attn_backends],
         )
+        logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._layer_specs: dict[str, KVCacheSpec] = {
@@ -1584,6 +1638,8 @@ class MooncakeConnectorWorker:
             for group in kv_cache_config.transfer_groups
             for name, spec in group.kv_cache_specs.items()
         }
+        self._sync_block_size_with_kernel()
+        self._layer_group_indices = dict(kv_cache_config.transfer_group_index_by_layer)
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
@@ -1599,9 +1655,32 @@ class MooncakeConnectorWorker:
         self._encoder = msgspec.msgpack.Encoder()
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeXferMetadata)
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
+        self.compression: Any = None
+        self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
+        self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
+        self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        # Completion is published by the connector's async/executor threads
+        # and drained by the engine's main thread without touching any loop.
+        self._finished_sending: queue.SimpleQueue[ReqId] = queue.SimpleQueue()
+        self._finished_recving: queue.SimpleQueue[ReqId] = queue.SimpleQueue()
         self._heartbeat_decoder = msgspec.msgpack.Decoder(MooncakeLeaseHeartbeat)
 
     def _sync_block_size_with_kernel(self) -> None:
+        """Derive the logical/kernel block-size mapping used by registration."""
+        logical_block_size = self.block_size
+        if self._compression_configured:
+            attention_block_sizes = {
+                spec.block_size
+                for spec in self._layer_specs.values()
+                if isinstance(spec, AttentionSpec)
+            }
+            if len(attention_block_sizes) > 1:
+                raise ValueError(
+                    "Mooncake compression requires one logical block size across "
+                    f"attention groups, got {sorted(attention_block_sizes)}."
+                )
+            if attention_block_sizes:
+                logical_block_size = attention_block_sizes.pop()
         # When speculative decoding (e.g. Eagle) is enabled, the main model
         # and draft model may use different attention backends with different
         # physical block sizes. Pick the common (smallest) block size so that
@@ -1616,18 +1695,23 @@ class MooncakeConnectorWorker:
         check_compressed_kernel_split(
             self.vllm_config, self.kv_cache_config, kernel_block_size
         )
-        if self.block_size != kernel_block_size:
+        if logical_block_size % kernel_block_size:
+            raise ValueError(
+                f"Mooncake logical block size {logical_block_size} is not "
+                f"divisible by kernel block size {kernel_block_size}."
+            )
+        self._physical_blocks_per_logical_kv_block = (
+            logical_block_size // kernel_block_size
+        )
+        self.block_size = kernel_block_size
+        if self._physical_blocks_per_logical_kv_block != 1:
             logger.info_once(
-                "User-specified logical block size (%s) does not match"
-                " physical kernel block size (%s). Using the latter.",
-                self.block_size,
+                "Mooncake maps each %s-token logical attention block to %s "
+                "%s-token kernel blocks.",
+                logical_block_size,
+                self._physical_blocks_per_logical_kv_block,
                 kernel_block_size,
             )
-            assert self.block_size > kernel_block_size
-            self._physical_blocks_per_logical_kv_block = (
-                self.block_size // kernel_block_size
-            )
-            self.block_size = kernel_block_size
 
     def __del__(self):
         # A constructor that raised before the ZeroMQ context existed still
@@ -1637,24 +1721,56 @@ class MooncakeConnectorWorker:
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        self._shutdown_complete = True
+        inline = getattr(self, "_inline_compression", None)
+        if inline is not None:
+            try:
+                inline.shutdown()
+            except Exception:
+                logger.exception(
+                    "Compressed transfers did not drain; retaining registered memory"
+                )
+                return
+            self._inline_compression = None
         shared_engine = getattr(self, "_shared_engine", None)
         if shared_engine is not None:
             clear_shared_transfer_engine(shared_engine)
-        self.async_zmq_ctx.term()
-        if not self.is_kv_consumer:
-            self._sender_executor.shutdown(wait=False)
-            if self.sender_loop.is_running():
-                self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
+        compression = getattr(self, "compression", None)
+        async_zmq_ctx = getattr(self, "async_zmq_ctx", None)
+        if async_zmq_ctx is not None:
+            async_zmq_ctx.term()
+        if not getattr(self, "is_kv_consumer", True):
+            sender_executor = getattr(self, "_sender_executor", None)
+            if sender_executor is not None:
+                sender_executor.shutdown(wait=False)
+            sender_loop = getattr(self, "sender_loop", None)
+            if sender_loop is not None and sender_loop.is_running():
+                sender_loop.call_soon_threadsafe(sender_loop.stop)
                 self._sender_listener_t.join()
-            if should_launch_bootstrap_server(self.vllm_config) and hasattr(
-                self, "bootstrap_server"
+            if sender_loop is not None and not sender_loop.is_closed():
+                sender_loop.close()
+            if (
+                hasattr(self, "vllm_config")
+                and hasattr(self, "bootstrap_server")
+                and should_launch_bootstrap_server(self.vllm_config)
             ):
                 self.bootstrap_server.shutdown()
-        if not self.is_kv_producer and self.receiver_loop.is_running():
-            self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
+        receiver_loop = getattr(self, "receiver_loop", None)
+        if (
+            not getattr(self, "is_kv_producer", True)
+            and receiver_loop is not None
+            and receiver_loop.is_running()
+        ):
+            receiver_loop.call_soon_threadsafe(receiver_loop.stop)
             self._mooncake_receiver_t.join()
         if hasattr(self, "transfer_backend"):
             self.transfer_backend.shutdown()
+        if receiver_loop is not None and not receiver_loop.is_closed():
+            receiver_loop.close()
+        if compression is not None:
+            compression.shutdown()
 
     async def register_worker_with_bootstrap(self):
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
@@ -1721,16 +1837,33 @@ class MooncakeConnectorWorker:
         await self.register_worker_with_bootstrap()
 
         # Create async worker tasks that process items from the queue
-        sender_tasks = [
-            asyncio.create_task(self._sender_worker(sock))
-            for _ in range(self.num_sender_tasks)
-        ]
+        sender_tasks = (
+            []
+            if self._compression_configured
+            else [
+                asyncio.create_task(self._sender_worker(sock))
+                for _ in range(self.num_sender_tasks)
+            ]
+        )
 
+        sender_tasks.append(asyncio.create_task(self._send_timeout_loop()))
         ready_event.set()
 
         try:
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
+                if self._compression_configured:
+                    assert self._inline_compression is not None
+                    try:
+                        self._inline_compression.dispatch(
+                            identity, metadata_bytes, sock
+                        )
+                    except Exception:
+                        self._inline_compression.fail(
+                            "Invalid compressed Mooncake request"
+                        )
+                        raise
+                    continue
                 # Renew here, not in a sender worker: those can all be
                 # waiting for prefills, and the renewal must not wait.
                 heartbeat = self._decode_heartbeat(metadata_bytes)
@@ -1990,6 +2123,7 @@ class MooncakeConnectorWorker:
 
             if len(src_ptrs):
                 remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
+                assert self.sender_loop is not None
                 transfer_err_msg = await self.sender_loop.run_in_executor(
                     self._sender_executor,
                     self._send_blocks,
@@ -2021,7 +2155,7 @@ class MooncakeConnectorWorker:
                     send_meta.sent == send_meta.need_send
                     and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
                 ):
-                    self.finished_sending_reqs.add(send_meta.p_req_id)
+                    self._finished_sending.put(send_meta.p_req_id)
 
             response = MooncakeXferResponse(
                 status=response_status,
@@ -2079,6 +2213,23 @@ class MooncakeConnectorWorker:
         ]
 
     async def _build_transfer_params(
+        self,
+        ready_reqs: list[tuple[ReqId, SendBlockMeta]],
+        agent_meta: MooncakeXferMetadata,
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+    ) -> tuple[
+        NDArray[np.uint64],
+        NDArray[np.uint64],
+        NDArray[np.uint64],
+        list[ReqId],
+        str | None,
+    ]:
+        return self._build_transfer_params_sync(
+            ready_reqs, agent_meta, local_regions, remote_regions
+        )
+
+    def _build_transfer_params_sync(
         self,
         ready_reqs: list[tuple[ReqId, SendBlockMeta]],
         agent_meta: MooncakeXferMetadata,
@@ -2319,15 +2470,37 @@ class MooncakeConnectorWorker:
         total_bytes = int(lengths.sum())
         num_ranges = len(src_ptrs)
         start_time = time.perf_counter()
-        result = self.transfer_backend.transfer_sync_arrays(
-            remote_session, TransferOp.WRITE, src_ptrs, dst_ptrs, lengths
-        )
-        duration = time.perf_counter() - start_time
-        if result.num_ranges != num_ranges:
-            raise RuntimeError(
-                f"The transfer backend returned a result for {result.num_ranges} "
-                f"ranges, expected {num_ranges}."
+        batches: list[slice | None] = [None]
+        if getattr(self, "_bound_raw_submissions", False) and (
+            num_ranges > _RAW_TRANSFER_MAX_DESCRIPTORS
+            or total_bytes > _RAW_TRANSFER_MAX_BYTES
+        ):
+            batches.clear()
+            start = batch_bytes = 0
+            for idx, size in enumerate(lengths):
+                size = int(size)
+                if idx > start and (
+                    idx - start >= _RAW_TRANSFER_MAX_DESCRIPTORS
+                    or batch_bytes + size > _RAW_TRANSFER_MAX_BYTES
+                ):
+                    batches.append(slice(start, idx))
+                    start, batch_bytes = idx, 0
+                batch_bytes += size
+            batches.append(slice(start, None))
+        for batch in batches:
+            src, dst, sizes = src_ptrs, dst_ptrs, lengths
+            if batch is not None:
+                src, dst, sizes = src[batch], dst[batch], sizes[batch]
+            result = self.transfer_backend.transfer_sync_arrays(
+                remote_session, TransferOp.WRITE, src, dst, sizes
             )
+            if result.num_ranges != len(sizes):
+                raise RuntimeError(
+                    "Mooncake backend returned an unexpected range count"
+                )
+            if result.state is not TransferState.COMPLETED:
+                break
+        duration = time.perf_counter() - start_time
         if result.state is TransferState.COMPLETED:
             self.xfer_stats.record_transfer(
                 duration_s=duration,
@@ -2561,6 +2734,13 @@ class MooncakeConnectorWorker:
                 collapsed_views,
             )
 
+        compression = getattr(self, "compression", None)
+        if compression is not None:
+            compression.bind_kv_caches(kv_caches, self._layer_group_indices)
+            compression_ptrs, compression_lens = compression.registered_memory()
+            kv_data_ptrs.extend(compression_ptrs)
+            kv_data_lens.extend(compression_lens)
+
         self.transfer_backend.register_regions(
             self._memory_regions(kv_data_ptrs, kv_data_lens)
         )
@@ -2572,10 +2752,10 @@ class MooncakeConnectorWorker:
             self.kv_block_len_per_layer,
         )
 
-        # No need to launch server for D node.
-        if self.is_kv_consumer:
-            return
+        if not self.is_kv_consumer and not self._compression_configured:
+            self._start_sender_listener()
 
+    def _start_sender_listener(self) -> None:
         # httpx applies the timeout to each phase (connect, read, write, pool)
         # rather than to the whole request, so budget for all four.
         register_timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
@@ -2583,6 +2763,7 @@ class MooncakeConnectorWorker:
         backoff_total = sum(min(2.0**i, 10.0) for i in range(max_attempts - 1))
         ready_timeout = max_attempts * 4 * register_timeout + backoff_total + 30.0
         ready_event = threading.Event()
+        assert self.sender_loop is not None
         fut = asyncio.run_coroutine_threadsafe(
             self._mooncake_sender_listener(ready_event), self.sender_loop
         )
@@ -2616,77 +2797,30 @@ class MooncakeConnectorWorker:
         )
         self._kv_unregistered = False
 
-    async def fetch_finished_recving_reqs(self) -> set[ReqId]:
-        finished_recving_reqs = self.finished_recving_reqs
-        self.finished_recving_reqs = set()
-        return finished_recving_reqs
-
-    async def fetch_finished_sending_reqs(self) -> set[ReqId]:
-        finished_sending_reqs = self.finished_sending_reqs
-        self.finished_sending_reqs = set()
-
-        # Handle timeout to avoid stranding blocks on remote.
-        now = time.perf_counter()
-
-        expired_transfer_id = []
-        # Scan every entry: renewals move deadlines, so the map is not in
-        # expiry order.
-        for transfer_id, send_meta in self.reqs_need_send.items():
-            if (
-                send_meta.p_req_id
-                and send_meta.expire_time < now
-                and send_meta.sending == 0
-            ):
-                if self._kv_lease_duration is None:
-                    logger.warning(
-                        "Request %s timed out after %d seconds without "
-                        "being sent. Freeing its blocks on the producer side.",
-                        send_meta.p_req_id,
-                        envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                    )
-                else:
-                    logger.warning(
-                        "KV lease of request %s expired before the decoder "
-                        "pulled it. Freeing its blocks on the producer side.",
-                        send_meta.p_req_id,
-                    )
-                self.xfer_stats.record_kv_expired_req()
-                finished_sending_reqs.add(send_meta.p_req_id)
-                expired_transfer_id.append(transfer_id)
-
-        for transfer_id in expired_transfer_id:
-            del self.reqs_need_send[transfer_id]
-            self._expired_transfer_ids[transfer_id] = now
-        # A pull later than this falls back to the ready-wait timeout.
-        horizon = now - envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-        while self._expired_transfer_ids:
-            transfer_id, expired_at = next(iter(self._expired_transfer_ids.items()))
-            if expired_at >= horizon:
-                break
-            del self._expired_transfer_ids[transfer_id]
-
-        return finished_sending_reqs
-
     def get_finished(self) -> tuple[set[str] | None, set[str] | None]:
         """Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
+
+        Completion is published by the connector's async and executor threads
+        into plain queues; draining them here keeps this call lock-free and
+        non-blocking on the engine's critical path.
         """
-        recv_fut = None
-        send_fut = None
-        if not self.is_kv_producer:
-            recv_fut = asyncio.run_coroutine_threadsafe(
-                self.fetch_finished_recving_reqs(), self.receiver_loop
-            )
-
-        if not self.is_kv_consumer:
-            send_fut = asyncio.run_coroutine_threadsafe(
-                self.fetch_finished_sending_reqs(), self.sender_loop
-            )
-
-        finished_recving_reqs = recv_fut.result() if recv_fut else set()
-        finished_sending_reqs = send_fut.result() if send_fut else set()
-
+        inline = getattr(self, "_inline_compression", None)
+        if inline is not None:
+            inline.check_health()
+        finished_sending_reqs: set[ReqId] = set()
+        finished_recving_reqs: set[ReqId] = set()
+        while True:
+            try:
+                finished_sending_reqs.add(self._finished_sending.get_nowait())
+            except queue.Empty:
+                break
+        while True:
+            try:
+                finished_recving_reqs.add(self._finished_recving.get_nowait())
+            except queue.Empty:
+                break
         if finished_sending_reqs or finished_recving_reqs:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -2695,7 +2829,6 @@ class MooncakeConnectorWorker:
                 len(finished_sending_reqs),
                 len(finished_recving_reqs),
             )
-
         return finished_sending_reqs or None, finished_recving_reqs or None
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
@@ -2876,7 +3009,7 @@ class MooncakeConnectorWorker:
         if pull_meta.pull_tasks_count > 0:
             pull_meta.pull_tasks_count -= 1
         if pull_meta.pull_tasks_count == 0 and any(pull_meta.local_block_ids):
-            self.finished_recving_reqs.add(pull_meta.d_req_id)
+            self._finished_recving.put(pull_meta.d_req_id)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain the blocks whose remote KV load failed since the last call."""
@@ -3002,9 +3135,16 @@ class MooncakeConnectorWorker:
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for worker_addr in worker_addrs:
-            asyncio.create_task(
-                self.receive_kv_from_single_worker(worker_addr, pull_metas)
-            )
+            if self._compression_configured:
+                assert self._inline_compression is not None
+                for pull_meta in pull_metas.values():
+                    asyncio.create_task(
+                        self._inline_compression.receive(worker_addr, pull_meta)
+                    )
+            else:
+                asyncio.create_task(
+                    self.receive_kv_from_single_worker(worker_addr, pull_metas)
+                )
 
     async def _query_bootstrap(self, remote_bootstrap_addr: str):
         """Query a bootstrap server, or wait for the query already running."""
@@ -3106,6 +3246,7 @@ class MooncakeConnectorWorker:
                 send_meta = self.reqs_need_send[transfer_id]
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
+                send_meta.num_tokens = metadata.num_tokens.get(p_req_id)
                 send_meta.expire_time = time.perf_counter() + (
                     self._kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )
@@ -3134,12 +3275,16 @@ class MooncakeConnectorWorker:
             asyncio.create_task(self._send_lease_heartbeat(remote_engine_id, heartbeat))
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
+        if self._compression_configured and self._inline_compression is None:
+            raise RuntimeError("Compression worker memory must be initialized")
         if not self.is_kv_producer and metadata.reqs_to_recv:
+            assert self.receiver_loop is not None
             asyncio.run_coroutine_threadsafe(
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
             )
 
         if not self.is_kv_producer and metadata.lease_heartbeats:
+            assert self.receiver_loop is not None
             asyncio.run_coroutine_threadsafe(
                 self._send_lease_heartbeats(metadata.lease_heartbeats),
                 self.receiver_loop,
@@ -3148,6 +3293,7 @@ class MooncakeConnectorWorker:
         if not self.is_kv_consumer and (
             metadata.reqs_to_send or metadata.reqs_not_processed
         ):
+            assert self.sender_loop is not None
             asyncio.run_coroutine_threadsafe(
                 self.record_send_reqs(metadata), self.sender_loop
             )
@@ -3158,7 +3304,7 @@ class MooncakeConnectorWorker:
     def _prepare_transfer_regions(
         self, meta: MooncakeXferMetadata
     ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
-        """Align and coalesce once per peer layout.
+        """Align and coalesce raw-transfer regions once per peer layout.
 
         `send_kv_to_decode` runs on every scheduler batch. The registered
         layout does not change until the next `register_kv_caches`.
@@ -3262,21 +3408,18 @@ class MooncakeConnectorWorker:
         # Replicated KV keeps that offset at 0. MLA is replicated in practice;
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
-        tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if tp_ratio == 1 or self._producer_cache_is_replicated():
+        if getattr(self, "compression", None) is not None:
+            # All registered regions are full attention when compression is enabled.
+            local_regions, remote_regions = [], []
+        elif (
+            _get_tp_ratio(self.tp_size, meta.remote_tp_size) == 1
+            or self._producer_cache_is_replicated()
+        ):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
-            n_aligned = len(local_regions)
             local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
-                local_regions,
-                remote_regions,
-                promote_full_row=covered_both_sides,
-            )
-            logger.info(
-                "Mooncake packed coalesce: %s aligned regions -> %s transfer regions.",
-                n_aligned,
-                len(local_regions),
+                local_regions, remote_regions, promote_full_row=covered_both_sides
             )
         prepared = (local_regions, remote_regions, None)
         self._prepared_transfer_regions[cache_key] = prepared
@@ -3450,6 +3593,147 @@ class MooncakeConnectorWorker:
             _get_tensor_dense_flag(cache),
             cache.data_ptr(),
         )
+
+    def initialize_worker_memory(
+        self, memory_plan: KVConnectorWorkerMemoryPlan | None
+    ) -> None:
+        if memory_plan is None or memory_plan.connector_data is None:
+            return
+
+        plan = memory_plan.connector_data
+        self.compression = create_worker_runtime(
+            plan=plan,
+            cache_layout=self.kv_cache_layout,
+            block_factor=self._physical_blocks_per_logical_kv_block,
+            device=torch.device("cuda", self.device_id),
+        )
+        # KV cache tensors are registered by ``initialize_kv_cache`` before
+        # this post allocation hook runs.  Bind them now and register the
+        # connector-owned pool with Mooncake before any transfer can start.
+        self.compression.bind_kv_caches(
+            self.device_kv_caches, self._layer_group_indices
+        )
+        compression_ptrs, compression_lens = self.compression.registered_memory()
+        self.transfer_backend.register_regions(
+            self._memory_regions(compression_ptrs, compression_lens)
+        )
+        self._inline_compression = InlineCompression(self)
+        if not self.is_kv_consumer:
+            self._start_sender_listener()
+        logger.info(
+            "Initialized Mooncake in-process compression pool: "
+            "transport=%s reserved=%d arena=%d "
+            "aux_per_slot=%d workspace=%d slots=%d",
+            plan.config.transport,
+            plan.reserved_bytes,
+            plan.layout.arena_bytes,
+            plan.layout.aux_arena_bytes,
+            plan.codec_workspace_bytes,
+            plan.config.slot_count,
+        )
+
+    def _compression_block_sizes(self) -> dict[int, int]:
+        assert self.compression is not None
+        return {
+            index: self.kv_cache_config.transfer_groups[index].block_size
+            for index in self.compression.fa_group_indices
+        }
+
+    def _match_compression_blocks(
+        self,
+        send_meta: SendBlockMeta,
+        remote_block_ids: list[list[int]],
+    ) -> tuple[list[list[int]], list[list[int]]]:
+        if not remote_block_ids:
+            remote_block_ids = [[] for _ in send_meta.local_block_ids]
+        local_result: list[list[int]] = []
+        remote_result: list[list[int]] = []
+        for group_index, (local_group, remote_group) in enumerate(
+            zip(send_meta.local_block_ids, remote_block_ids)
+        ):
+            is_mamba = issubclass(
+                self.kv_cache_config.transfer_groups[group_index].manager_cls,
+                MambaManager,
+            )
+            local_group, remote_group = _align_transfer_blocks(
+                local_group, remote_group, is_mamba
+            )
+            local_result.append(list(local_group))
+            remote_result.append(list(remote_group))
+        return local_result, remote_result
+
+    def _send_compressed_blocks(
+        self,
+        chunk: CompressedChunk,
+        remote_session: str,
+        remote_buffers: tuple[BufferSpan, ...],
+    ) -> None:
+        if len(chunk.buffers) != len(remote_buffers):
+            raise ValueError("Compressed buffer count differs between peers")
+        sources, destinations, lengths = [], [], []
+        for (source, length), (destination, capacity) in zip(
+            chunk.buffers, remote_buffers, strict=True
+        ):
+            if not 0 <= length <= capacity or (length and not (source and destination)):
+                raise ValueError("Compressed buffer exceeds the peer slot capacity")
+            if length:
+                sources.append(source)
+                destinations.append(destination)
+                lengths.append(length)
+        if lengths:
+            error = self._send_blocks(
+                remote_session,
+                np.asarray(sources, dtype=np.uint64),
+                np.asarray(destinations, dtype=np.uint64),
+                np.asarray(lengths, dtype=np.uint64),
+            )
+            if error is not None:
+                raise RuntimeError(f"Mooncake compressed transfer failed: {error}")
+
+    def _sweep_expired_sends(self) -> None:
+        """Free blocks of requests that were never sent to the remote side."""
+        now = time.perf_counter()
+
+        expired_transfer_id = []
+        for transfer_id, send_meta in self.reqs_need_send.items():
+            if (
+                send_meta.p_req_id
+                and send_meta.expire_time < now
+                and send_meta.sending == 0
+            ):
+                if self._kv_lease_duration is None:
+                    logger.warning(
+                        "Request %s timed out after %d seconds without "
+                        "being sent. Freeing its blocks on the producer side.",
+                        send_meta.p_req_id,
+                        envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                    )
+                else:
+                    logger.warning(
+                        "KV lease of request %s expired before the decoder "
+                        "pulled it. Freeing its blocks on the producer side.",
+                        send_meta.p_req_id,
+                    )
+                self.xfer_stats.record_kv_expired_req()
+                self._finished_sending.put(send_meta.p_req_id)
+                expired_transfer_id.append(transfer_id)
+
+        for transfer_id in expired_transfer_id:
+            del self.reqs_need_send[transfer_id]
+            self._expired_transfer_ids[transfer_id] = now
+        horizon = now - envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+        while self._expired_transfer_ids:
+            transfer_id, expired_at = next(iter(self._expired_transfer_ids.items()))
+            if expired_at >= horizon:
+                break
+            del self._expired_transfer_ids[transfer_id]
+
+    async def _send_timeout_loop(self) -> None:
+        while True:
+            await asyncio.sleep(0.1)
+            self._sweep_expired_sends()
+            if self._inline_compression is not None:
+                self._inline_compression.expire()
 
 
 def _normalize_paired_block_order(
