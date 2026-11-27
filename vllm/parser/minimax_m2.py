@@ -60,6 +60,29 @@ _PARTIAL_PARAM_RE = re.compile(
 
 # What ends an open value in ``_PARAM_RE``: a closing tag or the next opener.
 _PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s+name\s*=")
+_PARAM_OPENER_RE = re.compile(r"<\s*parameter\s+name\s*=")
+
+
+class _ClosedParams:
+    """Closed parameters of a raw argument text, reused by longer texts.
+
+    Raw arguments only grow while a call streams, so a parse of a text that
+    extends `text` resumes after its last closed parameter.
+    """
+
+    __slots__ = ("text", "end", "params", "outside")
+
+    def __init__(self) -> None:
+        self.text = ""  # raw text the closed parameters depend on
+        self.end = 0  # end of the last closed parameter in ``text``
+        self.params: dict[str, object] = {}
+        self.outside = ""  # text before ``end`` outside the closed parameters
+
+    def reset(self) -> None:
+        self.text = ""
+        self.end = 0
+        self.params = {}
+        self.outside = ""
 
 
 def _param_name(match: re.Match) -> str:
@@ -71,13 +94,43 @@ def _param_name(match: re.Match) -> str:
     ).strip()
 
 
+def _is_unstable_prefix(gap: str, match: re.Match) -> bool:
+    # An unmatched `<parameter name=` in `gap`, or a bare name starting with a
+    # quote, can re-parse into a wider quoted name once a closing quote arrives.
+    bare_name = match.group("bare_name")
+    return (bare_name is not None and bare_name[0] in "\"'") or _PARAM_OPENER_RE.search(
+        gap
+    ) is not None
+
+
 def _minimax_m2_parse_args(
-    raw_args: str, partial: bool
+    raw_args: str, partial: bool, closed: _ClosedParams | None = None
 ) -> tuple[dict[str, object], re.Match | None]:
     """Return the arguments and the match of the open trailing value, if any."""
     params: dict[str, object] = {}
+    outside: list[str] = []
+    pos = 0
+    if closed is not None and raw_args.startswith(closed.text):
+        params.update(closed.params)
+        outside.append(closed.outside)
+        pos = closed.end
+    start = pos
 
-    for match in _PARAM_RE.finditer(raw_args):
+    cache_end = start
+    cache_params: dict[str, object] | None = None
+    cache_outside = ""
+    unstable = False
+
+    for match in _PARAM_RE.finditer(raw_args, pos):
+        gap = raw_args[pos : match.start()]
+        if not unstable and _is_unstable_prefix(gap, match):
+            unstable = True
+            if closed is not None and pos > start:
+                cache_end = pos
+                cache_params = dict(params)
+                cache_outside = "".join(outside)
+        outside.append(gap)
+        pos = match.end()
         name = _param_name(match)
         if not name:
             continue
@@ -85,9 +138,22 @@ def _minimax_m2_parse_args(
         # between `>` and `</parameter>`, so surrounding whitespace is data.
         params[name] = match.group("value")
 
+    if closed is not None and not unstable and pos > start:
+        cache_end = pos
+        cache_params = dict(params)
+        cache_outside = "".join(outside)
+
+    if closed is not None and cache_end > start and cache_params is not None:
+        # A value closed by the next opener holds only while that opener follows.
+        opener = _PARAM_OPENER_RE.match(raw_args, cache_end)
+        closed.text = raw_args[: opener.end() if opener else cache_end]
+        closed.end = cache_end
+        closed.params = cache_params
+        closed.outside = cache_outside
+
     open_match = None
     if partial:
-        remaining = _PARAM_RE.sub("", raw_args)
+        remaining = "".join(outside) + raw_args[pos:]
         match = _PARTIAL_PARAM_RE.search(remaining)
         if match:
             name = _param_name(match)
@@ -99,8 +165,12 @@ def _minimax_m2_parse_args(
     return params, open_match
 
 
-def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
-    return json.dumps(_minimax_m2_parse_args(raw_args, partial)[0], ensure_ascii=False)
+def _minimax_m2_arg_converter(
+    raw_args: str, partial: bool, closed: _ClosedParams | None = None
+) -> str:
+    return json.dumps(
+        _minimax_m2_parse_args(raw_args, partial, closed)[0], ensure_ascii=False
+    )
 
 
 def _value_end_window(text: str) -> str:
@@ -112,10 +182,12 @@ def _value_end_window(text: str) -> str:
     return tail if _PARAM_VALUE_END_RE.fullmatch(tail, partial=True) else ""
 
 
-def _minimax_m2_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+def _minimax_m2_arg_value_extender(
+    raw_args: str, closed: _ClosedParams | None = None
+) -> ArgValueExtender | None:
     # The open value runs to the end of raw_args and is the last JSON value,
     # so a delta appends its JSON-escaped text unless it closes the value.
-    params, match = _minimax_m2_parse_args(raw_args, partial=True)
+    params, match = _minimax_m2_parse_args(raw_args, partial=True, closed=closed)
     if match is None or next(reversed(params)) != _param_name(match):
         return None
     # Later text could still re-parse the opener: an earlier unmatched one, or
@@ -252,8 +324,24 @@ class MinimaxM2Parser(ParserEngine):
 
     def __init__(self, tokenizer, tools=None, **kwargs) -> None:
         kwargs.setdefault("parser_engine_config", minimax_m2_config())
+        self._closed_params: _ClosedParams | None = None
         super().__init__(tokenizer, tools, **kwargs)
+        # Each streaming conversion resumes after the last closed parameter.
+        if self._arg_converter is _minimax_m2_arg_converter:
+            closed = _ClosedParams()
+            self._closed_params = closed
+            self._arg_converter = functools.partial(
+                _minimax_m2_arg_converter, closed=closed
+            )
+            self._arg_value_extender = functools.partial(
+                _minimax_m2_arg_value_extender, closed=closed
+            )
         self._think_end_token_id = self.vocab.get(THINK_END)
+
+    def _reset(self, initial_state=None) -> None:
+        super()._reset(initial_state)
+        if self._closed_params is not None:
+            self._closed_params.reset()
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         end_id = self._think_end_token_id

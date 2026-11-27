@@ -252,6 +252,20 @@ WRITE_CALL_TAIL = "</parameter>\n</invoke>\n</minimax:tool_call>"
 # Escapes, non-ASCII, blank lines and tag-like text that must stay inside
 # the value, including prefixes of the closing and next-parameter tags.
 CONTENT_LINE = 'if a < b > c: print("x\\y")  # </p> </param <parameter\té\n\n'
+# A model stuck in a loop repeats closed parameters inside one invoke block.
+LOOP_HEAD = (
+    '<minimax:tool_call>\n<invoke name="write_file">\n'
+    '<parameter name="path">/repo/app.py</parameter>\n'
+)
+LOOP_PARAMS = (
+    '<parameter name="content">a > b</parameter>\n'
+    '<parameter name="mode">644</parameter>\n'
+)
+LOOP_SECOND_INVOKE = (
+    '<invoke name="write_file">\n<parameter name="path">/repo/app.py</parameter>\n'
+)
+LOOP_INVOKE_TAIL = "</invoke>\n"
+LOOP_TAIL = "</invoke>\n</minimax:tool_call>"
 
 
 class TestArgValueExtender:
@@ -323,6 +337,117 @@ class TestArgValueExtender:
             return calls
 
         assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
+
+    @pytest.mark.parametrize("size", [1, 7])
+    def test_repeated_closed_params_stream_non_streaming_arguments(
+        self, mock_tokenizer, mock_request, write_tool, size
+    ):
+        """Covers a duplicate open key and a second call sharing the first pair."""
+        mock_request.tools = [write_tool]
+        text = (
+            LOOP_HEAD
+            + LOOP_PARAMS * 20
+            + '<parameter name="content">a > b'
+            + "</parameter>\n"
+            + LOOP_INVOKE_TAIL
+            + LOOP_SECOND_INVOKE
+            + LOOP_TAIL
+        )
+
+        results = simulate_tool_streaming(
+            MinimaxM2Parser(mock_tokenizer),
+            mock_request,
+            [text[i : i + size] for i in range(0, len(text), size)],
+        )
+        result = MinimaxM2Parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert len(result.tool_calls) == 2
+        assert collect_tool_arguments(results) == "".join(
+            c.function.arguments for c in result.tool_calls
+        )
+
+    def test_closed_params_are_parsed_once(
+        self, mock_tokenizer, mock_request, write_tool, monkeypatch
+    ):
+        """Streaming cost must not grow with the closed parameters already seen."""
+        from vllm.parser import minimax_m2
+
+        mock_request.tools = [write_tool]
+        param_re = minimax_m2._PARAM_RE
+        matches = 0
+
+        class CountingPattern:
+            def __getattr__(self, name):
+                return getattr(param_re, name)
+
+            def finditer(self, *args):
+                nonlocal matches
+                for match in param_re.finditer(*args):
+                    matches += 1
+                    yield match
+
+            def sub(self, repl, *args):
+                def count(match):
+                    nonlocal matches
+                    matches += 1
+                    return repl
+
+                return param_re.sub(count, *args)
+
+        monkeypatch.setattr(minimax_m2, "_PARAM_RE", CountingPattern())
+        text = LOOP_HEAD + LOOP_PARAMS * 200 + LOOP_TAIL
+        simulate_tool_streaming(
+            minimax_m2.MinimaxM2Parser(mock_tokenizer),
+            mock_request,
+            [text[i : i + 4] for i in range(0, len(text), 4)],
+        )
+
+        assert matches == len(param_re.findall(text))
+
+    def test_value_closed_by_next_parameter_needs_that_parameter(self):
+        from vllm.parser.minimax_m2 import _ClosedParams, _minimax_m2_arg_converter
+
+        closed = _ClosedParams()
+        _minimax_m2_arg_converter(
+            '<parameter name="path">/a.py<parameter name="mode">6', True, closed
+        )
+        text = '<parameter name="path">/a.py.bak</parameter>'
+        assert _minimax_m2_arg_converter(
+            text, False, closed
+        ) == _minimax_m2_arg_converter(text, False)
+
+    @pytest.mark.parametrize(
+        ("prefix", "suffix"),
+        [
+            (
+                '<parameter name="a<parameter name=b>1</parameter>',
+                '">2</parameter>',
+            ),
+            (
+                '<parameter name="a>1<parameter name=b>2</parameter>',
+                '">3</parameter>',
+            ),
+        ],
+        ids=["unmatched_quoted_opener", "bare_name_starts_with_quote"],
+    )
+    def test_unstable_quote_prefix_matches_uncached_parse(
+        self, mock_tokenizer, mock_request, prefix, suffix
+    ):
+        from vllm.parser.minimax_m2 import _ClosedParams, _minimax_m2_arg_converter
+
+        closed = _ClosedParams()
+        _minimax_m2_arg_converter(prefix, True, closed)
+        raw = prefix + suffix
+        assert _minimax_m2_arg_converter(
+            raw, False, closed
+        ) == _minimax_m2_arg_converter(raw, False)
+
+        full = f'<minimax:tool_call><invoke name="f">{raw}</invoke></minimax:tool_call>'
+        parser = MinimaxM2Parser(mock_tokenizer)
+        _, _, parsed = parser.parse(full, mock_request, enable_auto_tools=True)
+        extracted = parser.extract_tool_calls(full, mock_request)
+
+        assert extracted.tool_calls[0].function.arguments == parsed[0].arguments
 
     def test_extender_stops_at_split_end_tag(self):
         extend = _minimax_m2_arg_value_extender('<parameter name="k">')
