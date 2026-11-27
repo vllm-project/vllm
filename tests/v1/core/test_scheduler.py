@@ -8346,6 +8346,105 @@ def test_waiting_skip_releases_encoder_cache_hit_on_unchunked_mm_zero():
     assert manager.num_freeable_slots == 576
 
 
+@pytest.mark.parametrize("zero_token_path", ["lookahead", "unchunked_mm"])
+def test_waiting_skip_preserves_shared_encoder_cache_owner(zero_token_path: str):
+    """Zero-token skip releases only the skipped request's ref, not another owner's."""
+    is_lookahead = zero_token_path == "lookahead"
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_seqs=4,
+        max_num_batched_tokens=600,
+        max_model_len=2048,
+        disable_chunked_mm_input=not is_lookahead,
+        encoder_cache_size=576,
+    )
+    scheduler.num_prefill_lookahead = 3 if is_lookahead else 1
+    manager = scheduler.encoder_cache_manager
+
+    mm_hash = "img_cached" if is_lookahead else "img_0"
+    owner = create_requests(
+        num_requests=1,
+        num_tokens=576 if is_lookahead else 577,
+        mm_hashes_list=[[mm_hash]],
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=576)]
+            if is_lookahead
+            else [PlaceholderRange(offset=1, length=576)]
+        ],
+        req_ids=["owner"],
+    )[0]
+    manager.allocate(owner, 0)
+    assert manager.cached[mm_hash] == {"owner"}
+    assert mm_hash not in manager.freeable
+    assert manager.num_freeable_slots == 0
+
+    # Consume 599 (lookahead) or 595 (unchunked_mm) of 600 batched tokens in
+    # step 2 so the waiting queue sees token_budget=1 or 5.
+    filler = create_requests(
+        num_requests=1,
+        num_tokens=1199 if is_lookahead else 1195,
+        max_tokens=1,
+        req_ids=["filler"],
+    )[0]
+    scheduler.add_request(filler)
+    step1 = scheduler.schedule()
+    assert step1.num_scheduled_tokens == {"filler": 600}
+
+    if is_lookahead:
+        blocked = create_requests(
+            num_requests=1,
+            num_tokens=578,
+            mm_hashes_list=[[mm_hash]],
+            mm_positions=[[PlaceholderRange(offset=0, length=576)]],
+            max_tokens=1,
+            req_ids=["blocked"],
+        )[0]
+        blocked.num_computed_tokens = 575
+    else:
+        blocked = create_requests(
+            num_requests=1,
+            num_tokens=1160,
+            mm_hashes_list=[[mm_hash, "img_1"]],
+            mm_positions=[
+                [
+                    PlaceholderRange(offset=1, length=576),
+                    PlaceholderRange(offset=577, length=560),
+                ]
+            ],
+            max_tokens=1,
+            req_ids=["blocked"],
+        )[0]
+        blocked.num_computed_tokens = 576
+
+    successor = create_requests(
+        num_requests=1,
+        num_tokens=10,
+        mm_hashes_list=[["img_new"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=1)]],
+        max_tokens=1,
+        req_ids=["successor"],
+    )[0]
+    scheduler.add_request(blocked)
+    scheduler.add_request(successor)
+
+    output = scheduler.schedule()
+
+    # The skipped request drops its pin, while `owner` keeps the entry live and
+    # blocks eviction by `successor`.
+    assert "blocked" not in output.num_scheduled_tokens
+    assert "blocked" not in manager.request_cached_ids
+    assert manager.cached[mm_hash] == {"owner"}
+    assert mm_hash not in manager.freeable
+    assert manager.num_freeable_slots == 0
+    assert "successor" not in output.num_scheduled_tokens
+
+    # Once `owner` releases, all 576 slots become reclaimable immediately.
+    manager.free(owner)
+    assert manager.cached[mm_hash] == set()
+    assert mm_hash in manager.freeable
+    assert manager.num_freeable_slots == 576
+
+
 def test_encoder_cache_retained_across_preemption_and_resume():
     """Regression guard for issue #38551 (preemption path).
 
