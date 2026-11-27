@@ -10,6 +10,8 @@ run_all_patterns:
   - "docker/docker-bake-xpu.hcl"
   - "CMakeLists.txt"
   - "requirements/common.txt"
+  - "requirements/test/xpu.in"
+  - "requirements/test/xpu.txt"
   - "requirements/xpu.txt"
   - "setup.py"
   - "csrc/"

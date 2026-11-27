@@ -217,9 +217,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/vllm-workspace/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
     --mount=type=bind,src=requirements/test/xpu.txt,target=/vllm-workspace/requirements/test/xpu.txt \
+    --mount=type=bind,src=requirements/test/kv_connectors_xpu.txt,target=/vllm-workspace/requirements/test/kv_connectors_xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
     uv pip install -r /vllm-workspace/requirements/xpu.txt && \
-    uv pip install --no-build-isolation -r /vllm-workspace/requirements/test/xpu.txt
+    uv pip install --no-build-isolation -r /vllm-workspace/requirements/test/xpu.txt && \
+    uv pip install --no-build-isolation --require-hashes --no-deps \
+        -r /vllm-workspace/requirements/test/kv_connectors_xpu.txt
 
 # Keep source-dependent layers near the end so frequent code-only changes
 # don't invalidate heavy dependency and UCX/NIXL layers.
