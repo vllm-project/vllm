@@ -291,6 +291,16 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
     validate_parsed_serve_args(args)
 
 
+@pytest.mark.parametrize(
+    ("cli_args", "expected"),
+    [([], False), (["--debug-log-api-server-response"], True)],
+)
+def test_debug_log_api_server_response(serve_parser, cli_args, expected):
+    args = serve_parser.parse_args(args=cli_args)
+    validate_parsed_serve_args(args)
+    assert args.debug_log_api_server_response is expected
+
+
 def test_auto_tool_choice_with_reasoning_parser_passes(serve_parser):
     """Auto tool choice combined with a reasoning parser is supported.
 

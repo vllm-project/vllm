@@ -381,6 +381,12 @@ class FrontendArgs(BaseFrontendArgs):
     add it to the server using `app.add_middleware()`."""
     enable_request_id_headers: bool = False
     """If specified, API server will add X-Request-Id header to responses."""
+    debug_log_api_server_response: bool = False
+    """If set to True, log the full body of every API server response,
+    including streamed SSE payloads, for debugging. CAUTION: logged responses
+    can include sensitive information and should be avoided in production.
+    Replaces the deprecated `VLLM_DEBUG_LOG_API_SERVER_RESPONSE` environment
+    variable."""
     disable_fastapi_docs: bool = False
     """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT

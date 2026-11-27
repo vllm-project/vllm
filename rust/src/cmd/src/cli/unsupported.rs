@@ -392,6 +392,18 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub middleware: Option<Unsupported>,
 
+    /// If set to True, log the full body of every API server response,
+    /// including streamed SSE payloads, for debugging. CAUTION: logged
+    /// responses can include sensitive information and should be avoided
+    /// in production.
+    #[arg(
+        long,
+        visible_alias = "no-debug-log-api-server-response",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub debug_log_api_server_response: Option<Unsupported>,
+
     /// Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.
     ///
     /// Accepted as a no-op: the Rust frontend does not serve these docs
