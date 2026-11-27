@@ -189,6 +189,12 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
 MIN_FUSED_UP_M = 48
 
 
+# On B300, with hc_combine_norm triggering its PDL dependents early, the SM100
+# kernel beats the CuTeDSL one from M = 9 on (CUPTI, cold L2): +2-6% chain time
+# at M = 9..48, while the CuTeDSL FMA path wins at M <= 4 and M = 5..8 is a tie.
+SM100_DOWN_MIN_M = 9
+
+
 def hc_down_silu_sm100_supported(
     w_down: torch.Tensor, rank: int, hc_count: int
 ) -> bool:
