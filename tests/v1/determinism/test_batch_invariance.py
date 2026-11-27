@@ -9,6 +9,7 @@ import torch
 from transformers import AutoTokenizer
 from utils import (
     BACKENDS,
+    IS_GDN_MODEL,
     TEST_MODEL,
     _extract_step_logprobs,
     _prompt_with_tokens,
@@ -715,6 +716,11 @@ def test_logprobs_without_batch_invariance_should_fail(
 
 
 @skip_if_not_cuda_alike
+@pytest.mark.skipif(
+    IS_GDN_MODEL,
+    reason="GDN decodes with a recurrent kernel and prefills with a chunked "
+    "one; batch invariance does not make the two bitwise equal.",
+)
 @pytest.mark.parametrize(
     "backend", ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 )

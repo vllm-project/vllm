@@ -104,8 +104,10 @@ from vllm.utils.torch_utils import (
     aux_stream,
     direct_register_custom_op,
 )
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
+    GDNAttentionBackend,
     GDNAttentionMetadata,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -339,6 +341,10 @@ def _resolve_gdn_prefill_backend(
         )
 
     if not current_platform.is_cuda():
+        return backend, "triton"
+
+    if envs.VLLM_BATCH_INVARIANT:
+        # Only the FLA chunks are per-request; FlashInfer is not covered.
         return backend, "triton"
 
     supports_flashinfer = False
@@ -707,8 +713,19 @@ class ChunkGatedDeltaRule(CustomOp):
         return o, final_state
 
 
+class QwenGDNAttentionBackend(GDNAttentionBackend):
+    """GDN_ATTN for the Qwen layer, the only one made batch-invariant."""
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return current_platform.is_cuda()
+
+
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return QwenGDNAttentionBackend
+
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], ...]:
@@ -909,8 +926,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._checkpoint_exporter = MambaPrefillCheckpointExporter(
                 state_len=self.conv_kernel_size - 1
             )
+        if envs.VLLM_BATCH_INVARIANT and self.num_spec > 0:
+            raise ValueError(
+                "VLLM_BATCH_INVARIANT=1 does not support speculative decoding "
+                "with GDN_ATTN layers; disable one of them."
+            )
+        # Decodes must take the same kernels with or without prefills alongside.
         self.enable_packed_recurrent_decode = (
-            envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE and self.beta_scale == 1.0
+            envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+            and self.beta_scale == 1.0
+            and not envs.VLLM_BATCH_INVARIANT
         )
         # Off by default; the Qwen3.5 NVIDIA variant passes a fused gated RMS
         # norm that reads z strided from the packed qkvz projection and
@@ -944,6 +969,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # enabled, the paged GDN page grows to 5 tensors and the non-spec decode
         # branch decodes through fused_recurrent_gated_delta_rule_replayssm.
         self.use_replayssm = self.cache_config.use_replayssm
+        if envs.VLLM_BATCH_INVARIANT and self.use_replayssm:
+            raise ValueError(
+                "VLLM_BATCH_INVARIANT=1 does not support ReplaySSM with GDN_ATTN "
+                "layers; disable one of them."
+            )
         if self.use_replayssm and (
             reason := self._replayssm_unsupported_reason(vllm_config, self.beta_scale)
         ):
@@ -1011,6 +1041,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
+
+    def get_prefill_chunk_alignment(self) -> int | None:
+        # The FLA chunks start at each prefill chunk's first token.
+        return FLA_CHUNK_SIZE if envs.VLLM_BATCH_INVARIANT else None
 
     def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         if not self._exports_checkpoints:
@@ -2074,6 +2108,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.2: Process the remaining part
         conv_input_non_spec = mixed_qkv_non_spec
+        num_decode_tokens = attn_metadata.num_decode_tokens
         prefill_post_conv = None
         if (
             attn_metadata.num_prefills > 0
@@ -2083,6 +2118,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and gdn_prefill_conv_supported(
                 mixed_qkv, conv_weights, conv_state, self.head_k_dim, self.head_v_dim
             )
+            and not envs.VLLM_BATCH_INVARIANT
         ):
             # Pure prefill: conv + post-conv prep in one kernel.
             assert mixed_qkv_non_spec is not None
@@ -2106,6 +2142,41 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 head_dim=self.head_k_dim,
                 output_g_exp=self.gdn_prefill_backend == "flashinfer",
                 beta_scale=self.beta_scale,
+            )
+        elif (
+            envs.VLLM_BATCH_INVARIANT
+            and attn_metadata.num_prefills > 0
+            and attn_metadata.num_decodes > 0
+        ):
+            # Decodes use the decode conv kernel, as in a decode-only step.
+            assert mixed_qkv_non_spec is not None
+            assert non_spec_state_indices_tensor is not None
+            decode_in = mixed_qkv_non_spec[:num_decode_tokens]
+            mixed_qkv_non_spec = torch.cat(
+                [
+                    causal_conv1d_update(
+                        decode_in,
+                        conv_state,
+                        conv_weights,
+                        self.conv1d.bias,
+                        self.activation,
+                        conv_state_indices=non_spec_state_indices_tensor[
+                            :num_decode_tokens
+                        ],
+                        out=torch.empty_like(decode_in),
+                    ),
+                    causal_conv1d_fn(
+                        mixed_qkv_non_spec[num_decode_tokens:].transpose(0, 1),
+                        conv_weights,
+                        self.conv1d.bias,
+                        activation=self.activation,
+                        conv_states=conv_state,
+                        has_initial_state=attn_metadata.prefill_has_initial_state,
+                        cache_indices=attn_metadata.prefill_state_indices,
+                        query_start_loc=attn_metadata.prefill_query_start_loc,
+                        metadata=attn_metadata,
+                    ).transpose(0, 1),
+                ]
             )
         elif attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
@@ -2147,7 +2218,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_prefills > 0
             and attn_metadata.num_decodes > 0
         )
-        num_decode_tokens = attn_metadata.num_decode_tokens
 
         if attn_metadata.num_prefills > 0:
             if prefill_post_conv is None:

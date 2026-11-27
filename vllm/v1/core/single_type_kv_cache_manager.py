@@ -1865,6 +1865,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_speculative_blocks: int = 0
         num_prefill_checkpoint_blocks: int = 0
         prefill_checkpoint_alignment: int | None = None
+        prefill_chunk_alignment: int | None = None
 
     block_table_token_alignment: ClassVar[int | None] = None
 

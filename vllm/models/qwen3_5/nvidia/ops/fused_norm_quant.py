@@ -14,6 +14,7 @@ as the pre-SM80 fallback where flashinfer's norm module cannot JIT-build.
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8DynamicTokenSym,
@@ -232,6 +233,8 @@ def gemma_add_rms_norm_quant(
     # on SM120) needs 8 warps above that for its row amax, not 4.
     max_m_16_warps = 128 if quant == "nvfp4" else 384
     large_m_warps = 8 if quant == "fp8_token" else 4
+    # Batch invariance: the warp count sets a row's reduction order.
+    use_16_warps = max_m_16_warps >= M and not envs.VLLM_BATCH_INVARIANT
     _gemma_add_rms_norm_quant_kernel[(M,)](
         x,
         residual if residual is not None else x,
@@ -245,7 +248,7 @@ def gemma_add_rms_norm_quant(
         HAS_RESIDUAL=residual is not None,
         QUANT=quant,
         WRITE_Y=write_y,
-        num_warps=16 if max_m_16_warps >= M else large_m_warps,
+        num_warps=16 if use_16_warps else large_m_warps,
         launch_pdl=current_platform.is_arch_support_pdl(),
         # Overlaps the consumer's weight load with this kernel. Swept on
         # GB300: ~2% win at M <= 128; the prelaunched consumer grid steals
@@ -289,7 +292,8 @@ def gemma_add_rms_norm(
         HAS_RESIDUAL=residual is not None,
         QUANT="none",
         WRITE_Y=True,
-        num_warps=16 if M <= 384 else 4,
+        # Batch invariance: the warp count sets a row's reduction order.
+        num_warps=16 if M <= 384 and not envs.VLLM_BATCH_INVARIANT else 4,
         launch_pdl=current_platform.is_arch_support_pdl(),
         TRIGGER_EARLY=M <= 128,
     )
