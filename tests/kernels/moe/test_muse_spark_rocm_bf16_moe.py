@@ -954,15 +954,28 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
         out = reducer.apply(out, route_buffer, topk_weights, topk_ids, False)
         return routes, out, expert_map
 
+    def _assert_matches_unsharded(
+        actual: torch.Tensor, expected: torch.Tensor, **tolerance: float
+    ) -> None:
+        if backend != "aiter_fp8":
+            torch.testing.assert_close(actual, expected, **tolerance)
+            return
+        # AITER's 1-stage FP8 kernel picks its N tile from the CU count and the
+        # number of sorted M blocks, so the sharded and unsharded calls may run
+        # different tiles, which do not round alike.
+        diff = (actual.float() - expected.float()).norm().item()
+        bound = 0.04 * expected.float().norm().item()
+        assert diff <= bound, f"{diff:.4f} > {bound:.4f}"
+
     full_routes, full, _ = _finalize(1, 0)
     summed = torch.zeros(num_tokens, hidden_size, device="cuda")
     for ep_rank in range(ep_size):
         routes, partial, expert_map = _finalize(ep_size, ep_rank)
         assert expert_map is not None
         is_local = expert_map.cuda()[topk_ids.long()] >= 0
-        torch.testing.assert_close(routes[is_local], full_routes[is_local])
+        _assert_matches_unsharded(routes[is_local], full_routes[is_local])
         summed += partial.float()
-    torch.testing.assert_close(summed, full.float(), rtol=1e-2, atol=1e-2)
+    _assert_matches_unsharded(summed, full.float(), rtol=1e-2, atol=1e-2)
 
 
 def _post_expert_norm_module(hidden_size: int) -> torch.nn.Module:
