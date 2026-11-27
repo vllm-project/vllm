@@ -6,6 +6,7 @@ import socket
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from functools import partial
 from typing import Any
 
 import vllm.envs as envs
@@ -216,14 +217,18 @@ class AsyncLLM(EngineClient):
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
+        # Kept so elastic EP scale-up rebuilds loggers with the same settings.
+        self._new_logger_manager = partial(
+            StatLoggerManager,
+            vllm_config=vllm_config,
+            custom_stat_loggers=custom_stat_loggers,
+            enable_default_loggers=log_stats,
+            client_count=client_count,
+            aggregate_engine_logging=aggregate_engine_logging,
+        )
         if self.log_stats:
-            self.logger_manager = StatLoggerManager(
-                vllm_config=vllm_config,
-                engine_idxs=self.engine_core.engine_ranks_managed,
-                custom_stat_loggers=custom_stat_loggers,
-                enable_default_loggers=log_stats,
-                client_count=client_count,
-                aggregate_engine_logging=aggregate_engine_logging,
+            self.logger_manager = self._new_logger_manager(
+                engine_idxs=self.engine_core.engine_ranks_managed
             )
             self.logger_manager.log_engine_initialized()
 
@@ -1441,10 +1446,8 @@ class AsyncLLM(EngineClient):
             # This resets all the prometheus metrics since we
             # unregister during initialization. Need to understand
             # the intended behavior here better.
-            self.logger_manager = StatLoggerManager(
-                vllm_config=self.vllm_config,
-                engine_idxs=list(range(new_data_parallel_size)),
-                custom_stat_loggers=None,
+            self.logger_manager = self._new_logger_manager(
+                engine_idxs=list(range(new_data_parallel_size))
             )
             # Update the mutable ref so output_handler picks up the
             # new logger without creating a circular reference via self.
