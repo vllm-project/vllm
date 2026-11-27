@@ -148,7 +148,8 @@ def load_image(
     decoded (vLLM supplies PIL images instead of a record dict).
     """
     p = patch_size
-    image = image.convert("RGB")
+    if image.mode != "RGB":
+        image = image.convert("RGB")
     width, height = image.size
     if max_wh_ratio is not None and width > height * max_wh_ratio:
         width = height * max_wh_ratio
