@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Sequence
 
 import pytest
@@ -12,6 +13,7 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode, rescale_image_size
 from vllm.multimodal.media.audio import load_audio
+from vllm.transformers_utils.repo_utils import hf_api
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -32,6 +34,15 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 HF_MULTIIMAGE_IMAGE_PROMPT = (
     "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
 )
+
+model_path = hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
+# Since the vision-lora and speech-lora co-exist with the base model,
+# we have to manually specify the path of the lora weights.
+vision_lora_path = os.path.join(model_path, "vision-lora")
+speech_question = os.path.join(
+    model_path, "examples", "what_is_shown_in_this_image.wav"
+)
+models = [model_path]
 
 
 def vllm_to_hf_output(
@@ -74,7 +85,6 @@ def run_test(
     num_logprobs: int,
     mm_limit: int,
     tensor_parallel_size: int,
-    vision_lora_path: str,
     distributed_executor_backend: str | None = None,
 ):
     """Inference result should be the same between hf and vllm.
@@ -94,6 +104,7 @@ def run_test(
     with vllm_runner(
         model,
         runner="generate",
+        trust_remote_code=True,
         max_model_len=max_model_len,
         max_num_seqs=2,
         dtype=dtype,
@@ -123,7 +134,9 @@ def run_test(
     pytest.skip("HF impl is not compatible with current transformers")
 
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
-    with hf_runner(model, dtype=dtype, model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, model_kwargs=hf_model_kwargs, trust_remote_code=True
+    ) as hf_model:
         hf_processor = hf_model.processor
         eos_token_id = hf_processor.tokenizer.eos_token_id
 
@@ -161,6 +174,7 @@ def run_test(
         )
 
 
+@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_model_len", [12800])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -169,8 +183,7 @@ def test_models(
     hf_runner,
     vllm_runner,
     image_assets,
-    phi4_multimodal_model_path,
-    phi4_multimodal_vision_lora_path,
+    model,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
@@ -192,18 +205,18 @@ def test_models(
         hf_runner,
         vllm_runner,
         inputs_per_image,
-        phi4_multimodal_model_path,
+        model,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         mm_limit=1,
         tensor_parallel_size=1,
-        vision_lora_path=phi4_multimodal_vision_lora_path,
     )
 
 
 @large_gpu_test(min_gb=48)
+@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_model_len", [25600])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -212,8 +225,7 @@ def test_multi_images_models(
     hf_runner,
     vllm_runner,
     image_assets,
-    phi4_multimodal_model_path,
-    phi4_multimodal_vision_lora_path,
+    model,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
@@ -237,17 +249,17 @@ def test_multi_images_models(
         hf_runner,
         vllm_runner,
         inputs_per_case,
-        phi4_multimodal_model_path,
+        model,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         mm_limit=2,
         tensor_parallel_size=1,
-        vision_lora_path=phi4_multimodal_vision_lora_path,
     )
 
 
+@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_model_len", [12800])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -255,16 +267,14 @@ def test_multi_images_models(
 def test_vision_speech_models(
     hf_runner,
     vllm_runner,
-    phi4_multimodal_model_path,
-    phi4_multimodal_vision_lora_path,
-    phi4_multimodal_speech_question_path,
+    model,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
     # use the example speech question so that the model outputs are reasonable
-    audio = load_audio(phi4_multimodal_speech_question_path, sr=None)
+    audio = load_audio(speech_question, sr=None)
     image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
     inputs_vision_speech = [
@@ -279,12 +289,11 @@ def test_vision_speech_models(
         hf_runner,
         vllm_runner,
         inputs_vision_speech,
-        phi4_multimodal_model_path,
+        model,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         mm_limit=1,
         tensor_parallel_size=1,
-        vision_lora_path=phi4_multimodal_vision_lora_path,
     )

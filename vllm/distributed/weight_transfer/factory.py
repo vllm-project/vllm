@@ -4,7 +4,7 @@
 
 import importlib
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
@@ -25,23 +25,20 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_EngineT = TypeVar("_EngineT")
 
-class WeightTransferEngineFactory:
-    """Factory for creating weight transfer engines with lazy loading.
 
-    This factory implements a registry pattern that supports:
-    - Lazy loading: Engine modules are only imported when actually needed
-    - Extensibility: Custom engines can be registered at runtime
-    - Centralized registration: All built-in engines registered in one place
-    """
+class _LazyEngineFactory(Generic[_EngineT]):
+    """Registry-backed factory that imports engine classes lazily on demand."""
 
-    _registry: dict[str, Callable[[], type[WeightTransferEngine]]] = {}
+    _registry: dict[str, Callable[[], type[Any]]]
+    _engine_kind: ClassVar[str]
 
     @classmethod
     def register_engine(
         cls,
         name: str,
-        module_path_or_cls: str | type[WeightTransferEngine],
+        module_path_or_cls: str | type[_EngineT],
         class_name: str | None = None,
     ) -> None:
         """Register an engine with lazy-loading or direct class reference.
@@ -58,9 +55,12 @@ class WeightTransferEngineFactory:
 
         Raises:
             ValueError: If an engine with the same name is already registered
+
         """
         if name in cls._registry:
-            raise ValueError(f"Weight transfer engine '{name}' is already registered.")
+            raise ValueError(
+                f"Weight transfer {cls._engine_kind} '{name}' is already registered."
+            )
 
         if isinstance(module_path_or_cls, str):
             # Lazy loading path
@@ -69,16 +69,47 @@ class WeightTransferEngineFactory:
                 raise ValueError(
                     "class_name is required when registering with module path"
                 )
+            target_class = class_name
 
-            def loader() -> type[WeightTransferEngine]:
+            def loader() -> type[_EngineT]:
                 module = importlib.import_module(module_path)
-                return getattr(module, class_name)
+                return getattr(module, target_class)
 
             cls._registry[name] = loader
         else:
             # Direct class registration
             engine_cls = module_path_or_cls
             cls._registry[name] = lambda: engine_cls
+
+    @classmethod
+    def _resolve_engine(cls, backend: str) -> type[_EngineT]:
+        if backend not in cls._registry:
+            available = list(cls._registry.keys())
+            raise ValueError(
+                f"Invalid weight transfer backend: {backend}. "
+                f"Available {cls._engine_kind}s: {available}"
+            )
+        engine_cls = cls._registry[backend]()
+
+        logger.info(
+            "Creating weight transfer %s: %s",
+            cls._engine_kind,
+            engine_cls.__name__,
+        )
+        return engine_cls
+
+
+class WeightTransferEngineFactory(_LazyEngineFactory[WeightTransferEngine]):
+    """Factory for creating weight transfer engines with lazy loading.
+
+    This factory implements a registry pattern that supports:
+    - Lazy loading: Engine modules are only imported when actually needed
+    - Extensibility: Custom engines can be registered at runtime
+    - Centralized registration: All built-in engines registered in one place
+    """
+
+    _registry: dict[str, Callable[[], type[WeightTransferEngine]]] = {}
+    _engine_kind: ClassVar[str] = "engine"
 
     @classmethod
     def create_engine(
@@ -101,25 +132,13 @@ class WeightTransferEngineFactory:
 
         Raises:
             ValueError: If the backend is not registered
+
         """
-        backend = config.backend
-        if backend not in cls._registry:
-            available = list(cls._registry.keys())
-            raise ValueError(
-                f"Invalid weight transfer backend: {backend}. "
-                f"Available engines: {available}"
-            )
-        engine_cls = cls._registry[backend]()
-
-        logger.info(
-            "Creating weight transfer engine: %s",
-            engine_cls.__name__,
-        )
-
+        engine_cls = cls._resolve_engine(config.backend)
         return engine_cls(config, vllm_config, device, model)
 
 
-class WeightTransferTrainerFactory:
+class WeightTransferTrainerFactory(_LazyEngineFactory[TrainerWeightTransferEngine]):
     """Factory for creating trainer-side weight transfer engines.
 
     Parallel to `WeightTransferEngineFactory`, with its own lazy-import
@@ -130,36 +149,7 @@ class WeightTransferTrainerFactory:
     """
 
     _registry: dict[str, Callable[[], type[TrainerWeightTransferEngine]]] = {}
-
-    @classmethod
-    def register_engine(
-        cls,
-        name: str,
-        module_path_or_cls: "str | type[TrainerWeightTransferEngine]",
-        class_name: str | None = None,
-    ) -> None:
-        """Register a trainer engine. Same conventions as
-        `WeightTransferEngineFactory.register_engine`."""
-        if name in cls._registry:
-            raise ValueError(
-                f"Weight transfer trainer engine '{name}' is already registered."
-            )
-
-        if isinstance(module_path_or_cls, str):
-            module_path = module_path_or_cls
-            if class_name is None:
-                raise ValueError(
-                    "class_name is required when registering with module path"
-                )
-
-            def loader() -> type[TrainerWeightTransferEngine]:
-                module = importlib.import_module(module_path)
-                return getattr(module, class_name)
-
-            cls._registry[name] = loader
-        else:
-            engine_cls = module_path_or_cls
-            cls._registry[name] = lambda: engine_cls
+    _engine_kind: ClassVar[str] = "trainer engine"
 
     @classmethod
     def trainer_init(
@@ -172,10 +162,10 @@ class WeightTransferTrainerFactory:
         """Build and rendezvous a ready-to-send trainer engine.
 
         Called on every trainer rank (multi-rank trainers construct on all
-        ranks; the sender is resolved inside the engine's ``trainer_init``).
+        ranks; the sender is resolved inside the engine's `trainer_init`).
 
         The trainer side takes no `WeightTransferConfig` and no separate
-        `backend` argument: the backend is read from ``init_info.backend`` (a
+        `backend` argument: the backend is read from `init_info.backend` (a
         `ClassVar` on each `TrainerInitInfo` subclass), and the static wire
         params ride `init_info`.
 
@@ -190,21 +180,9 @@ class WeightTransferTrainerFactory:
 
         Raises:
             ValueError: If `init_info.backend` is not registered.
+
         """
-        backend = init_info.backend
-        if backend not in cls._registry:
-            available = list(cls._registry.keys())
-            raise ValueError(
-                f"Invalid weight transfer backend: {backend}. "
-                f"Available trainer engines: {available}"
-            )
-        engine_cls = cls._registry[backend]()
-
-        logger.info(
-            "Creating weight transfer trainer engine: %s",
-            engine_cls.__name__,
-        )
-
+        engine_cls = cls._resolve_engine(init_info.backend)
         return engine_cls.trainer_init(
             init_info=init_info,
             client=client,
@@ -234,6 +212,37 @@ WeightTransferEngineFactory.register_engine(
     "SparseNCCLWeightTransferEngine",
 )
 
+WeightTransferEngineFactory.register_engine(
+    "sparse_disk",
+    "vllm.distributed.weight_transfer.sparse_disk_engine",
+    "SparseDiskWeightTransferEngine",
+)
+
+WeightTransferEngineFactory.register_engine(
+    "sharded_rdt",
+    "vllm.distributed.weight_transfer.sharded_rdt_engine",
+    "ShardedRDTWeightTransferEngine",
+)
+
+WeightTransferEngineFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_engine",
+    "M2NWeightTransferEngine",
+)
+
+
+WeightTransferEngineFactory.register_engine(
+    "modelexpress",
+    "vllm.distributed.weight_transfer.modelexpress_engine",
+    "ModelExpressWeightTransferEngine",
+)
+
+WeightTransferEngineFactory.register_engine(
+    "connex",
+    "vllm.distributed.weight_transfer.connex_engine",
+    "ConnexWeightTransferEngine",
+)
+
 
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
@@ -252,4 +261,28 @@ WeightTransferTrainerFactory.register_engine(
     "sparse_nccl",
     "vllm.distributed.weight_transfer.sparse_nccl_engine",
     "SparseNCCLTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "sparse_disk",
+    "vllm.distributed.weight_transfer.sparse_disk_engine",
+    "SparseDiskTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "sharded_rdt",
+    "vllm.distributed.weight_transfer.sharded_rdt_trainer",
+    "ShardedRDTTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_trainer",
+    "M2NTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "connex",
+    "vllm.distributed.weight_transfer.connex_engine",
+    "ConnexTrainerWeightTransferEngine",
 )

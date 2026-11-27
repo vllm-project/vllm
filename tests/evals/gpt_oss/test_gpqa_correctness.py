@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-GPQA evaluation using vLLM server and GPT-OSS evaluation package.
+"""GPQA evaluation using vLLM server and GPT-OSS evaluation package.
 
 Usage:
 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py \
@@ -12,50 +11,52 @@ import os
 import shlex
 import subprocess
 import sys
+import urllib.request
+from pathlib import Path
 
 import regex as re
 import yaml
 
-from tests.utils import RemoteOpenAIServer, TestAssetFetcher
+from tests.utils import RemoteOpenAIServer
 
 TOL = 0.05  # Absolute tolerance for accuracy comparison
 
-TIKTOKEN_ASSET_SUITE = "gpt_oss/tiktoken"
+# gpt-oss >= 0.0.7 explicitly sends its 131072-token default as the output
+# budget, which leaves no room for the prompt in GPT-OSS's 131072-token context.
+# This test originally ran with a 32768-token model context, so retain that
+# proven generation budget while using the current evaluator package.
+MAX_OUTPUT_TOKENS = 32_768
+
+# Path to tiktoken encoding files
+TIKTOKEN_DATA_DIR = Path(__file__).parent / "data"
 
 # Tiktoken encoding files to download
 TIKTOKEN_FILES = {
-    "cl100k_base.tiktoken": (
-        "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken",
-        "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
-    ),
-    "o200k_base.tiktoken": (
-        "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken",
-        "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
-    ),
+    "cl100k_base.tiktoken": "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken",
+    "o200k_base.tiktoken": "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken",
 }
 
 
 def ensure_tiktoken_files():
     """Download tiktoken encoding files if they don't exist."""
-    assets = TestAssetFetcher.for_suite(TIKTOKEN_ASSET_SUITE)
+    TIKTOKEN_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    for filename, (url, expected_sha256) in TIKTOKEN_FILES.items():
-        filepath = assets.fetch(url, filename, expected_sha256)
-        print(f"Using {filename} from {filepath}")
-
-    return assets.directory
+    for filename, url in TIKTOKEN_FILES.items():
+        filepath = TIKTOKEN_DATA_DIR / filename
+        if not filepath.exists():
+            print(f"Downloading {filename} from {url}...")
+            urllib.request.urlretrieve(url, filepath)
+            print(f"  Downloaded to {filepath}")
+        else:
+            print(f"  {filename} already exists.")
 
 
 def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> float:
     """Run GPQA evaluation using the gpt-oss evaluation package."""
-
     # Build the command to run the evaluation
     cmd = [
         sys.executable,
-        "-m",
-        "gpt_oss.evals",
-        "--eval",
-        "gpqa",
+        str(Path(__file__).with_name("run_gpqa_eval.py")),
         "--model",
         model_name,
         "--reasoning-effort",
@@ -64,6 +65,8 @@ def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> floa
         base_url,
         "--n-threads",
         "200",
+        "--max-output-tokens",
+        str(MAX_OUTPUT_TOKENS),
     ]
 
     try:
@@ -108,11 +111,11 @@ def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> floa
 def test_gpqa_correctness(config_filename):
     """Test GPQA correctness for a given model configuration."""
     # Ensure tiktoken files are downloaded
-    tiktoken_data_dir = ensure_tiktoken_files()
+    ensure_tiktoken_files()
 
     # Verify tiktoken files exist
     for filename in TIKTOKEN_FILES:
-        filepath = tiktoken_data_dir / filename
+        filepath = TIKTOKEN_DATA_DIR / filename
         assert filepath.exists(), f"Tiktoken file not found: {filepath}"
 
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
@@ -122,16 +125,10 @@ def test_gpqa_correctness(config_filename):
     server_args = shlex.split(server_args_str) if server_args_str else []
 
     # Add standard server arguments
-    server_args.extend(
-        [
-            "--trust-remote-code",
-            "--enforce-eager",
-            "--disable-uvicorn-access-log",
-        ]
-    )
+    server_args.extend(["--enforce-eager", "--disable-uvicorn-access-log"])
 
     # Build server environment with tiktoken path and any config-specified vars
-    server_env = {"TIKTOKEN_ENCODINGS_BASE": str(tiktoken_data_dir)}
+    server_env = {"TIKTOKEN_ENCODINGS_BASE": str(TIKTOKEN_DATA_DIR)}
     if eval_config.get("env"):
         server_env.update(eval_config["env"])
 

@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 from ....utils import check_answers, prep_prompts
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     sliding_window: int
     ln_range: tuple[int, int]
@@ -35,8 +35,7 @@ model_config = {
 def test_sliding_window_retrieval(
     model, batch_size, seed, disable_hybrid_kv_cache_manager, vllm_runner
 ):
-    """
-    The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
+    """The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
     asks for value of one of them (which is outside the sliding window).
     If we tell it upfront which we are going to be looking for, then
     it answers correctly (mostly).
@@ -111,15 +110,36 @@ def test_hybrid_kv_cache_manager_output_equivalence(model, vllm_runner):
     assert outputs[0] == outputs[1]
 
 
-def check_length(prompts: list[str], llm: LLM, sliding_window: int):
+def test_hybrid_sliding_window_honors_user_block_size(vllm_runner):
+    """A user-specified block size must hold for sliding-window groups too, so
+    a one-block prefix is cacheable. Guards against backends picking a larger
+    sliding-window block when the worker builds KV cache specs.
     """
-    Check if the prompt length is valid, i.e., longer than the sliding window
+    block_size = 16
+    prompt = {"prompt_token_ids": [101] * (block_size + 1)}
+    sampling_params = SamplingParams(max_tokens=1)
+    with vllm_runner(
+        "google/gemma-3-1b-it",
+        block_size=block_size,
+        enable_prefix_caching=True,
+        max_model_len=1024,
+        enforce_eager=True,
+    ) as runner:
+        llm = runner.get_llm()
+        llm.generate([prompt], sampling_params)
+        outputs = llm.generate([prompt], sampling_params)
+    assert outputs[0].num_cached_tokens == block_size
+
+
+def check_length(prompts: list[str], llm: LLM, sliding_window: int):
+    """Check if the prompt length is valid, i.e., longer than the sliding window
     size and shorter than the model's max length.
 
     Args:
         prompts: list of prompts
         llm: LLM object
         sliding_window: Sliding window size
+
     """
     tokenizer = llm.get_tokenizer()
     max_model_len = llm.llm_engine.model_config.max_model_len

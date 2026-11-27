@@ -5,6 +5,7 @@ from itertools import islice
 
 import torch
 import torch.nn as nn
+from transformers import Lfm2MoeConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
@@ -17,12 +18,12 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -40,7 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.lfm2_moe import Lfm2MoeConfig
 
 from .interfaces import (
     HasInnerState,
@@ -125,10 +125,9 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate",
         )
@@ -556,6 +555,7 @@ class Lfm2MoeForCausalLM(
         Returns:
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -573,13 +573,6 @@ class Lfm2MoeForCausalLM(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
-
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Lfm2Moe currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
 
         super().__init__()
         self.config = config

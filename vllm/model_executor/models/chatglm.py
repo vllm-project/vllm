@@ -150,8 +150,6 @@ class GLMMLP(nn.Module):
     ):
         super().__init__()
 
-        self.add_bias = config.add_bias_linear
-
         # Project to 4h.
         self.dense_h_to_4h = MergedColumnParallelLinear(
             config.hidden_size,
@@ -430,7 +428,7 @@ class ChatGLMBaseModel(nn.Module):
 
 
 class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP, SupportsQuant):
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
     }

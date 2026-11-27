@@ -4,7 +4,7 @@
 import pytest
 
 from tests.utils import create_new_process_for_each_test
-from vllm import LLM, SamplingParams
+from vllm import LLM, EmbeddingRequestOutput, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
 
@@ -18,7 +18,7 @@ def test_plugin(
         m.setenv("VLLM_PLUGINS", "")
 
         with pytest.raises(ValueError, match="are not supported for now"):
-            LLM(model=dummy_opt_path, load_format="dummy")
+            LLM(model=dummy_opt_path, load_format="dummy", model_impl="vllm")
 
 
 @create_new_process_for_each_test()
@@ -55,7 +55,11 @@ def test_oot_registration_embedding(
         outputs = llm.embed(prompts)
 
         for output in outputs:
+            assert isinstance(output, EmbeddingRequestOutput)
             assert all(v == 0 for v in output.outputs.embedding)
+
+
+image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
 
 @create_new_process_for_each_test()
@@ -65,7 +69,6 @@ def test_oot_registration_multimodal(
 ):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
-        image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
         prompts = [
             {
                 "prompt": "What's in the image?<image>",
@@ -82,8 +85,6 @@ def test_oot_registration_multimodal(
             model=dummy_llava_path,
             load_format="dummy",
             max_num_seqs=1,
-            trust_remote_code=True,
-            gpu_memory_utilization=0.98,
             max_model_len=4096,
             enforce_eager=True,
             limit_mm_per_prompt={"image": 1},

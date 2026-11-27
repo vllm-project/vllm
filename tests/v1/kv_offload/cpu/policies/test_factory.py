@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Sequence
 
 import pytest
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
+from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
@@ -18,27 +18,64 @@ class _DummyCachePolicy(CachePolicy):
     tests/v1/kv_offload/test_factory.py's SingleArgExternalOffloadingSpec)."""
 
     def __init__(self, cache_capacity: int) -> None:
-        self.cache_capacity = cache_capacity
+        super().__init__(cache_capacity)
+        self.chunks: dict[OffloadKey, ChunkStatus] = {}
 
-    def get(self, key: OffloadKey) -> BlockStatus | None:
-        return None
+    def get(self, key: OffloadKey) -> ChunkStatus | None:
+        return self.chunks.get(key)
 
-    def insert(self, key: OffloadKey, block: BlockStatus) -> None:
-        pass
+    def insert(
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+    ) -> None:
+        self.chunks[key] = chunk
 
     def remove(self, key: OffloadKey) -> None:
-        pass
+        del self.chunks[key]
 
-    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
+    def on_request_finished(
+        self,
+        key_groups: Sequence[Sequence[OffloadKey]],
+        insertion_only_keys: set[OffloadKey],
+        reused_keys: set[OffloadKey],
+        req_context: ReqContext,
+    ) -> None:
         pass
 
     def evict(
         self, n: int, protected: set[OffloadKey]
-    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
-        return None
+    ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
+        candidates = [
+            (key, chunk)
+            for key, chunk in self.chunks.items()
+            if chunk.ref_cnt == 0 and key not in protected
+        ][:n]
+        if len(candidates) < n:
+            return None
+        for key, _ in candidates:
+            self.remove(key)
+        return candidates
 
     def clear(self) -> None:
-        pass
+        self.chunks.clear()
+
+
+def test_external_policy_can_ignore_retention():
+    policy = _DummyCachePolicy(2)
+    ctx = ReqContext(req_id="store")
+    oldest, newest = OffloadKey(b"old"), OffloadKey(b"new")
+    first, second = ChunkStatus(0), ChunkStatus(1)
+    for key, chunk in ((oldest, first), (newest, second)):
+        chunk.ref_cnt = 0
+        policy.insert(key, chunk, ctx)
+
+    first.lease_cnt = 1
+    policy.on_retention_changed(oldest, first.retained)
+
+    evicted = policy.evict(1, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [oldest]
+    assert policy.get(oldest) is None
+    assert policy.get(newest) is not None
 
 
 @pytest.fixture(autouse=True)
@@ -72,7 +109,7 @@ class TestCachePolicyFactory:
         policy_cls = CachePolicyFactory.get_cache_policy_cls("dummy")
         assert policy_cls is _DummyCachePolicy
 
-        manager = CPUOffloadingManager(num_blocks=4, cache_policy="dummy")
+        manager = CPUOffloadingManager(num_chunks=4, cache_policy="dummy")
         assert isinstance(manager._policy, _DummyCachePolicy)
 
     def test_unregistered_policy_raises(self):
@@ -98,7 +135,7 @@ class TestCachePolicyFactory:
         """End-to-end: CPUOffloadingManager resolves an unregistered policy
         purely from cache_policy_module_path."""
         manager = CPUOffloadingManager(
-            num_blocks=4,
+            num_chunks=4,
             cache_policy="_DummyCachePolicy",
             cache_policy_module_path="tests.v1.kv_offload.cpu.policies.test_factory",
         )

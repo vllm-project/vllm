@@ -3,13 +3,14 @@
 import argparse
 import contextlib
 import json
+import math
 import multiprocessing
+import sys
 import threading
 import time
 import weakref
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
@@ -29,14 +30,14 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
-from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.utils.torch_utils import PIN_MEMORY, TORCH_DTYPE_TO_NUMPY_DTYPE
 
 if TYPE_CHECKING:
     import numpy as np
 
+    from vllm.config import ModelConfig
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 
@@ -137,9 +138,10 @@ class CpuGpuBuffer:
             self.np = self.cpu.numpy()
 
     def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
-        if n is None:
-            return self.gpu.copy_(self.cpu, non_blocking=True)
-        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+        cpu, gpu = self.cpu, self.gpu
+        if n is not None:
+            cpu, gpu = cpu[:n], gpu[:n]
+        return gpu.copy_(cpu.pin_memory() if PIN_MEMORY else cpu, non_blocking=True)
 
     def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
@@ -154,10 +156,10 @@ def get_engine_client_zmq_addr(
     host: str,
     port: int = 0,
 ) -> str:
-    """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
+    """Return an IPC path (`local_only=True`) or `tcp://host:port`.
 
-    ``port=0`` lets the kernel assign the port at ``bind()`` time; the
-    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
+    `port=0` lets the kernel assign the port at `bind()` time; the
+    caller must recover it via `getsockopt(zmq.LAST_ENDPOINT)`."""
     if local_only:
         return get_open_zmq_ipc_path()
     return get_tcp_uri(host, port)
@@ -176,19 +178,13 @@ class APIServerProcessManager:
         sock: Any,
         args: argparse.Namespace,
         num_servers: int,
-        input_addresses: list[str],
-        output_addresses: list[str],
+        input_listeners: list[ZmqListener],
+        output_listeners: list[ZmqListener],
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
         """Initialize and start API server worker processes.
-
-        ``input_addresses``/``output_addresses`` may contain
-        ``tcp://host:0`` placeholders; each child must report the actual
-        bound endpoint over its ``actual_address_pipe`` in ``client_config``
-        and the parent collects them via
-        :py:meth:`gather_actual_addresses`.
 
         Args:
             target_server_fn: Override function to call for each API server process
@@ -196,10 +192,11 @@ class APIServerProcessManager:
             sock: Socket for client connections
             args: Command line arguments
             num_servers: Number of API server processes to start
-            input_addresses: Input addresses for each API server
-            output_addresses: Output addresses for each API server
+            input_listeners: Input listeners for each API server
+            output_listeners: Output listeners for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -207,126 +204,134 @@ class APIServerProcessManager:
 
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
-        self._address_pipes: list[connection.Connection] = []
 
-        for i, in_addr, out_addr in zip(
-            range(num_servers), input_addresses, output_addresses
-        ):
-            client_config: dict[str, Any] = {
-                "input_address": in_addr,
-                "output_address": out_addr,
-                "client_count": num_servers,
-                "client_index": i,
-            }
-            if stats_update_address is not None:
-                client_config["stats_update_address"] = stats_update_address
-            if tensor_queue is not None:
-                client_config["tensor_queue"] = tensor_queue
+        admission_counters = None
+        if num_servers > 1 and getattr(args, "max_num_queued_reqs", None) is not None:
+            from vllm.v1.engine.admission_control import SharedAdmissionStats
 
-            parent_recv, child_send = spawn_context.Pipe(duplex=False)
-            self._address_pipes.append(parent_recv)
-            client_config["actual_address_pipe"] = child_send
-
-            proc = spawn_context.Process(
-                target=target_server_fn or run_api_server_worker_proc,
-                name=f"ApiServer_{i}",
-                args=(listen_address, sock, args, client_config),
+            admission_counters = spawn_context.RawArray(
+                "q",
+                SharedAdmissionStats.num_counters(num_servers),
             )
-            self.processes.append(proc)
-            proc.start()
 
-            # Drop parent's write end so reader sees EOF on child death.
-            child_send.close()
+        # Open connections per API server, to accept on the least loaded one;
+        # a server that has not started yet is never the least loaded.
+        api_server_loads = (
+            spawn_context.RawArray("i", [2**31 - 1] * num_servers)
+            if num_servers > 1
+            else None
+        )
+
+        listeners = [*input_listeners, *output_listeners]
+        self._listeners = listeners
+        try:
+            listener_pairs = zip(
+                range(num_servers), input_listeners, output_listeners, strict=True
+            )
+            for i, input_listener, output_listener in listener_pairs:
+                client_config: dict[str, Any] = {
+                    "input_address": input_listener.address,
+                    "output_address": output_listener.address,
+                    "input_listener": input_listener.socket,
+                    "output_listener": output_listener.socket,
+                    "client_count": num_servers,
+                    "client_index": i,
+                }
+                if api_server_loads is not None:
+                    client_config["api_server_loads"] = api_server_loads
+                if admission_counters is not None:
+                    client_config["mp_admission_counters"] = admission_counters
+                if stats_update_address is not None:
+                    client_config["stats_update_address"] = stats_update_address
+                if tensor_queue is not None:
+                    client_config["tensor_queue"] = tensor_queue
+
+                proc = spawn_context.Process(
+                    target=target_server_fn or run_api_server_worker_proc,
+                    name=f"ApiServer_{i}",
+                    args=(listen_address, sock, args, client_config),
+                )
+                self.processes.append(proc)
+                proc.start()
+                input_listener.close()
+                output_listener.close()
+        except BaseException:
+            _shutdown_processes_and_cleanup_listeners(self.processes, listeners)
+            raise
 
         logger.info("Started %d API server processes", len(self.processes))
 
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
-
-    def gather_actual_addresses(
-        self,
-        timeout: float = envs.VLLM_ENGINE_READY_TIMEOUT_S,
-    ) -> tuple[list[str], list[str]]:
-        """Return (inputs, outputs) reported by each child, indexed by
-        ``client_index``. Raises ``RuntimeError`` on timeout or premature
-        child exit."""
-        n = len(self._address_pipes)
-        inputs: list[str | None] = [None] * n
-        outputs: list[str | None] = [None] * n
-        pending: dict[connection.Connection, int] = {
-            pipe: i for i, pipe in enumerate(self._address_pipes)
-        }
-        sentinel_to_idx: dict[Any, int] = {
-            proc.sentinel: i for i, proc in enumerate(self.processes)
-        }
-
-        deadline = time.monotonic() + timeout
-        try:
-            while pending:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    missing = [self.processes[i].name for i in pending.values()]
-                    raise RuntimeError(
-                        f"Timed out after {timeout:.1f}s waiting for "
-                        f"API server(s) to report bound ZMQ addresses: "
-                        f"{missing}"
-                    )
-                waitables: list[Any] = list(pending.keys()) + list(
-                    sentinel_to_idx.keys()
-                )
-                ready = connection.wait(waitables, timeout=remaining)
-                # Drain pipes before checking sentinels: a child that sent
-                # its message and then exited can surface both events in
-                # the same poll, and we must record the success first.
-                for item in ready:
-                    if isinstance(item, connection.Connection) and item in pending:
-                        idx = pending.pop(item)
-                        try:
-                            msg: dict[str, str] = item.recv()
-                        except EOFError as e:
-                            raise RuntimeError(
-                                f"API server {self.processes[idx].name} "
-                                f"closed its address pipe without "
-                                f"reporting its bound ZMQ addresses"
-                            ) from e
-                        inputs[idx] = msg["input_address"]
-                        outputs[idx] = msg["output_address"]
-                        item.close()
-                for item in ready:
-                    if item in sentinel_to_idx:
-                        idx = sentinel_to_idx.pop(item)
-                        pipe = self._address_pipes[idx]
-                        if pipe in pending:
-                            proc = self.processes[idx]
-                            raise RuntimeError(
-                                f"API server process {proc.name} exited "
-                                f"(code={proc.exitcode}) before reporting "
-                                f"its bound ZMQ addresses"
-                            )
-        finally:
-            for pipe in pending:
-                with contextlib.suppress(Exception):
-                    pipe.close()
-
-        return inputs, outputs  # type: ignore[return-value]
+        self._finalizer = weakref.finalize(
+            self,
+            _shutdown_processes_and_cleanup_listeners,
+            self.processes,
+            listeners,
+        )
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown API server processes with configurable timeout"""
-        for pipe in self._address_pipes:
-            with contextlib.suppress(Exception):
-                pipe.close()
-        self._address_pipes = []
-
         if self._finalizer.detach() is not None:
-            shutdown(self.processes, timeout=timeout)
+            _shutdown_processes_and_cleanup_listeners(
+                self.processes, self._listeners, timeout=timeout
+            )
+
+
+# Rust frontend arguments that Python reads only from environment variables,
+# or, for `api_key` and `max_tokenize_tokens`, from the environment when the
+# CLI flag is not given. `vllm.envs` resolves them and --args-json carries the
+# result, so the Rust frontend reads no environment on that path.
+_RUST_FRONTEND_ENV_ARGS = {
+    "api_key": "VLLM_API_KEY",
+    "max_tokenize_tokens": "VLLM_MAX_TOKENIZE_TOKENS",
+    "log_stats_interval": "VLLM_LOG_STATS_INTERVAL",
+    "disable_request_id_randomization": "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION",
+    "keep_alive_on_engine_death": "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+    "http_max_request_body_size": "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+    "skip_model_name_validation": "VLLM_SKIP_MODEL_NAME_VALIDATION",
+    "server_dev_mode": "VLLM_SERVER_DEV_MODE",
+    "allow_runtime_lora_updating": "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
+    "max_n_sequences": "VLLM_MAX_N_SEQUENCES",
+    "enable_cohere_api": "VLLM_ENABLE_COHERE_API",
+    "enable_responses_api_store": "VLLM_ENABLE_RESPONSES_API_STORE",
+}
+
+
+def _decisions_read_strategy(model_config: "ModelConfig | None") -> str | None:
+    """The class name of the Decisions API read strategy Python serves this
+    model with, or None where Python answers 501.
+
+    The Rust frontend refuses to start with a strategy it does not implement,
+    so which ones it implements is known to Rust alone.
+    """
+    if model_config is None:
+        return None
+    from vllm.entrypoints.openai.decisions.strategies import (
+        READ_STRATEGIES,
+        select_read_strategy,
+    )
+
+    strategy = READ_STRATEGIES.get(getattr(model_config, "architecture", ""))
+    if strategy is None:
+        return None
+    # The engine reports its supported tasks only once it runs. The runner
+    # type tells whether the model generates; a pooling architecture in the
+    # table pools for its strategy's task.
+    generates = getattr(model_config, "runner_type", None) == "generate"
+    tasks = (strategy.task,) if generates == (strategy.task == "generate") else ()
+    try:
+        select_read_strategy(model_config, tasks)
+    except ValueError:
+        return None
+    return strategy.__name__
 
 
 class RustFrontendProcessManager:
     """Manages a single Rust frontend subprocess.
 
     Launches the Rust vllm-rs binary in 'frontend' mode, passing the
-    listening socket fd and ZMQ transport addresses. Provides the same
+    HTTP and ZMQ listener file descriptors. Provides the same
     interface as APIServerProcessManager for process monitoring.
     """
 
@@ -335,28 +340,34 @@ class RustFrontendProcessManager:
         binary_path: str,
         sock: Any,
         args: argparse.Namespace,
-        input_address: str,
-        output_address: str,
+        input_listener: ZmqListener,
+        output_listener: ZmqListener,
         engine_start_index: int,
         engine_count: int,
         data_parallel_size: int,
         stats_update_address: str | None = None,
+        grpc_sock: Any | None = None,
+        model_config: "ModelConfig | None" = None,
     ):
         import os
         import subprocess
 
-        fd = sock.fileno()
-        os.set_inheritable(fd, True)
+        listen_fd = sock.fileno()
+        input_fd = input_listener.socket.fileno()
+        output_fd = output_listener.socket.fileno()
+        inherited_fds = [listen_fd, input_fd, output_fd]
+        for fd in inherited_fds:
+            os.set_inheritable(fd, True)
 
         cmd = [
             binary_path,
             "frontend",
             "--listen-fd",
-            str(fd),
-            "--input-address",
-            input_address,
-            "--output-address",
-            output_address,
+            str(listen_fd),
+            "--input-listener-fd",
+            str(input_fd),
+            "--output-listener-fd",
+            str(output_fd),
             "--engine-start-index",
             str(engine_start_index),
             "--engine-count",
@@ -364,9 +375,14 @@ class RustFrontendProcessManager:
             "--data-parallel-size",
             str(data_parallel_size),
         ]
+        if grpc_sock is not None:
+            grpc_fd = grpc_sock.fileno()
+            os.set_inheritable(grpc_fd, True)
+            cmd.extend(["--grpc-listen-fd", str(grpc_fd)])
+            inherited_fds.append(grpc_fd)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
-        from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
+        from vllm.entrypoints.common.startup import jsonify_non_default_args
 
         args_dict = jsonify_non_default_args(
             args,
@@ -378,6 +394,27 @@ class RustFrontendProcessManager:
                 "data_parallel_hybrid_lb",
             },
         )
+
+        # `model_tag` is the positional `vllm serve` model argument. When the
+        # model is supplied only through `--config`, argparse populates `model`
+        # while leaving `model_tag` unset. The Rust frontend requires
+        # `model_tag` in its JSON bootstrap payload, so use the resolved model
+        # as a fallback.
+        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+        if model_tag is not None:
+            args_dict["model_tag"] = model_tag
+
+        if (strategy := _decisions_read_strategy(model_config)) is not None:
+            args_dict["decisions_read_strategy"] = strategy
+
+        # Object storage models (s3://, gs://, az://) have their config and
+        # tokenizer pulled into a local directory, which the Rust frontend can
+        # read; it can't read the object storage URI. Keep serving the URI as
+        # the model name, like the Python frontend.
+        if model_config is not None and model_config.model_weights:
+            args_dict["model_tag"] = model_config.model
+            args_dict.setdefault("served_model_name", [model_config.served_model_name])
+
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
         # declarations on SharedRuntimeArgs fields. Forward the env-driven
@@ -386,22 +423,78 @@ class RustFrontendProcessManager:
         # frontends.
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        for key, name in _RUST_FRONTEND_ENV_ARGS.items():
+            if key in args_dict or not envs.is_set(name):
+                continue
+            value = getattr(envs, name)
+            # Like a default, an off value is left out, so the Rust frontend
+            # does not refuse a disabled feature it does not implement.
+            if value is None or value is False or value == "":
+                continue
+            # JSON has no infinity; Rust reads a too long interval as never.
+            if value == math.inf:
+                value = sys.float_info.max
+            args_dict[key] = value
+
+        # `--log-level` and `--logging-config` default to
+        # argparse.SUPPRESS, so get_non_default_args() never sees them;
+        # cli/main.py has already merged them into `args.logging_config`.
+        if logging_config := getattr(args, "logging_config", None):
+            args_dict["logging_config"] = {
+                "log_level": logging_config.log_level,
+                "formatter": logging_config.formatter,
+            }
+            if (
+                not logging_config.configure_logging
+                or logging_config.pylogging_config_file
+            ):
+                logger.warning(
+                    "configure_logging and pylogging_config_file apply to "
+                    "Python logging only, not to the Rust frontend's logs."
+                )
+
         args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
-        logger.info("Launching Rust frontend: %s", " ".join(cmd))
-        self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
+        # The subprocess needs the real values, but the log must not carry
+        # credentials such as api_key or hf_token.
+        from vllm.entrypoints.common.startup import redact_sensitive_args
+
+        redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
+        logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
+        self._listeners = [input_listener, output_listener]
+        try:
+            self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds)
+        except BaseException:
+            for listener in self._listeners:
+                listener.cleanup()
+            raise
+        else:
+            input_listener.close()
+            output_listener.close()
+            # Rust owns these now; an open copy here keeps the ports listening
+            # after Rust closes them.
+            sock.close()
+            if grpc_sock is not None:
+                grpc_sock.close()
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [
             _SubprocessWrapper(self._proc, "RustFrontend")
         ]
 
-        self._finalizer = weakref.finalize(self, _shutdown_subprocesses, self.processes)
+        self._finalizer = weakref.finalize(
+            self,
+            _shutdown_subprocesses_and_cleanup_listeners,
+            self.processes,
+            self._listeners,
+        )
 
     def shutdown(self, timeout: float | None = None) -> None:
         if self._finalizer.detach() is not None:
-            _shutdown_subprocesses(self.processes, timeout=timeout)
+            _shutdown_subprocesses_and_cleanup_listeners(
+                self.processes, self._listeners, timeout=timeout
+            )
 
 
 class _SubprocessWrapper:
@@ -498,17 +591,33 @@ def _shutdown_subprocesses(
     logger.debug_once("[shutdown] Subprocess manager: complete")
 
 
+def _shutdown_subprocesses_and_cleanup_listeners(
+    procs: list[_SubprocessWrapper],
+    listeners: list[ZmqListener],
+    timeout: float | None = None,
+) -> None:
+    try:
+        _shutdown_subprocesses(procs, timeout=timeout)
+    finally:
+        for listener in listeners:
+            listener.cleanup()
+
+
 def run_api_server_worker_proc(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Entrypoint for individual API server worker processes."""
+    if logging_config := getattr(args, "logging_config", None):
+        from vllm.logger import configure_logging
+
+        configure_logging(logging_config)
 
     from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
 
-    # Set process title and add process-specific prefix to stdout and stderr.
+    # Set process title and process-specific log metadata.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 
@@ -533,8 +642,8 @@ def wait_for_completion_or_failure(
             If CoreEngineProcManager, it manages local engines;
             if CoreEngineActorManager, it manages all engines.
         coordinator: The coordinator for data parallel.
-    """
 
+    """
     try:
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
@@ -596,6 +705,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     Args:
         procs: List of processes to shutdown
         timeout: Maximum time in seconds to wait for graceful shutdown
+
     """
     if timeout is None:
         # Keep a small grace period for best-effort cleanup paths that do not
@@ -647,25 +757,22 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     logger.debug_once("[shutdown] Process manager: complete")
 
 
-def copy_slice(
-    from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
-) -> torch.Tensor:
-    """
-    Copy the first length elements of a tensor into another tensor in a
-    non-blocking manner.
-
-    Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
-
-    Returns the sliced target tensor.
-    """
-    return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
+def _shutdown_processes_and_cleanup_listeners(
+    procs: list[BaseProcess],
+    listeners: list[ZmqListener],
+    timeout: float | None = None,
+) -> None:
+    try:
+        shutdown(procs, timeout=timeout)
+    finally:
+        for listener in listeners:
+            listener.cleanup()
 
 
 def report_usage_stats(
     vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
 ) -> None:
     """Report usage statistics if enabled."""
-
     if not is_usage_stats_enabled():
         return
 
@@ -717,7 +824,11 @@ def report_usage_stats(
             # Common configuration
             "dtype": str(model_config.dtype),
             "block_size": vllm_config.cache_config.block_size,
-            "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
+            # Reported at worker init: the extensible KV cache default (1.0) is
+            # still shown if the driver probe later falls back to 0.92.
+            "gpu_memory_utilization": (
+                vllm_config.cache_config.resolved_gpu_memory_utilization
+            ),
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
             "quantization": model_config.quantization,
@@ -786,68 +897,15 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
 
     Returns:
         A memoryview of the tensor data as uint8.
+
     """
+    if tensor.is_cpu and tensor.is_contiguous():
+        # Avoid several torch ops, each of which releases and re-acquires the GIL.
+        # View dtypes NumPy cannot export as bytes.
+        try:
+            if tensor.dtype not in TORCH_DTYPE_TO_NUMPY_DTYPE:
+                tensor = tensor.view(torch.uint8)
+            return memoryview(tensor.numpy()).cast("B")
+        except (TypeError, RuntimeError):
+            pass
     return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
-
-
-@dataclass
-class IterationDetails:
-    num_ctx_requests: int
-    num_ctx_tokens: int
-    num_generation_requests: int
-    num_generation_tokens: int
-    num_encoder_inputs: int = 0
-    num_encoder_output_tokens: int = 0
-
-    def __repr__(self) -> str:
-        return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
-                 num_ctx_tokens={self.num_ctx_tokens}, \
-                 num_generation_requests={self.num_generation_requests}, \
-                 num_generation_tokens={self.num_generation_tokens}, \
-                 num_encoder_inputs={self.num_encoder_inputs}, \
-                 num_encoder_output_tokens={self.num_encoder_output_tokens})"
-
-
-def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
-    """
-    Compute the number of context/generation requests and tokens
-    for the current iteration's scheduler output. A requests is regarded
-    as a context request if its output tokens are still 0, an extended chunk
-    of chunked prefill falls into this category.
-
-    Args:
-        scheduler_output: The scheduler output for the current iteration.
-
-    Returns:
-        An IterationDetails object containing the number of
-        context/generation requests and tokens.
-    """
-    num_context_requests = 0
-    num_context_tokens = 0
-    num_generation_requests = 0
-    num_generation_tokens = 0
-    new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
-    for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-        if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or (
-            req_id in new_req_ids
-        ):
-            num_context_requests += 1
-            num_context_tokens += num_tokens
-        else:
-            num_generation_requests += 1
-            num_generation_tokens += num_tokens
-    scheduled_encoder_input_stats = scheduler_output.scheduled_encoder_input_stats
-    num_encoder_inputs = 0
-    num_encoder_output_tokens = 0
-    if scheduled_encoder_input_stats is not None:
-        num_encoder_inputs = scheduled_encoder_input_stats.num_inputs
-        num_encoder_output_tokens = scheduled_encoder_input_stats.output_tokens
-
-    return IterationDetails(
-        num_context_requests,
-        num_context_tokens,
-        num_generation_requests,
-        num_generation_tokens,
-        num_encoder_inputs,
-        num_encoder_output_tokens,
-    )

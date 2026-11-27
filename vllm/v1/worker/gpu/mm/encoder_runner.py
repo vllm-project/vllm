@@ -18,10 +18,12 @@ from vllm.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    reserve_encoder_cache_residency,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -136,6 +138,27 @@ class EncoderRunner:
             dummy_modality,
         )
 
+        if single_input := budget.get_dummy_encoder_profile_single_input(
+            dummy_mm_inputs
+        ):
+            logger.info_once(
+                "Encoder profiling also runs one %s item that fills the budget "
+                "of %s tokens.",
+                dummy_modality,
+                encoder_budget,
+            )
+            self.execute_mm_encoder(single_input)
+
+        for modality_inputs in budget.get_dummy_encoder_profile_modality_inputs(
+            dummy_mm_inputs
+        ):
+            logger.info_once(
+                "Encoder profiling also runs %s %s items.",
+                len(modality_inputs),
+                modality_inputs[0][0],
+            )
+            self.execute_mm_encoder(modality_inputs)
+
         dummy_encoder_outputs = self.execute_mm_encoder(dummy_mm_inputs)
 
         sanity_check_mm_encoder_outputs(
@@ -145,21 +168,36 @@ class EncoderRunner:
         self.encoder_cache.encoder_outputs.update(
             (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
         )
+        cache_bytes = reserve_encoder_cache_residency(
+            self.encoder_cache.encoder_outputs,
+            dummy_encoder_outputs,
+            budget.encoder_cache_size,
+        )
+        logger.info_once(
+            "Encoder cache can hold %s tokens of %s embeddings across requests "
+            "(%s GiB, taken from the KV cache).",
+            budget.encoder_cache_size,
+            dummy_modality,
+            format_gib(cache_bytes),
+        )
 
     @torch.inference_mode()
     def execute_mm_encoder(
         self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
     ) -> list[torch.Tensor]:
+        # Stable-sort items by modality so each modality is encoded in as few
+        # batches as possible. The returned outputs are restored to input order.
+        order = sorted(range(len(mm_kwargs)), key=lambda i: mm_kwargs[i][0])
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
-            mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
+            [mm_kwargs[i] for i in order], device=self.device, pin_memory=PIN_MEMORY
         ):
             cg_manager = self.cudagraph_manager
             cudagraph_output = (
                 cg_manager.execute(mm_kwargs_batch)
                 if cg_manager is not None
                 and cg_manager.is_captured()
-                and cg_manager.supports_modality(modality)
+                and cg_manager.supports_batch(modality, mm_kwargs_batch)
                 else None
             )
             batch_outputs = (
@@ -169,7 +207,7 @@ class EncoderRunner:
             )
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
-        return encoder_outputs
+        return [encoder_outputs[i] for i in np.argsort(order)]
 
     @contextmanager
     def timed_encoder_operation(self, request_ids: Collection[str]):
@@ -215,7 +253,10 @@ class EncoderRunner:
             num_computed_tokens = num_computed_tokens + draft_lookahead
 
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+            total_num_scheduled_tokens,
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
         )
 
         # Whether to gather media embeddings this step.
@@ -238,6 +279,9 @@ class EncoderRunner:
 
             cur_query_start = query_start[i]
             cur_query_end = query_end[i]
+            # An idle PCP rank can retain a request with no local tokens.
+            if cur_query_start == cur_query_end:
+                continue
 
             mm_features = self.encoder_cache.mm_features[req_id]
             lo, hi = get_mm_features_in_window(
@@ -276,10 +320,13 @@ class EncoderRunner:
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
-                # Attach modality for Omni interleaved merge (collected on demand).
-                set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
-
-                req_start_pos = query_start_loc[i] + start_pos - cur_query_start
+                req_start_pos = int(query_start_loc[i]) + start_pos - cur_query_start
+                # Attach modality and placement for the Omni interleaved merge.
+                set_mm_embedding_modality(
+                    mm_embeds_item,
+                    mm_feature.modality,
+                    (req_start_pos + start_idx, req_start_pos + end_idx, is_embed),
+                )
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (
                     True if is_embed is None else is_embed
                 )

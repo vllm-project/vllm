@@ -43,6 +43,40 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
+def test_ray_bundle_indices_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    # Engines sharing a placement group get different bundle indices but
+    # compile the same graphs, so they must share a cache key.
+    monkeypatch.setenv("VLLM_RAY_BUNDLE_INDICES", "4,5,6,7")
+
+    assert "VLLM_RAY_BUNDLE_INDICES" not in envs.compile_factors()
+
+
+def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    # Only bounds chat template rendering in the Rust frontend.
+    monkeypatch.setenv("VLLM_CHAT_TEMPLATE_FUEL", "2000000")
+
+    assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
+
+
+def test_frontend_and_install_envs_are_not_compile_factors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Switching between the Python and Rust frontends, or between worktrees
+    # with their own vllm-rs, must not invalidate the compile cache.
+    frontend_envs = {
+        "VLLM_USE_PRECOMPILED": "1",
+        "VLLM_USE_PRECOMPILED_RUST": "1",
+        "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX": "1",
+        "VLLM_USE_RUST_FRONTEND": "1",
+        "VLLM_USE_RUST_BENCH": "1",
+        "VLLM_RUST_FRONTEND_PATH": "/opt/vllm-rs",
+    }
+    for name, value in frontend_envs.items():
+        monkeypatch.setenv(name, value)
+
+    assert frontend_envs.keys().isdisjoint(envs.compile_factors())
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
@@ -53,6 +87,24 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5799")
     assert envs.VLLM_P2P_SIDE_CHANNEL_HOST == "10.0.0.20"
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
+
+
+def test_p2p_resource_limit_defaults_and_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_P2P_MAX_PEERS", raising=False)
+    monkeypatch.delenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("VLLM_P2P_IDLE_TIMEOUT_S", raising=False)
+    assert envs.VLLM_P2P_MAX_PEERS == 128
+    assert envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S == 30
+    assert envs.VLLM_P2P_IDLE_TIMEOUT_S == 300
+
+    monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "64")
+    monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "15")
+    monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "60")
+    assert envs.VLLM_P2P_MAX_PEERS == 64
+    assert envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S == 15
+    assert envs.VLLM_P2P_IDLE_TIMEOUT_S == 60
 
 
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):

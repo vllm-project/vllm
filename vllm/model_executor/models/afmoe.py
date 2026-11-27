@@ -16,14 +16,18 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     MoERunner,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -41,7 +45,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsLoRA,
     SupportsPP,
 )
-from vllm.model_executor.models.llama import LlamaMLP as AfmoeMLP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -54,6 +57,45 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
 logger = init_logger(__name__)
+
+
+class AfmoeMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.gate_up_proj(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class AfmoeMoE(nn.Module):
@@ -82,11 +124,18 @@ class AfmoeMoE(nn.Module):
             )
 
         # Router gate
-        self.gate = nn.Linear(
+        router_dtype = (
+            torch.bfloat16
+            if torch.get_default_dtype() == torch.bfloat16
+            and (quant_config is None or quant_config.get_name() == "modelopt_fp4")
+            else torch.float32
+        )
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            dtype=torch.float32,
+            out_dtype=router_dtype,
+            params_dtype=router_dtype,
+            prefix=f"{prefix}.gate",
         )
         self.expert_bias = nn.Parameter(
             torch.empty(config.num_experts, dtype=torch.float32)
@@ -140,7 +189,8 @@ class AfmoeMoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        router_logits = self.gate(hidden_states.to(dtype=torch.float32))
+        router_logits, _ = self.gate(hidden_states)
+        router_logits = router_logits.float()
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -509,7 +559,10 @@ class AfmoeForCausalLM(
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                config.vocab_size, config.hidden_size, quant_config=quant_config
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         else:
             self.lm_head = PPMissingLayer()

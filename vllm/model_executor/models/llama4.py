@@ -18,7 +18,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
@@ -38,12 +38,12 @@ from vllm.model_executor.layers.attention import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -55,8 +55,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
@@ -98,11 +96,9 @@ class Llama4MoE(nn.Module):
         self.ep_size = self.ep_group.size()
 
         intermediate_size_moe = config.intermediate_size
-        self.router = ReplicatedLinear(
+        self.router = GateLinear(
             config.hidden_size,
             config.num_local_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.router",
         )
 
@@ -209,7 +205,6 @@ class Llama4Attention(nn.Module):
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
         self.max_position_embeddings = max_position_embeddings
-        self.n_rep = self.num_heads // self.num_kv_heads
         self.qk_norm = (
             RMSNorm(
                 hidden_size=self.head_dim,
@@ -323,7 +318,6 @@ class Llama4DecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.layer_idx = extract_layer_index(prefix)
-        self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
         max_position_embeddings = config.max_position_embeddings
 
@@ -406,8 +400,7 @@ class Llama4Model(LlamaModel):
         expert_params_mapping: list[tuple[str, str, int, str]],
         fused: bool = True,
     ) -> bool:
-        """
-        Load MoE expert weights.
+        """Load MoE expert weights.
 
         Args:
             name: The name of the weight to load.
@@ -427,8 +420,8 @@ class Llama4Model(LlamaModel):
         Returns:
             True if loaded_weight is one of MoE weights and the MoE expert
             weights are loaded successfully, False otherwise.
-        """
 
+        """
         # Whether the MoE expert weights are loaded successfully.
         expert_param_loaded = False
 
@@ -501,29 +494,21 @@ class Llama4Model(LlamaModel):
                         .flatten()
                         .to(new_loaded_weight.device)
                     )
-                    # Workaround for FP8 CPU indexing on older PyTorch:
-                    # https://github.com/vllm-project/vllm/issues/32862
-                    is_fp8_dtype = new_loaded_weight.dtype == (
-                        current_platform.fp8_dtype()
-                    ) or (
-                        new_loaded_weight.dtype.is_floating_point
-                        and new_loaded_weight.element_size() == 1
-                    )
-                    if (
-                        new_loaded_weight.device.type == "cpu"
-                        and is_fp8_dtype
-                        and not is_torch_equal_or_newer("2.11.0")
-                    ):
-                        # PyTorch < 2.11 doesn't support CPU float8 indexing.
-                        new_loaded_weight = new_loaded_weight.to(torch.float16)[
-                            local_expert_indices
-                        ].to(new_loaded_weight.dtype)
-                    else:
-                        new_loaded_weight = new_loaded_weight[local_expert_indices]
+                    new_loaded_weight = new_loaded_weight[local_expert_indices]
                     expert_id = local_expert_indices[0].item()
             else:
                 # TODO: add EP support for non fused weights
                 pass
+
+            # Ensure the tensor is contiguous before the GPU transfer. The
+            # transpose/chunk/indexing above can leave it as a non-contiguous
+            # view, and copying a non-contiguous CPU tensor to GPU is much
+            # slower than copying a contiguous one. Doing this on the final
+            # sliced tensor here (rather than on the whole weight right after
+            # the transpose) avoids making the contiguous copy larger than
+            # it needs to be.
+            if fused and isinstance(new_loaded_weight, torch.Tensor):
+                new_loaded_weight = new_loaded_weight.contiguous()
 
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
@@ -576,6 +561,7 @@ class Llama4Model(LlamaModel):
         params_dict = dict(self.named_parameters())
         # The module parameters that have been loaded.
         loaded_params: set[str] = set()
+        weight_loader: Callable[..., object]
 
         # Iterate over all the weights and load them into module parameters.
         for name, loaded_weight in weights:
@@ -612,9 +598,10 @@ class Llama4Model(LlamaModel):
                 # quant config's `get_cache_scale_mapper` does not cover
                 # (idempotent for names already renamed by the mapper).
                 if name.endswith("scale"):
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
 
                 # Load the weight into the module parameter with corresponding
                 # shard id and exit the for loop and the else block.

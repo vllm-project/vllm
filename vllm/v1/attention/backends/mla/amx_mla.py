@@ -3,39 +3,39 @@
 """AMX-only, high-performance MLA backend for DeepSeek V2/V3/R1 on CPU.
 
 Built on the AMX decode/extend/bmm kernels vendored under
-``csrc/cpu/sgl-kernels/``, plugged into vLLM's ``MLACommonBackend``/
-``MLACommonImpl`` abstraction the same way every other concrete MLA backend
-(``TritonMLAImpl``, etc.) does.
+`csrc/cpu/sgl-kernels/`, plugged into vLLM's `MLACommonBackend`/
+`MLACommonImpl` abstraction the same way every other concrete MLA backend
+(`TritonMLAImpl`, etc.) does.
 
-This is a separate backend from the reference ``CPUMLABackend``
-(``vllm/v1/attention/backends/mla/cpu_mla.py``): that one targets every CPU
-(any dtype, block_size=16, ``mla_decode_kvcache`` decode kernel + inherited
+This is a separate backend from the reference `CPUMLABackend`
+(`vllm/v1/attention/backends/mla/cpu_mla.py`): that one targets every CPU
+(any dtype, block_size=16, `mla_decode_kvcache` decode kernel + inherited
 SDPA-style prefill) as a functional/CI reference, not performance. This
 backend instead requires AMX (bf16 only, block_size a multiple of 32) and is
 selected by the platform layer in preference to the reference backend
-whenever the host supports it -- see ``CpuPlatform.get_attn_backend_cls``.
+whenever the host supports it -- see `CpuPlatform.get_attn_backend_cls`.
 
 Two points where this backend differs structurally from the GPU backends,
 both explained in the CPU MLA design plan:
 
-- ``forward_mha`` is fully overridden (not inherited from
-  ``MLACommonBaseImpl``): the GPU "compute-friendly" prefill path depends on
-  a pluggable ``MLAPrefillBackend`` and CUDA-only chunked-context gather ops,
+- `forward_mha` is fully overridden (not inherited from
+  `MLACommonBaseImpl`): the GPU "compute-friendly" prefill path depends on
+  a pluggable `MLAPrefillBackend` and CUDA-only chunked-context gather ops,
   neither of which exist on CPU. Instead, this attends directly in
-  latent-MQA space via the ``extend_attention_cpu`` kernel, which handles
+  latent-MQA space via the `extend_attention_cpu` kernel, which handles
   cached-prefix continuation and fresh prefill in one causal pass (the KV
   cache already contains the new tokens by the time this runs, since
-  ``do_kv_cache_update`` executes first).
+  `do_kv_cache_update` executes first).
 - Weight absorption for the prefill path is done with this impl's own
-  VNNI-packed copies of ``W_UK``/``W_UV`` (computed in
-  ``process_weights_after_loading``, using ``bmm_cpu``), rather than reading
-  the generic ``layer.W_UK_T``/``layer.W_UV``/``layer._v_up_proj`` the way
-  GPU backends do, since ``forward_mha``'s abstract signature has no
-  ``layer`` parameter (only ``forward_mqa`` does) and that signature is left
-  untouched. The decode path needs no such packing: ``MLAAttention.forward_impl``
-  already absorbs/de-absorbs Q around the ``forward_mqa`` call using the
-  generic (unpacked) ``layer.W_UK_T``/``layer._v_up_proj``, so
-  ``forward_mqa`` here only has to invoke the decode kernel.
+  VNNI-packed copies of `W_UK`/`W_UV` (computed in
+  `process_weights_after_loading`, using `bmm_cpu`), rather than reading
+  the generic `layer.W_UK_T`/`layer.W_UV`/`layer._v_up_proj` the way
+  GPU backends do, since `forward_mha`'s abstract signature has no
+  `layer` parameter (only `forward_mqa` does) and that signature is left
+  untouched. The decode path needs no such packing: `MLAAttention.forward_impl`
+  already absorbs/de-absorbs Q around the `forward_mqa` call using the
+  generic (unpacked) `layer.W_UK_T`/`layer._v_up_proj`, so
+  `forward_mqa` here only has to invoke the decode kernel.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from typing import ClassVar
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
@@ -61,6 +61,44 @@ _MIN_WORK_PER_SPLIT = 512
 _SPLIT_OCCUPANCY_MULTIPLIER = 2
 
 
+def _block_quant_to_tensor_quant(
+    weight: torch.Tensor,  # FP8 [N, K] block-quantized weight
+    weight_scale: torch.Tensor,  # [ceil(N/bn), ceil(K/bk)] block scales
+    block_size: list[int],  # [block_n, block_k]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Re-quantize FP8 block-quant weight to FP8 per-tensor quant.
+
+    Returns (fp8_weight, dequant_scale) where fp8_weight * dequant_scale
+    approximates the original float weight.  dequant_scale is a 0-dim
+    scalar tensor as expected by bmm_cpu's `scale` argument.
+
+    NOTE: block->tensor re-quantization may slightly affect accuracy
+    (equivalent to SGLang's block_quant_to_tensor_quant for CPU).
+    """
+    block_n, block_k = block_size[0], block_size[1]
+    n, k = weight.shape
+
+    # Expand block scales [ceil(N/bn), ceil(K/bk)] -> [N, K]
+    scale = weight_scale.to(torch.float32)
+    if scale.shape[0] < n:
+        scale = scale.repeat_interleave(block_n, dim=0)[:n, :]
+    if scale.shape[1] < k:
+        scale = scale.repeat_interleave(block_k, dim=1)[:, :k]
+
+    # Dequantize to float32
+    x_f32 = weight.to(torch.float32) * scale
+
+    # Re-quantize per-tensor back to FP8
+    fp8_max = torch.finfo(weight.dtype).max  # 448.0 for e4m3fn
+    amax = x_f32.abs().amax().clamp(min=1e-12)
+    quant_scale = fp8_max / amax
+    x_fp8 = (x_f32 * quant_scale).clamp(-fp8_max, fp8_max).to(weight.dtype)
+
+    # dequant_scale = 1 / quant_scale (0-dim tensor for bmm_cpu)
+    dequant_scale = (amax / fp8_max).to(torch.float32)
+    return x_fp8, dequant_scale
+
+
 def _compute_num_kv_splits(max_seq_len: int, num_threads: int) -> int:
     """Mirrors TritonMLAImpl's _compute_num_kv_splits, using the CPU thread
     count in place of SM count."""
@@ -74,7 +112,7 @@ def _compute_num_kv_splits(max_seq_len: int, num_threads: int) -> int:
 def _expand_block_table(block_table: torch.Tensor, block_size: int) -> torch.Tensor:
     """Adapter: vLLM's block-table paging -> the flat per-(request, position)
     physical row index the decode/extend kernels expect. Called once per step
-    from ``AMXMLAMetadataBuilder.build``, not per layer.
+    from `AMXMLAMetadataBuilder.build`, not per layer.
     """
     offsets = torch.arange(
         block_size, device=block_table.device, dtype=block_table.dtype
@@ -92,7 +130,7 @@ class AMXMLABackend(MLACommonBackend):
         return [576]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(32)]
 
     @classmethod
@@ -208,6 +246,9 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             )
         self._w_uk_packed: torch.Tensor | None = None
         self._w_uv_packed: torch.Tensor | None = None
+        self._w_scale: torch.Tensor | None = (
+            None  # per-tensor dequant scale (FP8 W8A16)
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         # forward_mha (unlike forward_mqa) receives no `layer` argument, so it
@@ -216,12 +257,40 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # impl derives its own copies from self.kv_b_proj (already available
         # via the constructor) and VNNI-packs them once, ahead of time, for
         # use with bmm_cpu in forward_mha.
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
-        ).T
-        kv_b_proj_weight = kv_b_proj_weight.view(
-            self.kv_lora_rank, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-        )
+        #
+        # kv_b_proj carries `_cpu_skip_gemm_dispatch`, so the CPU FP8 kernels
+        # leave its weight in the checkpoint [N, K] layout. For block-quant
+        # FP8 checkpoints, re-quantize per-tensor and keep the BMM in FP8
+        # (W8A16); everything else goes through the BF16 path.
+        weight = getattr(self.kv_b_proj, "weight", None)
+        block_size = getattr(self.kv_b_proj, "weight_block_size", None)
+        if (
+            weight is not None
+            and weight.dtype == torch.float8_e4m3fn
+            and block_size is not None
+        ):
+            block_scale = getattr(self.kv_b_proj, "weight_scale_inv", None)
+            if block_scale is None:
+                block_scale = self.kv_b_proj.weight_scale
+            fp8_weight, self._w_scale = _block_quant_to_tensor_quant(
+                weight, block_scale, block_size
+            )
+            # [N, K] -> [K, N] = [kv_lora_rank, heads * (nope + v)]
+            kv_b_proj_weight = fp8_weight.T.contiguous().view(
+                self.kv_lora_rank,
+                self.num_heads,
+                self.qk_nope_head_dim + self.v_head_dim,
+            )
+        else:
+            kv_b_proj_weight = get_and_maybe_dequant_weights(
+                self.kv_b_proj, out_dtype=act_dtype
+            ).T
+            kv_b_proj_weight = kv_b_proj_weight.view(
+                self.kv_lora_rank,
+                self.num_heads,
+                self.qk_nope_head_dim + self.v_head_dim,
+            )
+            self._w_scale = None
         w_uk, w_uv = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
@@ -242,6 +311,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         # Overrides the default (CUDA-only concat_and_cache_mla).
         if kv_cache.numel() == 0:
@@ -348,7 +418,9 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         ql_nope = torch.empty(
             num_tokens, num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
-        ops.bmm_cpu(ql_nope.transpose(0, 1), q_nope_t, self._w_uk_packed, True, None)
+        ops.bmm_cpu(
+            ql_nope.transpose(0, 1), q_nope_t, self._w_uk_packed, True, self._w_scale
+        )
         mqa_q = torch.cat([ql_nope, q_pe], dim=-1)
 
         kv_cache_flat = kv_c_and_k_pe_cache.view(-1, 1, self.head_size)
@@ -402,4 +474,4 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         output_view = output.view(num_tokens, num_heads, self.v_head_dim).transpose(
             0, 1
         )
-        ops.bmm_cpu(output_view, attn_out_t, self._w_uv_packed, True, None)
+        ops.bmm_cpu(output_view, attn_out_t, self._w_uv_packed, True, self._w_scale)

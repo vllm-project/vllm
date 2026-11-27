@@ -26,11 +26,6 @@ from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm import LLM, SamplingParams
 
 MODEL_NAME = "nvidia/audio-flamingo-3-hf"
-AUDIO_SKILLS_REVISION = "83bbf80178bb80461fc3e83e0139deb2d6fef1a6"
-AUDIO_SKILLS_ASSET_URL = (
-    "https://huggingface.co/datasets/nvidia/AudioSkills/resolve/"
-    f"{AUDIO_SKILLS_REVISION}/assets"
-)
 SINGLE_CONVERSATION = [
     {
         "role": "user",
@@ -43,7 +38,8 @@ SINGLE_CONVERSATION = [
             {
                 "type": "audio_url",
                 "audio_url": {
-                    "url": f"{AUDIO_SKILLS_ASSET_URL}/"
+                    "url": "https://huggingface.co/datasets/nvidia/AudioSkills/"
+                    "resolve/main/assets/"
                     "dogs_barking_in_sync_with_the_music.wav",
                 },
             },
@@ -69,7 +65,8 @@ BATCHED_CONVERSATIONS = [
                 {
                     "type": "audio_url",
                     "audio_url": {
-                        "url": f"{AUDIO_SKILLS_ASSET_URL}/"
+                        "url": "https://huggingface.co/datasets/nvidia/"
+                        "AudioSkills/resolve/main/assets/"
                         "Ch6Ae9DT6Ko_00-04-03_00-04-31.wav",
                     },
                 },

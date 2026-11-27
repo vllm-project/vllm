@@ -17,9 +17,7 @@ SEED = 42
 
 @pytest.fixture
 def test_prompts():
-    """
-    Adapted from tests/v1/e2e/spec_decode/utils.py
-    """
+    """Adapted from tests/v1/e2e/spec_decode/utils.py."""
     prompt_types = ["repeat", "sentence"]
     # Setting higher num prompts increases the chance of numerics mismatch
     # due to matrix multiplication numerics depending on batch dimension
@@ -52,8 +50,16 @@ use_fork_for_test = (
 
 
 @use_fork_for_test
-@pytest.mark.parametrize("kv_sharing_fast_prefill", [False, True])
-@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize(
+    "kv_sharing_fast_prefill,enforce_eager",
+    [
+        (True, True),
+        (True, False),
+        # (False, False) omitted: it saves ~9 min of mostly torch.compile time
+        # in CI.
+        (False, True),
+    ],
+)
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     kv_sharing_fast_prefill: bool,
@@ -68,9 +74,6 @@ def test_kv_sharing_fast_prefill(
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
-        # This allows vLLM compilation backend to handle allocating and
-        # managing buffers for cudagraph
-        cudagraph_copy_inputs=True,
         mode=CompilationMode.VLLM_COMPILE
         if not enforce_eager
         else CompilationMode.NONE,

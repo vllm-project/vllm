@@ -4,9 +4,12 @@
 import json
 
 import openai  # use the official client for correctness check
+import pybase64 as base64
 import pytest
 import pytest_asyncio
+import requests
 import torch
+from transformers import AutoConfig
 
 from tests.conftest import ImageTestAssets
 from tests.utils import RemoteOpenAIServer
@@ -14,6 +17,7 @@ from vllm.utils.serial_utils import tensor2base64
 
 # any model with a chat template should work here
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
+CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 MAXIMUM_IMAGES = 2
 
 
@@ -82,3 +86,37 @@ async def test_chat_completions_with_image_embeds(
     assert chat_completion.choices[0].message.content is not None
     assert isinstance(chat_completion.choices[0].message.content, str)
     assert len(chat_completion.choices[0].message.content) > 0
+
+
+@pytest.mark.asyncio
+async def test_unreadable_image_embeds_returns_bad_request(
+    client_with_image_embeds: openai.AsyncOpenAI,
+    server_with_image_embeds: RemoteOpenAIServer,
+):
+    unreadable = base64.b64encode(b"not a torch tensor").decode()
+
+    with pytest.raises(openai.BadRequestError) as excinfo:
+        await client_with_image_embeds.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_embeds",
+                            "image_embeds": unreadable,
+                        },
+                        {"type": "text", "text": "Describe the image."},
+                    ],
+                }
+            ],
+            max_tokens=1,
+        )
+
+    error = excinfo.value
+    assert error.status_code == 400
+    error_details = error.response.json()["error"]
+    assert error_details["type"] == "BadRequestError"
+    assert error_details["param"] == "image_embeds"
+    health = requests.get(server_with_image_embeds.url_for("health"), timeout=30)
+    health.raise_for_status()

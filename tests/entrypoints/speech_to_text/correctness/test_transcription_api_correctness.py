@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Evaluate Transcription API correctness by computing Word Error Rate (WER)
+"""Evaluate Transcription API correctness by computing Word Error Rate (WER)
 on a given ASR dataset. When provided, it will also compare the WER against
 a baseline.
 This simulates real work usage of the API and makes sure that the frontend and
@@ -11,7 +10,6 @@ AsyncLLMEngine are working correctly.
 import asyncio
 import io
 import time
-from functools import cache
 from statistics import mean, median
 
 import pytest
@@ -54,17 +52,18 @@ def load_audio_sample(audio):
     raise ValueError("Audio sample did not contain array, path, or bytes data")
 
 
-@cache
-def get_normalizer():
-    # Not all models have a normalizer, so use Whisper's as a standard option.
-    model = "openai/whisper-large-v3"
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
-    tokenizer = get_tokenizer(
-        model,
-        tokenizer_mode=model_info.tokenizer_mode,
-        trust_remote_code=model_info.trust_remote_code,
-    )
-    return EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
+# not all models have a normalizer so use the one from whisper as a standard option
+normalizer_model_info = HF_EXAMPLE_MODELS.find_hf_info("openai/whisper-large-v3")
+normalizer_tokenizer = get_tokenizer(
+    "openai/whisper-large-v3",
+    tokenizer_mode=normalizer_model_info.tokenizer_mode,
+    trust_remote_code=normalizer_model_info.trust_remote_code,
+)
+# english_spelling_normalizer is specific to the Whisper tokenizer and is not
+# part of the TokenizerLike protocol that get_tokenizer is annotated to return.
+normalizer = EnglishTextNormalizer(
+    normalizer_tokenizer.english_spelling_normalizer  # type: ignore[attr-defined]
+)
 
 
 async def transcribe_audio(client, tokenizer, y, sr, extra_body=None):
@@ -97,7 +96,6 @@ async def bound_transcribe(
             client, tokenizer, audio, sr, extra_body=extra_body
         )
         # Normalize *english* output/reference for evaluation.
-        normalizer = get_normalizer()
         out = normalizer(result[2])
         ref = normalizer(reference)
         return result[:2] + (out, ref)
@@ -252,7 +250,6 @@ async def bound_transcribe_path(
         result = await transcribe_audio_path(
             client, tokenizer, audio_path, extra_body=extra_body
         )
-        normalizer = get_normalizer()
         out = normalizer(result[2])
         ref = normalizer(reference)
         return result[:2] + (out, ref)
@@ -321,6 +318,9 @@ def run_longform_evaluation(
         ("openai/whisper-large-v3", 12.744980),
         # CohereASR is used to test the variable encoder length code paths
         ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        # fp32: in bf16, batch composition can flip one stuttered utterance
+        # ("100, 100") into a repetition loop up to max_model_len (+0.6 WER).
+        ("nvidia/canary-1b-v2", 12.4564, "--dtype=float32"),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -330,13 +330,14 @@ def run_longform_evaluation(
 def test_wer_correctness(
     model_config, dataset_repo, n_examples=-1, max_concurrent_request=None
 ):
-    model_name, expected_wer = model_config
+    model_name, expected_wer, *extra_server_args = model_config
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     server_args = [
         "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
         f"--max_num_seqs={MAX_SEQS_FOR_TRANSCRIPTION_TEST}",
         f"--gpu_memory_utilization={GPU_UTIL_FOR_TRANSCRIPTION_TEST}",
+        *extra_server_args,
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")

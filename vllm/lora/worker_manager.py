@@ -17,7 +17,7 @@ from vllm.lora.model_manager import (
     create_lora_manager,
 )
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, _TensorLoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
@@ -116,13 +116,26 @@ class WorkerLoRAManager:
                 if module == "experts":
                     expected_lora_lst.append(module)
             expected_lora_modules = set(expected_lora_lst)
-            lora_path = get_adapter_absolute_path(lora_request.lora_path)
-
-            peft_helper = PEFTHelper.from_local_dir(
-                lora_path,
-                self.max_position_embeddings,
-                lora_request.tensorizer_config_dict,
-            )
+            if isinstance(lora_request, _TensorLoRARequest):
+                logger.warning_once(
+                    "Loading LoRA from tensors is a private, worker-local interface "
+                    "for internal framework integration and may change without "
+                    "notice. "
+                    "The caller must synchronize updates and invalidate stale "
+                    "KV caches."
+                )
+                assert lora_request._peft_config is not None
+                peft_helper = PEFTHelper.from_dict(
+                    {
+                        **lora_request._peft_config,
+                        "vllm_max_position_embeddings": self.max_position_embeddings,
+                    }
+                )
+            else:
+                lora_path = get_adapter_absolute_path(lora_request.lora_path)
+                peft_helper = PEFTHelper.from_local_dir(
+                    lora_path, self.max_position_embeddings
+                )
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
@@ -139,23 +152,44 @@ class WorkerLoRAManager:
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
 
-            lora = self._lora_model_cls.from_local_checkpoint(
-                lora_path,
-                expected_lora_modules,
-                peft_helper=peft_helper,
-                lora_model_id=lora_request.lora_int_id,
-                device="cpu",
-                dtype=self.lora_config.lora_dtype,
-                model_vocab_size=self.vocab_size,
-                tensorizer_config_dict=lora_request.tensorizer_config_dict,
-                weights_mapper=hf_to_vllm_mapper,
-                skip_prefixes=lora_skip_prefixes,
-                moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
-            )
+            if isinstance(lora_request, _TensorLoRARequest):
+                assert lora_request._lora_tensors is not None
+                lora = self._lora_model_cls.from_lora_tensors(
+                    lora_model_id=lora_request.lora_int_id,
+                    tensors=lora_request._lora_tensors,
+                    peft_helper=peft_helper,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    model_vocab_size=self.vocab_size,
+                    weights_mapper=hf_to_vllm_mapper,
+                    skip_prefixes=lora_skip_prefixes,
+                    expected_lora_modules=expected_lora_modules,
+                    moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
+                    unsupported_lora_modules=self._adapter_manager.unsupported_lora_modules,
+                )
+            else:
+                lora = self._lora_model_cls.from_local_checkpoint(
+                    lora_path,
+                    expected_lora_modules,
+                    peft_helper=peft_helper,
+                    lora_model_id=lora_request.lora_int_id,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    model_vocab_size=self.vocab_size,
+                    weights_mapper=hf_to_vllm_mapper,
+                    skip_prefixes=lora_skip_prefixes,
+                    moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
+                    unsupported_lora_modules=self._adapter_manager.unsupported_lora_modules,
+                )
             # Stamp the on-disk MoE layout onto the loaded model so the
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
+            self._adapter_manager._validate_moe_lora_format(lora)
+
+            # Validate classification-head weights.
+            self._adapter_manager._validate_classification_head_lora(lora)
+            self._adapter_manager.warn_disabled_embedding_modules(lora)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both

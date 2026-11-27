@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for the TranslateGemma extra-fields-on-content-parts pathway.
 
-TranslateGemma's bundled chat template reads ``source_lang_code`` and
-``target_lang_code`` off each content part to assemble the translation prompt.
+TranslateGemma's bundled chat template reads `source_lang_code` and
+`target_lang_code` off each content part to assemble the translation prompt.
 This PR makes sure those extra fields survive request parsing and reach the
 template; these tests verify the full pathway with the real model on both
 the text and image content branches of the template.
@@ -52,9 +52,9 @@ def stop_sign_image_url():
 
 @pytest.mark.asyncio
 async def test_translategemma_extra_lang_code_fields(client: openai.AsyncOpenAI):
-    """en -> es translation through TranslateGemma's bundled chat template's
-    ``text`` content branch, which depends on ``source_lang_code`` /
-    ``target_lang_code`` extra fields being preserved on the content part."""
+    """En -> es translation through TranslateGemma's bundled chat template's
+    `text` content branch, which depends on `source_lang_code` /
+    `target_lang_code` extra fields being preserved on the content part."""
     completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -92,12 +92,12 @@ async def test_translategemma_image_extra_lang_code_fields(
     client: openai.AsyncOpenAI,
     stop_sign_image_url: str,
 ):
-    """en -> es OCR-translation through TranslateGemma's bundled chat
-    template's ``image`` content branch. Exercises the multimodal branch of
-    ``_collect_extra_fields`` in ``_parse_chat_message_content_part``: the
-    ``source_lang_code`` / ``target_lang_code`` extras must survive parsing
-    and end up alongside the ``{"type": "image"}`` placeholder so the
-    template's image branch (``content["type"] == 'image'``) renders the
+    """En -> es OCR-translation through TranslateGemma's bundled chat
+    template's `image` content branch. Exercises the multimodal branch of
+    `_collect_extra_fields` in `_parse_chat_message_content_part`: the
+    `source_lang_code` / `target_lang_code` extras must survive parsing
+    and end up alongside the `{"type": "image"}` placeholder so the
+    template's image branch (`content["type"] == 'image'`) renders the
     right OCR-translation prompt."""
     completion = await client.chat.completions.create(
         model=MODEL_NAME,

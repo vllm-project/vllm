@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Zentorch dynamic-symmetric W8A8 int8 linear kernel for AMD Zen CPUs.
 
-Selected by ``choose_scaled_mm_linear_kernel`` ahead of the generic
-oneDNN-backed ``CPUInt8ScaledMMLinearKernel``. When ``is_supported`` or
-``can_implement`` rejects a layer, the selector falls through to the next
-kernel in ``_POSSIBLE_INT8_KERNELS[PlatformEnum.CPU]``.
+Selected by `choose_scaled_mm_linear_kernel` ahead of the generic
+oneDNN-backed `CPUInt8ScaledMMLinearKernel`. When `is_supported` or
+`can_implement` rejects a layer, the selector falls through to the next
+kernel in `_POSSIBLE_INT8_KERNELS[PlatformEnum.CPU]`.
 """
 
 import torch
@@ -50,10 +50,10 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Prepare weights for ``zentorch_dynamic_qlinear``.
+        """Prepare weights for `zentorch_dynamic_qlinear`.
 
         Keeps weight in [N, K] layout (int8, contiguous) and converts the
-        per-channel weight scale to bf16 with shape ``(N,)``.
+        per-channel weight scale to bf16 with shape `(N,)`.
         """
         w_q_name, w_s_name, _, _, _ = self.layer_param_names
         weight = getattr(layer, w_q_name)

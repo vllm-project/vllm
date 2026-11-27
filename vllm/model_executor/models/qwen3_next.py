@@ -7,6 +7,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import Qwen3NextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -17,13 +18,20 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -43,16 +51,21 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_quark_ocp_mx_group_size,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
@@ -69,10 +82,12 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
@@ -83,15 +98,51 @@ def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
     return (
         parallel_config.use_sequence_parallel_moe
-        and parallel_config.pipeline_parallel_size == 1
         and getattr(config, "num_experts", 0) > 0
         and not getattr(config, "mlp_only_layers", [])
         and getattr(config, "decoder_sparse_step", 1) == 1
     )
 
 
+def _should_replicate_misaligned_shared_expert(
+    intermediate_size: int,
+    tp_size: int,
+    group_size: int | None,
+    enable_expert_parallel: bool,
+    is_sequence_parallel: bool,
+) -> bool:
+    if intermediate_size <= 0 or group_size is None:
+        return False
+
+    partition_size, remainder = divmod(intermediate_size, tp_size)
+    if remainder == 0 and partition_size % group_size == 0:
+        return False
+
+    if enable_expert_parallel or is_sequence_parallel:
+        return True
+
+    if remainder != 0:
+        raise ValueError(
+            f"Shared-expert intermediate size {intermediate_size} must be "
+            f"divisible by tensor-parallel size {tp_size}."
+        )
+
+    raise ValueError(
+        "The Quark OCP MX shared expert cannot be tensor-parallelized: "
+        f"intermediate size {intermediate_size} with TP size {tp_size} "
+        f"produces a partition of {partition_size}, which is not divisible by "
+        f"the OCP MX group size {group_size}. Choose a compatible "
+        "tensor-parallel size or enable expert parallelism."
+    )
+
+
 class Qwen3NextSparseMoeBlock(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        reduce_results: bool = True,
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -106,6 +157,30 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
+        # Resolve shared-expert fusion first (when enabled, TP alignment constraint no
+        # longer applies)
+        self.is_fused_shared_expert_enabled = False
+        if config.shared_expert_intermediate_size > 0:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config,
+                prefix,
+                shared_expert_name="shared_expert",
+            )
+
+        if self.is_fused_shared_expert_enabled:
+            self.replicate_shared_expert = False
+        else:
+            shared_expert_group_size = get_quark_ocp_mx_group_size(
+                quant_config,
+                f"{prefix}.shared_expert.down_proj",
+            )
+            self.replicate_shared_expert = _should_replicate_misaligned_shared_expert(
+                config.shared_expert_intermediate_size,
+                self.tp_size,
+                shared_expert_group_size,
+                parallel_config.enable_expert_parallel,
+                self.is_sequence_parallel,
+            )
         if self.tp_size > config.num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -121,11 +196,18 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.gate = ReplicatedLinear(
+        # INC/AutoRound decides per layer whether the routed gate is quantized
+        # (Intel/Qwen3-Coder-Next-int4-AutoRound stores it as int4); other
+        # formats keep the historical unquantized gate.
+        gate_quant_config = (
+            quant_config
+            if quant_config is not None and quant_config.get_name() == "inc"
+            else None
+        )
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            quant_config=None,
+            quant_config=gate_quant_config,
             prefix=f"{prefix}.gate",
         )
 
@@ -136,14 +218,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.shared_expert_gate",
         )
-
-        self.is_fused_shared_expert_enabled = False
-        if config.shared_expert_intermediate_size > 0:
-            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
-                quant_config,
-                prefix,
-                shared_expert_name="shared_expert",
-            )
 
         if (
             self.is_fused_shared_expert_enabled
@@ -159,11 +233,14 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 reduce_results=False,
                 expert_gate=self.shared_expert_gate,
                 is_sequence_parallel=self.is_sequence_parallel,
+                disable_tp=self.replicate_shared_expert,
                 prefix=f"{prefix}.shared_expert",
             )
 
         self.experts = FusedMoEFactory(
-            shared_experts=self.shared_expert,
+            shared_experts=(
+                None if self.replicate_shared_expert else self.shared_expert
+            ),
             gate=self.gate,
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -176,7 +253,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=1 if self.shared_expert is None else None,
+            reduce_results=reduce_results,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_expert",
             shared_expert_gate=self.shared_expert_gate
             if self.shared_expert is None
             else None,
@@ -195,9 +274,16 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
+        replicated_shared_output = (
+            self.shared_expert(hidden_states)
+            if self.replicate_shared_expert and self.shared_expert is not None
+            else None
+        )
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=hidden_states
         )
+        if replicated_shared_output is not None:
+            final_hidden_states += replicated_shared_output
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -217,6 +303,7 @@ class Qwen3NextAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.config = config
@@ -239,9 +326,6 @@ class Qwen3NextAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
         self.attn_output_gate = getattr(config, "attn_output_gate", True)
 
         self.qkv_proj = QKVParallelLinear(
@@ -267,7 +351,7 @@ class Qwen3NextAttention(nn.Module):
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            dual_chunk_attention_config=self.dual_chunk_attention_config,
+            mrope_positions_factor=mrope_positions_factor,
         )
 
         # Late-interaction retrieval models (e.g. ColQwen3.5) run BIDIRECTIONAL
@@ -288,27 +372,39 @@ class Qwen3NextAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": self.dual_chunk_attention_config,
-            }
-            if self.dual_chunk_attention_config
-            else {},
         )
 
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Fuse the gated split + QK-RMSNorm + (partial) NeoX RoPE + gate copy.
-        # TODO: support MRoPE
         mm_config = model_config.multimodal_config if model_config else None
         text_only = mm_config is None or mm_config.language_model_only
-        self.use_fused_qk_norm_rope_gate = (
+        mrope_section = getattr(self.rotary_emb, "mrope_section", None)
+        supports_mrope = bool(
+            type(self.rotary_emb) is MRotaryEmbedding
+            and mrope_section
+            and len(mrope_section) == 3
+            and sum(mrope_section) == self.rotary_emb.rotary_dim // 2
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+        )
+        supports_dtype = getattr(self.rotary_emb, "dtype", None) in (
+            torch.float16,
+            torch.bfloat16,
+        )
+        self.supports_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
-            and current_platform.is_cuda()
-            and text_only
+            and supports_dtype
+            and (text_only or supports_mrope)
         )
+        self.use_fused_qk_norm_rope_gate = self.supports_fused_qk_norm_rope_gate and (
+            current_platform.is_cuda() or current_platform.is_xpu()
+        )
+
+        # Off by default; Qwen3.5 enables the fused sigmoid-gate-mul Triton
+        # kernel post-construction (see Qwen3_5DecoderLayer).
+        self.use_fused_output_gate = False
 
     def _project_qkv_gate(
         self,
@@ -318,29 +414,35 @@ class Qwen3NextAttention(nn.Module):
         """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
         Dispatches between the fused Triton kernel and the eager
-        split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
+        split + QK-RMSNorm + RoPE path. `gate` is `None` when output
         gating is disabled.
         """
         if self.use_fused_qk_norm_rope_gate:
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
             )
-            # mRoPE passes positions as (3, n_tokens) for T/H/W. Fusion is only
-            # enabled text-only, where the three rows are identical, so taking
-            # the T row is exact. (1D positions pass through.)
-            pos = positions[0] if positions.ndim == 2 else positions
+            if positions.ndim == 2 and not getattr(
+                self.rotary_emb, "mrope_section", None
+            ):
+                positions = positions[0]
             q, k, gate = fused_qk_rmsnorm_rope_gate(
                 q_gate,
                 k,
-                self.q_norm.weight.float() + 1.0,
-                self.k_norm.weight.float() + 1.0,
+                self.q_norm.weight,
+                self.k_norm.weight,
                 self.rotary_emb.cos_sin_cache,
-                pos,
+                positions,
                 self.q_norm.variance_epsilon,
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_dim,
                 self.rotary_emb.rotary_dim,
+                norm_beta=1.0,
+                mrope_section=(
+                    getattr(self.rotary_emb, "mrope_section", None)
+                    if positions.ndim == 2
+                    else None
+                ),
             )
             return q, k, v, gate
 
@@ -369,13 +471,26 @@ class Qwen3NextAttention(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
+            if not self.use_fused_output_gate:
+                attn_output = attn_output * torch.sigmoid(gate)
+            elif get_input_quant_key(self.o_proj) == kFp8StaticTensorSym:
+                # Sigmoid gate, fused with o_proj's static FP8 input quant.
+                scale = self.o_proj.input_scale
+                attn_output = QuantizedActivation(
+                    data=fused_sigmoid_gate_mul(attn_output, gate, scale),
+                    scale=scale,
+                    orig_dtype=attn_output.dtype,
+                    orig_shape=attn_output.shape,
+                    quant_key=kFp8StaticTensorSym,
+                )
+            else:
+                attn_output = fused_sigmoid_gate_mul(attn_output, gate)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -470,7 +585,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        positions: torch.Tensor = None,
+        positions: torch.Tensor,
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
@@ -568,10 +683,13 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str):
             return Qwen3NextDecoderLayer(
@@ -583,10 +701,10 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Qwen3NextSparseMoeBlock,
-            "mlp",
+            enable_eplb=parallel_config.enable_eplb,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
@@ -627,7 +745,8 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         full_num_tokens = positions.shape[-1]
         if self.use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
-            assert residual is None
+            if residual is not None:
+                residual = sequence_parallel_chunk(residual)
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
@@ -644,6 +763,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
+            if self.use_sequence_parallel:
+                # PP transport expects full-token tensors replicated across TP ranks.
+                packed = torch.cat([hidden_states, residual], dim=-1)
+                packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
+                hidden_states, residual = packed.chunk(2, dim=-1)
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -667,7 +791,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=getattr(self.config, "num_experts", 0),
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -677,6 +801,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):
+    model: Qwen3NextModel
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -745,14 +872,8 @@ class Qwen3NextForCausalLM(
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
 
         scheduler_config = vllm_config.scheduler_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen3Next currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
@@ -762,11 +883,14 @@ class Qwen3NextForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

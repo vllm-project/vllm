@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused SwiGLU-OAI activation (split layout) for AMD ROCm via Triton.
 
-SwiGLU-OAI on a ``[*, 2I]`` split-layout input (gate = first half, up = second
+SwiGLU-OAI on a `[*, 2I]` split-layout input (gate = first half, up = second
 half):
 
     gate = clamp(gate, max=limit)
@@ -11,12 +11,12 @@ half):
 
 On ROCm the dense MLP and the native MXFP8 MoE (between its two GEMMs) fell back
 to a chain of elementwise PyTorch ops with fp32 intermediates: vLLM's shared
-``SiluAndMulWithClamp`` blanket-routes ROCm to ``forward_native``, and the MoE
+`SiluAndMulWithClamp` blanket-routes ROCm to `forward_native`, and the MoE
 applies the activation inline in PyTorch. This Triton kernel collapses that into
-a single pass producing the ``[*, I]`` output directly, and computes in fp32
+a single pass producing the `[*, I]` output directly, and computes in fp32
 (rel ~1e-6 vs reference).
 
-Note: the vectorized ``torch.ops._C.silu_and_mul_with_clamp`` op IS built on
+Note: the vectorized `torch.ops._C.silu_and_mul_with_clamp` op IS built on
 ROCm and is ~1.2-2.2x faster in isolation, but the win is launch overhead that
 HIP graphs already eliminate — measured end-to-end throughput is identical
 (within noise), so we keep the fp32-accurate Triton kernel.
@@ -83,12 +83,14 @@ def _swiglu_oai_quant_kernel(
     limit,
     HAS_LIMIT: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    TINY: tl.constexpr,
 ):
     """SwiGLU-OAI (split layout) fused with per-32-block MXFP8 (E4M3 + E8M0)
-    quant. Each program handles ``[BLOCK_M, 32]`` of the ``[M, I]`` output (one
-    MX block): it reads the matching gate/up columns from ``g1`` (``[M, 2I]``),
+    quant. Each program handles `[BLOCK_M, 32]` of the `[M, I]` output (one
+    MX block): it reads the matching gate/up columns from `g1` (`[M, 2I]`),
     computes the SwiGLU in fp32, then derives the block E8M0 scale and emits the
-    FP8 values + scale in a single pass — no bf16 ``act`` round-trip to HBM.
+    FP8 values + scale in a single pass — no bf16 `act` round-trip to HBM.
     """
     pid_m = tl.program_id(0)
     pid_b = tl.program_id(1)  # which 32-element block along I
@@ -109,10 +111,12 @@ def _swiglu_oai_quant_kernel(
         gate = tl.minimum(gate, limit)
         up = tl.minimum(tl.maximum(up, -limit), limit)
     act = gate * tl.sigmoid(alpha * gate) * (up + beta)  # [BLOCK_M, 32] fp32
-    amax = tl.maximum(tl.max(tl.abs(act), axis=1), 1e-30)  # [BLOCK_M]
-    sb = tl.minimum(tl.maximum(tl.floor(tl.log2(amax)) + 127.0, 0.0), 254.0)
-    descale = tl.exp2(sb - 127.0)
-    aq = (act / descale[:, None]).to(aq_ptr.dtype.element_ty)
+    amax = tl.maximum(tl.max(tl.abs(act), axis=1), TINY)  # [BLOCK_M]
+    sb = tl.minimum(tl.maximum(tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0, 0.0), 254.0)
+    # Computing the E8M0 byte-0 divisor (2^-127) can flush to zero on CDNA.
+    # Use its finite reciprocal so all-zero blocks do not produce 0/0.
+    rescale = tl.exp2(127.0 - sb)
+    aq = (act * rescale[:, None]).to(aq_ptr.dtype.element_ty)
     tl.store(
         aq_ptr + offs_m[:, None] * stride_qm + offs_c[None, :] * stride_qn,
         aq,
@@ -130,10 +134,10 @@ def swiglu_oai_quantize_mxfp8(
     limit: float | None,
     block_m: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """SwiGLU-OAI on split-layout ``[M, 2I]`` fused with MXFP8 activation-quant.
+    """SwiGLU-OAI on split-layout `[M, 2I]` fused with MXFP8 activation-quant.
 
-    Returns ``(act_q [M, I] float8_e4m3fn, act_scale [M, I//32] uint8 E8M0)``,
-    identical to ``mxfp8_e4m3_quantize(swiglu_oai_split(gate_up))`` but in a
+    Returns `(act_q [M, I] float8_e4m3fn, act_scale [M, I//32] uint8 E8M0)`,
+    identical to `mxfp8_e4m3_quantize(swiglu_oai_split(gate_up))` but in a
     single Triton pass (no bf16 intermediate). Used between the two GEMMs of the
     native MXFP8 MoE. Numerically equivalent to the unfused chain (bit-exact on
     measured MoE shapes); marginally more accurate (fp32 act, no bf16 round-trip).
@@ -173,6 +177,8 @@ def swiglu_oai_quantize_mxfp8(
         0.0 if limit is None else float(limit),
         HAS_LIMIT=limit is not None,
         BLOCK_M=block_m,
+        FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
+        TINY=float(torch.finfo(torch.float32).tiny),
         num_warps=4,
     )
     return aq, asc
@@ -185,7 +191,7 @@ def swiglu_oai_split(
     limit: float | None,
     out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """SwiGLU-OAI on a split-layout ``[*, 2I]`` tensor -> ``[*, I]``."""
+    """SwiGLU-OAI on a split-layout `[*, 2I]` tensor -> `[*, I]`."""
     orig_shape = gate_up.shape
     two_i = orig_shape[-1]
     n_inter = two_i // 2

@@ -4,7 +4,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import (
@@ -42,7 +42,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward of RowParallelLinear
+        """Forward of RowParallelLinear.
 
         Args:
             input_: tensor whose last dimension is `input_size`. If
@@ -52,6 +52,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         Returns:
             - output
             - bias
+
         """
         # set up backprop all-reduce.
         if self.base_layer.input_is_parallel:
@@ -88,7 +89,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is maybe_get_oot_by_class(RowParallelLinear)
 
@@ -99,8 +100,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
 
 class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
-    """
-    Differs from RowParallelLinearWithLoRA by slicing the
+    """Differs from RowParallelLinearWithLoRA by slicing the
     LoRA B's also.
 
     Based on S-LoRA, slicing happens along the output dim.
@@ -116,10 +116,9 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         return lora_b
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        output = self._get_quant_method().apply(self.base_layer, x, bias)
-
+        out_orig_shape = (*x.shape[:-1], -1)
         x = x.view(-1, x.shape[-1])
-        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+        output = self._get_quant_method().apply(self.base_layer, x, bias)
         buffer = torch.zeros(
             (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
             dtype=torch.float32,
@@ -165,7 +164,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(

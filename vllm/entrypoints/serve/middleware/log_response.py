@@ -94,7 +94,6 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
 
 def _log_streaming_response(response, response_body: list) -> None:
     """Log streaming response with robust SSE parsing."""
-
     sse_decoder = SSEDecoder()
     chunk_count = 0
 

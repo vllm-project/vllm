@@ -4,6 +4,7 @@
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
+import math
 from typing import Any
 
 import torch
@@ -56,16 +57,20 @@ def _paged_kv_cache_offsets(
     stride_v_cache_d,
     stride_v_cache_bl,
     PHYSICAL_BLOCK_SIZE: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr = 0,
     MASK_BLOCK_TABLE: tl.constexpr = False,
 ):
     """Compute paged K/V cache element offsets for a tile of token positions.
 
-    `token_indices` holds the absolute sequence positions of the tile. The
+    `token_indices` holds tile positions counted from the first block of `B_Loc`. The
     logical block for each token is looked up in `B_Loc` (handling cross-block
     tiles), then the physical element offsets are built with the same layout the
     kernel uses everywhere:
       K cache: [num_blocks, num_kv_heads, head_size // x, block_size, x]
-      V cache: [num_blocks, num_kv_heads, head_size, block_size]
+      V cache: [num_blocks, num_kv_heads, head_size, block_size], or the
+        interleaved layout [num_blocks, num_kv_heads, block_size // x,
+        head_size, x] when `INTERLEAVED_V_PACK_FACTOR` (= x) > 0.
     Returns `(off_k, off_v)` with shapes [D, N] and [N, D] respectively.
 
     When `MASK_BLOCK_TABLE` is set, the block-table load is masked with
@@ -94,12 +99,25 @@ def _paged_kv_cache_offsets(
         + internal[None, :] * stride_k_cache_bl
         + (offs_d[:, None] % x) * stride_k_cache_x
     )
-    off_v = (
-        bn[:, None] * stride_v_cache_bs
-        + cur_kv_head * stride_v_cache_h
-        + offs_d[None, :] * stride_v_cache_d
-        + internal[:, None] * stride_v_cache_bl
-    )
+    if INTERLEAVED_V_PACK_FACTOR > 0:
+        # Interleaved V-cache: [num_blocks, num_kv_heads, block_size/x,
+        # head_size, x] flattened onto the 4D stride layout.
+        off_v = (
+            bn[:, None] * stride_v_cache_bs
+            + cur_kv_head * stride_v_cache_h
+            + (internal[:, None] // INTERLEAVED_V_PACK_FACTOR)
+            * BLOCK_DMODEL
+            * INTERLEAVED_V_PACK_FACTOR
+            + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
+            + (internal[:, None] % INTERLEAVED_V_PACK_FACTOR)
+        )
+    else:
+        off_v = (
+            bn[:, None] * stride_v_cache_bs
+            + cur_kv_head * stride_v_cache_h
+            + offs_d[None, :] * stride_v_cache_d
+            + internal[:, None] * stride_v_cache_bl
+        )
     return off_k, off_v
 
 
@@ -152,6 +170,7 @@ def _fwd_kernel(
     PHYSICAL_BLOCK_SIZE: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
+    CTX_SKIP_ALIGN: tl.constexpr,
     num_unroll_cache: tl.constexpr,
     num_unroll_request: tl.constexpr,
     SKIP_DECODE: tl.constexpr,
@@ -159,6 +178,7 @@ def _fwd_kernel(
     USE_FP8: tl.constexpr,
     CAUSAL: tl.constexpr = True,
     MAX_Q_LEN: tl.constexpr = 0,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr = 0,
     MAX_CTX_LEN: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -227,10 +247,27 @@ def _fwd_kernel(
 
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
+    ctx_loop_start = 0
+    if SLIDING_WINDOW > 0:
+        # Oldest key the first query row in this program can see.
+        ctx_loop_start = tl.maximum(
+            0, cur_batch_ctx_len + block_start_loc - SLIDING_WINDOW + 1
+        )
+        ctx_loop_start = tl.minimum(ctx_loop_start, cur_batch_ctx_len)
+        # Round down to a tile so no in-window key is dropped.
+        ctx_loop_start = (ctx_loop_start // CTX_SKIP_ALIGN) * CTX_SKIP_ALIGN
+
     # compute query against context (no causal mask here)
-    for start_n in tl.range(
-        0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
+    # Ignore [0, ctx_loop_start): masked for every query row in this program.
+    # Counting from 0 keeps V-cache loads vectorized for caches over 2 GB.
+    B_Loc_ctx = B_Loc + (ctx_loop_start // PHYSICAL_BLOCK_SIZE) * stride_b_loc_s
+    for rel_start_n in tl.range(
+        0,
+        cur_batch_ctx_len - ctx_loop_start,
+        BLOCK_SIZE,
+        loop_unroll_factor=num_unroll_cache,
     ):
+        start_n = ctx_loop_start + rel_start_n
         # Under a block size of 544 (Qwen/Qwen3-Next-80B-A3B-Thinking),
         # replace one physical block every 17 32-Tile blocks
         # Calculate the logical block index of each of the 32 tokens
@@ -239,14 +276,16 @@ def _fwd_kernel(
         # (handles cross-block tiles via B_Loc). Same addressing is reused for
         # the current-chunk cache read below.
         token_indices = start_n + offs_bs_n
+        # Cache offsets count from B_Loc_ctx's first block, not the sequence start.
+        cache_indices = rel_start_n + offs_bs_n
         # Context tokens are always followed by the current chunk, so the tile
         # never steps past this batch's block-table row; the block-table load
         # stays unmasked (MASK_BLOCK_TABLE=False) and offs_bs_n is an unused
         # placeholder for token_valid.
         off_k, off_v = _paged_kv_cache_offsets(
-            B_Loc,
+            B_Loc_ctx,
             cur_batch,
-            token_indices,
+            cache_indices,
             offs_bs_n,
             offs_d,
             cur_kv_head,
@@ -263,6 +302,8 @@ def _fwd_kernel(
             stride_v_cache_d,
             stride_v_cache_bl,
             PHYSICAL_BLOCK_SIZE,
+            BLOCK_DMODEL,
+            INTERLEAVED_V_PACK_FACTOR,
         )
 
         if (
@@ -271,8 +312,7 @@ def _fwd_kernel(
         ):
             k_load = tl.load(
                 K_cache + off_k,
-                mask=dim_mask[:, None]
-                & ((start_n + offs_bs_n[None, :]) < cur_batch_ctx_len),
+                mask=dim_mask[:, None] & (token_indices[None, :] < cur_batch_ctx_len),
                 other=0.0,
             )  # [D,N]
         else:
@@ -403,6 +443,8 @@ def _fwd_kernel(
                 stride_v_cache_d,
                 stride_v_cache_bl,
                 PHYSICAL_BLOCK_SIZE,
+                BLOCK_DMODEL,
+                INTERLEAVED_V_PACK_FACTOR,
                 MASK_BLOCK_TABLE=True,
             )
             k_cur_load = tl.load(
@@ -540,6 +582,7 @@ def _fwd_kernel_alibi(
     BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
     BLOCK_N: tl.constexpr,
     SKIP_DECODE: tl.constexpr,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
 ):
     # attn_bias[]
     cur_batch = tl.program_id(0)
@@ -608,12 +651,24 @@ def _fwd_kernel_alibi(
             + ((start_n + offs_n[None, :]) % block_size) * stride_k_cache_bl
             + (offs_d[:, None] % x) * stride_k_cache_x
         )
-        off_v = (
-            bn[:, None] * stride_v_cache_bs
-            + cur_kv_head * stride_v_cache_h
-            + offs_d[None, :] * stride_v_cache_d
-            + (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl
-        )
+        if INTERLEAVED_V_PACK_FACTOR > 0:
+            v_internal = (start_n + offs_n[:, None]) % block_size
+            off_v = (
+                bn[:, None] * stride_v_cache_bs
+                + cur_kv_head * stride_v_cache_h
+                + (v_internal // INTERLEAVED_V_PACK_FACTOR)
+                * BLOCK_DMODEL
+                * INTERLEAVED_V_PACK_FACTOR
+                + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
+                + (v_internal % INTERLEAVED_V_PACK_FACTOR)
+            )
+        else:
+            off_v = (
+                bn[:, None] * stride_v_cache_bs
+                + cur_kv_head * stride_v_cache_h
+                + offs_d[None, :] * stride_v_cache_d
+                + (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl
+            )
         k_load = tl.load(
             K_cache + off_k,
             mask=dim_mask[:, None] & ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
@@ -796,6 +851,7 @@ def context_attention_fwd(
     fp8_out_scale=None,
     sinks=None,
     is_block_table_ptr: bool = False,
+    interleaved_v_pack_factor: int = 0,
     causal: bool = True,
 ):
     q_dtype_is_f32 = q.dtype is torch.float32
@@ -937,6 +993,7 @@ def context_attention_fwd(
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
             SKIP_DECODE=skip_decode,
+            INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
             num_warps=NUM_WARPS,
             num_stages=1,
         )
@@ -948,21 +1005,26 @@ def context_attention_fwd(
         extra_kargs = {}
 
     real_block_size = v_cache.shape[3]
-    is_pow2 = real_block_size > 0 and (real_block_size & (real_block_size - 1) == 0)
-    # For standard models involving powers of 2,
-    # follow the original logic (Llama 128/64)
-    # For non-standard models (Qwen3-next block_size 544), set to 32.
-    if is_pow2:
-        BLOCK_M = 128
-        BLOCK_N = 64
-    else:
-        BLOCK_M = 32
-        BLOCK_N = 32
-
-    # TRITON_BLOCK_SIZE is kept at 32 to ensure
-    # correct alignment logic when the kernel handles
-    # non-standard sizes (such as 544).
+    # _paged_kv_cache_offsets resolves context tokens against PHYSICAL_BLOCK_SIZE
+    # individually, so tiles need not divide the page size.
+    BLOCK_M = 128
+    BLOCK_N = 64
     TRITON_BLOCK_SIZE = 32
+    num_unroll_cache = 4
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_rdna
+
+        if on_rdna():
+            BLOCK_M, BLOCK_N, TRITON_BLOCK_SIZE, num_unroll_cache = 64, 32, 16, 1
+
+    num_unroll_cache = 4
+    # Unroll 4 spills above head size 128 on gfx942; it only repays that past 2 GiB.
+    if sliding_window > 0 and Lk_padded > 128 and current_platform.is_rocm():
+        from vllm.platforms.rocm import get_cdna_version
+
+        within_2gb = v_cache.untyped_storage().size() <= 2**31 - 1
+        if get_cdna_version() == 3 and within_2gb:
+            num_unroll_cache = 1
 
     grid_fn = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
     _fwd_kernel[grid_fn](
@@ -1011,15 +1073,17 @@ def context_attention_fwd(
         BLOCK_DMODEL=Lk,
         BLOCK_DMODEL_PADDED=Lk_padded,
         SLIDING_WINDOW=sliding_window,
+        CTX_SKIP_ALIGN=math.lcm(TRITON_BLOCK_SIZE, real_block_size),
         SKIP_DECODE=skip_decode,
         USE_FP8=fp8_out_scale is not None,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        num_unroll_cache=4,
+        num_unroll_cache=num_unroll_cache,
         num_unroll_request=1,
         num_warps=4,
         num_stages=1,
         USE_SINKS=sinks is not None,
+        INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
         CAUSAL=causal,
         KV_FROM_CACHE=kv_from_cache,
         **extra_kargs,

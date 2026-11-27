@@ -137,17 +137,14 @@ TEST_CASES = [
     ),
 ]
 
-
-@pytest.fixture(scope="module")
-def tokenizer():
-    return AutoTokenizer.from_pretrained("allenai/Olmo-3-7B-Think")
+# Global tokenizer initialization to avoid repeated loading
+tokenizer = AutoTokenizer.from_pretrained("allenai/Olmo-3-7B-Think")
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
 def test_reasoning(
     streaming: bool,
     param_dict: dict[str, str],
-    tokenizer,
 ):
     output = tokenizer.tokenize(param_dict["output"])
 

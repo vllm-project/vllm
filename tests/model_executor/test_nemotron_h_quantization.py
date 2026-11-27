@@ -3,6 +3,8 @@
 
 from unittest.mock import Mock, patch
 
+import torch
+
 
 def test_nemotron_h_lm_head_receives_quant_config():
     from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
@@ -19,10 +21,17 @@ def test_nemotron_h_lm_head_receives_quant_config():
     mock_vllm_config.scheduler_config = Mock()
     mock_vllm_config.quant_config = mock_quant_config
 
+    mock_pp_group = Mock()
+    mock_pp_group.is_last_rank = True
+
     with (
         patch("vllm.model_executor.models.nemotron_h.NemotronHModel") as MockModel,
         patch("vllm.model_executor.models.nemotron_h.ParallelLMHead") as MockLMHead,
         patch("vllm.model_executor.models.nemotron_h.LogitsProcessor"),
+        patch(
+            "vllm.model_executor.models.nemotron_h.get_pp_group",
+            return_value=mock_pp_group,
+        ),
     ):
         MockModel.return_value.make_empty_intermediate_tensors = Mock()
         MockModel.return_value.has_moe = False
@@ -32,3 +41,28 @@ def test_nemotron_h_lm_head_receives_quant_config():
         MockLMHead.assert_called_once()
         call_kwargs = MockLMHead.call_args.kwargs
         assert call_kwargs["quant_config"] is mock_quant_config
+
+
+def test_relu2_fp8_fusion_uses_registry():
+    from vllm.model_executor.models.nemotron_h import NemotronHMLP
+
+    projected = torch.empty((1, 1), dtype=torch.bfloat16)
+    fused = Mock()
+    act_fn = Mock()
+    down_proj = Mock(side_effect=lambda x: (x, None))
+
+    mlp = NemotronHMLP.__new__(NemotronHMLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.up_proj = Mock(return_value=(projected, None))
+    mlp.down_proj = down_proj
+    mlp.act_fn = act_fn
+
+    with patch(
+        "vllm.model_executor.models.nemotron_h.maybe_fused_act_quant",
+        return_value=fused,
+    ) as maybe_fused:
+        result = mlp(Mock())
+
+    maybe_fused.assert_called_once_with(act_fn, projected, down_proj)
+    act_fn.assert_not_called()
+    assert result is fused

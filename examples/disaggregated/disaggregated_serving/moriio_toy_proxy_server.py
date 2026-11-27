@@ -367,6 +367,8 @@ async def handle_request(api: str, request: Request):
                 "remote_block_ids"
             ]
             req_data["kv_transfer_params"]["transfer_id"] = prefill_kv["transfer_id"]
+            if prefill_kv.get("tp_size") is not None:
+                req_data["kv_transfer_params"]["tp_size"] = prefill_kv["tp_size"]
 
         req_data["kv_transfer_params"]["remote_dp_size"] = prefill_instance_endpoint[
             "dp_size"
@@ -471,9 +473,11 @@ async def stop_profile():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=10001)
+    # Port the prefill/decode servers register on (their proxy_ping_port).
+    parser.add_argument("--service-discovery-port", type=int, default=36367)
     args = parser.parse_args()
 
-    t = start_service_discovery("0.0.0.0", 36367)
+    t = start_service_discovery("0.0.0.0", args.service_discovery_port)
     # High-concurrency hardening. Quart's app.run() uses a shallow listen
     # backlog (100) and, with app.debug=True, adds per-request overhead that
     # starves the single accept loop. Under a burst of ~512 simultaneous client

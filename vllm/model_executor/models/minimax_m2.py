@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -70,7 +70,7 @@ from .utils import (
 class MiniMaxM2MoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -249,7 +249,7 @@ class MiniMaxM2Attention(nn.Module):
 class MiniMaxM2DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         model_config: ModelConfig,
         cache_config: CacheConfig | None = None,

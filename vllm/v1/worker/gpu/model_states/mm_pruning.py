@@ -123,6 +123,15 @@ class MultiModalPruner:
         return count
 
 
+def uses_multimodal_pruning(model_config: ModelConfig, model: nn.Module) -> bool:
+    """Whether the model prunes multimodal embeddings (e.g. EVS)."""
+    return (
+        model_config.multimodal_config is not None
+        and model_config.multimodal_config.is_multimodal_pruning_enabled()
+        and supports_multimodal_pruning(model)
+    )
+
+
 def maybe_create_mm_pruner(
     model_config: ModelConfig,
     model: nn.Module,
@@ -132,11 +141,8 @@ def maybe_create_mm_pruner(
     """Create a MultiModalPruner if the model prunes embeddings and uses M-RoPE."""
     if (
         rope_state is None
-        or not rope_state.has_delta
         or encoder_cache is None
-        or model_config.multimodal_config is None
-        or not model_config.multimodal_config.is_multimodal_pruning_enabled()
-        or not supports_multimodal_pruning(model)
+        or not uses_multimodal_pruning(model_config, model)
     ):
         return None
 

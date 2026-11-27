@@ -1,28 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
+from collections.abc import Generator
+from contextlib import nullcontext
 from functools import partial
 from unittest.mock import patch
 
 import pytest
+import torch
 
-from vllm import LLM
+from vllm import LLM, ModelRegistry
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
+from vllm.v1.core.kv_cache_planning import (
+    get_global_kv_cache_groups,
     get_kv_cache_configs,
 )
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
-from ..utils import create_new_process_for_each_test, requires_spawn_multiprocessing
+from ..utils import (
+    create_new_process_for_each_test,
+    requires_spawn_multiprocessing,
+    wait_for_gpu_memory_to_clear,
+    wait_for_memory_to_settle,
+)
 from .registry import (
     _TRANSFORMERS_BACKEND_MODELS,
     AUTO_EXAMPLE_MODELS,
     HF_EXAMPLE_MODELS,
     HfExampleModels,
 )
-from .utils import dummy_hf_overrides
+from .utils import dummy_hf_overrides, skip_unavailable_models
+
+logger = init_logger(__name__)
 
 # This minimal list of model architectures is smaller than the total list of
 # supported models. The intention is that in the "typical" regression testing
@@ -39,7 +53,7 @@ MINIMAL_MODEL_ARCH_LIST = [
     "InternVLChatModel",
     "InternLM2ForRewardModel",
     "TransformersMultiModalForCausalLM",
-    "PrithviGeoSpatialMAE",
+    "Terratorch",
     "UltravoxModel",
     "DeepSeekMTPModel",
     "XLMRobertaModel",
@@ -53,6 +67,43 @@ OTHER_MODEL_ARCH_LIST = set(HF_EXAMPLE_MODELS.get_supported_archs()) - set(
 )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def fill_model_info_cache() -> None:
+    # Every case builds a different model: inspect them all once, not per case.
+    ModelRegistry.fill_model_info_cache()
+
+
+@pytest.fixture(autouse=True)
+def cleanup_gpu_memory_between_tests() -> Generator[None, None, None]:
+    """Reclaim GPU memory left over by each test's forked subprocess.
+
+    These tests are known to leave behind GPU memory (see the comment at
+    `gpu_memory_utilization=0.80` below). Each parametrized case builds an
+    LLM in a forked subprocess whose VRAM is only reclaimed asynchronously
+    when the subprocess exits, so the leftovers can OOM a later test in this
+    module (observed with the heavier multimodal archs, e.g.
+    InternVLChatModel). Mirrors `clean_gpu_memory_between_tests` in the
+    top-level conftest, but unconditionally for this module.
+    """
+    yield
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    torch.accelerator.empty_cache()
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        wait_for_memory_to_settle()
+        return
+    try:
+        wait_for_gpu_memory_to_clear(
+            devices=list(range(torch.accelerator.device_count())),
+            threshold_ratio=0.1,
+        )
+    except Exception as e:
+        # NVML is not usable on MIG slices (raises NVMLError_NoPermission);
+        # cleanup is best-effort, so never fail a test over it.
+        logger.info("Failed to clean GPU memory: %s", e)
+
+
 @create_new_process_for_each_test()
 def can_initialize(
     model_arch: str, monkeypatch: pytest.MonkeyPatch, EXAMPLE_MODELS: HfExampleModels
@@ -64,14 +115,7 @@ def can_initialize(
     The spawn process causes the _initialize_kv_caches_v1 function below to
     become ineffective.
     """
-
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
-    model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
-    )
 
     hf_overrides_fn = partial(
         dummy_hf_overrides,
@@ -82,24 +126,29 @@ def can_initialize(
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v1(self, vllm_config):
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        layer_configs = self.model_executor.get_kv_cache_layer_configs()
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
-            [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
+            [lc for layers in layer_configs for lc in layers.values()],
         )
-        self.model_executor.set_kv_cache_layout(layout.name)
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, layer_configs)
+        vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
+        self.model_executor.set_kv_cache_layout(
+            layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
-            kv_cache_specs,
+            layer_configs,
             [10 * GiB_bytes],
+            global_kv_cache_groups,
         )
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
             vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
+                g.block_size for g in kv_cache_groups
             )
 
         vllm_config.validate_block_size()
@@ -111,7 +160,7 @@ def can_initialize(
             "which is not configured in test environment"
         )
 
-    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+    if model_arch == "Terratorch":
         import importlib.util
 
         if importlib.util.find_spec("terratorch") is None:
@@ -132,11 +181,74 @@ def can_initialize(
                 f"capability {capability.major}.{capability.minor}"
             )
 
+    if model_arch == "Step5ForConditionalGeneration":
+        from vllm.platforms import current_platform
+        from vllm.platforms.interface import DeviceCapability
+
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_mi3xx
+
+            if not on_mi3xx():
+                pytest.skip("Step5 on ROCm requires MI300 or MI350")
+        elif (
+            not current_platform.is_cuda()
+            or current_platform.get_device_capability()
+            not in (
+                DeviceCapability(9, 0),
+                DeviceCapability(10, 3),
+            )
+        ):
+            pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
+
+    if model_arch in (
+        "Inkling2ForConditionalGeneration",
+        "Inkling2LoopForConditionalGeneration",
+        "Inkling2DSparkModel",
+    ):
+        from vllm.platforms import current_platform
+
+        if not (
+            current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(120)
+            )
+        ):
+            pytest.skip("Inkling2 requires Hopper or Blackwell")
+
+    if model_arch == "DeepseekV4ForConditionalGeneration":
+        from vllm.platforms import current_platform
+
+        if not (current_platform.is_cuda() or current_platform.is_rocm()):
+            pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
+
+    from vllm.platforms import current_platform
+
+    # Flash runs on CUDA and on ROCm gfx950; other platforms must reject it.
+    initialization_result = nullcontext()
+    if model_arch in (
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+        "HYV4DFlyModel",
+    ):
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                initialization_result = pytest.raises(
+                    NotImplementedError, match="gfx950"
+                )
+        elif not current_platform.is_cuda():
+            initialization_result = pytest.raises(
+                NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA"
+            )
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
+        initialization_result,
     ):
-        if requires_spawn_multiprocessing():
+        if requires_spawn_multiprocessing() or model_arch == "Glm5NextForCausalLM":
             # The EngineCore subprocess re-imports the class and does not
             # inherit the KV-cache patch above, so it OOMs. Run in-process
             # so the patch applies.
@@ -157,6 +269,12 @@ def can_initialize(
         kwargs = {}
         if not model_info.enable_prefix_caching:
             kwargs["enable_prefix_caching"] = False
+        if model_arch in (
+            "Glm5NextForCausalLM",
+            "Glm5NextForConditionalGeneration",
+            "Glm5NextMTPModel",
+        ):
+            kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
 
         LLM(
             model_info.default,
@@ -171,7 +289,7 @@ def can_initialize(
             speculative_config={
                 "model": model_info.speculative_model,
                 "method": model_info.speculative_method,
-                "num_speculative_tokens": 1,
+                "num_speculative_tokens": model_info.num_speculative_tokens,
             }
             if model_info.speculative_model
             else None,
@@ -191,15 +309,21 @@ def can_initialize(
         )
 
 
-@pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
+@pytest.mark.parametrize(
+    "model_arch",
+    skip_unavailable_models(MINIMAL_MODEL_ARCH_LIST, HF_EXAMPLE_MODELS.get_hf_info),
+)
 def test_can_initialize_small_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """Test initializing small subset of supported models"""
+    """Test initializing small subset of supported models."""
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
-@pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
+@pytest.mark.parametrize(
+    "model_arch",
+    skip_unavailable_models(OTHER_MODEL_ARCH_LIST, HF_EXAMPLE_MODELS.get_hf_info),
+)
 def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """Test initializing large subset of supported models
+    """Test initializing large subset of supported models.
 
     This test covers the complement of the tests covered in the "small subset"
     test.
@@ -207,6 +331,11 @@ def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.Monkey
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
-@pytest.mark.parametrize("model_arch", AUTO_EXAMPLE_MODELS.get_supported_archs())
+@pytest.mark.parametrize(
+    "model_arch",
+    skip_unavailable_models(
+        AUTO_EXAMPLE_MODELS.get_supported_archs(), AUTO_EXAMPLE_MODELS.get_hf_info
+    ),
+)
 def test_implicit_converted_models(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     can_initialize(model_arch, monkeypatch, AUTO_EXAMPLE_MODELS)

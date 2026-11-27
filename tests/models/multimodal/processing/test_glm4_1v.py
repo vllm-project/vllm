@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import deepcopy
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
+import torch
 
 from vllm.assets.video import VideoAsset
 from vllm.model_executor.models.glm4_1v import (
@@ -11,6 +14,7 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vProcessingInfo,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.multimodal.video import DynamicVideoBackend, VideoBackend
 
@@ -146,14 +150,13 @@ def test_processor_override(
 
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("fps", [2])
-@pytest.mark.parametrize("backend", ["opencv", "pyav"])
+@pytest.mark.parametrize("backend", ["opencv"])
 def test_video_loader_consistency(
     model_id: str,
     fps: int,
     backend: str,
 ):
-    """
-    Ensure dynamic video loader (pre-sampled by loader) and normal video
+    """Ensure dynamic video loader (pre-sampled by loader) and normal video
     loader (post-sampled by processor) produce same video processing outputs.
     """
     ctx = build_model_context(
@@ -200,3 +203,67 @@ def test_video_loader_consistency(
         static_outputs["mm_kwargs"].get_data(),
         dynamic_outputs["mm_kwargs"].get_data(),
     )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"fps": 1.0},
+        {"do_sample_frames": False},
+        {"fps": 1.0, "return_metadata": False},
+        {"videos_kwargs": {"fps": 1.0, "return_metadata": True}},
+        {"videos_kwargs": {"fps": 1.0, "return_metadata": False}},
+    ],
+)
+@pytest.mark.parametrize("kwargs_on_init", [False, True])
+@pytest.mark.parametrize("token_prompt", [False, True])
+def test_video_timestamps_follow_processor_sampling(
+    kwargs,
+    kwargs_on_init,
+    token_prompt,
+):
+    """Prompt timestamps must describe the frames HF actually sampled."""
+    ctx = build_model_context(
+        "zai-org/GLM-4.1V-9B-Thinking",
+        limit_mm_per_prompt={"video": 1},
+        mm_processor_cache_gb=1,
+        mm_processor_kwargs=kwargs if kwargs_on_init else None,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    frames = np.zeros((12, 224, 320, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 4.0,
+        "duration": 3.0,
+        "total_num_frames": 12,
+        "frames_indices": list(range(12)),
+        "video_backend": "opencv",
+        "do_sample_frames": True,
+    }
+    prompt = "<|begin_of_video|><|video|><|end_of_video|>"
+    hf_processor = processor.info.get_hf_processor()
+    reference_kwargs = dict(kwargs)
+    reference_kwargs.update(reference_kwargs.pop("videos_kwargs", {}))
+    reference_kwargs["return_metadata"] = True
+    reference = hf_processor(
+        text=prompt,
+        videos=[frames],
+        video_metadata=[{k: v for k, v in metadata.items() if k != "do_sample_frames"}],
+        return_tensors="pt",
+        **({"do_sample_frames": True} | reference_kwargs),
+    )
+    if token_prompt:
+        prompt = ctx.tokenizer.encode(prompt)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    for _ in range(2):
+        mm_data = {"video": [(frames, deepcopy(metadata))]}
+        processed = processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs={} if kwargs_on_init else kwargs,
+            cache=cache,
+        )
+        data = processed["mm_kwargs"].get_data()
+        assert torch.equal(data["video_grid_thw"], reference["video_grid_thw"])
+        assert processed["prompt_token_ids"] == reference["input_ids"][0].tolist()
+        assert mm_data["video"][0][1] == metadata

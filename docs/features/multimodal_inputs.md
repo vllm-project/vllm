@@ -13,6 +13,23 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+## GLM-5.3-Flash
+
+`zai-org/GLM-5.3-Flash` (`Glm5NextForConditionalGeneration`) requires the
+Rust frontend for image and video inputs. Its Python multimodal preprocessor
+has been removed. Enable the Rust frontend explicitly:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash
+```
+
+You can also use `vllm-rs serve zai-org/GLM-5.3-Flash`. Selecting
+`--tokenizer-mode glm5_next` alone does not enable the Rust frontend.
+Python `LLM` and the Python API server reject multimodal initialization for
+this checkpoint. For Python text-only inference, set
+`limit_mm_per_prompt={"image": 0, "video": 0}` in `LLM`, or pass
+`--limit-mm-per-prompt '{"image": 0, "video": 0}'` to `vllm serve`.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
@@ -187,7 +204,7 @@ Multi-image input can be extended to perform video captioning. We show this with
 
 #### Custom RGBA Background Color
 
-When loading RGBA images (images with transparency), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
+When loading images with transparency (including RGBA images and PNGs with a tRNS chunk), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
 
 ??? code
 
@@ -212,7 +229,7 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
 
 !!! note
     - The `rgba_background_color` accepts RGB values as a list `[R, G, B]` or tuple `(R, G, B)` where each value is 0-255
-    - This setting only affects RGBA images with transparency; RGB images are unchanged
+    - This setting affects images with transparency, including RGB PNGs with a transparent color; opaque RGB images are unchanged
     - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
 
 #### Moondream3 Prompt Recipes { #moondream3-prompt-recipes }
@@ -295,7 +312,6 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
 
     llm = LLM(
         model=model_path,
-        gpu_memory_utilization=0.8,
         enforce_eager=True,
         limit_mm_per_prompt={"video": 1},
     )
@@ -378,6 +394,11 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
+
+You can also pass a one-dimensional `torch.Tensor` directly. vLLM detaches
+the tensor, moves it to CPU, and converts it to a NumPy array before audio
+processing, so tensors on CUDA devices and tensors with `requires_grad=True`
+are supported.
 
 Full example: [examples/generate/multimodal/audio_language_offline.py](../../examples/generate/multimodal/audio_language_offline.py)
 
@@ -601,7 +622,7 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         print(o.outputs[0].text)
     ```
 
-Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache. If several skipped items miss the cache, the error names all of them by modality and index.
 
 ??? code
 
@@ -643,6 +664,13 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
+
+### Media Download Cache
+
+Set `VLLM_MEDIA_CACHE` to a directory to cache media downloaded from URLs on disk.
+This cache is disabled by default. If another request evicts an entry while it
+is being read, vLLM downloads the media again. The source URL must still be
+accessible when this happens.
 
 ### Image Inputs
 
@@ -779,6 +807,14 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
     ```
 
+    For synchronous media fetching, vLLM limits response-body streaming and
+    retries to twice the configured per-read timeout. This prevents a server
+    that continuously sends a few response-body bytes from occupying a
+    renderer worker indefinitely. The same limit applies to audio and video
+    URLs using `VLLM_AUDIO_FETCH_TIMEOUT` and `VLLM_VIDEO_FETCH_TIMEOUT`.
+    When a fetch exceeds this limit, the API returns HTTP 422 with `error.param`
+    set to the request field that supplied the URL.
+
 ### Video Inputs
 
 Instead of `image_url`, you can pass a video file via `video_url`. Here is a simple example using [LLaVA-OneVision](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf).
@@ -844,20 +880,19 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
 
 #### Video Decoding Backend
 
-vLLM decodes video bytes into frames using a selectable decoding backend. Five
+vLLM decodes video bytes into frames using a selectable decoding backend. Four
 backends are supported:
 
 | Backend | Device | Description |
 | --- | --- | --- |
 | `opencv` (default) | CPU | OpenCV-based decoder |
-| `pyav` | CPU | PyAV decoder |
 | `torchcodec` | CPU | TorchCodec (PyTorch-native) decoder |
 | `pynvvideocodec` | GPU | NVIDIA PyNvVideoCodec decoder |
 | `deepstream` | GPU | NVIDIA DeepStream decoder |
 
-The three CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
-choose which FFmpeg version is used while `opencv` and `pyav` rely on whichever
-FFmpeg build they were linked against.
+The two CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
+choose which FFmpeg version is used while `opencv` relies on whichever
+FFmpeg build it was linked against.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 
@@ -892,11 +927,23 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   Because vLLM reserves GPU memory for these slots at startup, this value cannot
   be overridden per request. Benchmark before increasing it because each
   additional slot increases the GPU memory reservation.
+- `keyframe_sampling`: Unset by default, which keeps uniform sampling. Set it
+  to `"nearest"` to replace each uniform frame position with the closest
+  keyframe, keeping distinct frames in chronological order; if a video has too
+  few keyframes, it falls back to uniform positions for that video.
 
 ```bash
 # Example: explicitly use the recommended 2 hardware decoders
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 2}}'
+```
+
+To sample the keyframes nearest to the uniform frame positions:
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "keyframe_sampling": "nearest"}}' \
+  --mm-ipc-gpu-memory-gb 1
 ```
 
 #### Video Frame Recovery
@@ -1021,6 +1068,13 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.
 
+!!! warning
+    Per-request `media_io_kwargs` (and `mm_processor_kwargs`) are rejected by
+    default because they let a client change media loading and preprocessing
+    resource usage. Start the server with `--trust-request-mm-kwargs` only when
+    your API clients are trusted; see
+    [Per-request multimodal arguments](../usage/security.md#per-request-multimodal-arguments).
+
 **Supported Parameters:**
 
 | Parameter | Type | Description |
@@ -1043,7 +1097,7 @@ When you extract video frames on the client side and send them as `video/jpeg` (
     frames_b64 = ",".join([encode_image(f) for f in frames])
     video_url = f"data:video/jpeg;base64,{frames_b64}"
 
-    # Pass video metadata via media_io_kwargs
+    # Pass video metadata via media_io_kwargs (server started with --trust-request-mm-kwargs)
     response = client.chat.completions.create(
         model="your-multimodal-model",
         messages=[{
@@ -1083,7 +1137,7 @@ By passing this metadata, the model can better understand the temporal distribut
 
 #### Custom RGBA Background Color
 
-To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
+To use a custom background color for images with transparency, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
 
 ```bash
 # Example: Black background for dark theme
@@ -1094,6 +1148,32 @@ vllm serve llava-hf/llava-1.5-7b-hf \
 vllm serve llava-hf/llava-1.5-7b-hf \
   --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
 ```
+
+#### Image Decoding Backend
+
+vLLM decodes image bytes with one of these backends:
+
+| Backend | Description |
+| --- | --- |
+| `pil` (default) | Pillow, returns PIL images |
+| `torchcodec` | TorchCodec for JPEG, PNG, WebP and AVIF, returning CHW `uint8` tensors; Pillow for everything else |
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+  --media-io-kwargs '{"image": {"image_backend": "torchcodec"}}'
+```
+
+The `torchcodec` backend decodes faster than Pillow, and the HF image
+processor receives a tensor directly, skipping its PIL-to-tensor conversion.
+The pixel values are identical to the `pil` backend.
+Images with transparency, CMYK or 16-bit images, animated images and
+`image_mode` values other than `RGB` are decoded with Pillow.
+
+!!! note
+    The `torchcodec` backend requires torchcodec >= 0.16 and falls back to
+    Pillow when it is unavailable. Some processors only accept PIL images
+    (e.g. InternVL, DeepSeek-VL2, DeepSeek-OCR, Step3-VL and Kimi-VL) and do
+    not support this backend yet.
 
 ### Audio Inputs
 
@@ -1205,6 +1285,41 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Audio Decoding Backend
+
+vLLM decodes audio bytes into waveforms using a selectable decoding backend:
+
+| Backend | Description |
+| --- | --- |
+| `auto` (default) | torchcodec, falling back to soundfile, then PyAV |
+| `soundfile` | libsndfile only, no fallback |
+| `pyav` | PyAV (FFmpeg) only, no fallback |
+| `torchcodec` | TorchCodec (PyTorch-native) only, no fallback |
+
+Select the backend per server via `--media-io-kwargs`:
+
+```bash
+vllm serve mistralai/Voxtral-Mini-3B-2507 \
+  --media-io-kwargs '{"audio": {"audio_backend": "soundfile"}}'
+```
+
+!!! tip
+    `pyav` drives FFmpeg through a per-frame Python generator, so under
+    concurrency the Python/C crossings contend on the GIL. `torchcodec`
+    decodes each stream in a single call that releases the GIL for its whole
+    duration, which is why `auto` prefers it when many requests decode audio
+    concurrently, such as when audio tracks are extracted from video.
+    vLLM normalizes codec padding on this path (e.g. it trims trailing Vorbis
+    padding that older system FFmpeg versions (< 5.0) fail to trim), so the
+    decoded waveform matches the soundfile reference length.
+
+!!! note
+    `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other
+    platforms (e.g. ROCm, TPU) `auto` falls back to the soundfile → PyAV
+    chain unless you install it manually. torchcodec also links against a
+    system FFmpeg installation; if FFmpeg is missing, `auto` falls back the
+    same way.
+
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
@@ -1215,10 +1330,18 @@ pass a tensor of shape `(..., hidden_size of LM)` for each item to the correspon
     in order for placeholder tokens to be applied correctly by the chat template.
 
 You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+To reject embeddings of a single modality, set `"allow_embeds": false` for it in `--limit-mm-per-prompt`,
+e.g. `--limit-mm-per-prompt '{"video": {"count": 0, "allow_embeds": false}}'`.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
+
+Embedding payloads that cannot be decoded in a supported format are rejected
+as client input errors with HTTP status 400. Memory exhaustion while loading an
+otherwise valid payload remains a server error.
+
+NumPy image and video embeddings serialized as `.npy` data are accepted in either native or non-native byte order. The embedding readers convert non-native arrays to native byte order while preserving their numeric values and element precision. For example, `numpy2base64` from `vllm.utils.serial_utils` can encode a big-endian floating-point NumPy array for the image or video embedding fields. The array must still have the shape required by the model; object arrays are not supported.
 
 #### Image Embedding Inputs
 
@@ -1365,6 +1488,13 @@ Just like with offline inference, you can skip sending media if you expect cache
             "type": "image_pil",
             "image_pil": None,
             "uuid": image_uuid,
+        },
+
+        # video_url:
+        {
+            "type": "video_url",
+            "video_url": {},
+            "uuid": video_uuid,
         },
 
     ```

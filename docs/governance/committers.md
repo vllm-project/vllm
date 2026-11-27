@@ -2,7 +2,7 @@
 
 This document lists the current committers of the vLLM project and the core areas they maintain.
 Committers have write access to the vLLM repository and are responsible for reviewing and merging PRs.
-You can also refer to the [CODEOWNERS](https://github.com/vllm-project/vllm/blob/main/.github/CODEOWNERS) file for concrete file-level ownership and reviewers. Both this documents and the CODEOWNERS file are living documents and they complement each other.
+You can also refer to the [CODEOWNERS](https://github.com/vllm-project/vllm/blob/main/.github/CODEOWNERS) file for concrete file-level ownership and reviewers. Both these documents and the CODEOWNERS file are living documents and they complement each other.
 
 ## Active Committers
 
@@ -22,9 +22,12 @@ Sorted alphabetically by GitHub handle:
 - [@DarkLight1337](https://github.com/DarkLight1337): Multimodality, API server
 - [@dllehr-amd](https://github.com/dllehr-amd): AMD integration
 - [@esmeetu](https://github.com/esmeetu): developer marketing, community
+- [@gau-nernst](https://github.com/gau-nernst): Kernels and performance
 - [@gshtras](https://github.com/gshtras): ROCm / AMD GPU integration
+- [@gty111](https://github.com/gty111): Multimodal EPD, encoder cache transfer
 - [@Harry-Chen](https://github.com/Harry-Chen): Build, CI, CUDA architecture
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
+- [@hickeyma](https://github.com/hickeyma): API server
 - [@hmellor](https://github.com/hmellor): Hugging Face integration, documentation
 - [@hongxiayang](https://github.com/hongxiayang): AMD GPU / ROCm integration
 - [@houseroad](https://github.com/houseroad): Engine core and Llama models
@@ -32,6 +35,7 @@ Sorted alphabetically by GitHub handle:
 - [@ivanium](https://github.com/ivanium): KV Connector and offload
 - [@jeejeelee](https://github.com/jeejeelee): LoRA, new model support
 - [@jikunshang](https://github.com/jikunshang): Intel CPU/XPU integration
+- [@jperezdealgaba](https://github.com/jperezdealgaba): Security
 - [@khluu](https://github.com/khluu): CI infrastructure
 - [@LucasWilkinson](https://github.com/LucasWilkinson): Kernels and performance
 - [@markmc](https://github.com/markmc): Observability
@@ -44,16 +48,18 @@ Sorted alphabetically by GitHub handle:
 - [@pavanimajety](https://github.com/pavanimajety): NVIDIA GPU integration
 - [@ProExpertProg](https://github.com/ProExpertProg): Compilation, startup UX
 - [@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat): Core, distributed, disagg
-- [@russellb](https://github.com/russellb): Structured output, engine core, security
 - [@sfeng33](https://github.com/sfeng33): Tool use and reasoning parser
 - [@shen-shanshan](https://github.com/shen-shanshan): AMD GPU / ROCm integration, multimodality, ViT CUDA graph
 - [@simon-mo](https://github.com/simon-mo): Project lead, API entrypoints, community
+- [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
 - [@tdoublep](https://github.com/tdoublep): State space models
 - [@tjtanaa](https://github.com/tjtanaa): AMD GPU integration
 - [@tlrmchlsmth](https://github.com/tlrmchlsmth): Kernels and performance, distributed, disagg
 - [@tomeras91](https://github.com/tomeras91): MoE, Mamba, Ray
 - [@vadiklyutiy](https://github.com/vadiklyutiy): CI, performance, kernels
 - [@WoosukKwon](https://github.com/WoosukKwon): Project lead, engine core
+- [@wangxiyuan](https://github.com/wangxiyuan): Platform, KV cache, Mooncake
+- [@wzhao18](https://github.com/wzhao18): Kernels and performance, KV offloading
 - [@xinli-sw](https://github.com/xinli-sw): Quantization and model support
 - [@xuechendi](https://github.com/xuechendi): Intel CPU/XPU integration, KV connector
 - [@yaochengji](https://github.com/yaochengji): TPU integration
@@ -82,6 +88,7 @@ Committers who have contributed to vLLM significantly in the past (thank you!) b
 - [@pcmoritz](https://github.com/pcmoritz): MoE
 - [@rkooo567](https://github.com/rkooo567): Chunked prefill
 - [@ruisearch42](https://github.com/ruisearch42): Pipeline parallelism, Ray Support
+- [@russellb](https://github.com/russellb): Structured output, engine core, security
 - [@sighingnow](https://github.com/sighingnow): Qwen models, new model support
 - [@sroy745](https://github.com/sroy745): Speculative decoding
 - [@Yard1](https://github.com/Yard1): kernels and performance
@@ -100,7 +107,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - KV Cache Manager: memory management layer within scheduler maintaining KV cache logical block data
     - @heheda12345, @WoosukKwon
 - AsyncLLM: the zmq based protocol hosting engine core and making it accessible for entrypoints
-    - @robertgshaw2-redhat, @njhill, @russellb
+    - @robertgshaw2-redhat, @njhill
 - ModelRunner, Executor, Worker: the abstractions for engine wrapping model implementation
     - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson, @ProExpertProg, @MatthewBonanni
 - KV Connector: Connector interface and implementation for KV cache offload and transfer
@@ -111,11 +118,15 @@ If you have PRs touching the area, please feel free to ping the area owner for r
     - @tlrmchlsmth, @youkaichao
 - Multimodality engine and memory management: core scheduling and memory management concerning vision, audio, and video inputs.
     - @ywang96, @DarkLight1337
+- EC Connector: Transfers multimodal encoder outputs between encoder and prefill workers.
+    - @gty111
 
 ### Model Implementations
 
 - Model Interface: The `nn.Module` interface and implementation for various models
     - @zhuohan123, @mgoin, @simon-mo, @houseroad, @ywang96 (multimodality), @jeejeelee (lora)
+- Pooling models: Embeddings, classification, reward modeling, and scoring
+    - @noooop, @taneem-ibrahim
 - Logits Processors / Sampler: The provided sampler class and pluggable logits processors
     - @njhill, @houseroad
 - Custom Layers: Utility layers in vLLM such as rotary embedding and rms norms
@@ -153,7 +164,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - Spec Decode: Covers model definition, attention, sampler, and scheduler related to n-grams, EAGLE, and MTP.
     - @WoosukKwon, @benchislett, @MatthewBonanni
 - Structured Output: The structured output implementation
-    - @russellb, @aarnphm
+    - @aarnphm
 - RL: The RL related features such as collective rpc, sleep mode, etc.
     - @youkaichao, @zhuohan123
 - LoRA: @jeejeelee
@@ -167,14 +178,15 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - Documentation: @hmellor, @DarkLight1337, @simon-mo
 - Benchmarks: @ywang96, @simon-mo
 - CI, Build, Release Process: @khluu, @njhill, @simon-mo, @Harry-Chen, @vadiklyutiy
-- Security: @russellb
+- Security: @jperezdealgaba
 
 ### External Kernels Integration
 
 - FlashAttention: @LucasWilkinson, @MatthewBonanni
-- FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon, @MatthewBonanni
+- FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon, @MatthewBonanni, @wzhao18
 - Blackwell Kernels: @mgoin, @yewentao256
 - DeepEP/DeepGEMM: @mgoin, @yewentao256
+- FlashKDA: @gau-nernst
 
 ### Integrations
 
@@ -184,8 +196,8 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 
 ### Hardware
 
-- Plugin Interface: @youkaichao, @Yikun
-- NVIDIA GPU: @pavanimajety
+- Plugin Interface: @youkaichao, @Yikun, @wangxiyuan
+- NVIDIA GPU: @pavanimajety, @wzhao18
 - AMD GPU: @gshtras, @tjtanaa, @hongxiayang, @shen-shanshan, @AndreasKaratzas
 - Intel CPU/GPU: @jikunshang, @bigPYJ1151, @xuechendi
 - Google TPU: @yaochengji

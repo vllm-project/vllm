@@ -18,7 +18,6 @@ import json
 import math
 import mimetypes
 import os
-import shutil
 import socket
 import tempfile
 import threading
@@ -32,6 +31,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from vllm.transformers_utils.repo_utils import hf_api
 from PIL import Image
 from transformers import (
     AutoConfig,
@@ -66,7 +66,7 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
-from vllm.transformers_utils.repo_utils import hf_api, with_retry
+from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -133,7 +133,6 @@ def sample_json_schema():
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
-_SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
 
@@ -241,7 +240,7 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="nccl",
+                backend=current_platform.dist_backend,
             )
             initialize_model_parallel(1, 1)
             yield
@@ -300,34 +299,76 @@ def workspace_init():
     reset_workspace_manager()
 
 
+@pytest.fixture
+def narrow_dummy_fp8_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep dummy FP8 weights within +-1, as before full-range dummy FP8 codes.
+
+    For tests that compare dummy-weight outputs of paths that are not bitwise
+    equivalent (greedy tokens across engines, fused vs. unfused kernels).
+    Full-range FP8 codes, NVFP4 block scales included, scale up activations,
+    so rounding noise flips near-tied greedy tokens or exceeds absolute
+    tolerances. The patch applies to this process only, so the engine core
+    runs in process; the model must also run in it (one worker, no
+    multiprocessing executor).
+    """
+    from vllm.model_executor.model_loader import dummy_loader
+
+    original = dummy_loader.initialize_single_dummy_weight
+
+    def initialize(param: torch.Tensor, *args, **kwargs) -> None:
+        if param.is_floating_point() and torch.finfo(param.dtype).bits == 8:
+            kwargs.setdefault("low", -1.0)
+            kwargs.setdefault("high", 1.0)
+        original(param, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_loader, "initialize_single_dummy_weight", initialize)
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def release_dynamo_tracked_fakes():
+    """Clear ShapeEnv.tracked_fakes once Dynamo has built a frame's guards.
+
+    The tracked FakeTensors and their ShapeEnv form a cycle through C++ SymInts
+    that gc cannot collect. torch only clears the list for registered backends
+    (https://github.com/pytorch/pytorch/pull/193015, torch >= 2.15), not for
+    the callable backends the tests compile with.
+    """
+    from torch._dynamo import convert_frame
+
+    original = convert_frame.clear_compile_context_weakrefs
+
+    def clear_compile_context_weakrefs(tracer_output, compiler_fn):
+        original(tracer_output, compiler_fn)
+        output_graph = tracer_output and tracer_output.output_graph_for_cleanup
+        if output_graph is not None and not output_graph.export:
+            output_graph.tracked_fakes.clear()
+
+    convert_frame.clear_compile_context_weakrefs = clear_compile_context_weakrefs
+    yield
+    convert_frame.clear_compile_context_weakrefs = original
+
+
 @pytest.fixture(autouse=True)
 def dynamo_reset():
     yield
     torch._dynamo.reset()
 
+    # These caches are unbounded or keyed by pattern and ShapeEnv objects, so in
+    # a process that compiles once per test they grow until every full
+    # gc.collect() takes seconds.
+    from torch._inductor.pattern_matcher import PatternPrettyPrinter
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    PatternPrettyPrinter.run.cache_clear()
+    for attr in vars(ShapeEnv).values():
+        if hasattr(attr, "cache_clear"):
+            attr.cache_clear()
+
 
 @pytest.fixture
 def example_prompts() -> list[str]:
     return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
-
-
-@pytest.fixture
-def example_system_message() -> str:
-    with open(_SYS_MSG) as f:
-        return f.read()
-
-
-class DecoderPromptType(Enum):
-    """For encoder/decoder models only."""
-
-    CUSTOM = 1
-    NONE = 2
-    EMPTY_STR = 3
-
-
-@pytest.fixture
-def example_long_prompts() -> list[str]:
-    return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture(scope="session")
@@ -391,7 +432,7 @@ class HfRunner:
         *,
         revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -429,7 +470,7 @@ class HfRunner:
         *,
         revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -504,6 +545,36 @@ class HfRunner:
                     if model_cls is not None:
                         _fix_v4_tied_weights_keys(model_cls)
 
+            from transformers.integrations import is_deepspeed_zero3_enabled
+
+            # On ROCm, avoid a converted CPU copy when downcasting FP32 references.
+            # Same-dtype CPU loads can stay lazily mapped and use less host RAM.
+            # Leave customized, remote, and quantized loading unchanged.
+            if (
+                current_platform.is_rocm()
+                and self.device == "cuda"
+                and auto_cls is AutoModelForCausalLM
+                and revision is None
+                and model_kwargs.keys() == {"dtype"}
+                and self.config.dtype == torch.float32
+                and model_kwargs["dtype"] in (torch.float16, torch.bfloat16)
+                and not (trust_remote_code and hasattr(self.config, "auto_map"))
+                and getattr(self.config, "quantization_config", None) is None
+                and getattr(
+                    self.config.get_text_config(decoder=True),
+                    "quantization_config",
+                    None,
+                )
+                is None
+                and not is_deepspeed_zero3_enabled()
+            ):
+                model_kwargs = {
+                    **model_kwargs,
+                    "device_map": torch.device(
+                        "cuda", torch.accelerator.current_device_index()
+                    ),
+                }
+
             model = cast(
                 nn.Module,
                 auto_cls.from_pretrained(
@@ -514,11 +585,13 @@ class HfRunner:
                 ),
             )
 
-            # in case some unquantized custom models are not in same dtype
+            # In case some unquantized custom models are not in the same dtype.
             if getattr(model, "quantization_method", None) is None and any(
                 p.dtype != self.dtype for p in model.parameters()
             ):
-                model = model.to(dtype=self.dtype)
+                for parameter in model.parameters():
+                    if parameter.is_floating_point() or parameter.is_complex():
+                        parameter.data = parameter.data.to(dtype=self.dtype)
 
             if len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)
@@ -807,10 +880,10 @@ class HfRunner:
 
         # convert to dict
         seq_logprobs_lst: list[dict[int, float]] = []
-        for tok_idx, tok_logprobs in enumerate(seq_logprobs):
-            # drop prompt logprobs
-            if tok_idx == 0:
-                tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+        for tok_logprobs in seq_logprobs:
+            # Keep only the last position: the first step (and every step when
+            # use_cache=False) also returns logprobs for the preceding tokens.
+            tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
             topk = tok_logprobs.topk(num_logprobs)
 
             tok_logprobs_dct = {}
@@ -898,16 +971,13 @@ class HfRunner:
             # shutdown. This is helpful in cases where the HfRunner is
             # initialized after significant GPU memory is already occupied,
             # e.g. in
-            # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            # tests/basic_correctness/models/test_basic_correctness.py::test_models_distributed
             # where vllm worker processes are still alive and holding GPU
             # memory when hf_runner.__exit__ is called.
-            from tests.utils import (
-                get_physical_device_indices,
-                record_gpu_memory_usage_stats,
-            )
+            from tests.utils import record_gpu_memory_usage_stats
 
             if (device_count := current_platform.device_count()) > 0:
-                devices = get_physical_device_indices(devices=list(range(device_count)))
+                devices = list(range(device_count))
                 mem_usage_stats = record_gpu_memory_usage_stats(devices=devices)
                 self.threshold_ratios = {
                     device: 0.05 + mem_used / mem_tot
@@ -934,12 +1004,19 @@ def hf_runner():
     return HfRunner
 
 
+def _default_block_size() -> int:
+    if current_platform.is_xpu():
+        return 64
+    if current_platform.is_cpu():
+        return 128
+    return 16
+
+
 class VllmRunner:
     """
     The default value of some arguments have been modified from
     {class}`~vllm.LLM` as follows:
 
-    - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
     - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
     - `block_size`: To reduce memory usage, set default to `64` if on XPU
@@ -947,6 +1024,8 @@ class VllmRunner:
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
     - `enforce_eager`: Set to `False` to test CUDA graph.
+    - `kernel_config.enable_jit_warmup`: Set to `False` to reduce test startup
+      time.
     """
 
     def __init__(
@@ -956,13 +1035,13 @@ class VllmRunner:
         convert: ConvertOption = "auto",
         tokenizer_name: str | None = None,
         tokenizer_mode: str = "auto",
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         seed: int = 0,
         max_model_len: int | None = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
-        block_size: int = 16 if not torch.xpu.is_available() else 64,
+        block_size: int = _default_block_size(),
         enable_chunked_prefill: bool | None = False,
         enforce_eager: bool | None = False,
         # Set this to avoid hanging issue
@@ -974,6 +1053,8 @@ class VllmRunner:
             if default_torch_num_threads is None
             else set_default_torch_num_threads(default_torch_num_threads)
         )
+
+        kwargs.setdefault("kernel_config", {"enable_jit_warmup": False})
 
         if not kwargs.get("compilation_config", None):
             # Note(@tdoublep): This is set to 4 because some tests (e.g., hybrid
@@ -993,9 +1074,12 @@ class VllmRunner:
         from vllm.platforms import current_platform
 
         if current_platform.is_rocm():
-            gpu_memory_utilization = kwargs.get(
-                "gpu_memory_utilization",
-                CacheConfig.gpu_memory_utilization,
+            # An unset utilization resolves to 1.0 with the extensible KV cache,
+            # which no longer needs the memory free up front; wait for the
+            # standard fraction in that case.
+            gpu_memory_utilization = (
+                kwargs.get("gpu_memory_utilization")
+                or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
             )
             # V1 startup requires free_memory >= total * gpu_memory_utilization.
             # ROCm CI can hand a test a device that is still lazily releasing
@@ -1010,7 +1094,7 @@ class VllmRunner:
             # CCL context in the engine subprocess. The default utilization of
             # 0.92 leaves too little headroom for both, so lower it on XPU when
             # the caller did not request an explicit value.
-            if "gpu_memory_utilization" not in kwargs:
+            if kwargs.get("gpu_memory_utilization") is None:
                 kwargs["gpu_memory_utilization"] = 0.9
             gpu_memory_utilization = kwargs["gpu_memory_utilization"]
             # XPU (Level Zero) can also release device memory lazily after a
@@ -1137,7 +1221,7 @@ class VllmRunner:
                 output_logprobs = sample.logprobs
             if include_prompt_token_ids:
                 outputs.append(
-                    (  # type: ignore[arg-type]
+                    (
                         output_ids,
                         output_str,
                         output_logprobs,
@@ -1359,6 +1443,7 @@ class VllmRunner:
         # because when the next test starts some GPU memory is still in use.
         gpu_memory_utilization = (
             self.llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
         )
         from vllm.platforms import current_platform
 
@@ -1371,8 +1456,10 @@ class VllmRunner:
             shutdown_timeout = 60.0 if current_platform.is_rocm() else None
             self.llm.llm_engine.engine_core.shutdown(timeout=shutdown_timeout)
         except Exception:
-            # Ignore shutdown errors as cleanup will still proceed
-            pass
+            # Don't fail the test on shutdown errors since cleanup will still
+            # proceed, but don't hide them either: a failure here usually
+            # means the engine's GPU memory was never released.
+            logger.exception("Engine core shutdown raised; GPU memory may leak")
         del self.llm
         torch._dynamo.reset()
         cleanup_dist_env_and_memory()
@@ -1385,20 +1472,25 @@ def vllm_runner():
 
 
 @pytest.fixture()
-def temporary_enable_log_propagate():
+def temporary_enable_log_propagate(monkeypatch):
     import logging
 
-    logger = logging.getLogger("vllm")
-    logger.propagate = True
-    yield
-    logger.propagate = False
+    from vllm.logger import DEFAULT_LOGGING_CONFIG
+
+    # The first LLM init in a process reapplies DEFAULT_LOGGING_CONFIG, which
+    # would otherwise turn propagation back off mid-test.
+    monkeypatch.setitem(DEFAULT_LOGGING_CONFIG["loggers"]["vllm"], "propagate", True)
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
 
 
 @pytest.fixture()
 def caplog_vllm(temporary_enable_log_propagate, caplog):
-    # To capture vllm log, we should enable propagate=True temporarily
-    # because caplog depends on logs propagated to the root logger.
-    yield caplog
+    # caplog depends on logs propagated to the root logger. The vLLM logger
+    # inherits this INFO level until runtime initialization configures it.
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        yield caplog
 
 
 @pytest.fixture()
@@ -1507,114 +1599,78 @@ def num_gpus_available():
     return current_platform.device_count()
 
 
-PHI4_MULTIMODAL_MODEL_ID = "microsoft/Phi-4-multimodal-instruct"
+temp_dir = tempfile.gettempdir()
+_dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
+_dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
 
 
-@pytest.fixture(scope="session")
-def phi4_multimodal_model_path():
-    return hf_api().snapshot_download(PHI4_MULTIMODAL_MODEL_ID)
+@pytest.fixture
+def dummy_opt_path():
+    json_path = os.path.join(_dummy_opt_path, "config.json")
+    if not os.path.exists(_dummy_opt_path):
+        hf_api().snapshot_download(
+            repo_id="facebook/opt-125m",
+            local_dir=_dummy_opt_path,
+            ignore_patterns=["*.bin", "*.bin.index.json", "*.pt", "*.h5", "*.msgpack"],
+        )
+        assert os.path.exists(json_path)
+        with open(json_path) as f:
+            config = json.load(f)
+        config["architectures"] = ["MyOPTForCausalLM"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_opt_path
 
 
-@pytest.fixture(scope="session")
-def phi4_multimodal_audio_lora_path(phi4_multimodal_model_path):
-    return os.path.join(phi4_multimodal_model_path, "speech-lora")
+@pytest.fixture
+def dummy_llava_path():
+    json_path = os.path.join(_dummy_llava_path, "config.json")
+    if not os.path.exists(_dummy_llava_path):
+        hf_api().snapshot_download(
+            repo_id="llava-hf/llava-1.5-7b-hf",
+            local_dir=_dummy_llava_path,
+            ignore_patterns=[
+                "*.bin",
+                "*.bin.index.json",
+                "*.pt",
+                "*.h5",
+                "*.msgpack",
+                "*.safetensors",
+            ],
+        )
+        assert os.path.exists(json_path)
+        with open(json_path) as f:
+            config = json.load(f)
+        config["architectures"] = ["MyLlava"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_llava_path
 
 
-@pytest.fixture(scope="session")
-def phi4_multimodal_vision_lora_path(phi4_multimodal_model_path):
-    return os.path.join(phi4_multimodal_model_path, "vision-lora")
-
-
-@pytest.fixture(scope="session")
-def phi4_multimodal_speech_question_path(phi4_multimodal_model_path):
-    return os.path.join(
-        phi4_multimodal_model_path,
-        "examples",
-        "what_is_shown_in_this_image.wav",
-    )
-
-
-@pytest.fixture(scope="session")
-def dummy_model_cache_dir(tmp_path_factory):
-    return tmp_path_factory.mktemp("dummy-models")
-
-
-def _create_dummy_model_path(
-    cache_dir: pathlib.Path,
-    model_name: str,
-    repo_id: str,
-    architecture: str,
-    ignore_patterns: list[str],
-) -> str:
-    model_path = cache_dir / model_name
-    json_path = model_path / "config.json"
-
-    snapshot_path = hf_api().snapshot_download(
-        repo_id=repo_id,
-        ignore_patterns=ignore_patterns,
-    )
-    # A shared snapshot may already contain weights downloaded by another test,
-    # so apply the filter again while creating the mutable session-local copy.
-    shutil.copytree(
-        snapshot_path,
-        model_path,
-        ignore=shutil.ignore_patterns(*ignore_patterns),
-    )
-    assert json_path.exists()
-    with open(json_path) as f:
-        config = json.load(f)
-    config["architectures"] = [architecture]
-    with open(json_path, "w") as f:
-        json.dump(config, f)
-
-    return str(model_path)
-
-
-@pytest.fixture(scope="session")
-def dummy_opt_path(dummy_model_cache_dir):
-    return _create_dummy_model_path(
-        dummy_model_cache_dir,
-        "dummy_opt",
-        "facebook/opt-125m",
-        "MyOPTForCausalLM",
-        ["*.bin", "*.bin.index.json", "*.pt", "*.h5", "*.msgpack"],
-    )
-
-
-@pytest.fixture(scope="session")
-def dummy_llava_path(dummy_model_cache_dir):
-    return _create_dummy_model_path(
-        dummy_model_cache_dir,
-        "dummy_llava",
-        "llava-hf/llava-1.5-7b-hf",
-        "MyLlava",
-        [
-            "*.bin",
-            "*.bin.index.json",
-            "*.pt",
-            "*.h5",
-            "*.msgpack",
-            "*.safetensors",
-        ],
-    )
-
-
-@pytest.fixture(scope="session")
-def dummy_gemma2_embedding_path(dummy_model_cache_dir):
-    return _create_dummy_model_path(
-        dummy_model_cache_dir,
-        "dummy_gemma2_embedding",
-        "BAAI/bge-multilingual-gemma2",
-        "MyGemma2Embedding",
-        [
-            "*.bin",
-            "*.bin.index.json",
-            "*.pt",
-            "*.h5",
-            "*.msgpack",
-            "*.safetensors",
-        ],
-    )
+@pytest.fixture
+def dummy_gemma2_embedding_path():
+    json_path = os.path.join(_dummy_gemma2_embedding_path, "config.json")
+    if not os.path.exists(_dummy_gemma2_embedding_path):
+        hf_api().snapshot_download(
+            repo_id="BAAI/bge-multilingual-gemma2",
+            local_dir=_dummy_gemma2_embedding_path,
+            ignore_patterns=[
+                "*.bin",
+                "*.bin.index.json",
+                "*.pt",
+                "*.h5",
+                "*.msgpack",
+                "*.safetensors",
+            ],
+        )
+        assert os.path.exists(json_path)
+        with open(json_path) as f:
+            config = json.load(f)
+        config["architectures"] = ["MyGemma2Embedding"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_gemma2_embedding_path
 
 
 # Add the flag `--optional` to allow run tests
@@ -1785,6 +1841,24 @@ def disable_deepgemm_ue8m0(monkeypatch):
         is_deep_gemm_e8m0_used.cache_clear()
 
 
+@pytest.fixture
+def gpu_memory_cleared():
+    """Wait for prior tests to release GPU memory on gfx950."""
+    if not current_platform.is_rocm():
+        return
+
+    from tests.utils import wait_for_gpu_memory_to_clear
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        wait_for_gpu_memory_to_clear(
+            devices=[0],
+            threshold_ratio=0.08,
+            timeout_s=30,
+            stable_duration_s=1,
+        )
+
+
 def _should_clean_gpu_memory_between_tests() -> bool:
     # This must stay opt-in: a function-scoped fixture cannot distinguish
     # stale VRAM from allocations owned by longer-lived module/session fixtures.
@@ -1846,8 +1920,8 @@ def disable_vllm_compile_cache(monkeypatch, use_fresh_inductor_cache):
     This forces compilation (and any custom compile passes) to actually run
     instead of being served from a warm cache left behind by previous runs
     (e.g. on persistent CI agents). Use this for tests that inspect what
-    happens during compilation; use ``use_fresh_inductor_cache`` (or
-    ``fresh_vllm_cache``) instead when the vLLM compile cache must stay
+    happens during compilation; use `use_fresh_inductor_cache` (or
+    `fresh_vllm_cache`) instead when the vLLM compile cache must stay
     enabled (e.g. cache save/load tests).
     """
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
@@ -1896,11 +1970,11 @@ def fake_vllm_ir(monkeypatch):
     """
     Pytest fixture to allow isolated IR op registration in tests.
 
-    Replaces IrOp.registry with an empty dict and swaps ``vllm_ir_torch_lib`` for a
-    fresh ``Library`` with a unique namespace per test (see ``Library.ns``).
+    Replaces IrOp.registry with an empty dict and swaps `vllm_ir_torch_lib` for a
+    fresh `Library` with a unique namespace per test (see `Library.ns`).
 
     Torch keeps registrations for the process lifetime; reusing the fragment
-    name ``vllm_ir`` and defining the same op string again can segfault. A
+    name `vllm_ir` and defining the same op string again can segfault. A
     random library name keeps each fixture run on a disjoint namespace.
 
     The test Library is kept alive until after monkeypatch teardown so PyTorch's
@@ -1930,3 +2004,43 @@ def fake_vllm_ir(monkeypatch):
     yield
 
     del test_lib
+
+
+@pytest.fixture
+def gpu_model_runner_for_requests(dist_init, tmp_path):
+    """A real MRv2 runner with small request buffers, without loading weights."""
+    from transformers import OPTConfig
+
+    from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+    from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+    OPTConfig(
+        architectures=["OPTForCausalLM"],
+        hidden_size=32,
+        ffn_dim=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        vocab_size=32000,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), max_model_len=1024),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_num_seqs=10,
+            max_num_batched_tokens=64,
+            max_model_len=1024,
+        ),
+    )
+    device = torch.device(current_platform.device_type)
+    runner = GPUModelRunner(config, device)
+    runner.model_state = DefaultModelState(config, nn.Module(), None, device)
+    runner.block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=10,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[64],
+        device=device,
+    )
+    return runner

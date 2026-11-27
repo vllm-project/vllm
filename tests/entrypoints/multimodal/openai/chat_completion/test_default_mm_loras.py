@@ -1,25 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 
 from tests.conftest import AudioTestAssets
 from tests.utils import RemoteOpenAIServer
+from vllm.transformers_utils.repo_utils import hf_api
 
 # NOTE - the tests in this module are currently analogous to test_chat, but are
 # separated to avoid OOM killing due to module-scoped servers, since we
 # need a multimodal model for these tests.
 
+# Contains a modality specific lora alongside the base model
+MULTIMODAL_MODEL_NAME = hf_api().snapshot_download(
+    "microsoft/Phi-4-multimodal-instruct"
+)
+AUDIO_LORA_PATH = os.path.join(MULTIMODAL_MODEL_NAME, "speech-lora")
+
 ACTIVE_MM_LORA_RESPONSE = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
 
 
 @pytest.fixture(scope="module")
-def multimodal_server(
-    phi4_multimodal_model_path: str,
-    phi4_multimodal_audio_lora_path: str,
-):
+def multimodal_server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -30,7 +36,7 @@ def multimodal_server(
         # lora config below
         "--enable-lora",
         "--lora-modules",
-        f"speech={phi4_multimodal_audio_lora_path}",
+        f"speech={AUDIO_LORA_PATH}",
         "--max-lora-rank",
         "320",
         "--max-num-seqs",
@@ -39,11 +45,11 @@ def multimodal_server(
         "--gpu-memory-utilization",
         "0.8",
         "--default-mm-loras",
-        f'{{"audio": "{phi4_multimodal_audio_lora_path}"}}',
+        f'{{"audio": "{AUDIO_LORA_PATH}"}}',
     ]
 
     with RemoteOpenAIServer(
-        phi4_multimodal_model_path, args, max_wait_seconds=480
+        MULTIMODAL_MODEL_NAME, args, max_wait_seconds=480
     ) as remote_server:
         yield remote_server
 
@@ -55,20 +61,18 @@ async def multi_modal_client(multimodal_server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [False, True])
 @pytest.mark.parametrize(
     # base model with default lora should give the same response as lora model
     "model_name",
-    ["base", "speech"],
+    [MULTIMODAL_MODEL_NAME, "speech"],
 )
 async def test_default_mm_lora_chat_completions(
     model_name: str,
+    batched: bool,
     multi_modal_client: openai.AsyncOpenAI,
     audio_assets: AudioTestAssets,
-    phi4_multimodal_model_path: str,
 ):
-    served_model_name = (
-        phi4_multimodal_model_path if model_name == "base" else model_name
-    )
     messages = [
         {
             "role": "user",
@@ -85,15 +89,16 @@ async def test_default_mm_lora_chat_completions(
         }
     ]
 
-    chat_completion = await multi_modal_client.chat.completions.create(
-        model=served_model_name,
-        messages=messages,
-        max_completion_tokens=128,
-        temperature=0.0,
+    chat_completion = await multi_modal_client.post(
+        "chat/completions/batch" if batched else "chat/completions",
+        cast_to=openai.types.chat.ChatCompletion,
+        body={
+            "model": model_name,
+            "messages": [messages] if batched else messages,
+            "max_completion_tokens": 128,
+            "temperature": 0.0,
+        },
     )
 
-    assert len(chat_completion.choices) > 0
-
-    message = chat_completion.choices[0].message
-    assert message.content is not None and len(message.content) >= 0
-    assert message.content == ACTIVE_MM_LORA_RESPONSE
+    assert len(chat_completion.choices) == 1
+    assert chat_completion.choices[0].message.content == ACTIVE_MM_LORA_RESPONSE

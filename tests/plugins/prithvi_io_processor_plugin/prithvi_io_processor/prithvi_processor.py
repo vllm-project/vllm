@@ -3,7 +3,6 @@
 
 import datetime
 import os
-import shutil
 import tempfile
 import urllib.request
 from collections.abc import Sequence
@@ -24,16 +23,10 @@ from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.renderers import BaseRenderer
-from vllm.transformers_utils.repo_utils import hf_api
 
 from .types import DataModuleConfig, ImagePrompt, ImageRequestOutput
 
 logger = init_logger(__name__)
-
-_PINNED_HF_ASSET_URL = re.compile(
-    r"^https://huggingface\.co/([^/?]+/[^/?]+)/resolve/"
-    r"([0-9a-f]{40})/([^?%]+)$"
-)
 
 NO_DATA = -9999
 NO_DATA_FLOAT = 0.0001
@@ -65,6 +58,7 @@ def save_geotiff(image: torch.Tensor, meta: dict, out_format: str) -> str | byte
         image: np.ndarray with shape (bands, height, width)
         output_path: path where to save the image
         meta: dict with meta info.
+
     """
     if out_format == "path":
         # create temp file
@@ -107,13 +101,12 @@ def read_geotiff(
     Returns:
         np.ndarray with shape (bands, height, width)
         meta info dict
-    """
 
+    """
     if all([x is None for x in [file_path, path_type, file_data]]):
         raise Exception("All input fields to read_geotiff are None")
     write_to_file: bytes | None = None
     path: str | None = None
-    download_url: str | None = None
     if file_data is not None:
         # with tempfile.NamedTemporaryFile() as tmpfile:
         #     tmpfile.write(file_data)
@@ -121,14 +114,11 @@ def read_geotiff(
 
         write_to_file = file_data
     elif file_path is not None and path_type == "url":
-        if match := _PINNED_HF_ASSET_URL.fullmatch(file_path):
-            path = hf_api().hf_hub_download(
-                repo_id=match.group(1),
-                revision=match.group(2),
-                filename=match.group(3),
-            )
-        else:
-            download_url = file_path
+        resp = urllib.request.urlopen(file_path)
+        # with tempfile.NamedTemporaryFile() as tmpfile:
+        #     tmpfile.write(resp.read())
+        #     path = tmpfile.name
+        write_to_file = resp.read()
     elif file_path is not None and path_type == "path":
         path = file_path
     elif file_path is not None and path_type == "b64_json":
@@ -144,11 +134,6 @@ def read_geotiff(
         path_to_use = None
         if write_to_file:
             tmpfile.write(write_to_file)
-            path_to_use = tmpfile.name
-        elif download_url:
-            with urllib.request.urlopen(download_url, timeout=300) as response:
-                shutil.copyfileobj(response, tmpfile)
-            tmpfile.flush()
             path_to_use = tmpfile.name
         elif path:
             path_to_use = path
@@ -184,8 +169,8 @@ def load_image(
     Returns:
         np.array containing created example
         list of meta info for each image in *file_paths*
-    """
 
+    """
     imgs: list[np.ndarray] = []
     metas = []
     temporal_coords = []

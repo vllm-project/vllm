@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use thiserror_ext::AsReport;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tracing::{debug, warn};
-use zeromq::prelude::SocketSend;
-use zeromq::{XPubSocket, ZmqMessage};
+use zeromq::prelude::{SocketRecv, SocketSend};
+use zeromq::{XPubSocket, ZmqError, ZmqMessage};
 
 use crate::client::imp::ClientInner;
-use crate::coordinator::handle::{CoordinatorCommand, CoordinatorState};
+use crate::coordinator::bootstrap::is_subscribe_all;
+use crate::coordinator::handle::{CoordinatorState, CoordinatorStateUpdate};
 use crate::error::{Error, Result, bail_unexpected_coordinator_output};
 use crate::protocol::encode_msgpack;
 use crate::protocol::output::{DpControlMessage, DpControlOutput, EngineCoreOutputs};
@@ -29,33 +30,96 @@ use crate::protocol::request::EngineCoreRequestType;
 struct StartDpWaveMessage {
     /// DP wave number that all engines should start processing.
     wave: u32,
-    /// Engine index that already received the triggering request and so does not
-    /// need an extra wakeup. `None` wakes every engine (used when the triggering
-    /// request was for a stale wave).
+    /// Engine index that started the wave and so does not need an extra wakeup.
+    /// `None` wakes every engine.
     exclude_engine_index: Option<u32>,
 }
 
 /// Background half of the in-process coordinator.
 ///
-/// This owns the command receiver and the engine-facing coordinator input
-/// socket. It is the single place where wave transitions are serialized and
-/// where `START_DP_WAVE` broadcasts are emitted.
+/// This owns the engine-facing coordinator input socket. It is the single place
+/// where wave transitions are serialized and where `START_DP_WAVE` broadcasts
+/// are emitted.
 pub(crate) struct InProcCoordinatorRunner {
     state: Arc<CoordinatorState>,
-    command_rx: mpsc::UnboundedReceiver<CoordinatorCommand>,
     coordinator_input: XPubSocket,
+    /// Wakes the frontend publisher after each wave transition.
+    state_changed: Arc<Notify>,
+    /// Moved out by `run` to run beside the engine-facing loop.
+    frontend_publisher: Option<FrontendStatePublisher>,
+}
+
+/// Frontend-facing half of the in-process coordinator, through which frontends
+/// of other DP ranks follow the wave state that this process reads in memory.
+///
+/// It runs beside the engine-facing loop, so a frontend that stops reading can
+/// delay frontend updates but never engine wave control. Updates coalesce to
+/// the latest state, which is all a frontend reads.
+struct FrontendStatePublisher {
+    state: Arc<CoordinatorState>,
+    socket: XPubSocket,
+    state_changed: Arc<Notify>,
+}
+
+impl FrontendStatePublisher {
+    /// Publish the current wave state to subscribed frontends.
+    async fn publish_state(&mut self) -> Result<()> {
+        let state = *self.state.lock();
+        let payload = encode_msgpack(&CoordinatorStateUpdate {
+            counts: None,
+            wave: state.current_wave,
+            engines_running: state.engines_running,
+        })?;
+        self.socket.send(ZmqMessage::from(payload)).await?;
+        Ok(())
+    }
+
+    /// Publish on every wave transition and to every new subscriber until a
+    /// fatal socket error.
+    async fn run(mut self) -> Result<()> {
+        loop {
+            tokio::select! {
+                () = self.state_changed.notified() => self.publish_state().await?,
+                // As on the engine-facing socket, zmq.rs registers a subscription only
+                // when `recv()` yields it. Answering it with the current state covers a
+                // frontend that subscribes after the last wave transition.
+                subscription = self.socket.recv() => {
+                    match subscription {
+                        Ok(message) => {
+                            if is_subscribe_all(&message) {
+                                self.publish_state().await?;
+                            }
+                        }
+                        Err(error @ (ZmqError::Codec(_) | ZmqError::Network(_))) => {
+                            warn!(
+                                error = %error,
+                                "coordinator frontend subscription peer disconnected"
+                            );
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl InProcCoordinatorRunner {
     pub(super) fn new(
         state: Arc<CoordinatorState>,
-        command_rx: mpsc::UnboundedReceiver<CoordinatorCommand>,
         coordinator_input: XPubSocket,
+        frontend_publish: XPubSocket,
     ) -> Self {
+        let state_changed = Arc::new(Notify::new());
         Self {
+            frontend_publisher: Some(FrontendStatePublisher {
+                state: state.clone(),
+                socket: frontend_publish,
+                state_changed: state_changed.clone(),
+            }),
             state,
-            command_rx,
             coordinator_input,
+            state_changed,
         }
     }
 
@@ -81,34 +145,6 @@ impl InProcCoordinatorRunner {
         Ok(())
     }
 
-    /// Apply one frontend-originated command to the coordinator state machine.
-    async fn handle_command(&mut self, command: CoordinatorCommand) -> Result<()> {
-        match command {
-            CoordinatorCommand::FirstRequest {
-                target_engine_id,
-                wave,
-            } => {
-                let target_engine_index = target_engine_id.engine_index().ok_or_else(|| {
-                    Error::UnsupportedCoordinatorEngineId {
-                        engine_id: target_engine_id.to_vec(),
-                    }
-                })?;
-                let (current_wave, exclude) = {
-                    let mut state = self.state.lock();
-                    state.start_wave_for_first_request(wave, target_engine_index)
-                };
-                debug!(
-                    current_wave,
-                    request_wave = wave,
-                    ?exclude,
-                    "starting DP wave after first request while engines were paused"
-                );
-                self.broadcast_start_wave(current_wave, exclude).await?;
-            }
-        }
-        Ok(())
-    }
-
     /// Apply one engine-originated control output to the coordinator state
     /// machine.
     async fn handle_outputs(&mut self, outputs: EngineCoreOutputs) -> Result<()> {
@@ -128,16 +164,24 @@ impl InProcCoordinatorRunner {
                 // The engines signals they completed the current wave and are now paused.
                 // Advance the current wave and mark the state as paused.
                 DpControlMessage::WaveComplete(wave) => {
-                    let mut state = self.state.lock();
-                    if wave >= state.current_wave {
-                        let next_wave = wave + 1;
-                        debug!(
-                            wave,
-                            next_wave,
-                            "DP wave finished; pausing engines and advancing coordinator state"
-                        );
-                        state.current_wave = wave + 1;
-                        state.engines_running = false;
+                    let advanced = {
+                        let mut state = self.state.lock();
+                        if wave >= state.current_wave {
+                            let next_wave = wave + 1;
+                            debug!(
+                                wave,
+                                next_wave,
+                                "DP wave finished; pausing engines and advancing coordinator state"
+                            );
+                            state.current_wave = wave + 1;
+                            state.engines_running = false;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if advanced {
+                        self.state_changed.notify_one();
                     }
                 }
                 // An engine requests to start the wave.
@@ -159,9 +203,10 @@ impl InProcCoordinatorRunner {
                         debug!(
                             wave,
                             exclude_engine_index = engine_index,
-                            "starting DP wave after stale-wave notification from engine"
+                            "starting DP wave on notification from engine"
                         );
                         self.broadcast_start_wave(wave, Some(engine_index)).await?;
+                        self.state_changed.notify_one();
                     }
                 }
             },
@@ -174,8 +219,8 @@ impl InProcCoordinatorRunner {
         Ok(())
     }
 
-    /// Drive the coordinator event loop until either side of the control plane
-    /// is closed or a fatal error is observed.
+    /// Drive the coordinator event loop until the engine control output is
+    /// closed or a fatal error is observed.
     ///
     /// Any fatal error closes the main client registries so request streams and
     /// future calls observe a stable shutdown cause.
@@ -184,16 +229,38 @@ impl InProcCoordinatorRunner {
         mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
         inner: Arc<ClientInner>,
     ) {
-        let result: Result<()> = async {
+        let frontend_publisher =
+            self.frontend_publisher.take().expect("the coordinator runner runs once");
+        let engine_loop = async {
             loop {
                 tokio::select! {
-                    // Received frontend-originated command from the handle.
-                    command = self.command_rx.recv() => {
-                        let Some(command) = command else {
-                            warn!("coordinator command channel closed, shutting down coordinator runner");
-                            return Ok(());
-                        };
-                        self.handle_command(command).await?;
+                    // Keep receiving engine subscriptions: zmq.rs XPUB registers a
+                    // subscription only when `recv()` yields it (unlike libzmq), so an
+                    // engine whose XSUB reconnects gets no broadcasts until we read its
+                    // subscribe-all. If a wave is running, replay it so that engine does
+                    // not miss the `START_DP_WAVE` sent while it was disconnected.
+                    subscription = self.coordinator_input.recv() => {
+                        match subscription {
+                            Ok(message) => {
+                                if is_subscribe_all(&message) {
+                                    let state = *self.state.lock();
+                                    if state.engines_running {
+                                        debug!(
+                                            current_wave = state.current_wave,
+                                            "replaying active DP wave after engine subscription"
+                                        );
+                                        self.broadcast_start_wave(state.current_wave, None).await?;
+                                    }
+                                }
+                            }
+                            Err(error @ (ZmqError::Codec(_) | ZmqError::Network(_))) => {
+                                warn!(
+                                    error = %error,
+                                    "coordinator subscription peer disconnected"
+                                );
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
                     }
                     // Received engine-originated control output from the coordinator socket.
                     outputs = output_rx.recv() => {
@@ -205,56 +272,14 @@ impl InProcCoordinatorRunner {
                     }
                 }
             }
-        }
-        .await;
+        };
+        let result: Result<()> = tokio::select! {
+            result = engine_loop => result,
+            result = frontend_publisher.run() => result,
+        };
         let Err(error) = result else { return };
 
         warn!(error = %error.as_report(), "coordinator runner exiting with error");
         inner.close_registries(Arc::new(error));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::coordinator::handle::CoordinatorStateSnapshot;
-
-    /// A `FirstRequest` for the current wave starts that wave and excludes the
-    /// engine that already received the triggering request.
-    #[test]
-    fn first_request_for_current_wave_excludes_target() {
-        let mut state = CoordinatorStateSnapshot {
-            current_wave: 3,
-            engines_running: false,
-        };
-
-        let (wave, exclude) = state.start_wave_for_first_request(3, 2);
-
-        assert_eq!(wave, 3);
-        assert_eq!(exclude, Some(2));
-        assert!(state.engines_running);
-        assert_eq!(state.current_wave, 3);
-    }
-
-    /// A `FirstRequest` whose wave was superseded by a racing `WaveComplete`
-    /// (`request_wave < current_wave`) must still start the request's wave: it
-    /// broadcasts the current wave and wakes every engine (`exclude = None`)
-    /// rather than rewinding the wave or dropping the request.
-    #[test]
-    fn stale_first_request_starts_current_wave_for_all_engines() {
-        let mut state = CoordinatorStateSnapshot {
-            current_wave: 4,
-            engines_running: false,
-        };
-
-        // Request stamped with wave 3 while the coordinator already advanced to 4.
-        let (wave, exclude) = state.start_wave_for_first_request(3, 2);
-
-        assert_eq!(
-            wave, 4,
-            "must broadcast the current wave, not the stale one"
-        );
-        assert_eq!(exclude, None, "a stale request must wake every engine");
-        assert!(state.engines_running);
-        assert_eq!(state.current_wave, 4, "wave must not be rewound");
     }
 }

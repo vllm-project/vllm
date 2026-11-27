@@ -3,109 +3,30 @@
 
 use std::sync::Arc;
 
-use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use thiserror_ext::AsReport;
-use tokio::sync::mpsc;
 use tracing::{debug, warn};
-use zeromq::prelude::{SocketRecv, SocketSend};
-use zeromq::{XSubSocket, ZmqMessage};
+use zeromq::prelude::SocketRecv;
+use zeromq::{XSubSocket, ZmqError, ZmqMessage};
 
 use crate::client::imp::ClientInner;
-use crate::coordinator::handle::{CoordinatorCommand, CoordinatorState};
+use crate::coordinator::handle::{CoordinatorState, CoordinatorStateUpdate};
 use crate::error::{Error, Result, bail_unexpected_coordinator_output};
-use crate::protocol::{OpaqueValue, decode_msgpack, encode_msgpack};
+use crate::protocol::decode_msgpack;
 
-/// Frontend-to-coordinator wakeup message sent when the first request arrives
-/// while all engines are paused.
+/// Background half of a connection to a coordinator in another process: a
+/// Python coordinator, or the in-process coordinator of another Rust frontend.
 ///
-/// This matches the frontend-side msgpack tuple sent by Python
-/// `DPAsyncMPClient._ensure_stats_update_task` to the coordinator front socket.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/694449050f8dac3d9853e97e518b4a43ec52106a/vllm/v1/engine/core_client.py#L1230-L1236>
-#[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
-struct CoordinatorWakeupMessage {
-    /// Engine index that already has the triggering request and should be
-    /// excluded from the coordinator's `START_DP_WAVE` rebroadcast.
-    exclude_engine_index: u32,
-    /// DP wave number observed by the frontend when the request was admitted.
-    wave: u32,
-}
-
-/// Coordinator-to-frontend state publish received on the front-side coordinator
-/// socket.
-///
-/// This matches the msgpack tuple periodically published by Python
-/// `DPCoordinatorProc.run_coordinator` to all connected frontends.
-///
-/// Original Python definitions:
-/// <https://github.com/vllm-project/vllm/blob/694449050f8dac3d9853e97e518b4a43ec52106a/vllm/v1/engine/coordinator.py#L282-L283>
-/// <https://github.com/vllm-project/vllm/blob/694449050f8dac3d9853e97e518b4a43ec52106a/vllm/v1/engine/coordinator.py#L445-L447>
-#[derive(Debug, Clone, PartialEq, Deserialize_tuple)]
-struct CoordinatorStateUpdate {
-    /// Global per-engine request counts published by the coordinator.
-    ///
-    /// The Rust bootstrapped external-coordinator path preserves this field for
-    /// wire compatibility but intentionally ignores it for routing decisions.
-    counts: OpaqueValue,
-    /// Current global DP wave number stamped onto newly admitted requests.
-    wave: u32,
-    /// Whether engines are currently running (`true`) or paused (`false`).
-    engines_running: bool,
-}
-
-/// Background half of an external Python-owned coordinator connection.
-///
-/// This owns the command receiver and one frontend-facing XSUB socket. It
-/// mirrors the subset of Python's coordinator protocol needed by the Rust
-/// bootstrapped frontend: receive `(counts, wave, running)` publishes, ignore
-/// `counts`, and send `(exclude_engine_index, wave)` wakeup messages when the
-/// first request arrives while engines are paused.
+/// This owns one frontend-facing XSUB socket. It mirrors the subset of Python's
+/// coordinator protocol needed by the Rust bootstrapped frontend: receive
+/// `(counts, wave, running)` publishes and ignore `counts`.
 pub(crate) struct ExternalCoordinatorService {
     state: Arc<CoordinatorState>,
-    command_rx: mpsc::UnboundedReceiver<CoordinatorCommand>,
     socket: XSubSocket,
 }
 
 impl ExternalCoordinatorService {
-    pub(super) fn new(
-        state: Arc<CoordinatorState>,
-        command_rx: mpsc::UnboundedReceiver<CoordinatorCommand>,
-        socket: XSubSocket,
-    ) -> Self {
-        Self {
-            state,
-            command_rx,
-            socket,
-        }
-    }
-
-    /// Apply one frontend-originated command to the external coordinator state
-    /// machine.
-    async fn handle_command(&mut self, command: CoordinatorCommand) -> Result<()> {
-        match command {
-            CoordinatorCommand::FirstRequest {
-                target_engine_id,
-                wave,
-            } => {
-                let target_engine_index = target_engine_id.engine_index().ok_or_else(|| {
-                    Error::UnsupportedCoordinatorEngineId {
-                        engine_id: target_engine_id.to_vec(),
-                    }
-                })?;
-                debug!(
-                    wave,
-                    exclude_engine_index = target_engine_index,
-                    "notifying external coordinator about first request while engines were paused"
-                );
-                let payload = encode_msgpack(&CoordinatorWakeupMessage {
-                    exclude_engine_index: target_engine_index,
-                    wave,
-                })?;
-                self.socket.send(ZmqMessage::from(payload)).await?;
-            }
-        }
-        Ok(())
+    pub(super) fn new(state: Arc<CoordinatorState>, socket: XSubSocket) -> Self {
+        Self { state, socket }
     }
 
     /// Apply one publish received from the xsub socket containing a coordinator
@@ -136,26 +57,24 @@ impl ExternalCoordinatorService {
         Ok(())
     }
 
-    /// Drive the coordinator event loop until either side of the control plane
-    /// is closed or a fatal error is observed.
+    /// Drive the coordinator event loop until the task is aborted or a fatal
+    /// error is observed.
     pub(crate) async fn run(mut self, inner: Arc<ClientInner>) {
         let result: Result<()> = async {
             loop {
-                tokio::select! {
-                    // Received frontend-originated command from the handle.
-                    command = self.command_rx.recv() => {
-                        let Some(command) = command else {
-                            warn!("external coordinator command channel closed, shutting down service");
-                            return Ok(());
-                        };
-                        self.handle_command(command).await?;
+                // Received publish from the external coordinator socket.
+                let publish = match self.socket.recv().await {
+                    Ok(publish) => publish,
+                    Err(error @ (ZmqError::Codec(_) | ZmqError::Network(_))) => {
+                        warn!(
+                            error = %error.as_report(),
+                            "external coordinator peer connection failed"
+                        );
+                        continue;
                     }
-                    // Received publish from the external coordinator socket.
-                    publish = self.socket.recv() => {
-                        let publish = publish.map_err(Error::from)?;
-                        self.handle_publish(publish).await?;
-                    }
-                }
+                    Err(error) => return Err(error.into()),
+                };
+                self.handle_publish(publish).await?;
             }
         }
         .await;
@@ -166,5 +85,101 @@ impl ExternalCoordinatorService {
             "external coordinator service exiting with error"
         );
         inner.close_registries(Arc::new(error));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use futures::StreamExt as _;
+    use tokio::runtime::Handle;
+    use tokio::time::timeout;
+    use zeromq::prelude::{Socket, SocketRecv, SocketSend};
+    use zeromq::{RouterSocket, SocketEvent, XPubSocket, XSubSocket, ZmqMessage};
+
+    use super::ExternalCoordinatorService;
+    use crate::client::imp::ClientInner;
+    use crate::coordinator::handle::{CoordinatorStateSnapshot, CoordinatorStateUpdate};
+    use crate::mock_engine::default_ready_response;
+    use crate::protocol::encode_msgpack;
+    use crate::test_utils::{read_zmtp_frame, reset_zmtp_stream, zmtp_handshake};
+    use crate::transport::{ConnectedEngine, EngineId};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn service_continues_after_peer_connection_error() {
+        let mut coordinator = XPubSocket::new();
+        let coordinator_address = coordinator.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+        let reset_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let reset_address = format!("tcp://{}", reset_listener.local_addr().unwrap());
+        let reset_peer = tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = reset_listener.accept().unwrap();
+            zmtp_handshake(&mut stream, b"XPUB");
+            assert_eq!(read_zmtp_frame(&mut stream), [1]);
+            reset_zmtp_stream(stream);
+        });
+
+        let mut socket = XSubSocket::new();
+        let mut events = socket.monitor();
+        socket.connect(&coordinator_address).await.unwrap();
+        socket.connect(&reset_address).await.unwrap();
+        socket.subscribe("").await.unwrap();
+        assert_eq!(
+            coordinator.recv().await.unwrap().into_vec()[0].as_ref(),
+            &[1]
+        );
+        reset_peer.await.unwrap();
+
+        let state = Arc::new(parking_lot::Mutex::new(CoordinatorStateSnapshot {
+            current_wave: 0,
+            engines_running: false,
+        }));
+        let service = ExternalCoordinatorService::new(state.clone(), socket);
+        let mut input = RouterSocket::new();
+        input.bind("tcp://127.0.0.1:0").await.unwrap();
+        let (input_send, _) = input.split();
+        let inner = Arc::new(ClientInner::new(
+            input_send,
+            Handle::current(),
+            "test-model".to_string(),
+            0,
+            false,
+            &[ConnectedEngine {
+                engine_id: EngineId::from(b"engine-0"),
+                ready_response: default_ready_response(),
+            }],
+        ));
+        let service_task = tokio::spawn(service.run(inner.clone()));
+
+        timeout(Duration::from_secs(5), async {
+            while !matches!(events.next().await, Some(SocketEvent::Disconnected(_))) {}
+        })
+        .await
+        .expect("peer disconnection event");
+        let publish = encode_msgpack(&CoordinatorStateUpdate {
+            counts: None,
+            wave: 7,
+            engines_running: true,
+        })
+        .unwrap();
+        coordinator.send(ZmqMessage::from(publish)).await.unwrap();
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if state.lock().current_wave == 7 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("coordinator state update after peer reset");
+        assert!(inner.is_healthy());
+
+        service_task.abort();
+        assert!(service_task.await.unwrap_err().is_cancelled());
     }
 }

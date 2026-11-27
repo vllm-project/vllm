@@ -1,8 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gzip
 import json
+import threading
+from collections.abc import Iterator
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from uuid import uuid4
 
+import pybase64
 import pytest
 import requests
 from transformers import AutoProcessor
@@ -28,11 +35,36 @@ TEST_IMAGE_ASSETS = [
 
 input_text = "The best thing about vLLM is that it supports many different models"
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
+image_base64 = {"url": encode_image_url(fetch_image(image_url))}
 
 
-@pytest.fixture(scope="module")
-def image_base64():
-    return {"url": encode_image_url(fetch_image(image_url))}
+@pytest.fixture
+def gzip_image_server() -> Iterator[str]:
+    _, encoded_image = image_base64["url"].split(",", 1)
+    body = gzip.compress(pybase64.b64decode(encoded_image))
+    stop = threading.Event()
+
+    class ImageHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.path.endswith("/delayed.png"):
+                stop.wait(timeout=30)
+            else:
+                self.wfile.write(body)
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), ImageHandler) as http_server:
+        thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{http_server.server_port}/{uuid4()}"
+        finally:
+            stop.set()
+            http_server.shutdown()
+            thread.join()
 
 
 @pytest.fixture(scope="module")
@@ -50,9 +82,11 @@ def server():
         json.dumps({"image": MAXIMUM_IMAGES}),
         "--chat-template",
         str(vlm2vec_jinja_path),
+        "--trust-request-mm-kwargs",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    env = {"VLLM_IMAGE_FETCH_TIMEOUT": "5", "VLLM_MEDIA_FETCH_MAX_RETRIES": "3"}
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env) as remote_server:
         yield remote_server
 
 
@@ -81,21 +115,32 @@ def test_chat_text_request(server: RemoteOpenAIServer, model_name: str):
     assert output.usage.prompt_tokens == 14
 
 
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_chat_image_url_request(server: RemoteOpenAIServer, model_name: str):
+def _request_image_embedding(
+    server: RemoteOpenAIServer, model_name: str, url: str
+) -> requests.Response:
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": "Represent the user's input."},
-                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "image_url", "image_url": {"url": url}},
             ],
         }
     ]
 
-    response = requests.post(
+    return requests.post(
         server.url_for("v1/embeddings"),
         json={"model": model_name, "messages": messages},
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_chat_gzip_image_url_request(
+    server: RemoteOpenAIServer, model_name: str, gzip_image_server: str
+):
+    response = _request_image_embedding(
+        server, model_name, f"{gzip_image_server}/image.png"
     )
     response.raise_for_status()
 
@@ -106,10 +151,28 @@ def test_chat_image_url_request(server: RemoteOpenAIServer, model_name: str):
     assert output.usage.prompt_tokens == 767
 
 
+def test_chat_media_timeout_recovers(
+    server: RemoteOpenAIServer, gzip_image_server: str
+) -> None:
+    response = _request_image_embedding(
+        server, MODEL_NAME, f"{gzip_image_server}/delayed.png"
+    )
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    error = response.json()["error"]
+    assert error["param"] == "image_url"
+    assert "Media fetch exceeded its time limit" in error["message"]
+
+    response = _request_image_embedding(
+        server, MODEL_NAME, f"{gzip_image_server}/image.png"
+    )
+    response.raise_for_status()
+    output = EmbeddingResponse.model_validate(response.json())
+    assert len(output.data) == 1
+    assert len(output.data[0].embedding) == 3072
+
+
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_chat_image_base64_request(
-    server: RemoteOpenAIServer, model_name: str, image_base64: dict
-):
+def test_chat_image_base64_request(server: RemoteOpenAIServer, model_name: str):
     messages = [
         {
             "role": "user",

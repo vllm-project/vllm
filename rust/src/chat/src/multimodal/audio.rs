@@ -8,22 +8,30 @@ use std::sync::Arc;
 use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-use super::{AudioModalitySupport, MultimodalModelInfo, PreparedMedia, item};
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use super::timing::MM_STAGE_TARGET;
+use super::{AudioModalitySupport, MmModality, MultimodalModelInfo, PreparedMedia, item};
+use crate::error::{Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary audio encoder input.
 pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
 
 impl MultimodalModelInfo {
     /// Preprocess fetched audio clips as one batch and build per-item features.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocess_audio")
+    )]
     pub(super) async fn prepare_audios(
         &self,
         clips: Vec<Arc<AudioClip>>,
         uuids: Vec<Option<String>>,
     ) -> Result<PreparedMedia> {
-        let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Audio.to_string(),
-        })?;
+        let support = self
+            .audio
+            .as_ref()
+            .ok_or_else(|| self.unsupported_modality(MmModality::Audio))?;
         let preprocessed = self.preprocess_audios(support, &clips).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != clips.len() {
@@ -75,16 +83,22 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
+    use super::super::tests::from_context;
     use super::super::{MultimodalModelContext, TokenizerResolver};
     use super::*;
 
     const AUDIO_PAD_ID: u32 = 151_676;
     const INKLING_AUDIO_MARKER_ID: u32 = 200_020;
     const INKLING_AUDIO_EMBED_ID: i32 = 200_053;
+    const INKLING_AUDIO_SOFT_PLACEHOLDER: &str = "<|unused_200053|>";
+    const INKLING_IMAGE_SOFT_PLACEHOLDER: &str = "<|unused_200054|>";
 
     fn inkling_info(decoder_dmodel: serde_json::Value) -> MultimodalModelInfo {
         let config = serde_json::json!({
             "model_type": "inkling_mm_model",
+            // Keep the vision tower enabled so audio gating alone decides
+            // whether the model still resolves multimodal support.
+            "vision_config": {"decoder_dmodel": 6144},
             "audio_config": {
                 "decoder_dmodel": decoder_dmodel,
                 "n_mel_bins": 80,
@@ -95,7 +109,12 @@ mod tests {
         });
         let tokenizer = TestTokenizer::new()
             .with_regular_token("<|content_image|>", 200_005)
-            .with_regular_token("<|content_audio_input|>", INKLING_AUDIO_MARKER_ID);
+            .with_regular_token("<|content_audio_input|>", INKLING_AUDIO_MARKER_ID)
+            .with_regular_token(
+                INKLING_AUDIO_SOFT_PLACEHOLDER,
+                INKLING_AUDIO_EMBED_ID as u32,
+            )
+            .with_regular_token(INKLING_IMAGE_SOFT_PLACEHOLDER, 200_054);
         let context = MultimodalModelContext {
             model_id: "inkling-test".to_string(),
             model_type: Some("inkling_mm_model".to_string()),
@@ -103,8 +122,9 @@ mod tests {
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
+            PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             HashMap::new(),
@@ -123,8 +143,9 @@ mod tests {
             )),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
+            PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             HashMap::new(),
@@ -159,11 +180,16 @@ mod tests {
         let info = inkling_info(serde_json::json!(1024));
         let support = info.audio.as_ref().expect("audio support");
 
+        // The spec renders the checkpoint's soft placeholder; the template's
+        // `<|content_audio_input|>` marker rides in the structural prefix.
         assert_eq!(
             info.placeholder_token(Modality::Audio),
-            Some("<|content_audio_input|>")
+            Some(INKLING_AUDIO_SOFT_PLACEHOLDER)
         );
-        assert_eq!(support.placeholder.marker_token_id, INKLING_AUDIO_MARKER_ID);
+        assert_eq!(
+            support.placeholder.marker_token_ids,
+            vec![INKLING_AUDIO_EMBED_ID as u32]
+        );
         assert_eq!(
             support.placeholder.embed_token_id,
             INKLING_AUDIO_EMBED_ID as u32
@@ -172,10 +198,10 @@ mod tests {
         assert!(matches!(
             &support.spec.field_layouts.encoder_input,
             llm_multimodal::FieldLayout::Flat { sizes_key }
-                if sizes_key == "num_audio_tokens"
+                if sizes_key == "tokens_per_item"
         ));
         assert!(matches!(
-            support.spec.field_layouts.model_specific.get("num_audio_tokens"),
+            support.spec.field_layouts.model_specific.get("tokens_per_item"),
             Some(llm_multimodal::FieldLayout::Batched)
         ));
     }
@@ -197,7 +223,7 @@ mod tests {
             info.placeholder_token(Modality::Audio),
             Some("<|audio_pad|>")
         );
-        assert_eq!(support.placeholder.marker_token_id, AUDIO_PAD_ID);
+        assert_eq!(support.placeholder.marker_token_ids, vec![AUDIO_PAD_ID]);
         assert_eq!(support.placeholder.embed_token_id, AUDIO_PAD_ID);
         assert!(matches!(
             support.spec.field_layouts.encoder_input,
@@ -205,7 +231,7 @@ mod tests {
         ));
 
         let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::zeros(vec![1, 128, 4]),
+            encoder_input: ArrayD::zeros(vec![1, 128, 4]).into(),
             feature_token_counts: vec![1],
             item_sizes: vec![(128, 4)],
             model_specific: HashMap::from([
@@ -234,6 +260,58 @@ mod tests {
             &item.data[AUDIO_PRIMARY_KEY].field,
             MmField::Batched(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn audio_pipeline_attributes_stage_timings_to_request() {
+        use std::sync::LazyLock;
+
+        use tracing::Instrument as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use vllm_tracing::timing::RequestTimingStats;
+
+        use crate::{mm_request_span, mm_timing_layer};
+
+        // Installed globally, like `vllm-bench mm-processor` does: callsite
+        // interest is cached process-wide, so a scoped subscriber misses the
+        // stages whose callsites a concurrent test registers first without it.
+        static TIMINGS: LazyLock<RequestTimingStats> = LazyLock::new(|| {
+            let (layer, timings) = mm_timing_layer();
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                .expect("install global subscriber");
+            timings
+        });
+        // Multimodal requests of other tests also reach the global layer.
+        const REQUEST_ID: &str = "audio-stage-timings";
+
+        let info = qwen3_asr_info();
+        LazyLock::force(&TIMINGS);
+        let parts = vec![MediaContentPart::AudioData {
+            data: wav_i16_mono(16_000, &[0; 1_600]),
+            mime_type: Some("audio/wav".to_string()),
+            uuid: Some("audio-1".to_string()),
+        }];
+        info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
+            .instrument(mm_request_span(REQUEST_ID))
+            .await
+            .unwrap();
+
+        let mut stages = TIMINGS
+            .stat()
+            .remove(REQUEST_ID)
+            .expect("request timings")
+            .into_keys()
+            .collect::<Vec<_>>();
+        stages.sort();
+        expect_test::expect![[r#"
+            [
+                "media_fetch_secs",
+                "preprocess_audio_secs",
+                "preprocessor_total_secs",
+                "prompt_expansion_secs",
+            ]
+        "#]]
+        .assert_debug_eq(&stages);
     }
 
     #[tokio::test]
@@ -268,14 +346,14 @@ mod tests {
         assert!(matches!(
             features.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
-                if tensor.dtype == "float32" && tensor.shape.first() == Some(&128)
+                if tensor.dtype.as_str() == "float32" && tensor.shape.first() == Some(&128)
         ));
         let lengths = &item.data["audio_feature_lengths"];
         assert!(matches!(&lengths.field, MmField::Batched(_)));
         assert!(matches!(
             lengths.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
-                if tensor.dtype == "int64" && tensor.shape.is_empty()
+                if tensor.dtype.as_str() == "int64" && tensor.shape.is_empty()
         ));
     }
 
@@ -296,12 +374,12 @@ mod tests {
         let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
-        assert_eq!(
-            prepared.replacements[0].tokens[0],
-            INKLING_AUDIO_MARKER_ID as i32
-        );
+        // Every replacement token is the soft placeholder; the typed
+        // `<|content_audio_input|>` marker is the structural prefix owned by
+        // the chat template.
         assert!(
-            prepared.replacements[0].tokens[1..]
+            prepared.replacements[0]
+                .tokens
                 .iter()
                 .all(|token| *token == INKLING_AUDIO_EMBED_ID)
         );
@@ -314,14 +392,14 @@ mod tests {
         assert!(matches!(
             features.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
-                if tensor.dtype == "float32" && tensor.shape.get(1) == Some(&80)
+                if tensor.dtype.as_str() == "float32" && tensor.shape.get(1) == Some(&80)
         ));
-        let count = &item.data["num_audio_tokens"];
+        let count = &item.data["tokens_per_item"];
         assert!(matches!(&count.field, MmField::Batched(_)));
         assert!(matches!(
             count.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
-                if tensor.dtype == "int64" && tensor.shape.is_empty()
+                if tensor.dtype.as_str() == "int64" && tensor.shape.is_empty()
         ));
     }
 }

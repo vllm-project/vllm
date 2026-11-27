@@ -18,11 +18,6 @@ PROMPT = (
 )
 
 
-@pytest.fixture(scope="module")
-def image():
-    return ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
-
-
 class DummyLogprobs(dict[int, Logprob]):
     def __init__(self, vocab_ids: Iterable[int]):
         super().__init__(dict.fromkeys(vocab_ids, Logprob(0.0)))
@@ -35,8 +30,7 @@ def mask_bbox_tokens(
     output: tuple[list[int], str, SampleLogprobs],
     tokenizer: TokenizerLike,
 ) -> tuple[list[int], str, SampleLogprobs]:
-    """
-    Always pass check_logprobs_close check for bounding box tokens
+    """Always pass check_logprobs_close check for bounding box tokens
     because it is reasonable for them to differ slightly.
     """
     ignore_pattern = r"<[xy]_[\d.]+>"
@@ -68,6 +62,8 @@ def run_test(
     with vllm_runner(
         model,
         dtype=dtype,
+        max_model_len=1024,
+        enable_chunked_prefill=False,
         max_num_seqs=64,
         limit_mm_per_prompt={"image": 1},
         trust_remote_code=True,
@@ -84,7 +80,9 @@ def run_test(
 
         tokenizer = vllm_model.llm.get_tokenizer()
 
-    with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, auto_cls=AutoModel, trust_remote_code=True
+    ) as hf_model:
         hf_outputs_per_case = [
             hf_model.generate_greedy_logprobs_limit(
                 prompts,
@@ -109,12 +107,22 @@ def run_test(
         )
 
 
-@pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-v1.2"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+        # v2.0's checkpoint ties lm_head to the decoder's input embeddings
+        # instead of shipping a separate lm_head.weight tensor; this
+        # exercises that path (see tie_weights() in nemotron_parse.py).
+        "nvidia/NVIDIA-Nemotron-Parse-2.0",
+    ],
+)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
-    hf_runner, vllm_runner, image, model: str, dtype: str, num_logprobs: int
+    hf_runner, vllm_runner, model: str, dtype: str, num_logprobs: int
 ) -> None:
+    image = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
     run_test(
         hf_runner,
         vllm_runner,

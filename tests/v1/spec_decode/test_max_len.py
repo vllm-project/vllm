@@ -18,22 +18,28 @@ _PROMPTS = [
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
-def test_ngram_max_len(num_speculative_tokens: int, vllm_runner):
+@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
+def test_ngram_max_len(method: str, num_speculative_tokens: int, vllm_runner):
+    """N-gram decoding stops at max_model_len."""
     with vllm_runner(
         "facebook/opt-125m",
-        trust_remote_code=False,
         max_model_len=100,
         enable_chunked_prefill=None,
         enforce_eager=True,  # For faster initialization.
         speculative_config={
-            "method": "ngram",
+            "method": method,
             "prompt_lookup_max": 5,
             "prompt_lookup_min": 3,
             "num_speculative_tokens": num_speculative_tokens,
         },
     ) as runner:
         sampling_params = SamplingParams(max_tokens=100, ignore_eos=True)
-        runner.llm.generate(_PROMPTS, sampling_params)
+        outputs = runner.llm.generate(_PROMPTS, sampling_params)
+        for output in outputs:
+            assert output.prompt_token_ids is not None
+            assert (
+                len(output.prompt_token_ids) + len(output.outputs[0].token_ids) == 100
+            )
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
@@ -49,12 +55,11 @@ def test_eagle_max_len(
 
     with vllm_runner(
         "meta-llama/Meta-Llama-3-8B-Instruct",
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         enforce_eager=True,  # For faster initialization.
         speculative_config={
             "method": "eagle",
-            "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+            "model": "vllm/EAGLE-LLaMA3-Instruct-8B",
             "num_speculative_tokens": num_speculative_tokens,
             "max_model_len": 80,
         },

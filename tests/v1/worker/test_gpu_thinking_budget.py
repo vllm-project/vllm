@@ -1,22 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
         "CUDA required for Model Runner V2 thinking budget tests",
         allow_module_level=True,
     )
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
 
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 START = 90
 END = 91
 END_A = 92
@@ -75,11 +81,17 @@ def _apply(
     idx_mapping_np = idx_mapping.cpu().numpy()
     state.apply(
         logits,
-        expanded_idx_mapping,
-        idx_mapping,
-        idx_mapping_np,
-        torch.tensor(input_ids, dtype=torch.int32, device=DEVICE),
-        torch.tensor(local_pos, dtype=torch.int32, device=DEVICE),
+        LogitsContext(
+            expanded_idx_mapping=expanded_idx_mapping,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=idx_mapping_np,
+            expanded_local_pos=torch.tensor(
+                local_pos, dtype=torch.int32, device=DEVICE
+            ),
+            input_ids=torch.tensor(input_ids, dtype=torch.int32, device=DEVICE),
+            pos=torch.zeros(len(input_ids), dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(1, len(input_ids), dtype=np.int64),
+        ),
     )
     return logits.cpu()
 
@@ -190,15 +202,14 @@ def test_v2_greedy_sampling_applies_thinking_budget():
     """Greedy-only requests must not bypass thinking-budget processing."""
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     sampler = Sampler(
+        vllm_config=SimpleNamespace(reasoning_config=MockReasoningConfig()),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
-        reasoning_config=MockReasoningConfig(),
     )
     sampler.add_request(
         req_idx=3,
-        prompt_len=1,
         sampling_params=SamplingParams(
             temperature=0.0,
             thinking_token_budget=3,
@@ -219,6 +230,7 @@ def test_v2_greedy_sampling_applies_thinking_budget():
         torch.tensor([4], dtype=torch.int32, device=DEVICE),
         input_ids,
         torch.tensor([0], dtype=torch.int32, device=DEVICE),
+        np.full(1, 4, dtype=np.int64),
     )
 
     assert out[0, END].item() == pytest.approx(1.0e9)

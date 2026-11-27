@@ -8,7 +8,10 @@ from torch import nn
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    bind_model_loader,
+)
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.modelexpress_loader import (
@@ -24,6 +27,10 @@ from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     get_model_cls,
 )
+from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
+    PeerModelLoader,
+)
 
 logger = init_logger(__name__)
 
@@ -35,9 +42,11 @@ LoadFormats = Literal[
     "dummy",
     "fastsafetensors",
     "instanttensor",
+    "ipc_cache",
     "mistral",
     "modelexpress",
     "npcache",
+    "peer_cache",
     "pt",
     "runai_streamer",
     "runai_streamer_sharded",
@@ -51,9 +60,11 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
     "instanttensor": DefaultModelLoader,
+    "ipc_cache": IpcModelLoader,
     "mistral": DefaultModelLoader,
     "modelexpress": ModelExpressModelLoader,
     "npcache": DefaultModelLoader,
+    "peer_cache": PeerModelLoader,
     "pt": DefaultModelLoader,
     "runai_streamer": RunaiModelStreamerLoader,
     "runai_streamer_sharded": ShardedStateLoader,
@@ -91,6 +102,7 @@ def register_model_loader(load_format: str):
         >>> load_config = LoadConfig(load_format="my_loader")
         >>> type(get_model_loader(load_config))
         <class 'MyModelLoader'>
+
     """  # noqa: E501
 
     def _wrapper(model_loader_cls):
@@ -116,12 +128,17 @@ def register_model_loader(load_format: str):
     return _wrapper
 
 
-def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
-    """Get a model loader based on the load format."""
+def get_model_loader_cls(load_config: LoadConfig) -> type[BaseModelLoader]:
+    """Get the model loader class for the load format."""
     load_format = load_config.load_format
     if load_format not in _LOAD_FORMAT_TO_MODEL_LOADER:
         raise ValueError(f"Load format `{load_format}` is not supported")
-    return _LOAD_FORMAT_TO_MODEL_LOADER[load_format](load_config)
+    return _LOAD_FORMAT_TO_MODEL_LOADER[load_format]
+
+
+def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
+    """Get a model loader based on the load format."""
+    return get_model_loader_cls(load_config)(load_config)
 
 
 def get_model(
@@ -140,8 +157,10 @@ def get_model(
 
 
 __all__ = [
+    "bind_model_loader",
     "get_model",
     "get_model_loader",
+    "get_model_loader_cls",
     "get_architecture_class_name",
     "get_model_architecture",
     "get_model_cls",
@@ -150,6 +169,8 @@ __all__ = [
     "ModelExpressModelLoader",
     "DefaultModelLoader",
     "DummyModelLoader",
+    "IpcModelLoader",
+    "PeerModelLoader",
     "RunaiModelStreamerLoader",
     "ShardedStateLoader",
     "TensorizerLoader",

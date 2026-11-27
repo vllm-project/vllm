@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -14,6 +15,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -52,6 +54,9 @@ class ShortConv(MambaBase, PluggableLayer):
         self.conv_dim = dim
         self.L_cache = config.conv_L_cache
         self.bias = config.conv_bias
+        self._checkpoint_exporter = MambaPrefillCheckpointExporter(
+            state_len=self.L_cache - 1
+        )
 
         self.conv = ColumnParallelLinear(
             input_size=self.L_cache,
@@ -80,7 +85,9 @@ class ShortConv(MambaBase, PluggableLayer):
             prefix=f"{prefix}.out_proj",
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        self.num_spec = vllm_config.num_speculative_tokens
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -111,8 +118,10 @@ class ShortConv(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
-            assert isinstance(attn_metadata, ShortConvAttentionMetadata)
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+            assert attn_metadata is None or isinstance(
+                attn_metadata, ShortConvAttentionMetadata
+            )
 
         BCx, _ = self.in_proj(hidden_states)
         B, C, x = BCx.chunk(3, dim=-1)
@@ -223,7 +232,8 @@ class ShortConv(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, ShortConvAttentionMetadata)
             conv_state = (
                 self.kv_cache[0]
@@ -234,6 +244,8 @@ class ShortConv(MambaBase, PluggableLayer):
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             has_initial_states_p = attn_metadata.has_initial_states_p
             query_start_loc_p = attn_metadata.query_start_loc_p
+            num_accepted_tokens = attn_metadata.num_accepted_tokens
+            query_start_loc_d = attn_metadata.query_start_loc_d
 
         BCx, _ = self.in_proj(hidden_states)
 
@@ -290,20 +302,47 @@ class ShortConv(MambaBase, PluggableLayer):
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
             ).transpose(0, 1)[:num_prefill_tokens]
+            if attn_metadata.checkpoint is not None:
+                assert query_start_loc_p is not None
+                self._checkpoint_exporter.export(
+                    attn_metadata.checkpoint,
+                    raw_qkv=Bx_p.transpose(0, 1),
+                    conv_state=conv_state,
+                    cu_seqlens=query_start_loc_p,
+                )
 
             y = C_p * Bx
             conv_output_list.append(y)
 
         if has_decode:
             Bx_d = (B_d * x_d).contiguous()
-            Bx = causal_conv1d_update(
-                Bx_d,
-                conv_state,
-                conv_weights,
-                self.conv.bias,
-                activation=None,
-                conv_state_indices=state_indices_tensor_d,
-            )
+            if num_accepted_tokens is not None:
+                # Speculative decode: the verify step feeds >1 query token per
+                # decode request, so use the spec-aware conv update path
+                # (mirrors mamba_mixer2). state_indices_tensor_d is
+                # (num_decodes, 1 + num_spec_tokens) here.
+                assert state_indices_tensor_d is not None
+                Bx = causal_conv1d_update(
+                    Bx_d,
+                    conv_state,
+                    conv_weights,
+                    self.conv.bias,
+                    activation=None,
+                    conv_state_indices=state_indices_tensor_d,
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=query_start_loc_d,
+                    max_query_len=state_indices_tensor_d.size(-1),
+                )
+            else:
+                # Non-spec decode
+                Bx = causal_conv1d_update(
+                    Bx_d,
+                    conv_state,
+                    conv_weights,
+                    self.conv.bias,
+                    activation=None,
+                    conv_state_indices=state_indices_tensor_d,
+                )
             y = C_d * Bx
             conv_output_list.insert(0, y)
 
@@ -312,6 +351,11 @@ class ShortConv(MambaBase, PluggableLayer):
 
         # Final linear projection
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
+
+    def get_cache_checkpoint_alignment(self) -> int | None:
+        # The window ending at a checkpoint is a copy of its last inputs, so
+        # any position works; the CPU path has no export.
+        return None if current_platform.is_cpu() else 1
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
@@ -326,6 +370,7 @@ class ShortConv(MambaBase, PluggableLayer):
             tp_world_size=get_tensor_model_parallel_world_size(),
             intermediate_size=self.conv_dim,
             conv_kernel=self.L_cache,
+            num_spec=self.num_spec,
         )
 
     @property
@@ -333,6 +378,7 @@ class ShortConv(MambaBase, PluggableLayer):
         return MambaAttentionBackendEnum.SHORT_CONV
 
 
+@eager_break_during_capture
 def short_conv(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
@@ -346,17 +392,8 @@ def short_conv(
         self.forward_native(hidden_states=hidden_states, output=output)
 
 
-def short_conv_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="short_conv",
     op_func=short_conv,
     mutates_args=["output"],
-    fake_impl=short_conv_fake,
 )

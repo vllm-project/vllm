@@ -255,8 +255,7 @@ class ApertusDecoderLayer(nn.Module):
 
         # Apertus defaults to causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
-        # bidirectional attention, which is used in some embedding models
-        # (e.g. parasail-ai/GritLM-7B-vllm)
+        # bidirectional attention, which is used in some embedding models.
         if getattr(config, "is_causal", True):
             attn_type = AttentionType.DECODER
         else:

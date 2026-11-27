@@ -13,8 +13,28 @@ pub struct RequestSchedule {
     /// Cumulative absolute delay from start (seconds) for each request.
     pub delays: Vec<f64>,
     /// Instantaneous rate for each request (for ramp-up logging).
-    #[allow(dead_code)]
     pub rates: Vec<f64>,
+}
+
+impl RequestSchedule {
+    /// Integer request rates a ramp-up schedule steps through, each paired with
+    /// the delay (seconds) of the first request sent at or above it.
+    ///
+    /// Mirrors Python's `rps_change_events`: the start rate at delay 0, then
+    /// every integer rate up to the last one reached. Rates that a single
+    /// request jumps over share that request's delay.
+    pub fn rps_change_offsets(&self, start_rps: f64) -> Vec<(u64, f64)> {
+        let mut last = start_rps as u64;
+        let mut events = vec![(last, 0.0)];
+        for (&rate, &delay) in self.rates.iter().zip(&self.delays) {
+            let current = rate as u64;
+            if current > last {
+                events.extend((last + 1..=current).map(|rps| (rps, delay)));
+                last = current;
+            }
+        }
+        events
+    }
 }
 
 /// Compute the per-request rate, accounting for optional ramp-up.
@@ -104,9 +124,29 @@ pub fn compute_schedule(
     }
 }
 
+/// Schedule built from trace-recorded arrival offsets (`--self-timed`).
+///
+/// Offsets are clamped at zero so a row anchored before the trace start fires
+/// immediately, as Python's `get_request` does; `Duration::from_secs_f64` in
+/// the dispatch loop would otherwise panic. `rates` carries no meaning here.
+pub fn trace_schedule(timestamps: impl ExactSizeIterator<Item = Option<f64>>) -> RequestSchedule {
+    let rates = vec![0.0; timestamps.len()];
+    RequestSchedule {
+        delays: timestamps.map(|t| t.unwrap_or(0.0).max(0.0)).collect(),
+        rates,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_trace_schedule_uses_offsets_and_clamps_negatives() {
+        let sched = trace_schedule([Some(-3.0), Some(0.0), Some(2.5), None].into_iter());
+        assert_eq!(sched.delays, vec![0.0, 0.0, 2.5, 0.0]);
+        assert_eq!(sched.rates.len(), 4);
+    }
 
     #[test]
     fn test_infinite_rate_all_zero_delays() {
@@ -167,5 +207,18 @@ mod tests {
         for i in 1..sched.rates.len() {
             assert!(sched.rates[i] >= sched.rates[i - 1]);
         }
+    }
+
+    #[test]
+    fn test_rps_change_offsets() {
+        let sched = RequestSchedule {
+            delays: vec![0.5, 1.0, 1.5, 2.0],
+            rates: vec![2.0, 2.9, 3.5, 6.0],
+        };
+        // Start rate at 0; 3 at the third request; 4..=6 all at the fourth.
+        assert_eq!(
+            sched.rps_change_offsets(2.0),
+            vec![(2, 0.0), (3, 1.5), (4, 2.0), (5, 2.0), (6, 2.0)]
+        );
     }
 }

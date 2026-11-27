@@ -5,7 +5,6 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
-from contextlib import contextmanager
 from unittest.mock import Mock
 
 import pytest
@@ -18,20 +17,28 @@ from compressed_tensors.quantization import (
 )
 
 from tests.models.utils import check_logprobs_close
+from tests.quantization.utils import load_model_without_vllm_runner
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.kernel import KernelConfig
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
+    CompressedTensorsKVCacheMethod,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
+    CompressedTensorsW6A8Mxfp6,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -44,16 +51,21 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
+    should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kFp8Dynamic128Sym,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.import_utils import has_humming
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -64,20 +76,53 @@ ROCM_AITER_SUPPORTED_INT8_MODEL = [
     "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
 ]
 
-# TritonInt8ScaledMMLinearKernel only supports symmetric quantization.
-ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
-    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
-    "nm-testing/tinyllama-oneshot-w8-channel-a8-tensor",
-    "neuralmagic/Llama-3.2-1B-quantized.w8a8",
-    "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2",
-    "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
-]
-
 
 @pytest.fixture(scope="function", autouse=True)
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def _compressed_tensors_actorder_config(actorder):
+    return {
+        "format": "pack-quantized",
+        "config_groups": {
+            "group_0": {
+                "targets": ["Linear"],
+                "weights": {
+                    "num_bits": 4,
+                    "type": "int",
+                    "strategy": "group",
+                    "group_size": 128,
+                    "symmetric": True,
+                    "dynamic": False,
+                    "actorder": actorder,
+                },
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "actorder", [ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC, True]
+)
+def test_compressed_tensors_rejects_runtime_activation_order(actorder):
+    with pytest.raises(ValueError, match="has been removed"):
+        CompressedTensorsConfig.from_config(
+            _compressed_tensors_actorder_config(actorder)
+        )
+
+
+@pytest.mark.parametrize(
+    "actorder", [ActivationOrdering.STATIC, ActivationOrdering.WEIGHT, False, None]
+)
+def test_compressed_tensors_accepts_preordered_weights(actorder):
+    config = CompressedTensorsConfig.from_config(
+        _compressed_tensors_actorder_config(actorder)
+    )
+    assert config.target_scheme_map["Linear"]["weights"].actorder == (
+        actorder.value if isinstance(actorder, ActivationOrdering) else None
+    )
 
 
 @pytest.mark.parametrize(
@@ -99,64 +144,48 @@ def enable_pickle(monkeypatch):
         ),
     ],
 )
-def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
+def test_compressed_tensors_w8a8_static_setup(model_args, dist_init, workspace_init):
     model_path, strategy, quant_type, shape_0, is_symmetric = model_args
 
-    if (
-        current_platform.is_rocm()
-        and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
-    ):
-        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
+    model, _ = load_model_without_vllm_runner(model_path)
+    layer = model.model.layers[0]
 
-    with vllm_runner(model_path, enforce_eager=True) as llm:
+    qkv_proj = layer.self_attn.qkv_proj
+    o_proj = layer.self_attn.o_proj
+    gate_up_proj = layer.mlp.gate_up_proj
+    down_proj = layer.mlp.down_proj
 
-        def check_model(model):
-            layer = model.model.layers[0]
+    def zp_valid(zp: torch.Tensor | None):
+        if is_symmetric:
+            return zp is None
 
-            qkv_proj = layer.self_attn.qkv_proj
-            o_proj = layer.self_attn.o_proj
-            gate_up_proj = layer.mlp.gate_up_proj
-            down_proj = layer.mlp.down_proj
+        return zp is not None and zp.dtype is torch.int32
 
-            # assert zp for symmetric and asymmetric cases
-            def zp_valid(zp: torch.Tensor | None):
-                if is_symmetric:
-                    return zp is None
+    assert zp_valid(qkv_proj.input_zero_point)
+    assert zp_valid(o_proj.input_zero_point)
+    assert zp_valid(gate_up_proj.input_zero_point)
+    assert zp_valid(down_proj.input_zero_point)
 
-                return zp is not None and zp.dtype is torch.int32
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(o_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(gate_up_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(down_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
 
-            assert zp_valid(qkv_proj.input_zero_point)
-            assert zp_valid(o_proj.input_zero_point)
-            assert zp_valid(gate_up_proj.input_zero_point)
-            assert zp_valid(down_proj.input_zero_point)
+    assert qkv_proj.scheme.strategy == strategy
+    assert qkv_proj.scheme.is_static_input_scheme
+    expected_type = torch.int8
 
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(o_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(gate_up_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(down_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
+    assert qkv_proj.weight.dtype is expected_type
+    assert o_proj.weight.dtype is expected_type
+    assert gate_up_proj.weight.dtype is expected_type
 
-            assert qkv_proj.scheme.strategy == strategy
-            assert qkv_proj.scheme.is_static_input_scheme
-            expected_type = torch.int8
-
-            assert qkv_proj.weight.dtype is expected_type
-            assert o_proj.weight.dtype is expected_type
-            assert gate_up_proj.weight.dtype is expected_type
-
-            if qkv_proj.scheme.strategy == "tensor":
-                # Make sure it is a channelwise buffer
-                # After running process_weights_after_loading
-                assert len(qkv_proj.weight_scale.shape) == 2
-                assert qkv_proj.weight_scale.shape[0] == shape_0
-                assert qkv_proj.weight_scale.shape[1] == 1
-            assert qkv_proj.weight_scale.dtype is torch.float32
-            assert qkv_proj.input_scale.dtype is torch.float32
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        assert output
+    if qkv_proj.scheme.strategy == "tensor":
+        assert len(qkv_proj.weight_scale.shape) == 2
+        assert qkv_proj.weight_scale.shape[0] == shape_0
+        assert qkv_proj.weight_scale.shape[1] == 1
+    assert qkv_proj.weight_scale.dtype is torch.float32
+    assert qkv_proj.input_scale.dtype is torch.float32
 
 
 @pytest.mark.parametrize(
@@ -180,12 +209,6 @@ def test_compressed_tensors_w8a8_logprobs(
     use_aiter,
     monkeypatch,
 ):
-    if (
-        current_platform.is_rocm()
-        and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
-    ):
-        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
-
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
             pytest.skip(f"Skip model {model_path} as it is not support by aiter.")
@@ -243,18 +266,9 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
     "use_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_compressed_tensors_w8a8_dynamic_per_token(
-    vllm_runner,
-    model_args,
-    use_aiter,
-    monkeypatch,
+    model_args, use_aiter, monkeypatch, dist_init, workspace_init
 ):
     model_path, strategy = model_args
-
-    if (
-        current_platform.is_rocm()
-        and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
-    ):
-        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
@@ -262,23 +276,13 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
         # this will enable VLLM_ROCM_USE_AITER_LINEAR
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-    with vllm_runner(model_path, enforce_eager=True, dtype=torch.float16) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
-            assert not qkv_proj.scheme.is_static_input_scheme
-            assert qkv_proj.scheme.strategy == strategy
-            assert qkv_proj.weight.dtype is torch.int8
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        assert output
+    model, _ = load_model_without_vllm_runner(model_path, dtype=torch.float16)
+    qkv_proj = model.model.layers[0].self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
+    assert not qkv_proj.scheme.is_static_input_scheme
+    assert qkv_proj.scheme.strategy == strategy
+    assert qkv_proj.weight.dtype is torch.int8
 
 
 @pytest.mark.parametrize(
@@ -290,23 +294,15 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
             None,
             8,
             True,
-            False,
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
-            "group",
-            128,
-            8,
-            False,
-            True,
         ),
     ],
 )
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="The tests are skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="The tests are skipped on non-CUDA/ROCm platform.",
 )
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
-    model, strategy, group, pack_factor, symmetric, has_g_idx = wNa16_args
+    model, strategy, group, pack_factor, symmetric = wNa16_args
     with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
@@ -321,7 +317,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
             assert qkv_proj.scheme.pack_factor == pack_factor
             assert qkv_proj.scheme.symmetric == symmetric
-            assert qkv_proj.scheme.has_g_idx == has_g_idx
 
         llm.apply_model(check_model)
 
@@ -329,33 +324,36 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
         assert output
 
 
-def test_compressed_tensors_fp8(vllm_runner):
+def test_compressed_tensors_fp8(monkeypatch, dist_init, workspace_init):
     model_path = "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test"
-    with vllm_runner(model_path, enforce_eager=True) as llm:
+    model, vllm_config = load_model_without_vllm_runner(model_path)
+    target_device = torch.device(current_platform.device_type)
 
-        def check_model(model):
-            layer = model.model.layers[0]
+    layer = model.model.layers[0]
+    qkv_proj = layer.self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(
+        qkv_proj.scheme,
+        (CompressedTensorsW8A8Fp8, CompressedTensorsW8A16Fp8),
+    )
+    assert qkv_proj.input_scale.dtype is torch.float32
 
-            qkv_proj = layer.self_attn.qkv_proj
+    if isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8):
+        assert len(qkv_proj.input_scale.shape) == 0
+        assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
+        assert qkv_proj.weight_scale.dtype is torch.float32
+        assert len(qkv_proj.weight_scale.shape) == 0
 
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(
-                qkv_proj.scheme,
-                (CompressedTensorsW8A8Fp8, CompressedTensorsW8A16Fp8),
-            )
-
-            assert qkv_proj.input_scale.dtype is torch.float32
-
-            if isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8):
-                assert len(qkv_proj.input_scale.shape) == 0
-                assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
-                assert qkv_proj.weight_scale.dtype is torch.float32
-                assert len(qkv_proj.weight_scale.shape) == 0
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        assert output
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
+    positions = torch.arange(input_ids.numel(), device=target_device)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
@@ -387,7 +385,8 @@ def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
 )
 def test_compressed_tensors_kv_cache_fp8_per_tensor(vllm_runner):
     model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor"
@@ -413,25 +412,53 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         assert output
 
 
-@contextmanager
-def _nvfp4_marlin_error_context(model, capfd):
-    is_rocm_and_unsupported = (
-        model == "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
-        and current_platform.is_rocm()
+@pytest.mark.parametrize(
+    ("is_fnuz", "has_scheme", "has_q_scale", "kv_expected", "q_expected"),
+    [
+        pytest.param(True, True, True, 0.6, 0.6, id="fnuz_with_q"),
+        pytest.param(True, True, False, 0.6, 1.0, id="fnuz_no_q"),
+        pytest.param(False, True, True, 0.3, 0.3, id="not_fnuz"),
+        pytest.param(True, False, True, 0.3, 0.3, id="fnuz_no_scheme"),
+    ],
+)
+def test_compressed_tensors_kv_scales_fnuz_doubling(
+    monkeypatch, is_fnuz, has_scheme, has_q_scale, kv_expected, q_expected
+):
+    """Loaded KV scales double on fnuz; a missing q_scale stays 1.0."""
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: is_fnuz)
+    scheme = {"type": "float", "num_bits": 8, "strategy": "tensor", "symmetric": True}
+    method = CompressedTensorsKVCacheMethod(
+        CompressedTensorsConfig(
+            target_scheme_map={},
+            ignore=[],
+            quant_format="float-quantized",
+            kv_cache_scheme=scheme if has_scheme else None,
+        )
     )
 
-    if is_rocm_and_unsupported:
-        expected_error = (
-            "ValueError: Forced NVFP4 kernel MarlinNvFp4LinearKernel is not "
-            "supported: Marlin FP4 not available"
-        )
-        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
-            yield
+    layer = torch.nn.Module()
+    set_default_quant_scales(layer, register_buffer=True)
+    layer.kv_cache_dtype = "fp8"
+    layer.num_kv_heads = 1
+    method.create_weights(layer)
+    for name in ("k_scale", "v_scale"):
+        getattr(layer, name).data.fill_(0.3)
+    if has_q_scale:
+        layer.q_scale.data.fill_(0.3)
 
-        captured = capfd.readouterr()
-        assert expected_error in captured.out + captured.err
-    else:
-        yield
+    method.process_weights_after_loading(layer)
+    assert layer._k_scale.item() == pytest.approx(kv_expected)
+    assert layer._k_scale_float == pytest.approx(kv_expected)
+    assert layer._v_scale_float == pytest.approx(kv_expected)
+    assert layer._q_scale_float == pytest.approx(q_expected)
+    assert layer._k_scale_cpu.item() == pytest.approx(kv_expected)
+
+    # A second call must not compound the factor.
+    ptrs = [layer._k_scale.data_ptr(), layer._q_scale.data_ptr()]
+    method.process_weights_after_loading(layer)
+    assert [layer._k_scale.data_ptr(), layer._q_scale.data_ptr()] == ptrs
+    assert layer._k_scale_float == pytest.approx(kv_expected)
+    assert layer._q_scale_float == pytest.approx(q_expected)
 
 
 @pytest.mark.parametrize(
@@ -441,26 +468,30 @@ def _nvfp4_marlin_error_context(model, capfd):
         ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", False),
     ],
 )
-def test_compressed_tensors_nvfp4(vllm_runner, args, capfd):
-    model, use_a16 = args
-    with (
-        _nvfp4_marlin_error_context(model, capfd),
-        vllm_runner(model, enforce_eager=True) as llm,
-    ):
+def test_compressed_tensors_nvfp4(args, dist_init, workspace_init):
+    model_path, use_a16 = args
+    is_rocm_and_unsupported = (
+        model_path == "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
+        and current_platform.is_rocm()
+    )
+    if is_rocm_and_unsupported:
+        with pytest.raises(
+            ValueError,
+            match="Forced NVFP4 kernel MarlinNvFp4LinearKernel is not supported",
+        ):
+            load_model_without_vllm_runner(model_path)
+        return
 
-        def check_model(model):
-            layer = model.model.layers[0]
+    try:
+        model, _ = load_model_without_vllm_runner(model_path)
+    except ValueError as exc:
+        pytest.fail(f"Unexpected NVFP4 loading failure: {exc}")
 
-            qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW4A4Fp4)
-            assert qkv_proj.scheme.use_a16 == use_a16
-            assert qkv_proj.scheme.group_size == 16
-
-        llm.apply_model(check_model)
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(output)
-        assert output
+    qkv_proj = model.model.layers[0].self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW4A4Fp4)
+    assert qkv_proj.scheme.use_a16 == use_a16
+    assert qkv_proj.scheme.group_size == 16
 
 
 @pytest.mark.skipif(
@@ -469,7 +500,7 @@ def test_compressed_tensors_nvfp4(vllm_runner, args, capfd):
 )
 @pytest.mark.parametrize(
     "args",
-    [("czhu-cohere/TinyLlama-1.1B-Chat-v1.0-W4A8-e2e", CompressedTensorsW4A8Fp8)],
+    [("vllm/TinyLlama-1.1B-Chat-v1.0-W4A8-e2e", CompressedTensorsW4A8Fp8)],
 )
 def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
     model, scheme = args
@@ -499,7 +530,8 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
 )
 @pytest.mark.parametrize(
     "model,prompt,exp_perplexity",
@@ -509,15 +541,21 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
         ),
-        (
+        pytest.param(
             "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="hadacore is CUDA-only"
+            ),
         ),
-        (
+        pytest.param(
             "nm-testing/Llama-3.2-1B-Instruct-quipv16-nvfp4",
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="hadacore is CUDA-only"
+            ),
         ),
     ],
 )
@@ -533,56 +571,49 @@ def test_compressed_tensors_transforms_perplexity(
 @pytest.mark.parametrize(
     "linear_backend", ["auto", "marlin"] if current_platform.is_cuda() else ["auto"]
 )
-def test_compressed_tensors_fp8_block_enabled(vllm_runner, linear_backend):
+def test_compressed_tensors_fp8_block_enabled(
+    linear_backend, dist_init, workspace_init
+):
     model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
-    with vllm_runner(
-        model_path, enforce_eager=True, linear_backend=linear_backend
-    ) as llm:
-        fp8_dtype = current_platform.fp8_dtype()
+    model, _ = load_model_without_vllm_runner(
+        model_path,
+        vllm_config_kwargs={
+            "kernel_config": KernelConfig(linear_backend=linear_backend)
+        },
+    )
+    fp8_dtype = current_platform.fp8_dtype()
+    layer = model.model.layers[0]
 
-        def check_model(model):
-            layer = model.model.layers[0]
+    qkv_proj = layer.self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
+    if linear_backend == "marlin":
+        assert isinstance(qkv_proj.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        assert qkv_proj.weight.dtype is torch.int32
+        assert qkv_proj.weight_scale.dtype is qkv_proj.orig_dtype
+    else:
+        assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
+        assert qkv_proj.weight.dtype is fp8_dtype
+        assert qkv_proj.weight_scale.dtype is torch.float32
+    assert len(qkv_proj.weight.shape) == 2
+    assert len(qkv_proj.weight_scale.shape) == 2
 
-            qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-            if linear_backend == "marlin":
-                assert isinstance(
-                    qkv_proj.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel
-                )
-                assert qkv_proj.weight.dtype is torch.int32
-                assert qkv_proj.weight_scale.dtype is qkv_proj.orig_dtype
-            else:
-                assert isinstance(
-                    qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel
-                )
-                assert qkv_proj.weight.dtype is fp8_dtype
-                assert qkv_proj.weight_scale.dtype is torch.float32
-            assert len(qkv_proj.weight.shape) == 2
-            assert len(qkv_proj.weight_scale.shape) == 2
-
-            if linear_backend == "auto":
-                input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
-                assert isinstance(input_quant_op, QuantFP8)
-                assert input_quant_op._forward_method in (
-                    input_quant_op.forward_cuda,
-                    input_quant_op.forward_hip,
-                    input_quant_op.forward_xpu,
-                )
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        assert output
+    if linear_backend == "auto":
+        input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
+        assert isinstance(input_quant_op, QuantFP8)
+        assert input_quant_op._forward_method in (
+            input_quant_op.forward_cuda,
+            input_quant_op.forward_hip,
+            input_quant_op.forward_xpu,
+        )
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="This test is not for non-CUDA platforms",
+    not current_platform.is_cuda_alike(),
+    reason="This test is not for non-CUDA/ROCm platforms",
 )
 def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
-    """
-    Integration test for MoE layer ignore functionality with a real model.
+    """Integration test for MoE layer ignore functionality with a real model.
 
     This test would verify that when loading a compressed-tensors quantized
     MoE model where some MoE layers are in the ignore list, those layers
@@ -594,7 +625,6 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     - Config with ignore list containing specific MoE layers
     - Multiple MoE layers where some are quantized and some are not
     """
-
     # model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only" # CT 12.3
     model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"  # CT 12.2
 
@@ -731,6 +761,141 @@ def test_get_scheme_dict_returns_none_on_no_match():
         layer_name="model.layers.0.unmatched_layer",
     )
     assert result is None
+
+
+def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
+    """Prefix, substring, and suffix rules apply to re: targets.
+
+    Stacked q/k/v maps stay on concrete paths. Class names and kv-cache
+    field names are left alone.
+    """
+    gate = {"weights": "gate"}
+    attn = {"weights": "attn"}
+    linear = {"weights": "linear"}
+    config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": linear,
+            r"re:^model\.layers\.\d+\.mlp\.fc1\.gate\Z": gate,
+            r"re:.*self_attn\..*": attn,
+            r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z": {"weights": "q"},
+        },
+        ignore=[
+            "multi_modal_projector.linear_1",
+            r"re:^multi_modal_projector\.linear_\d+\Z",
+            r"re:^model\.layers\.\d+\.mlp\.gate\Z",
+            r"re:^model\.layers\.\d+\.ffn\.gate\.bias\Z",
+            r"re:^mtp\.layers\.\d+\Z",
+        ],
+        quant_format="pack-quantized",
+        kv_cache_scheme={
+            "type": "float",
+            "num_bits": 8,
+            "strategy": "tensor",
+            "symmetric": True,
+        },
+    )
+    mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "multi_modal_projector.": "vision_tower.multi_modal_projector.",
+        },
+        orig_to_new_substr={
+            ".mlp.fc1.": ".fc1.",
+            ".mlp.fc2.": ".fc2.",
+            ".shared_experts.w2": ".shared_experts.down_proj",
+            "mtp.": None,
+        },
+        orig_to_new_suffix={
+            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+    )
+    config.apply_vllm_mapper(mapper)
+
+    assert config.target_scheme_map["Linear"] is linear
+    assert config.target_scheme_map[r"re:.*self_attn\..*"] is attn
+    assert config.target_scheme_map[r"re:^model\.layers\.\d+\.fc1\.gate\Z"] is gate
+    # Stacked fusion is not written into regex targets.
+    assert r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in config.target_scheme_map
+    assert config.kv_cache_scheme == {
+        "type": "float",
+        "num_bits": 8,
+        "strategy": "tensor",
+        "symmetric": True,
+    }
+    assert "vision_tower.multi_modal_projector.linear_1" in config.ignore
+    assert r"re:^vision_tower\.multi_modal_projector\.linear_\d+\Z" in config.ignore
+    assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in config.ignore
+    assert (
+        r"re:^model\.layers\.\d+\.ffn\.gate\.e_score_correction_bias\Z" in config.ignore
+    )
+    assert r"re:^mtp\.layers\.\d+\Z" not in config.ignore
+    assert should_ignore_layer(
+        "vision_tower.multi_modal_projector.linear_3",
+        ignore=config.ignore,
+    )
+    assert should_ignore_layer(
+        "model.layers.2.ffn.gate.e_score_correction_bias",
+        ignore=config.ignore,
+    )
+    assert not should_ignore_layer(
+        "model.layers.2.ffn.gate.bias",
+        ignore=config.ignore,
+    )
+
+    stacked = CompressedTensorsConfig(
+        target_scheme_map={
+            "model.layers.0.self_attn.q_proj": {"weights": "q"},
+            r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z": {"weights": "q"},
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    stacked.apply_vllm_mapper(
+        WeightsMapper(orig_to_new_stacked={".q_proj": (".qkv_proj", "q")})
+    )
+    assert "model.layers.0.self_attn.qkv_proj" in stacked.target_scheme_map
+    assert r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in stacked.target_scheme_map
+
+    anchored = CompressedTensorsConfig(
+        target_scheme_map={r"re:^layers\.\d+\.mlp\.gate\Z": {"weights": "g"}},
+        ignore=["layers.1.mlp.gate"],
+        quant_format="pack-quantized",
+    )
+    anchored.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"": "model."}))
+    assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in anchored.target_scheme_map
+    assert anchored.ignore == ["model.layers.1.mlp.gate"]
+
+
+def test_deepseek_v4_small_regex_matches_vllm_names():
+    """Checkpoint regex from the 2-layer DeepSeek-V4 small model.
+
+    The saved target uses the checkpoint name `w2`. vLLM's module is
+    `model.layers.*.ffn.shared_experts.down_proj`. Leaving the `re:`
+    target unchanged misses that module.
+    """
+    saved = r"re:^layers\.(?:0|1)\.ffn\.shared_experts\.w2\Z"
+    runtime = "model.layers.0.ffn.shared_experts.down_proj"
+    module = torch.nn.Linear(1, 1)
+    assert find_matched_target(runtime, module, [saved]) is None
+
+    config = CompressedTensorsConfig(
+        target_scheme_map={saved: {"weights": "fp8"}},
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={"layers.": "model.layers."},
+            orig_to_new_substr={".shared_experts.w2": ".shared_experts.down_proj"},
+        )
+    )
+    rewritten = r"re:^model\.layers\.(?:0|1)\.ffn\.shared_experts\.down_proj\Z"
+    assert rewritten in config.target_scheme_map
+    assert find_matched_target(runtime, module, [rewritten]) == rewritten
 
 
 # Test constants for activation quantization
@@ -929,12 +1094,13 @@ def test_scheme_selection(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(75),
+    not current_platform.is_cuda_alike()
+    or not current_platform.has_device_capability(75),
     reason="MXFP8 requires Turing (sm_75+) or newer.",
 )
 def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
     """Verify MXFP8 scheme, dtypes, and generation for a MoE model."""
-    model_path = "AliEdalati97/Qwen3-30B-A3B-MXFP8"
+    model_path = "vllm/Qwen3-30B-A3B-MXFP8"
     with vllm_runner(
         model_path,
         enforce_eager=True,
@@ -963,35 +1129,6 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
-
-
-@pytest.mark.parametrize(
-    "actorder,group_size,part,full,expected",
-    [
-        # actorder="group" with real grouping: must load full-K w2 scales and,
-        # when sharded (part != full), report is_k_full=False.
-        (ActivationOrdering.GROUP, 32, 64, 128, (True, 128, False)),
-        # actorder="group" but unsharded (part == full): full scales, k_full.
-        (ActivationOrdering.GROUP, 32, 128, 128, (True, 128, True)),
-        # actorder="group" with channel-wise (group_size == -1): no full load.
-        (ActivationOrdering.GROUP, -1, 64, 128, (False, 64, False)),
-        # "static"/"weight" reorder at quant time -> shard normally + k_full.
-        # Regression: static actorder under TP must keep is_k_full=True so the
-        # Marlin kernel never gets the invalid (group_size=16, is_k_full=0).
-        ("static", 32, 64, 128, (False, 64, True)),
-        ("weight", 32, 64, 128, (False, 64, True)),
-        (None, 32, 64, 128, (False, 64, True)),
-    ],
-)
-def test_wna16_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
-        CompressedTensorsWNA16MoEMethod,
-    )
-
-    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(
-        actorder, group_size, part, full
-    )
-    assert result == expected
 
 
 @pytest.mark.parametrize("num_bits", range(2, 9))
@@ -1032,8 +1169,25 @@ def test_quant_key_str_supports_scalar_type_dtypes():
     )
 
 
+@pytest.mark.skipif(not has_humming(), reason="MXFP6 requires humming")
+def test_compressed_tensors_mxfp6(vllm_runner):
+    model_path = "nm-testing/Qwen3-0.6B-MXFP6A8"
+    with vllm_runner(model_path, enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            for proj in (layer.self_attn.qkv_proj, layer.mlp.down_proj):
+                assert isinstance(proj.scheme, CompressedTensorsW6A8Mxfp6)
+                assert proj.scheme.kernel.config.activation_quant_key == kMxfp8Dynamic
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
+    not current_platform.is_cuda_alike()
+    or not current_platform.has_device_capability(80),
     reason="MXFP4 requires ampere or newer",
 )
 def test_compressed_tensors_mxfp4(vllm_runner):
@@ -1058,3 +1212,144 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+def _mxfp4_moe_layer(monkeypatch, input_activations):
+    from types import SimpleNamespace
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization import mxfp4
+
+    # Exercise scheme routing and allocation without selecting a GPU kernel.
+    monkeypatch.setattr(
+        mxfp4,
+        "select_deepseek_v4_mxfp4_moe_backend",
+        lambda moe: (Mxfp4MoeBackend.NONE, None),
+    )
+    weights = {
+        "num_bits": 4,
+        "type": "float",
+        "strategy": "group",
+        "group_size": 32,
+        "symmetric": True,
+        "dynamic": False,
+    }
+    quant_config = CompressedTensorsConfig.from_config(
+        {
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    # Name targets only match if the layer's own checkpoint
+                    # projection names are used for the lookup.
+                    "targets": [r"re:.*experts\.\d+\.w\d+$"],
+                    "weights": weights,
+                    "input_activations": input_activations,
+                }
+            },
+        }
+    )
+    return RoutedExperts(
+        "model.layers.0.ffn.experts",
+        torch.bfloat16,
+        make_dummy_moe_config(num_experts=2, hidden_dim=64, intermediate_size=32),
+        quant_config,
+        expert_map_manager=SimpleNamespace(
+            local_num_experts=2,
+            placement_strategy="linear",
+            expert_map=None,
+            expert_mask=None,
+            routing_tables=None,
+            map_global_to_local=lambda index: index,
+        ),
+        ckpt_gate_proj_name="w1",
+        ckpt_down_proj_name="w2",
+        ckpt_up_proj_name="w3",
+    )
+
+
+def test_mxfp4_moe_with_fp8_inputs_shares_native_mxfp4_method(monkeypatch):
+    """MXFP4 weights with dynamic FP8 inputs load compressed-tensors names but
+    otherwise behave as the native MXFP4 method, so its backends, padding and
+    monolithic support are not reimplemented."""
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+    layer = _mxfp4_moe_layer(
+        monkeypatch,
+        {
+            "num_bits": 8,
+            "type": "float",
+            "strategy": "group",
+            "group_size": 128,
+            "symmetric": True,
+            "dynamic": True,
+        },
+    )
+
+    assert isinstance(layer.quant_method, Mxfp4MoEMethod)
+    assert not layer.quant_method.supports_pre_processed_weights
+    # The checkpoint's FP8 activations reach backends such as Humming that
+    # would otherwise default to BF16 activations.
+    assert layer.quant_method.activation_key == kFp8Dynamic128Sym
+    assert {"w13_weight_packed", "w2_weight_packed"} <= dict(
+        layer.named_parameters()
+    ).keys()
+    w13 = layer.w13_weight_packed
+
+    layer.quant_method.process_weights_after_loading(layer)
+
+    assert layer.w13_weight is w13
+    assert layer.w13_weight_packed is w13
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="FP8 x MXFP4 linear kernels need CUDA"
+)
+def test_mxfp4_linear_with_fp8_inputs_requests_fp8_activations():
+    """Dense MXFP4 layers with dynamic FP8 inputs (e.g. GLM-5.3 dense MLPs)
+    must not be routed as W4A4."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+        CompressedTensorsW4A8Mxfp4,
+    )
+
+    weights = QuantizationArgs(
+        num_bits=4, type="float", strategy="group", group_size=32, symmetric=True
+    )
+    inputs = QuantizationArgs(
+        num_bits=8,
+        type="float",
+        strategy="group",
+        group_size=128,
+        symmetric=True,
+        dynamic=True,
+    )
+    config = CompressedTensorsConfig.from_config(
+        {"format": "mxfp4-pack-quantized", "config_groups": {}}
+    )
+    with set_current_vllm_config(VllmConfig()):
+        scheme = config._get_scheme_from_parts(weights, inputs)
+
+    assert isinstance(scheme, CompressedTensorsW4A8Mxfp4)
+    assert scheme.kernel.config.activation_quant_key == kFp8Dynamic128Sym
+
+
+def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
+    """Only FP8 inputs take the shared path; W4A4 keeps its own kernels."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+        CompressedTensorsW4A4Mxfp4MoEMethod,
+    )
+
+    layer = _mxfp4_moe_layer(
+        monkeypatch,
+        {
+            "num_bits": 4,
+            "type": "float",
+            "strategy": "group",
+            "group_size": 32,
+            "symmetric": True,
+            "dynamic": True,
+        },
+    )
+
+    assert isinstance(layer.quant_method, CompressedTensorsW4A4Mxfp4MoEMethod)
