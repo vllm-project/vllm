@@ -7,8 +7,7 @@
 
 namespace cu {
 
-// Raises a kernel's dynamic shared memory limit, which launches above 48 KB
-// need.
+// Launches above 48 KB of dynamic shared memory need this limit raised.
 template <typename Kernel>
 inline cudaError_t max_dynamic_smem(Kernel* kernel, int bytes) {
   return cudaFuncSetAttribute(
@@ -70,7 +69,6 @@ __device__ __forceinline__ void bulk_commit() {
   asm volatile("cp.async.bulk.commit_group;\n" ::: "memory");
 }
 
-// Waits until the sources of all but the newest N bulk groups may be reused.
 template <int N>
 __device__ __forceinline__ void bulk_wait_read() {
   asm volatile("cp.async.bulk.wait_group.read %0;\n" ::"n"(N) : "memory");

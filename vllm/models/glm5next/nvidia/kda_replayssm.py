@@ -3,9 +3,7 @@
 """GLM-5.3-Flash KDA ReplaySSM verify step (CUDA, sm_90a/100a/103a).
 
 One launch per layer covers the `f_b` / `g_b` projections, the short conv, the
-replay of the committed ring records onto the checkpoint, the new tokens and the
-gated RMSNorm. A verify step (T = 6, 9) flushes when `c + q > L` and stores the
-committed state. See ops/kda_replayssm.cu.
+ring replay, the new tokens and the gated RMSNorm. See ops/kda_replayssm.cu.
 """
 
 import functools
@@ -79,7 +77,6 @@ def check_supported(
     lower_bound: float | None,
     gate_projs: tuple[LinearBase, ...],
 ) -> None:
-    """Reject at startup every configuration the kernel was not built for."""
     cache_config = vllm_config.cache_config
     query_len = 1 + vllm_config.num_speculative_tokens
     # The step's fp32 exp of the summed gates (each >= lower_bound) of up to
@@ -188,9 +185,8 @@ class StepCursors(NamedTuple):
 
 
 def step_cursors(layer, metadata: GDNAttentionMetadata) -> StepCursors:
-    """The step's verify rows and cursors, built once per step and metadata
-    and held in the forward context. The cursors are the ReplaySSM tracker's,
-    committed after acceptance by the runner."""
+    """The step's verify cursors, cached per metadata in the forward context.
+    The runner commits the tracker's cursors after acceptance."""
     held = get_forward_context().additional_kwargs.setdefault(
         "kda_replayssm_cursors", {}
     )

@@ -1,6 +1,4 @@
-// tvm-ffi entry points of the KDA ReplaySSM step: shape, dtype and layout
-// checks, then kernel_run. The rings take their own slots and a slot stride
-// (vLLM's Mamba page).
+// tvm-ffi entry points of the KDA ReplaySSM step.
 #include <tvm/ffi/tvm_ffi.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include "kda_replayssm.cuh"
@@ -209,7 +207,6 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
       << "kernel_run: " << cudaGetErrorString(err);
 }
 
-// Scratch of a step with M token rows of H heads of D channels.
 int64_t scratch_bytes_impl(int64_t M, int64_t H, int64_t D) {
   kda_replayssm::Dims dims{};
   dims.M = M, dims.H = H, dims.D = D;

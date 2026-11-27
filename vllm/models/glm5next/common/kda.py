@@ -1112,11 +1112,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g_a: torch.Tensor,
         out: torch.Tensor,
     ) -> tuple[int, torch.Tensor | None]:
-        """Runs the step's verify rows through the ReplaySSM kernel. Returns the
-        leading token rows it wrote to `out` (every row of a verify step without
-        prefills) and, in a step that mixes verify rows and prefills, their
-        output `[1, tokens, H, D]` for `spec_token_indx`.
-        """
+        """Returns the leading token rows written to `out` and, in a step that
+        mixes verify rows and prefills, their output `[1, tokens, H, D]` for
+        `spec_token_indx` instead."""
         if not metadata.num_spec_decodes:
             return 0, None
         cursors = kda_replayssm.step_cursors(self, metadata)

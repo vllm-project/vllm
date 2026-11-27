@@ -1,5 +1,5 @@
 // KDA ReplaySSM verify (T = 6, T = 9, q_n tokens per request) step for one
-// B200 rank, vLLM layouts.
+// TP rank, vLLM layouts.
 //
 // Request n owns the packed token rows b_n .. b_n + q_n - 1 (b_n =
 // query_start_loc[n], q_n = query_start_loc[n+1] - b_n) of the token args [M,
@@ -19,10 +19,6 @@
 // - T = 6 above FZ_UNITS, every T = 9: proj_kernel, then step_kernel<T, !FZ>
 //   (two CTAs per SM) launched with PDL.
 // Any other T launches an invalid configuration, so the call fails.
-// Per unit: the conv history and token rows, ring records and activations by
-// cp.async, then the checkpoint by one 64 KB bulk copy; conv + SiLU, q / k
-// norms, gates, the ring replay, the q tokens, gated RMSNorm, ring appends,
-// flush.
 //
 // Algebra per unit (S0 the checkpoint [V, K]; records j < c with cumulative log
 // decay G_j, total G_c, E = e^{G_c}; tokens t with cumulative log decay
@@ -74,7 +70,6 @@ __device__ __forceinline__ uint32_t tf(float x) {
 __device__ __forceinline__ uint32_t sa(const void* p) {
   return static_cast<uint32_t>(__cvta_generic_to_shared(p));
 }
-// Two floats as an f16x2 operand, lo in the low half (round to nearest).
 __device__ __forceinline__ uint32_t h2(float lo, float hi) {
   const __half2 v = __floats2half2_rn(lo, hi);
   return *reinterpret_cast<const uint32_t*>(&v);
@@ -86,8 +81,6 @@ __device__ __forceinline__ float4 ld4(const float* p) {
   return *reinterpret_cast<const float4*>(p);
 }
 __device__ __forceinline__ float f(uint32_t x) { return __uint_as_float(x); }
-// Request n's token rows and the batch total from query_start_loc; q clamped to
-// [0, T].
 struct Toks {
   int b, q, total;
 };
@@ -101,8 +94,6 @@ __device__ __forceinline__ Toks req_tokens(const int32_t* qsl, int n, int N,
   return t;
 }
 
-// The out rows total + n, total + n + N, ... below MO of head h are zero (16
-// threads per row).
 __device__ __forceinline__ void zero_tail(__nv_bfloat16* out, int n, int N,
                                           int h, int H, int total, int64_t MO,
                                           int tid) {
@@ -149,23 +140,20 @@ constexpr int pow2_at_least(int n) {
 }
 // Row of column r in the record-key table: rows r and r ^ 4 of a 16-row group
 // move apart by two rows of 32 bytes, so the B-fragment reads of rows {0, 1, 4,
-// 5} (one half-warp) fall on distinct banks. Not in step_kernel<6, false>:
-// there the extra addressing costs 24 bytes of stack.
+// 5} (one half-warp) fall on distinct banks. Not in step_kernel<6, false>,
+// where the extra addressing spills to the stack.
 template <bool SW>
 __device__ __forceinline__ int ks(int r) {
   return SW ? r ^ (((r >> 2) & 1) << 1) : r;
 }
-
-// ------------------------------------------------------------------------------------------------
-// projections
 
 // The low-rank projections: out[t][ch] = sum_k a[t][k] w[ch][k] with bf16
 // m16n8k16 mma (fp32 accumulate), 32 channels ch0 .. ch0 + 31 per warp. K is
 // permuted within each 32-column chunk so that one 16-byte load gives a thread
 // the B fragments of two k-steps (logical k 2tq, 2tq + 1, 2tq + 8, 2tq + 9 of
 // the first step and 16 + those of the second at physical 8tq .. 8tq + 7), and
-// one 16-byte shared load per row the matching A fragments. row stride of the
-// activation rows in shared memory (16-byte loads without conflicts)
+// one 16-byte shared load per row the matching A fragments. AS: the activation
+// row stride in shared memory, padded so the 16-byte loads do not conflict.
 constexpr int AS = D + 32;
 
 __device__ __forceinline__ void proj_load(uint4 (&b)[4][4],
@@ -204,8 +192,7 @@ __device__ __forceinline__ void proj_mma(float (&acc)[4][4],
   }
 }
 
-// The same fragments from a [rows, D] bf16 copy of the weights in shared
-// memory.
+// The same fragments from a bf16 copy of the weights in shared memory.
 __device__ __forceinline__ void proj_lds(uint4 (&b)[4][4],
                                          const __nv_bfloat16* w, int g,
                                          int tq) {
@@ -259,7 +246,7 @@ __global__ void __launch_bounds__(128)
   proj_load(
       b, (pj ? p.wt[1] : p.wt[0]) + (static_cast<int64_t>(h) * D + 32 * w) * D,
       g, tq);
-  const int nrows = min(p.M, nrows_q);  // packed rows in use
+  const int nrows = min(p.M, nrows_q);
   ptx::cp_async_wait<0>();
   if (rbase >= nrows) return;
   __syncthreads();
@@ -288,9 +275,6 @@ __global__ void __launch_bounds__(128)
   }
 }
 
-// ------------------------------------------------------------------------------------------------
-// step
-
 struct StepArgs {
   kda_replayssm::Args a;
   // [2][M][H*D] gate and output-gate logits from proj_kernel (FZ false)
@@ -313,7 +297,6 @@ template <int T>
 // Y, the token keys kt and the token-token coefficients C = kt^T Y, from the
 // token phase on
 struct TokBuf {
-  // 2T targets in n-tiles of 8: 16, 24 at T 6, 9
   static constexpr int NB = (2 * T + 7) / 8 * 8;
   float y[NB][D + 16];
   // kt_i = khat_i e^{-Gcum_i} (fp32; the m16 tile's rows past T are zero
@@ -405,10 +388,8 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
     x.b = tk.b, x.q = tk.q, x.total = tk.total;
     return x;
   };
-  // The small inputs of a live unit x (one cp.async group): token rows, conv
-  // history, ring records, the activations (FZ); token and activation rows q ..
-  // are zeroed, u rows past c are zeroed (A operand rows of the record
-  // product).
+  // Token and activation rows q .. are zeroed, and u rows past c (A operand
+  // rows of the record product).
   auto issue_small = [&](const Unit& x) {
     {
       const __nv_bfloat16* xs = a.x + x.h * a.x_stride[2];
@@ -501,8 +482,6 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
       dtb = __uint_as_float(ptx::ld_global_u32(a.dt_bias + hh * D + d));
     a_log = __uint_as_float(ptx::ld_global_u32(a.A_log + hh));
   };
-  // Projection outputs of channels c0 .. c0 + 31 of the token rows g < T into
-  // dst [T][D].
   auto store_proj = [&](float (*dst)[D], const float (&acc)[4][4], int c0,
                         bool rnd) {
 #pragma unroll
@@ -556,7 +535,6 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
   {
     const int h = cur.h, slot = cur.slot, rslot = cur.rslot, c = cur.c,
               r0 = cur.r0, b = cur.b, q = cur.q;
-    // beta logits of the tokens (second half); 0 past q
     float bt[T];
     if (tid >= D)
 #pragma unroll
@@ -570,16 +548,13 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
     issue_ck(cur);  // the checkpoint after the small inputs have landed
 
     {
-      // flush when the committed records and the new tokens overflow the
-      // window
       const bool flush = c + q > L;
       float* ckp = a.checkpoint + slot * a.checkpoint_stride[0] +
                    h * a.checkpoint_stride[1];
       const int64_t ring_base = static_cast<int64_t>(h) * R;
 
-      // conv + SiLU of channel d over the window of part p (q, k: first half;
-      // v: second half), with its new conv rows (history rows 1, 2, then the q
-      // tokens; rows q + 2 .. kept)
+      // Conv + SiLU of channel d of part p; the conv state becomes history rows
+      // 1, 2 and the q tokens, rows q + 2 .. kept.
       auto conv_part = [&](int p, const float (&wc)[4], float (&y)[T]) {
         float hf[T + 3];
 #pragma unroll
@@ -607,9 +582,8 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
             cs[(t + 2) * a.conv_state_stride[1]] =
                 __float2bfloat16_rn(hf[3 + t]);
       };
-      // conv outputs of channel d: q, k (first half), v (second half)
       float qr[T], kr[T], vr[T];
-      if (tid < D) {  // q and k; their squared norms
+      if (tid < D) {
         conv_part(0, wcr[0], qr);
         conv_part(1, wcr[1], kr);
         constexpr int PS = pow2_at_least(2 * T);
@@ -622,16 +596,12 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
         }
         const float sw = wsums(ss, lane);
         if (lane < 2 * T) s.nsq[lane / T][lane % T][w] = sw;
-        // v of value row d; the raw gate g1 = bf16(f_a f_b^T) of channels 32 (w
-        // - 4) ..; the records of column d
       } else {
         if (FZ) {
           float ga[4][4] = {};
           weights_from_smem();
           proj_mma<false>(ga, pw, &s.fa[0][0], TA, g, tq);
           store_proj(s.g1s, ga, 32 * (w - 4), true);
-          // gate and output-gate rows of this head from proj_kernel (rows q ..
-          // zero)
         } else {
           ptx::griddep_wait();
           for (int i = d; i < 2 * T * 32; i += D) {
@@ -672,8 +642,6 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
       }
       __syncthreads();
 
-      // tokens, column d: gates, Y, token keys, ring appends of k and g (tokens
-      // past q: Y rows zero)
       if (tid < D) {
         const float ea = expf(a_log), lb = a.lower_bound;
         float gk[T], gcum[T], khat[T], qh[T];
@@ -705,7 +673,7 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
         }
       } else {
 #pragma unroll
-        // in place: sigmoid(z) (FZ: z still being written) and sigmoid(beta)
+        // FZ: zs is still being written; the norm takes its sigmoid.
         for (int t = 0; t < T; ++t) {
           if (!FZ) s.zs[t][d] = sigm(s.zs[t][d]);
           bt[t] = __fdividef(1.f, 1.f + fexp(-bt[t]));
@@ -715,8 +683,6 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
             *reinterpret_cast<float4*>(
                 &s.B.tok.y[M + i / (S::YS / 4)][4 * (i % (S::YS / 4))]) =
                 make_float4(0.f, 0.f, 0.f, 0.f);
-        // output-gate logits of channels 32 (w - 4) .. from the bulk-copied g_b
-        // (needed only by the norm)
         if (FZ) {
           proj_lds(pw, wts + 32 * (w - 4) * D, g, tq);
           float za[4][4] = {};
@@ -727,11 +693,7 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
       ptx::cp_async_wait<0>();  // the records' u
       __syncthreads();
 
-      // The warp's checkpoint rows into registers: rows 16w + g (+8), columns
-      // 16m + 4tq .. +3. Lanes of odd rows load the two groups of a pair in the
-      // other order, so that rows g and g + 1 (one quarter-warp) read different
-      // banks. while the checkpoint lands, warp w: the n-tile w of C over all
-      // columns (rows g, g + 8 of the kt tile; past T zero)
+      // While the checkpoint lands, warp w computes n-tile w of C.
       if (w < NT8) {
         float cf[2][4] = {};
 #pragma unroll
@@ -762,6 +724,10 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
       const int v0 = 16 * w + g, v1 = v0 + 8;
       uint4 st[2][8];
       ptx::mbarrier_wait_parity(sa(&s.bar), 0);
+      // The warp's checkpoint rows into registers: rows 16w + g (+8), columns
+      // 16m + 4tq .. +3. Lanes of odd rows load the two groups of a pair in the
+      // other order, so that rows g and g + 1 (one quarter-warp) read different
+      // banks.
       {
         const bool odd = g & 1;
 #pragma unroll
@@ -873,8 +839,6 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
       }
 
       float o[T];  // recurrent output of value row d (second half)
-      // value row d: the delta rule over the tokens, ring append of u, the RMS
-      // sums
       if (tid >= D) {
         float qv[M];
 #pragma unroll
@@ -909,7 +873,6 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
       }
       __syncthreads();
 
-      // gated RMSNorm of value row d, the q token rows b .. b + q - 1
       if (tid >= D) {
 #pragma unroll
         for (int t = 0; t < T; ++t) {
@@ -933,7 +896,7 @@ __global__ void __launch_bounds__(NTHR, FZ ? 1 : 2)
   }
 }
 
-// B200 (sm_100): 227 KB of dynamic shared memory per block
+// SM90 and SM100: 227 KB of dynamic shared memory per block
 constexpr size_t SMEM_MAX = 232448;
 
 template <int T, bool FZ>
@@ -959,9 +922,8 @@ void launch_step(const StepArgs& sa_, const kda_replayssm::Ctx& ctx) {
                    sa_);
 }
 
-// Launched with 2048 threads per block, an invalid configuration: kernel_run's
-// way to fail a shape it does not support (kda_replayssm_binding.cu checks
-// cudaGetLastError after kernel_run).
+// Launched with 2048 threads per block, an invalid configuration, so that the
+// binding's cudaGetLastError check fails an unsupported shape.
 __global__ void unsupported_kernel() {}
 
 }  // namespace
@@ -975,7 +937,6 @@ void kernel_workspace(const Dims& d, size_t* scratch_bytes) {
 void kernel_run(const Args& x, const Ctx& ctx) {
   const Dims& d = x.dims;
   if ((d.T != 6 && d.T != 9) || d.D != D || d.N < 1 || d.N > 65535 || d.H < 1) {
-    // fails loudly: cudaErrorInvalidConfiguration
     unsupported_kernel<<<1, 2048, 0, ctx.stream>>>();
     return;
   }
@@ -986,9 +947,6 @@ void kernel_run(const Args& x, const Ctx& ctx) {
   const bool ks_route = d.H == 16 && d.T == 6;
   const bool split = ks_route && M <= 16;
   const bool split_gate = ks_route && M >= 32 && M <= 64;
-  // The projections in the step CTAs (FZ) for T = 6 up to FZ_UNITS units (the
-  // head's weights by bulk copy there, one CTA per SM); otherwise in their own
-  // launch (weights read once per head and PR tokens).
   const bool fz = d.N * d.H <= FZ_UNITS && d.T == 6;
   float* gz = static_cast<float*>(ctx.scratch);
   if (!fz) {
@@ -1008,7 +966,7 @@ void kernel_run(const Args& x, const Ctx& ctx) {
       launch_step<6, true>(sa_, ctx);
     else
       launch_step<6, false>(sa_, ctx);
-  } else {  // T = 9
+  } else {
     launch_step<9, false>(sa_, ctx);
   }
 }
