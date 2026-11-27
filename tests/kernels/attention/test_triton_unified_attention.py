@@ -159,6 +159,8 @@ def _spy_reduce_segments(monkeypatch):
             {"batch_invariant": True, "max_seqlen_k": 16 * BI_SPLIT_KV_TOKENS + 1},
             False,
         ),
+        # Sliding-window layers keep the single-pass 2D kernel.
+        (1, {"batch_invariant": True, "window_size": (1023, 0)}, False),
         (5, {"mm_prefix": True}, False),
         # BLOCK_Q is 2 for 8 query heads per KV head: 4 * ceil(4 / 2) <= 8.
         (4, {"num_seqs": 4}, True),
@@ -182,6 +184,20 @@ def test_splitk_admission_preserves_decode_and_bounds_verification(
         )
     scratch = _scratch(options.pop("scratch_rows", num_seqs * query_len))
     assert _uses_splitk(monkeypatch, query_len, scratch, **options) is expected
+
+
+@pytest.mark.parametrize("window_size", [(-1, -1), (1023, 0)])
+def test_batch_invariant_split_kv_only_for_full_attention(monkeypatch, window_size):
+    """Under batch invariance only full-attention layers split the KV into fixed
+    segments; a sliding-window layer launches main's single-pass 2D kernel."""
+    monkeypatch.setattr(attention, "is_batch_invariant", True)
+    split = window_size == (-1, -1) and current_platform.is_cuda()
+    kernel, reduce = _launch_kwargs(
+        monkeypatch, 1, _scratch(2), window_size=window_size
+    )
+    assert kernel["IS_3D"] is split
+    assert (kernel["BI_SEGMENT_TILES"] > 0) is split
+    assert (reduce is not None) is split
 
 
 @pytest.mark.parametrize(
@@ -1536,6 +1552,7 @@ BI_SPLIT_KV_CASES = [
     ((32, 8), 128, 16, 1000, True, None),
     ((8, 1), 128, 64, None, True, 50.0),
     ((8, 1), 256, 16, 4096, False, 50.0),
+    ((16, 8), 256, 16, None, False, None),
     ((12, 4), 96, 32, None, False, None),
 ]
 BI_CASE_ARGS = "num_heads,head_size,block_size,sliding_window,use_sinks,soft_cap"

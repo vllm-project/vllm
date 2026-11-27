@@ -1338,9 +1338,11 @@ def unified_attention(
 
     # Batch invariance (CUDA): both kernels reduce a query row over the same
     # fixed KV segments with the same tile size, so its bits do not depend on
-    # the 2D/3D choice, the batch, or the query length. Elsewhere it runs 2D.
+    # the 2D/3D choice, the batch, or the query length. Elsewhere, and for
+    # sliding-window layers (a window spans few of the segments, so a split
+    # would mostly launch empty programs), it runs the single-pass 2D kernel.
     bi_segment_tiles = 0
-    if is_batch_invariant and current_platform.is_cuda():
+    if is_batch_invariant and current_platform.is_cuda() and sliding_window_val == 0:
         # 64-token tiles keep batch-invariant prefill at main's speed on A100;
         # 16-bit KV up to head size 128 fits shared memory.
         if head_size_padded <= 128 and q.element_size() == 2:
