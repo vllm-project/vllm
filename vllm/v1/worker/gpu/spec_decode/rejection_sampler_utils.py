@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
@@ -14,6 +16,11 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import (
     draft_logits_row,
 )
 from vllm.v1.worker.gpu.spec_decode.fly import compute_fly_entropy
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_graph import (
+        RejectionSamplerGraph,
+    )
 
 
 @triton.jit
@@ -1158,6 +1165,13 @@ def rejection_sample(
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
     skip_masked_vocab_blocks: bool = False,
+    # Optional graph manager: when provided and the step is eligible, the
+    # rejection-sampling kernels are replayed from a captured graph instead
+    # of being dispatched individually.
+    graph: "RejectionSamplerGraph | None" = None,
+    # Optional output buffers for the graph path; allocated when None.
+    sampled: torch.Tensor | None = None,
+    num_sampled: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     draft_logits = None
@@ -1168,6 +1182,40 @@ def rejection_sample(
     assert draft_logits is None or (
         draft_logits.ndim == 3 and draft_logits.stride(-1) == 1
     )
+    if (
+        graph is not None
+        and not use_fp64
+        and not use_block_verification
+        and synthetic_conditional_rates is None
+        and contexts is None
+        and watermarking is None
+        and watermarking_skip_mask is None
+        and watermark_key is None
+        and fly_window_size == 0
+        and not skip_masked_vocab_blocks
+        and graph.can_use(
+            target_logits,
+            draft_logits_cache,
+            cu_num_logits,
+            temperature,
+            seed,
+            num_speculative_steps,
+        )
+    ):
+        # Only the plain probabilistic path reaches the graph
+        return graph.run(
+            target_logits,
+            draft_logits_cache,
+            draft_sampled,
+            cu_num_logits,
+            pos,
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            seed,
+            num_speculative_steps,
+        )
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
 
@@ -1348,10 +1396,12 @@ def rejection_sample(
 
     # Sample up until the first rejected/bonus token, and store
     # the step.
-    sampled = draft_sampled.new_empty(
-        num_reqs, num_speculative_steps + 1, dtype=torch.int64
-    )
-    num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
+    if sampled is None:
+        sampled = draft_sampled.new_empty(
+            num_reqs, num_speculative_steps + 1, dtype=torch.int64
+        )
+    if num_sampled is None:
+        num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     _rejection_kernel[(num_reqs,)](
