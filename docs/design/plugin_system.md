@@ -106,6 +106,8 @@ Every plugin has three parts:
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
+    Optionally, implement `get_moe_backends` to return the platform's MoE backends as a dict from name to `FusedMoEExperts` subclass. Names are lowercase with underscores and must not reuse an in-tree backend's; each is accepted by `--moe-backend`. With `--moe-backend auto`, the first backend in the dict whose `is_supported_config` accepts the layer is used ahead of the in-tree ones; if all are rejected, a warning lists the reasons. Override `convert_fp8_weights` on the class to change the weight layout. Currently only FP8 MoE layers use these backends.
+
     For out-of-tree EPLB, implement `supports_eplb()` and `check_and_update_eplb_config(parallel_config)` to select and validate policy and communicator names. An unset policy is `None` until this hook selects the platform default; preserve explicitly configured names. When EPLB is enabled, this hook selects the default communicator and validates names and configuration combinations; `EPLBConfig` enforces field types and numeric bounds. Built-in names retain their existing defaults and async communicator restrictions; a platform override owns validation of its custom names and combinations.
 
     To use an `EplbState` subclass, construct it in the plugin's worker or controller. The platform configuration hooks do not select the state class; the upstream `EPLBController` constructs the base `EplbState`.
