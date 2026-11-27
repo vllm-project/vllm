@@ -2956,7 +2956,8 @@ def test_worker_is_hma_required_from_kv_cache_groups(
     assert store_worker._is_hma_required is expected_is_hma_required
 
 
-def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("compressed", [False, True])
+def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch, compressed):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -2972,11 +2973,14 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
                 "protocol": "rdma",
                 "device_name": "mlx5_0",
                 "master_server_address": "10.0.0.7:50051",
-                "enable_offload": True,
+                "enable_offload": not compressed,
             },
         ),
     )
-    w = worker.MooncakeStoreWorker(_make_vllm_config(), _make_kv_cache_config())
+    config = _make_vllm_config(
+        extra_config={"compression": {"enable-compression-pipeline": compressed}},
+    )
+    w = worker.MooncakeStoreWorker(config, _make_kv_cache_config())
 
     assert not hasattr(w, "_isolate_offload_resources")
     assert store.setup.call_args.args == (
@@ -2989,6 +2993,12 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
         "10.0.0.7:50051",
     )
     assert w.coord.retention_interval == 0
+    if compressed:
+        assert isinstance(w.store, worker.CompressedStore)
+        assert w.store.store is store
+    else:
+        assert w.store is store
+    assert w.store_service.store is w.store
 
 
 def _p2p_store_config(**overrides: object) -> dict[str, object]:

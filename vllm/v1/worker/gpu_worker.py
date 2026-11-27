@@ -48,6 +48,7 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
+    KVConnectorWorkerMemoryPlan,
 )
 from vllm.distributed.parallel_state import (
     Handle,
@@ -759,6 +760,7 @@ class Worker(WorkerBase):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
+            self._build_kv_connector_worker_memory_plan()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -846,6 +848,17 @@ class Worker(WorkerBase):
             - cudagraph_memory_estimate
         )
 
+        memory_plan = self._build_kv_connector_worker_memory_plan()
+        connector_reserved_bytes = memory_plan.reserved_bytes
+        self.available_kv_cache_memory_bytes -= connector_reserved_bytes
+        if connector_reserved_bytes:
+            logger.info(
+                "Reserved %s GiB for the KV connector; %s GiB remains available "
+                "for KV cache.",
+                format_gib(connector_reserved_bytes),
+                format_gib(self.available_kv_cache_memory_bytes),
+            )
+
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
             "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",
@@ -906,6 +919,36 @@ class Worker(WorkerBase):
             self.model_config.multimodal_config,
             getattr(self.parallel_config, "_api_process_count", 1),
         )
+
+    def _build_kv_connector_worker_memory_plan(
+        self,
+    ) -> KVConnectorWorkerMemoryPlan:
+        existing = getattr(self, "_kv_connector_worker_memory_plan", None)
+        if existing is not None:
+            return existing
+
+        plan = KVConnectorWorkerMemoryPlan()
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_transfer_instance
+        ):
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            plan = connector_cls.build_worker_memory_plan(
+                self.vllm_config, self.get_kv_cache_layer_configs()
+            )
+        self._kv_connector_worker_memory_plan = plan
+        return plan
+
+    def _initialize_kv_connector_worker_memory(self) -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().initialize_worker_memory(
+                self._build_kv_connector_worker_memory_plan()
+            )
 
     def get_kv_connector_handshake_metadata(
         self,
@@ -1022,6 +1065,9 @@ class Worker(WorkerBase):
                     kv_cache_config, kv_cache_allocation_context=allocation_context
                 )
 
+        if not self.cache_config.enable_extensible_kv_cache:
+            self._initialize_kv_connector_worker_memory()
+
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.
@@ -1062,6 +1108,7 @@ class Worker(WorkerBase):
     def extend_kv_cache(self, num_blocks: int) -> None:
         """Commit the final size of an extensible KV cache."""
         extend_kv_cache(self.model_runner, self._kv_cache_config, num_blocks)
+        self._initialize_kv_connector_worker_memory()
         self.cache_config.num_gpu_blocks = num_blocks
         if getattr(self.model_runner, "adaptive_verification", None) is not None:
             # Capture profiled step costs with only a block or two committed,
@@ -1298,6 +1345,9 @@ class Worker(WorkerBase):
                     self.device,
                     init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
+                    connector_reserved_bytes=(
+                        self._build_kv_connector_worker_memory_plan().reserved_bytes
+                    ),
                 )
             )
 

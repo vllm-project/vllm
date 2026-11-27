@@ -322,6 +322,37 @@ Set `tenant_id` in the Mooncake JSON config when different vLLM deployments shou
 
 Strict isolation requires a Mooncake master started with `--enable_multi_tenants=true` and a tenant quota policy that registers each tenant. Non-default `tenant_id` also requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts the `tenant_id` parameter. In `standalone-store` mode, start the external `mooncake_client` with the matching tenant id because that process owns the real store client.
 
+## KVServe compression
+
+Install the [pinned KVServe API v2 runtime](mooncake_connector_usage.md#optional-kv-compression).
+Select the pipeline under
+`kv_connector_extra_config.compression` before starting the worker:
+
+```json
+{
+  "kv_connector": "MooncakeStoreConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "compression": {
+      "enable-compression-pipeline": true,
+      "pipeline": ["codec"]
+    }
+  }
+}
+```
+
+The compressed Store path operates on rank-local, whole-block full-attention
+objects. Each key uses a one-block compression window. The connector reserves
+workspace before KV-cache sizing. The format profile
+namespaces the stored keys and is checked again during restoration. A prefix
+is available when both K and V payloads and their manifests are present.
+This example uses lossless ANS. Adding a quantizer can change model outputs.
+Use native Store for disk staging, selective lease, and other cache layouts.
+
+With `MultiConnector`, a parent `compression` value supplies the default for
+both Mooncake children. The P/D connector keeps its transport and session
+protocol. Each child reserves the workspace needed by its own I/O.
+
 ## Environment Variables
 
 | Variable | Description | Default |

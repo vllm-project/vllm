@@ -11,14 +11,17 @@ and consumer instances read/write KV to/from the store independently,
 enabling prefix caching via hash-based deduplication.
 """
 
+import copy
 import os
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_events import (
@@ -31,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    KVConnectorWorkerMemoryPlan,
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
@@ -40,6 +44,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.adapter import (
+    build_memory_plan,
+)
 from vllm.distributed.mooncake_store import MooncakeStoreConfig
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -47,6 +54,7 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -131,6 +139,55 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
     @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        assert vllm_config.kv_transfer_config is not None
+        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+        if (extra.get("compression") or {}).get("enable-compression-pipeline"):
+            return "LBHNC"
+        return None
+
+    @classmethod
+    def build_worker_memory_plan(cls, vllm_config, kv_cache_specs):
+        assert vllm_config.kv_transfer_config is not None
+        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+        compression = extra.get("compression") or {}
+        if not compression.get("enable-compression-pipeline", False):
+            return KVConnectorWorkerMemoryPlan()
+        if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
+            raise ValueError(
+                "Compressed Mooncake Store does not support selective lease"
+            )
+        if any(
+            layer.manager_cls is not FullAttentionManager
+            for layer in kv_cache_specs.values()
+        ):
+            raise ValueError("Compressed Mooncake Store requires full-attention caches")
+        # A Store key identifies one block. The runtime's fixed window must
+        # match that block even when MultiConnector supplies a larger P/D chunk.
+        store_config = copy.copy(vllm_config)
+        store_config.kv_transfer_config = replace(
+            vllm_config.kv_transfer_config,
+            kv_connector_extra_config={
+                **extra,
+                "compression": {**compression, "logical_blocks_per_chunk": 1},
+            },
+        )
+        plan = build_memory_plan(store_config, kv_cache_specs)
+        if plan is None:
+            raise ValueError("Mooncake Store compression needs a compression plan")
+        if plan.config.is_raw_aggregate:
+            raise ValueError(
+                "Mooncake Store compression does not support raw_aggregate"
+            )
+        return KVConnectorWorkerMemoryPlan(plan.reserved_bytes, plan)
+
+    def initialize_worker_memory(self, memory_plan) -> None:
+        if self.connector_worker is not None:
+            self.connector_worker.initialize_compression(
+                None if memory_plan is None else memory_plan.connector_data
+            )
+
+    @classmethod
     def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
         # Registers the device KV cache with an RDMA engine.
         return KVCacheAccess.REGISTERS
@@ -138,6 +195,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         extra_config = kv_transfer_config.kv_connector_extra_config
+        if (extra_config.get("compression") or {}).get(
+            "enable-compression-pipeline", False
+        ):
+            return False
         if extra_config.get("reuse_pd_transfer_engine") is True:
             # The store holds no device regions on a borrowed engine; whether the
             # engine itself can sleep is validated by MooncakeConnector.

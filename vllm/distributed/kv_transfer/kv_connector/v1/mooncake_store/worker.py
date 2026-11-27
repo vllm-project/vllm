@@ -42,6 +42,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.adapter import (
+    create_worker_runtime,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
     SharedMooncakeTransferEngine,
     get_shared_transfer_engine,
@@ -107,6 +110,7 @@ from vllm.v1.kv_cache_interface import (
     group_kernel_blocks,
 )
 
+from .compression import CompressedStore
 from .metrics import MooncakeStoreConnectorStats
 
 logger = init_logger(__name__)
@@ -436,6 +440,8 @@ def _log_mooncake_load_tier_summary(
 
 class KVTransferThread(threading.Thread):
     """Base class for async KV cache transfer threads."""
+
+    compression: CompressedStore | None = None
 
     def __init__(
         self,
@@ -1047,6 +1053,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             addrs: list[list[int]] = []
             sizes: list[list[int]] = []
+            store_blocks: list[int] = []
             chunks_per_group: list[list[tuple[int, int]]] = [
                 [] for _ in self.token_databases
             ]
@@ -1066,13 +1073,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if not chunks:
                     continue
                 db = self.token_databases[g_idx]
-                group_addrs, group_sizes, _ = db.store_layout.prepare_values(
+                group_addrs, group_sizes, group_blocks = db.store_layout.prepare_values(
                     chunks,
                     block_ids_per_group[g_idx],
                     shards_per_group[g_idx],
                 )
                 addrs.extend(group_addrs)
                 sizes.extend(group_sizes)
+                store_blocks.extend(group_blocks)
 
             if current_event is not None:
                 current_event.synchronize()
@@ -1086,12 +1094,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
             batch_bytes = _sum_batch_bytes(sizes)
             put_start = time.perf_counter()
             try:
-                res = self.store_service.put(
-                    keys,
-                    addrs,
-                    sizes,
-                    self.replicate_config,
-                )
+                if self.compression is None:
+                    res = self.store_service.put(
+                        keys,
+                        addrs,
+                        sizes,
+                        self.replicate_config,
+                    )
+                else:
+                    batch_bytes = 0
+                    res, batch_bytes = self.compression.put(
+                        keys, store_blocks, self.replicate_config
+                    )
             except Exception as e:
                 self._record_operation(
                     "save_put",
@@ -1461,7 +1475,11 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
                 # Reset so the recorded RPC duration excludes tier lookup.
                 load_get_start = time.perf_counter()
-                res = self.store_service.get(batch_keys, batch_addrs, batch_sizes)
+                if self.compression is None:
+                    res = self.store_service.get(batch_keys, batch_addrs, batch_sizes)
+                else:
+                    batch_bytes = 0
+                    res, batch_bytes = self.compression.get(batch_keys, batch_block_ids)
                 if tiers_by_key is not None:
                     _log_mooncake_load_tier_summary(
                         req_id, batch_keys, res, tiers_by_key
@@ -1535,6 +1553,7 @@ class MooncakeStoreWorker:
 
     # Bare workers built with __new__ in tests read this default.
     _reuse_pd_transfer_engine: bool = False
+    _compression: CompressedStore | None = None
 
     @staticmethod
     def _create_mem_pool(
@@ -1781,6 +1800,22 @@ class MooncakeStoreWorker:
             store_namespace=store_namespace,
         )
         self.token_dbs = self._build_token_databases(metadata, store_group_plans)
+        compression = extra_config.get("compression") or {}
+        if compression.get("enable-compression-pipeline", False):
+            if (
+                len(self.token_dbs) != 1
+                or not isinstance(self.token_dbs[0].store_layout, RankLocalStoreLayout)
+                or self.token_dbs[0].chunk_size != self.block_size
+                or self.enable_group_semantics
+                or self.disk_offload_buffer_budget_bytes is not None
+            ):
+                raise ValueError(
+                    "KVServe Store requires rank-local, whole-block attention "
+                    "objects without disk staging or group replication"
+                )
+            self._compression = CompressedStore(self.store, self.block_size)
+            self.store = self._compression
+            self.store_service.store = self._compression
         self._init_lookup_key_prefixes()
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
             self._selective_lease = SelectiveLookupLease(
@@ -2290,6 +2325,8 @@ class MooncakeStoreWorker:
             num_device_segments,
         )
 
+        if self._compression is not None:
+            self._compression_caches = kv_caches
         # Start transfer threads
         if self.can_put:
             ready_event_sending = threading.Event()
@@ -2311,6 +2348,7 @@ class MooncakeStoreWorker:
                     group.prefix_cacheable for group in self._kv_cache_groups
                 ],
             )
+            self.kv_send_thread.compression = self._compression
             self.kv_send_thread.start()
 
         self.kv_recv_threads = []
@@ -2331,6 +2369,7 @@ class MooncakeStoreWorker:
                 ],
                 is_hma_required=self._is_hma_required,
             )
+            recv_thread.compression = self._compression
             recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
             recv_thread.start()
             self.kv_recv_threads.append(recv_thread)
@@ -2340,6 +2379,21 @@ class MooncakeStoreWorker:
         logger.info(
             "Started %d Mooncake KV-load receive thread(s)", self.num_recv_threads
         )
+
+    def initialize_compression(self, plan: Any) -> None:
+        if self._compression is None:
+            return
+        if plan is None:
+            raise RuntimeError("Store compression is missing its memory plan")
+        caches = self._compression_caches
+        layout = self._kv_cache_config.kv_cache_layout or "LBHNC"
+        runtime = create_worker_runtime(
+            plan, layout, plan.blocks_per_logical, next(iter(caches.values())).device
+        )
+        self._compression.bind(
+            runtime, caches, self._kv_cache_config.transfer_group_index_by_layer
+        )
+        del self._compression_caches
 
     def unregister_kv_caches(self) -> None:
         """Unregister device KV buffers after the engine has drained transfers."""

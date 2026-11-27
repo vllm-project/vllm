@@ -53,6 +53,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -95,6 +96,28 @@ def test_store_tp_does_not_override_backend_kv_cache_layout(extra_config):
         )
         is None
     )
+
+
+def test_compressed_store_rejects_mixed_cache_before_backend_planning():
+    config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "compression": {"enable-compression-pipeline": True}
+        },
+    )
+    layers = {
+        "attn": FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=16, num_kv_heads=8, head_size=64, dtype=torch.bfloat16
+            )
+        ),
+        "mamba": mamba_layer(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
+    }
+    with pytest.raises(ValueError, match="requires full-attention caches"):
+        mooncake_store_connector.MooncakeStoreConnector.build_worker_memory_plan(
+            config, layers
+        )
 
 
 def _make_kv_cache_config() -> KVCacheConfig:
