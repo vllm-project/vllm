@@ -748,6 +748,7 @@ def _cadenced_dp_engine_core(
     core.dp_group = object()
     core.vllm_config = MagicMock(parallel_config=ParallelConfig())
     core.dp_sync_interval = dp_sync_interval
+    core.prefill_schedule_interval = 1
     core.step_counter = 0
     core.pending_pause = False
     core.ignore_start_dp_wave = False
@@ -790,6 +791,43 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     assert synced == [1]
     assert core.ignore_start_dp_wave
     assert not core.pending_pause
+
+
+@pytest.mark.parametrize("interval", [1, 4])
+@pytest.mark.parametrize("bound_rank", [None, 2])
+def test_dp_prefill_release_is_rank_aligned(monkeypatch, interval, bound_rank):
+    """Ranks in lockstep throttle prefills together: between cadence steps all
+    of them release if any rank was capacity-bound, and otherwise throttle as
+    without DP. Interval 1 adds no collective."""
+    ranks = []
+    for rank in range(4):
+        core, _ = _cadenced_dp_engine_core(monkeypatch, [])
+        core.dp_group = rank
+        core.prefill_schedule_interval = interval
+        core.dp_prefill_capacity_bound = False
+        core.scheduler = MagicMock(prefill_capacity_bound=False)
+        ranks.append(core)
+    collectives: list[int] = []
+
+    def any_dp_rank(self, dp_group, flag):
+        assert flag == ranks[dp_group].scheduler.prefill_capacity_bound
+        collectives.append(dp_group)
+        return any(r.scheduler.prefill_capacity_bound for r in ranks)
+
+    monkeypatch.setattr(ParallelConfig, "any_dp_rank", any_dp_rank)
+    monkeypatch.setattr(ParallelConfig, "sync_dp_state", lambda *a, **k: (True, False))
+    any_bound = False
+    for step in range(12):
+        throttled = {DPEngineCoreProc._should_throttle_prefills(r) for r in ranks}
+        off_cadence = interval > 1 and step % interval != 0
+        assert throttled == {off_cadence and not any_bound}
+        # schedule() sets each rank's flag; the end-of-step sync combines them.
+        any_bound = bound_rank is not None and step % 3 == 1
+        for rank, core in enumerate(ranks):
+            core.scheduler.prefill_capacity_bound = any_bound and rank == bound_rank
+        for core in ranks:
+            assert DPEngineCoreProc._has_global_unfinished_reqs(core, True)
+    assert len(collectives) == (12 * 4 if interval > 1 else 0)
 
 
 @pytest.mark.parametrize(

@@ -1112,6 +1112,12 @@ class ParallelConfig:
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
         return has_unfinished_global, pause_count == dp_size
 
+    def any_dp_rank(self, dp_group: ProcessGroup, flag: bool) -> bool:
+        """Whether `flag` is set on any rank of the DP group."""
+        tensor = torch.tensor([int(flag)], dtype=torch.int32, device="cpu")
+        cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
+        return tensor.item() > 0
+
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:
         if kv_cache_memory == -1:

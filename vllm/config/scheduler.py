@@ -247,7 +247,9 @@ class SchedulerConfig:
 
     A deferred step carries no prefill at all, including chunks of an
     already-admitted prompt, so a long prompt can take up to N times as many
-    steps to finish prefilling."""
+    steps to finish prefilling. Deferral stops while the last step that
+    admitted prefill left requests waiting; data-parallel ranks that step in
+    lockstep (MoE models) all stop deferring when any one does."""
 
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting

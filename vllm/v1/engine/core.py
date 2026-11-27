@@ -2659,6 +2659,8 @@ class DPEngineCoreProc(EngineCoreProc):
         # finished with DP peers every N steps.
         self.step_counter = 0
         self.current_wave = 0
+        # Whether any DP rank is prefill capacity-bound, synced every step.
+        self.dp_prefill_capacity_bound = False
 
         # Two-phase pause protocol state. When pending_pause is True, the
         # engine keeps stepping (dummy batches) while waiting for all DP
@@ -2823,9 +2825,12 @@ class DPEngineCoreProc(EngineCoreProc):
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
+        # Ranks step in lockstep, so if any rank is capacity-bound (and so
+        # prefills anyway), all ranks prefill.
         return (
             self.prefill_schedule_interval > 1
             and self.step_counter % self.prefill_schedule_interval != 0
+            and not self.dp_prefill_capacity_bound
         )
 
     @fault_tolerant_wrapper
@@ -2921,6 +2926,13 @@ class DPEngineCoreProc(EngineCoreProc):
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
+        if self.prefill_schedule_interval > 1:
+            # Every rank reaches this once per step, so the collective is aligned.
+            self.dp_prefill_capacity_bound = (
+                self.vllm_config.parallel_config.any_dp_rank(
+                    self.dp_group, self.scheduler.prefill_capacity_bound
+                )
+            )
         if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
             return True
 
