@@ -960,6 +960,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
         # Triton plans each decode step in one layer per cache group.
         self._plans_replayssm_decode = True
+        # The Triton spec decode kernel can store one state per step instead of
+        # one per draft token, deferring the rest to the next step. This needs
+        # an FP32 state, for exactness, and no prefix caching, which reads the
+        # per-token states.
+        self.defer_gdn_spec_state = (
+            self.gdn_decode_kernel == "triton"
+            and self.num_spec > 0
+            and not self.cache_config.enable_prefix_caching
+            and self.get_state_dtype()[1] == torch.float32
+        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -2217,6 +2227,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
                     beta_scale=self.beta_scale,
+                    defer_spec_state=self.defer_gdn_spec_state,
                 )
             )
         else:
