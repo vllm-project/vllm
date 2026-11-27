@@ -16,6 +16,8 @@ members = [
     "src/text",
     "src/tokenizer",
     "src/tracing",
+    "src/turn-detection",
+    "src/turn-detection/python",
 ]
 resolver = "3"
 
@@ -64,7 +66,9 @@ indicatif = "0.18.4"
 itertools = "0.14.0"
 json5 = "1.3.8"
 libc = "0.2.177"
+libm = "0.2.16"
 llm-multimodal = { git = "https://github.com/smg-project/smg", rev = "f23bf087be275375580718c57067d5ad5e66fc49", default-features = false }
+matrixmultiply = "0.3.11"
 memmap2 = "0.9"
 mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
@@ -83,9 +87,11 @@ prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
 prost-types = "0.14.3"
 protox = "0.9.1"
+pyo3 = "0.30.1"
 rand = "0.9.3"
 rand_distr = "0.5.1"
 rayon = "1.11.0"
+realfft = "3.5.1"
 reasoning-parser = "1.2.2"
 regex = "1.12.3"
 reqwest = { version = "0.12.8", default-features = false, features = ["native-tls"] }
@@ -159,6 +165,7 @@ vllm-shm-object-storage = { path = "src/shm-object-storage" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }
+vllm-turn-detection = { path = "src/turn-detection" }
 winnow = { version = "1.0.2", features = ["simd"] }
 xgrammar-structural-tag = "0.5.0"
 zeromq = { git = "https://github.com/zeromq/zmq.rs", rev = "67dcba97559ebe8e8206dab753710d8b9cb07591", default-features = false, features = [
@@ -178,12 +185,17 @@ pcre2 = { git = "https://github.com/vllm-project/rust-pcre2", rev = "bb2f377c9f9
 [profile.dev]
 panic = "abort"
 
-# Speed up cold tokenizer construction in tests.
+# Speed up cold tokenizer construction in tests, and keep turn detection usable
+# in debug builds of the Python extension.
 [profile.dev.package]
 fastokens = { opt-level = 3 }
+matrixmultiply = { opt-level = 3 }
+realfft = { opt-level = 3 }
 regex-automata = { opt-level = 3 }
+rustfft = { opt-level = 3 }
 serde_json = { opt-level = 3 }
 tokenizers = { opt-level = 3 }
+vllm-turn-detection = { opt-level = 3 }
 
 [profile.release]
 lto = "thin"

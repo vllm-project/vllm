@@ -227,6 +227,12 @@ steps:
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
+  - rust/src/turn-detection
+  - rust/Cargo.toml
+  - rust/Cargo.lock
+  - rust-toolchain.toml
+  - tools/build_rust.py
+  - tools/build_rust.sh
   - tests/entrypoints/speech_to_text
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn

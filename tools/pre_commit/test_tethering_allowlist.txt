@@ -137,7 +137,6 @@ tests/plugins_tests/bitsandbytes/test_bitsandbytes.py  # CI jobs disabled pendin
 tests/plugins_tests/bitsandbytes/test_transformers.py  # CI jobs disabled pending locked BitsAndBytes plugin installation
 tests/plugins_tests/gguf/test_gguf_plugin_generate.py  # CI jobs disabled pending locked GGUF plugin installation
 tests/plugins_tests/gguf/test_gguf_plugin_multimodal.py  # CI jobs disabled pending locked GGUF plugin installation
-tests/standalone_tests/test_precompiled_wheel.py  # CI jobs disabled pending locked cmake installation
 tests/test_attention_backend_registry.py  # CI jobs disabled pending locked cmake installation
 tests/test_audio_media_size_precheck.py  # CI jobs disabled pending locked cmake installation
 tests/test_cmake_utils.py  # CI jobs disabled pending locked cmake installation
