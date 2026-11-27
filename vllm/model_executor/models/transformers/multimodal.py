@@ -1552,7 +1552,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             # patch counts we split by otherwise aren't (LlavaOnevision's anyres)
             split_sizes = getattr(features, "split_sizes", None)
             if split_sizes is not None:
-                split_sizes = torch.as_tensor(split_sizes).tolist()
+                split_sizes = split_sizes.tolist()
         embeddings = features.pooler_output
         # Carried alongside the embeddings so the encoder cache keeps them together
         deepstack = getattr(features, "deepstack_features", None)
