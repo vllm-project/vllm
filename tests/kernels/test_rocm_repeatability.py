@@ -43,13 +43,16 @@ pytestmark = pytest.mark.skipif(
 N_CALLS = 8
 
 # Tracking for the AITER kernels that are not repeatable, as measured on gfx950.
+TRACKING = "https://github.com/vllm-project/vllm/issues/70272"
 AITER_A16W16_SPLIT_K = (
-    "https://github.com/ROCm/aiter/pull/7053, https://github.com/ROCm/aiter/issues/8349"
+    f"{TRACKING}, https://github.com/ROCm/aiter/pull/7053, "
+    "https://github.com/ROCm/aiter/issues/8349"
 )
 AITER_A8W8_BLOCKSCALE_SPLIT_K = (
-    "https://github.com/ROCm/aiter/pull/8541, https://github.com/ROCm/aiter/pull/8609"
+    f"{TRACKING}, https://github.com/ROCm/aiter/pull/8541, "
+    "https://github.com/ROCm/aiter/pull/8609"
 )
-AITER_FUSED_MOE = "AITER_MOE_TRACKING_URL"
+AITER_FUSED_MOE = f"{TRACKING}, https://github.com/ROCm/aiter/issues/8797"
 
 
 @pytest.fixture(autouse=True)

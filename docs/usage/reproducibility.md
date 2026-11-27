@@ -28,7 +28,7 @@ Example: [examples/rl/batch_invariance/reproducibility_offline.py](../../example
     [#8349](https://github.com/ROCm/aiter/issues/8349),
     [#8541](https://github.com/ROCm/aiter/pull/8541),
     [#8609](https://github.com/ROCm/aiter/pull/8609))
-    and fused MoE with three or more experts per token (AITER_MOE_TRACKING_URL).
+    and fused MoE with three or more experts per token ([#8797](https://github.com/ROCm/aiter/issues/8797)).
     Set `VLLM_ROCM_USE_AITER_LINEAR=0` to keep linear layers repeatable, or `VLLM_ROCM_USE_AITER=0` to turn AITER off.
 
 ## Setting the global seed
