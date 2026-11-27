@@ -1829,5 +1829,12 @@ class NemotronH_Nano_VL_V2(
         return NemotronHForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
 
     @classmethod
+    def get_mamba_state_alignment_from_config(cls, vllm_config: "VllmConfig") -> int:
+        text_config = vllm_config.model_config.hf_config.text_config
+        return NemotronHForCausalLM.get_mamba_state_alignment_from_config(
+            vllm_config.with_hf_config(text_config)
+        )
+
+    @classmethod
     def get_mamba_state_copy_func(cls):
         return NemotronHForCausalLM.get_mamba_state_copy_func()
