@@ -111,6 +111,10 @@ class ObservabilityConfig:
     that iteration scheduled, and `SchedulerStats` has `queued_workload`, a
     summary of the requests that are still waiting.
 
+    Stat loggers also get a `SchedulerStats` with `engine_idle` set to `True`
+    when the engine has no work left and stops stepping, and one with `False`
+    when it resumes.
+
     With `--api-server-count` above 1, the engine sends the stats of each
     step to only one of the API servers, so the stat loggers of any one
     server receive only part of the iterations."""

@@ -154,3 +154,16 @@ def test_dummy_batch_publishes_nothing_without_gpu_timings_or_stats(records, sta
     EngineCoreProc.execute_dummy_batch(engine)
 
     assert engine.output_queue.empty()
+
+
+def test_idle_state_is_reported_once_per_change():
+    engine = make_fake_engine()
+    engine.scheduler = SimpleNamespace(make_stats=SchedulerStats)
+    engine.output_queue = queue.Queue()
+    engine._reported_idle = False
+
+    for idle in (True, True, False, False, True):
+        EngineCoreProc._report_idle(engine, idle)
+
+    sent = [outputs for _, outputs in engine.output_queue.queue]
+    assert [o.scheduler_stats.engine_idle for o in sent] == [True, False, True]

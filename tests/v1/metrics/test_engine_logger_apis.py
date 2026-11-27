@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import copy
 
 import pytest
@@ -96,7 +97,8 @@ async def test_iteration_workload_reaches_custom_stat_loggers(
     log_stats_enabled_engine_args,
 ):
     """--enable-logging-iteration-details reports every iteration to stat
-    loggers with its workload, and the queued workload with the stats.
+    loggers with its workload, the queued workload with the stats, and when
+    the engine stops and resumes stepping.
     """
     engine_args = copy.deepcopy(log_stats_enabled_engine_args)
     engine_args.enable_logging_iteration_details = True
@@ -113,6 +115,16 @@ async def test_iteration_workload_reaches_custom_stat_loggers(
         async for _ in engine.generate("Hello, my name is", sampling_params, "0"):
             pass
 
+        # The engine stops once it has started, resumes with the request in its
+        # queue, and stops again when the request has finished.
+        idle_reports: list[SchedulerStats] = []
+        async with asyncio.timeout(10):
+            while len(idle_reports) < 3:
+                await asyncio.sleep(0.01)
+                idle_reports = [s for s in all_stats if s.engine_idle is not None]
+        assert [stats.engine_idle for stats in idle_reports] == [True, False, True]
+        resumed = idle_reports[1]
+
         records = [record for stats in all_stats for record in stats.iteration_records]
         prefill, decode = records[:2]
         timed = engine.vllm_config.gpu_iteration_timing
@@ -122,6 +134,10 @@ async def test_iteration_workload_reaches_custom_stat_loggers(
         assert decode.scheduled_workload == ScheduledWorkload(
             sum_decode_kv_tokens=prefill.num_ctx_tokens
         )
+        assert resumed.queued_workload == QueuedWorkload(
+            num_prefill_requests=1, sum_prefill_tokens=prefill.num_ctx_tokens
+        )
+        all_stats.remove(resumed)
         assert all(stats.queued_workload == QueuedWorkload() for stats in all_stats)
     finally:
         engine.shutdown()
