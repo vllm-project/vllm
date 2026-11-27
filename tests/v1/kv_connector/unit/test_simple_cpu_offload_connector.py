@@ -241,4 +241,5 @@ def test_share_replicated_regions_sizes_cpu_pool(share, aliased, expected_blocks
         vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
     )
     # Shared: 2 ranks * 98304 B // (2 * 1024 B private + 512 B stored once).
+    assert connector.scheduler_manager is not None
     assert connector.scheduler_manager.num_cpu_blocks == expected_blocks

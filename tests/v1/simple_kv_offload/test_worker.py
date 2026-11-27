@@ -876,7 +876,9 @@ def test_only_rank_zero_stores_replicated_regions(dist_init):
     num_blocks, world_size = 4, 2
     specs = _dsa_specs(1, 64)
     index = "model.layers.0.self_attn.indexer.k_cache"
-    specs[index] = dataclasses.replace(specs[index], max_tp_shards=1)
+    index_spec = specs[index]
+    assert isinstance(index_spec, AttentionSpec)
+    specs[index] = dataclasses.replace(index_spec, max_tp_shards=1)
     group = make_kv_cache_group_from_specs(specs)
     page_bytes = sum(spec.page_size_bytes for spec in specs.values())
     blocks = list(range(num_blocks))
@@ -926,12 +928,16 @@ def test_only_rank_zero_stores_replicated_regions(dist_init):
                     assert torch.equal(host, want.cpu())
 
         # In an engine every rank maps rank 0's shared region.
-        workers[1].cpu_kv_caches[index].copy_(workers[0].cpu_kv_caches[index])
+        cpu0, cpu1 = workers[0].cpu_kv_caches, workers[1].cpu_kv_caches
+        assert cpu0 is not None and cpu1 is not None
+        cpu1[index].copy_(cpu0[index])
         for worker in workers:
+            assert worker.gpu_kv_caches is not None
             for region in worker.gpu_kv_caches.values():
                 region.zero_()
             _launch_and_wait(worker._backend, blocks, is_store=False)
         for rank, worker in enumerate(workers):
+            assert worker.gpu_kv_caches is not None
             for name, region in worker.gpu_kv_caches.items():
                 want = expected[0 if name == index else rank][name]
                 assert torch.equal(region, want)
