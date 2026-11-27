@@ -474,9 +474,11 @@ def test_decode_scheduler_ships_the_lease_with_heartbeats():
     the engine's HeartbeatInfo, and _stop_heartbeat drops them."""
     scheduler = make_nixl_scheduler(heartbeat=True)
     req = create_request(request_id=1, do_remote_prefill=True)
+    assert req.kv_transfer_params is not None
     req.kv_transfer_params["remote_blocks_expiry_time"] = 1234.5
     req.kv_transfer_params["remote_lease_extension"] = 20
     bare = create_request(request_id=2, do_remote_prefill=True)
+    assert bare.kv_transfer_params is not None
     bare.kv_transfer_params.pop("remote_blocks_expiry_time", None)
     bare.kv_transfer_params.pop("remote_lease_extension", None)
     scheduler.on_new_request(req)

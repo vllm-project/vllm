@@ -372,9 +372,9 @@ impl ChatRenderer for InklingChatRenderer {
             return self.render_inkling2(request);
         }
         if request.chat_options.continue_final_message() {
-            return Err(Error::ChatTemplate(
-                "Inkling renderer does not support continue_final_message".to_string(),
-            ));
+            return Err(Error::UnsupportedContinueFinalMessage {
+                renderer: "Inkling",
+            });
         }
 
         let mut out = Vec::new();

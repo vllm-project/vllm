@@ -119,6 +119,15 @@ class ConversationContext(ABC):
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
+    first_content_token_ts: float | None = None
+
+    def record_first_content_token(self, metrics: "RequestStateStats | None") -> None:
+        if (
+            self.first_content_token_ts is None
+            and metrics is not None
+            and metrics.last_token_ts > 0
+        ):
+            self.first_content_token_ts = metrics.last_token_ts
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
@@ -197,6 +206,7 @@ class SimpleContext(ConversationContext):
             if parser_cls is not None and tokenizer is not None and request is not None
             else None
         )
+        self.first_content_token_ts = None
 
         # Accumulated final output for streaming mode
         self._accumulated_text: str = ""
@@ -325,6 +335,7 @@ class ParsableContext(ConversationContext):
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
+        self.first_content_token_ts = None
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
 
@@ -664,6 +675,7 @@ class HarmonyContext(ConversationContext):
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
+        self.first_content_token_ts = None
         self.num_tool_output_tokens = 0
 
         self.last_append_segments: list[Segment] = []
@@ -721,6 +733,14 @@ class HarmonyContext(ConversationContext):
             self._attach_logprobs(segments, output_token_ids, logprobs)
             if output.finished:
                 self._current_message_logprobs = []
+
+        if (
+            self.request is not None
+            and self.request.stream
+            and any(segment.delta and segment.is_content for segment in segments)
+        ):
+            self.record_first_content_token(output.metrics)
+
         self.last_append_segments = segments
         self._messages.extend(
             segment.completed_message

@@ -89,6 +89,7 @@ from vllm.v1.engine import (
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
+    EngineHealthState,
     FinishReason,
     PauseMode,
     PrefixHashConfig,
@@ -1298,8 +1299,13 @@ class EngineCore:
                 request.mm_features
             )
 
-        watermark_config = self.vllm_config.watermark_config
+        # The sender cache has already been updated, even for rejected requests.
+        lora_config = self.vllm_config.lora_config
         params = request.sampling_params
+        if lora_config is not None and params is not None:
+            lora_config.validate_prompt_logprobs(params)
+
+        watermark_config = self.vllm_config.watermark_config
         # Greedy decoding and trace replay cannot be watermarked; leave their
         # flag as the frontend resolved it.
         if (
@@ -1815,6 +1821,21 @@ class EngineCoreProc(EngineCore):
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
+
+    def check_health_generate(self) -> EngineHealthState:
+        """Health check served by the busy loop between steps.
+
+        A busy engine adds no GPU work; an idle one runs the forward probe.
+        """
+        if self.is_sleeping():
+            return EngineHealthState.SLEEPING
+        if self.has_work():
+            return EngineHealthState.BUSY
+        self._probe_forward()
+        return EngineHealthState.OK
+
+    def _probe_forward(self) -> None:
+        self.model_executor.probe_forward()
 
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
@@ -2746,6 +2767,13 @@ class DPEngineCoreProc(EngineCoreProc):
             self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled
         ):
             self.engines_running = True
+
+    def _probe_forward(self) -> None:
+        """Liveness only: the reply proves the busy loop is not wedged.
+
+        A dummy batch here would run outside the DP wave and could deadlock
+        against a peer's wave collectives.
+        """
 
     def barrier(self):
         """Blocking barrier on the DP process group (test-only utility)."""
