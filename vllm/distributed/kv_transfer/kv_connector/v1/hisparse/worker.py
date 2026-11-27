@@ -58,6 +58,54 @@ class _DMADescriptors(NamedTuple):
     sizes_np: np.ndarray
 
 
+class _RowDMAGeometry(NamedTuple):
+    source_index: np.ndarray
+    source_base: np.ndarray
+    source_block_stride: np.ndarray
+    source_num_blocks: np.ndarray
+    row_bytes: np.ndarray
+    destination_base: np.ndarray
+    destination_num_rows: np.ndarray
+
+
+def _fill_batched_row_dma_descriptors(
+    descriptors: _DMADescriptors,
+    geometry: _RowDMAGeometry,
+    source_starts: np.ndarray,
+    destination_starts: np.ndarray,
+    row_counts: np.ndarray,
+    block_size: int,
+) -> None:
+    if np.any(geometry.source_index >= source_starts.shape[1]):
+        raise RuntimeError("HiSparse row DMA source index is out of range.")
+    blocks, offsets = np.divmod(source_starts[:, geometry.source_index], block_size)
+    rows = row_counts[:, None]
+    destinations = destination_starts[:, None]
+    if (
+        np.any(blocks < 0)
+        or np.any(blocks >= geometry.source_num_blocks)
+        or np.any(offsets + rows > block_size)
+    ):
+        raise RuntimeError("HiSparse row DMA source is out of range.")
+    if np.any(destinations < 0) or np.any(
+        destinations + rows > geometry.destination_num_rows
+    ):
+        raise RuntimeError("HiSparse row DMA index is out of range.")
+
+    # Mirror-major, layer-minor, just like the strided scalar fill.
+    shape = blocks.shape
+    count = blocks.size
+    descriptors.src_np[:count].reshape(shape)[:] = (
+        geometry.source_base
+        + blocks * geometry.source_block_stride
+        + offsets * geometry.row_bytes
+    )
+    descriptors.dst_np[:count].reshape(shape)[:] = (
+        geometry.destination_base + destinations * geometry.row_bytes
+    )
+    descriptors.sizes_np[:count].reshape(shape)[:] = rows * geometry.row_bytes
+
+
 @dataclass(slots=True)
 class _SlotMappingStaging:
     stream: torch.Stream
@@ -81,6 +129,8 @@ def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
 
 
 _METRICS_INTERVAL = 2000
+_MIN_BATCHED_ROW_DMA_LAYERS = 4
+_MAX_BATCHED_ROW_DMA_DESCRIPTORS = 4096
 
 
 def _get_hisparse_cache(
@@ -399,6 +449,8 @@ class HiSparseConnectorWorker:
             resident_caches.append(cache.view.cache)
         self.host_caches = host_caches
         self.resident_caches = tuple(resident_caches)
+        self._row_dma_geometry_layers: tuple[int, ...] = ()
+        self._row_dma_geometry: _RowDMAGeometry | None = None
 
         for resident_cache, host_cache in zip(resident_caches, host_caches):
             row_bytes = resident_cache.shape[-1] * resident_cache.element_size()
@@ -658,6 +710,32 @@ class HiSparseConnectorWorker:
             self._row_mirror_source_starts = np.empty((0, 0), dtype=np.int64)
         self._row_mirror_num_rows = int(self._row_mirror_counts.sum())
 
+    def _get_row_dma_geometry(self, layer_indices: Sequence[int]) -> _RowDMAGeometry:
+        layers = tuple(layer_indices)
+        if self._row_dma_geometry is None or layers != self._row_dma_geometry_layers:
+            rows = []
+            for layer_index in layers:
+                cache = self.cache_handles[layer_index]
+                source = self.resident_caches[layer_index]
+                destination = self.host_caches[layer_index]
+                element_size = source.element_size()
+                rows.append(
+                    (
+                        cache.runtime.resident_source_index,
+                        source.data_ptr(),
+                        source.stride(0) * element_size,
+                        source.shape[0],
+                        source.shape[-1] * element_size,
+                        destination.data_ptr(),
+                        destination.shape[0],
+                    )
+                )
+            self._row_dma_geometry = _RowDMAGeometry(
+                *np.asarray(rows, dtype=np.int64).T.copy()
+            )
+            self._row_dma_geometry_layers = layers
+        return self._row_dma_geometry
+
     def _enqueue_row_dma(
         self, layer_indices: Sequence[int], ready_event: torch.Event | None = None
     ) -> None:
@@ -673,6 +751,35 @@ class HiSparseConnectorWorker:
         descriptors = self._acquire_dma_descriptors(descriptor_count)
         destination_starts = self._row_mirror_destination_starts
         row_counts = self._row_mirror_counts
+        if (
+            num_layers >= _MIN_BATCHED_ROW_DMA_LAYERS
+            and descriptor_count <= _MAX_BATCHED_ROW_DMA_DESCRIPTORS
+        ):
+            _fill_batched_row_dma_descriptors(
+                descriptors,
+                self._get_row_dma_geometry(layer_indices),
+                self._row_mirror_source_starts,
+                destination_starts,
+                row_counts,
+                self.kernel_block_size,
+            )
+        else:
+            self._fill_row_dma_descriptors(
+                descriptors, layer_indices, destination_starts, row_counts
+            )
+        self._submit_dma_descriptors(
+            descriptors, descriptor_count, ready_event=ready_event
+        )
+
+    def _fill_row_dma_descriptors(
+        self,
+        descriptors: _DMADescriptors,
+        layer_indices: Sequence[int],
+        destination_starts: np.ndarray,
+        row_counts: np.ndarray,
+    ) -> None:
+        num_layers = len(layer_indices)
+        descriptor_count = len(self._row_mirrors) * num_layers
         for descriptor_offset, layer_index in enumerate(layer_indices):
             cache = self.cache_handles[layer_index]
             source_index = cache.runtime.resident_source_index
@@ -706,10 +813,6 @@ class HiSparseConnectorWorker:
                 destination.data_ptr() + destination_starts * row_bytes
             )
             descriptors.sizes_np[descriptor_slice] = row_counts * row_bytes
-
-        self._submit_dma_descriptors(
-            descriptors, descriptor_count, ready_event=ready_event
-        )
 
     def _enqueue_layer_mirror(self, layer_index: int) -> None:
         handle = self.cache_handles[layer_index]
