@@ -237,6 +237,7 @@ class MambaHybridModelState(DefaultModelState):
         for_capture: bool = False,
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+        metadata_builder_idx: int | None = None,
     ) -> dict[str, Any]:
         assert ubatch_idx == 0, "DBO is not supported"
         assert model_specific_attn_metadata is None
@@ -306,7 +307,12 @@ class MambaHybridModelState(DefaultModelState):
             aligned_index_builders = []
             for group_idx, group_id in enumerate(ctx.mamba_group_ids):
                 for group in attn_groups[group_id]:
-                    builder = group.get_metadata_builder(0)
+                    builder_idx = (
+                        ubatch_idx
+                        if metadata_builder_idx is None
+                        else metadata_builder_idx
+                    )
+                    builder = group.get_metadata_builder(builder_idx)
                     if hasattr(builder, "mamba_aligned_state_indices"):
                         aligned_index_builders.append((group_idx, builder))
             if aligned_index_builders:
@@ -339,6 +345,7 @@ class MambaHybridModelState(DefaultModelState):
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            metadata_builder_idx=metadata_builder_idx,
         )
         if self._use_replayssm_trackers:
             self._replayssm_query_start_loc = None

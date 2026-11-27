@@ -930,6 +930,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "skip_attn must only be True for initial memory profiling."
             )
 
+        if self.pcp_manager is not None and not uniform_decode:
+            num_tokens = self.pcp_manager.get_num_tokens_for_dummy_run(
+                num_tokens, self.max_num_reqs
+            )
+
         # Create a dummy scheduler output. Standalone AR speculation adds
         # one correction slot per request during prefill. The scheduler
         # accounts for these slots, while dummy runs bypass the scheduler.

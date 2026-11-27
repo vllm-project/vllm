@@ -29,6 +29,38 @@ def _copy_to_cpu(value, device=None, dtype=None, out=None):
     return tensor
 
 
+@pytest.mark.parametrize("global_budget", [4, 31, 128, 32768])
+@pytest.mark.parametrize("use_global_batch_tables", [False, True])
+def test_profile_budget_covers_real_rank_batches(
+    global_budget, use_global_batch_tables
+):
+    """Profiling covers skewed and mixed batches without a PCP-fold expansion."""
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=False,
+        use_global_batch_tables=use_global_batch_tables,
+    )
+    max_num_reqs = 4
+    profile_budget = manager.get_num_tokens_for_dummy_run(global_budget, max_num_reqs)
+    batches = [
+        ([global_budget], [True]),
+        ([1, global_budget - 1], [False, True]),
+        ([1, 1, 1, global_budget - 3], [False, False, False, True]),
+        ([global_budget // 4] * 4, [True] * 4),
+    ]
+    for lengths, prefilling in batches:
+        local_tokens = manager.get_num_tokens_for_dispatch(
+            np.array(lengths), np.array(prefilling)
+        )
+        assert local_tokens <= profile_budget <= global_budget
+    if use_global_batch_tables and global_budget == 32768:
+        assert profile_budget < global_budget // 2
+    if not use_global_batch_tables:
+        assert profile_budget == global_budget
+
+
 def _make_config(cudagraph_mode: CUDAGraphMode):
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
@@ -311,6 +343,8 @@ def test_block_table_rebind_updates_interleave():
 
     assert manager._block_tables is final_block_tables
     assert manager.cp_interleave == 64
+    assert manager._global_block_tables is None
+    assert manager._global_block_table_ptrs is None
 
 
 def test_dummy_context_updates_pcp_local_block_tables():

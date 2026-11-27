@@ -142,6 +142,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("pcp_rank", [None, 0, 3])
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [
@@ -162,10 +163,12 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         ),
         pytest.param(True, True, True, 4, [37], [37], [0], id="fresh"),
         pytest.param(True, True, True, 4, [4097], [4097], [0], id="tiled"),
+        pytest.param(True, True, True, 4, [1], [1], [0], id="empty-pcp-rank"),
     ],
 )
 def test_qsa_fused_prepare_matches_unfused(
     indexer_dtype,
+    pcp_rank,
     mrope,
     is_2d_positions,
     cache_rope_positions,
@@ -229,7 +232,7 @@ def test_qsa_fused_prepare_matches_unfused(
     )
 
     compressed_block_counts = [
-        (seq_len // CR + COMP_PAGE - 1) // COMP_PAGE for seq_len in seq_lens
+        max(1, (seq_len // CR + COMP_PAGE - 1) // COMP_PAGE) for seq_len in seq_lens
     ]
     raw_block_table, num_raw_blocks = _make_block_table([1] * len(seq_lens))
     compressed_block_table, num_compressed_blocks = _make_block_table(
@@ -326,13 +329,21 @@ def test_qsa_fused_prepare_matches_unfused(
     q_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
     k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
 
-    fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
+    query_slice = slice(None) if pcp_rank is None else slice(pcp_rank, None, 4)
+    query_positions = positions[..., query_slice]
+    fused_query = torch.empty(
+        query_positions.shape[-1], HQ, D, dtype=indexer_dtype, device=device
+    )
     # The main-attention cache follows the recipe's pairing with the indexer.
-    main = _make_main_inputs(num_tokens, indexer_dtype == torch.float8_e4m3fn)
-    main_q_out, main_gate_out = qsa_prepare(
-        projected_qk[:, : HQ * D],
+    main = (
+        _make_main_inputs(num_tokens, indexer_dtype == torch.float8_e4m3fn)
+        if pcp_rank is None
+        else {}
+    )
+    main_outputs = qsa_prepare(
+        projected_qk[query_slice, : HQ * D],
         projected_qk[:, HQ * D :],
-        positions,
+        query_positions,
         rope.cos_sin_cache,
         q_weight,
         k_weight,
@@ -349,15 +360,22 @@ def test_qsa_fused_prepare_matches_unfused(
         compress_ratio=CR,
         mrope_section=MROPE_SECTION if mrope else None,
         rope_pos_offset=ROPE_POS_OFFSET if cache_rope_positions else None,
+        key_positions=positions if pcp_rank is not None else None,
         **main,
     )
-    _check_main_outputs(main, main_q_out, main_gate_out, rope, positions)
+    if pcp_rank is None:
+        assert main_outputs is not None
+        main_q_out, main_gate_out = main_outputs
+        _check_main_outputs(main, main_q_out, main_gate_out, rope, positions)
+    else:
+        assert main_outputs is None
 
     unfused_query = projected_qk[:, : HQ * D].reshape(num_tokens, HQ, D)
     unfused_query = gemma_rmsnorm(
         unfused_query.reshape(-1, D), q_weight, EPS
     ).reshape_as(unfused_query)
     unfused_query = apply_qsa_rope(rope, positions, unfused_query)
+    unfused_query = unfused_query[query_slice]
 
     raw_keys = unfused_raw[..., :D]
     rope_positions = (

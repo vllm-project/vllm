@@ -746,8 +746,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ) = None,
         norm_eps: float | None = None,
         a_log_dtype: torch.dtype = torch.float32,
+        *,
+        tp_rank: int | None = None,
+        tp_size: int | None = None,
     ) -> None:
-        super().__init__(config, vllm_config, prefix)
+        super().__init__(config, vllm_config, prefix, tp_rank=tp_rank, tp_size=tp_size)
 
         self.beta_scale = (
             2.0 if getattr(config, "linear_allow_neg_eigval", False) else 1.0
@@ -841,8 +844,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         )
 
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        head_weight_loader = (
+            sharded_weight_loader(0)
+            if tp_rank is None
+            else mamba_v2_sharded_weight_loader(
+                [(self.num_v_heads, 0, False)], self.tp_size, self.tp_rank
+            )
+        )
+        set_weight_attrs(self.A_log, {"weight_loader": head_weight_loader})
+        set_weight_attrs(self.dt_bias, {"weight_loader": head_weight_loader})
 
         output_gate_type = getattr(config, "output_gate_type", "silu")
         if output_gate_type == "swish":
@@ -868,6 +878,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             reduce_results=reduce_results,
             quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
@@ -1089,6 +1101,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             output_size=self.conv_dim,
             bias=False,
             prefix=f"{prefix}.conv1d",
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         )
         conv.weight.data = conv.weight.data.unsqueeze(1)
         query_key_settings = (self.key_dim, 0, False)
@@ -1130,6 +1144,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         )
 
     def create_ba_proj(
@@ -1154,6 +1170,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             quant_config=quant_config,
             prefix=prefix,
             disable_tp=self.maybe_disable_tp(quant_config),
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         )
 
     def maybe_disable_tp(self, quant_config: QuantizationConfig | None) -> bool:

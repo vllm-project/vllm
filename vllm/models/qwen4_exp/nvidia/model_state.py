@@ -7,12 +7,21 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionMetadata,
+)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.utils import AttentionGroup
 
+from ..common.qsa import PCP_GLOBAL_METADATA_SUFFIX
 from .ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEHostStagedEmbedding,
@@ -23,6 +32,15 @@ from .ngram_embedding import (
 class Qwen4ExpModelState(MambaHybridModelState):
     """Add rollback-safe PLE n-gram context to the model inputs."""
 
+    @staticmethod
+    def _pcp_global_positions(
+        local_positions: torch.Tensor,
+        global_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        if local_positions.ndim == 1:
+            return global_positions
+        return global_positions.unsqueeze(0).expand(local_positions.shape[0], -1)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -31,6 +49,7 @@ class Qwen4ExpModelState(MambaHybridModelState):
         device: torch.device,
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
+        self._pcp_mamba_block_table_ptrs: tuple[int, ...] | None = None
         config = self.model_config.hf_text_config
         self.uses_ngram_embedding = bool(config.ple_layer_ids)
         if not self.uses_ngram_embedding:
@@ -102,7 +121,34 @@ class Qwen4ExpModelState(MambaHybridModelState):
         req_states: RequestState,
     ) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
+        pcp = input_batch.pcp
+        if pcp is not None:
+            global_batch = pcp.global_batch
+            local_positions = model_inputs.get("positions", input_batch.positions)
+            model_inputs.update(
+                pcp_hidden_restore_idx=pcp.hidden_restore_idx,
+                pcp_local_gather_idx=pcp.local_gather_idx,
+                pcp_global_positions=self._pcp_global_positions(
+                    local_positions, global_batch.positions
+                ),
+                pcp_global_input_ids=global_batch.input_ids,
+            )
         if not self.uses_ngram_embedding:
+            return model_inputs
+        if pcp is not None:
+            global_batch = pcp.global_batch
+            ngram_context = self._prepare_ngram_context(global_batch, req_states)
+            model_inputs.update(
+                query_start_loc=global_batch.query_start_loc,
+                ngram_context=ngram_context,
+            )
+            if self.host_staged_modules:
+                stage_host_rows(
+                    self.host_staged_modules,
+                    global_batch.input_ids,
+                    global_batch.query_start_loc,
+                    ngram_context,
+                )
             return model_inputs
 
         num_reqs_padded = input_batch.num_reqs_after_padding
@@ -123,6 +169,100 @@ class Qwen4ExpModelState(MambaHybridModelState):
             ngram_context=ngram_context,
         )
         return model_inputs
+
+    def preprocess_state(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        pcp = input_batch.pcp
+        if pcp is not None:
+            assert pcp.global_block_tables is not None
+            ctx = getattr(self, "_mamba_ctx", None)
+            if ctx is not None:
+                tables = [pcp.global_block_tables[gid] for gid in ctx.mamba_group_ids]
+                ptrs = tuple(table.data_ptr() for table in tables)
+                if ptrs != self._pcp_mamba_block_table_ptrs:
+                    assert all(
+                        table.stride(0) == ctx.block_table_stride_req
+                        for table in tables
+                    )
+                    # State copies retain the persistent per-request tables.
+                    # GDN indices need the PCP batch's global token order.
+                    async_tensor_h2d(list(ptrs), out=ctx.aligned_index_block_table_ptrs)
+                    self._pcp_mamba_block_table_ptrs = ptrs
+            input_batch = pcp.global_batch
+            block_tables = pcp.global_block_tables
+        super().preprocess_state(
+            input_batch, block_tables, kv_cache_config, num_computed_tokens
+        )
+
+    def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+        ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+        metadata_builder_idx: int | None = None,
+    ) -> dict[str, Any]:
+        pcp = input_batch.pcp
+        local_attn_groups = attn_groups
+        if pcp is not None:
+            # Recurrent layers run once per global request, not per PCP segment.
+            local_attn_groups = [
+                [
+                    group
+                    for group in groups
+                    if group.backend.get_name()
+                    not in {"GDN_ATTN", "PLE_SHORT_CONV_ATTN"}
+                ]
+                for groups in attn_groups
+            ]
+        metadata = super().prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            local_attn_groups,
+            kv_cache_config,
+            for_capture,
+            ubatch_idx,
+            model_specific_attn_metadata,
+            metadata_builder_idx=metadata_builder_idx,
+        )
+        if pcp is None:
+            return metadata
+        assert cudagraph_mode == CUDAGraphMode.NONE
+        assert pcp.global_block_tables is not None
+        assert pcp.global_slot_mappings is not None
+        global_metadata = super().prepare_attn(
+            pcp.global_batch,
+            cudagraph_mode,
+            pcp.global_block_tables,
+            pcp.global_slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture,
+            0,
+            model_specific_attn_metadata,
+            metadata_builder_idx=1,
+        )
+        for layer_name, layer_metadata in global_metadata.items():
+            if isinstance(
+                layer_metadata,
+                (GDNAttentionMetadata, PleShortConvAttentionMetadata),
+            ):
+                metadata[layer_name] = layer_metadata
+            else:
+                metadata[layer_name + PCP_GLOBAL_METADATA_SUFFIX] = layer_metadata
+        return metadata
 
     def prepare_dummy_inputs(
         self,

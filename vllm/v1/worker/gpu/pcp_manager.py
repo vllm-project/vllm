@@ -35,6 +35,11 @@ class PCPBatchMetadata:
     # [num_reqs], aligned with local request segments; requests may repeat.
     global_query_lens_np: np.ndarray
     global_seq_lens_cpu_upper_bound_np: np.ndarray
+    global_batch: "InputBatch"
+    hidden_restore_idx: torch.Tensor
+    local_gather_idx: torch.Tensor
+    global_block_tables: tuple[torch.Tensor, ...] | None = None
+    global_slot_mappings: torch.Tensor | None = None
     # [num_reqs_after_padding], set only under PCP+DCP.
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
@@ -72,6 +77,7 @@ class PCPManager:
         dcp_rank: int = 0,
         cp_interleave: int = 1,
         moe_gathers_tokens: bool = False,
+        use_global_batch_tables: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -80,6 +86,7 @@ class PCPManager:
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
         self.shard_decode_requests = shard_decode_requests
+        self.use_global_batch_tables = use_global_batch_tables
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
@@ -116,6 +123,8 @@ class PCPManager:
         device, pcp_world_size = self.device, self.pcp_world_size
         self._local_block_tables: tuple[torch.Tensor, ...] | None
         self._local_block_table_ptrs: torch.Tensor | None
+        self._global_block_tables: tuple[torch.Tensor, ...] | None
+        self._global_block_table_ptrs: torch.Tensor | None
         if block_tables is not None and max_num_local_reqs is not None:
             self._local_block_tables = tuple(
                 table.new_zeros((max_num_local_reqs, table.shape[1]))
@@ -126,9 +135,24 @@ class PCPManager:
                 dtype=torch.uint64,
                 device=device,
             )
+            if self.use_global_batch_tables:
+                self._global_block_tables = tuple(
+                    table.new_zeros((max_num_local_reqs, table.shape[1]))
+                    for table in block_tables.input_block_tables
+                )
+                self._global_block_table_ptrs = torch.tensor(
+                    [table.data_ptr() for table in self._global_block_tables],
+                    dtype=torch.uint64,
+                    device=device,
+                )
+            else:
+                self._global_block_tables = None
+                self._global_block_table_ptrs = None
         else:
             self._local_block_tables = None
             self._local_block_table_ptrs = None
+            self._global_block_tables = None
+            self._global_block_table_ptrs = None
         num_kv_cache_groups = (
             block_tables.num_kv_cache_groups if block_tables is not None else 0
         )
@@ -164,8 +188,24 @@ class PCPManager:
         if pcp_size <= 1:
             return
 
-        if not model_config.use_mla:
+        architecture = getattr(model_config, "architecture", None)
+        is_qwen4_exp = architecture in (
+            "Qwen4ExpForCausalLM",
+            "Qwen4ExpForConditionalGeneration",
+        )
+        if not model_config.use_mla and not is_qwen4_exp:
             raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
+        if is_qwen4_exp:
+            if parallel_config.data_parallel_size > 1:
+                raise NotImplementedError("Qwen4Exp PCP currently supports DP=1 only.")
+            if parallel_config.decode_context_parallel_size > 1:
+                raise NotImplementedError(
+                    "Qwen4Exp PCP does not support decode context parallelism."
+                )
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "Qwen4Exp PCP currently requires cudagraph_mode=NONE."
+                )
         if model_config.is_encoder_decoder:
             raise NotImplementedError(
                 "MRV2 PCP does not support encoder-decoder models yet."
@@ -426,6 +466,18 @@ class PCPManager:
             )
             for rank in range(self.pcp_world_size)
         )
+
+    def get_num_tokens_for_dummy_run(
+        self, global_token_budget: int, max_num_reqs: int
+    ) -> int:
+        """Bound local dummy rows without multiplying the global token budget."""
+        if not self.use_global_batch_tables:
+            return global_token_budget
+        local_budget = (
+            global_token_budget + self.pcp_world_size - 1
+        ) // self.pcp_world_size
+        # DualChunkSwap rounding can add two local rows per global request.
+        return min(global_token_budget, local_budget + 2 * max_num_reqs)
 
     @staticmethod
     def _resolve_num_reqs_after_padding(
@@ -700,6 +752,9 @@ class PCPManager:
                 global_seq_lens_cpu_upper_bound_np=global_batch.seq_lens_cpu_upper_bound.numpy()[
                     local_to_global_batch_req_idx_np
                 ],
+                global_batch=global_batch,
+                hidden_restore_idx=self._hidden_restore_idx,
+                local_gather_idx=local_gather_idx,
                 dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             ),
             num_computed_tokens_np=local_start_pos_np,
@@ -769,6 +824,26 @@ class PCPManager:
             out_ptrs=self._local_block_table_ptrs,
         )
         slot_mappings = self.prepare_slot_mappings()
+        if not self.use_global_batch_tables:
+            return block_tables, slot_mappings
+        assert self._global_block_tables is not None
+        assert self._global_block_table_ptrs is not None
+        assert input_batch.pcp is not None
+        global_batch = input_batch.pcp.global_batch
+        global_block_tables = self._block_tables.gather_block_tables(
+            global_batch.idx_mapping,
+            global_batch.num_reqs_after_padding,
+            out=self._global_block_tables,
+            out_ptrs=self._global_block_table_ptrs,
+        )
+        assert self._global_batch_slot_mappings is not None
+        input_batch.pcp = replace(
+            input_batch.pcp,
+            global_block_tables=global_block_tables,
+            global_slot_mappings=self._global_batch_slot_mappings[
+                :, : global_batch.num_tokens_after_padding
+            ],
+        )
         return block_tables, slot_mappings
 
     def prepare_slot_mappings(self) -> torch.Tensor:
@@ -929,4 +1004,9 @@ def maybe_build_pcp_manager(
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
         # Without EP all2all kernels, MoERunner all-gathers PCP tokens to route.
         moe_gathers_tokens=not parallel_config.enable_expert_parallel,
+        use_global_batch_tables=vllm_config.model_config.architecture
+        in (
+            "Qwen4ExpForCausalLM",
+            "Qwen4ExpForConditionalGeneration",
+        ),
     )

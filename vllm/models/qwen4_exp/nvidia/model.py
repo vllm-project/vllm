@@ -12,7 +12,7 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -95,6 +95,12 @@ from .qsa import Qwen4ExpQSAAttention
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
 _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
+
+
+def _pcp_restore_global(
+    tensor: torch.Tensor, hidden_restore_idx: torch.Tensor
+) -> torch.Tensor:
+    return get_pcp_group().all_gather(tensor.contiguous(), dim=0)[hidden_restore_idx]
 
 
 def without_modelopt_fp4(
@@ -216,6 +222,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
         self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
         )
+        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        if self.use_pcp and (
+            vllm_config.parallel_config.tensor_parallel_size != 1
+            or vllm_config.parallel_config.data_parallel_size != 1
+            or vllm_config.parallel_config.decode_context_parallel_size != 1
+        ):
+            raise ValueError("Qwen4Exp PCP requires TP=1, DP=1 and DCP=1")
         self.ple: Qwen4ExpPLELayer | None = None
         ple_layer_ids = config.ple_layer_ids
         if (self.layer_idx + 1) in ple_layer_ids:
@@ -234,13 +247,17 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
 
         if layer_type == "linear_attention":
+            pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+            pcp_group = get_pcp_group() if pcp_size > 1 else None
             self.linear_attn = QwenGatedDeltaNetAttention(
                 config,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
-                reduce_results=not self.use_hc_sequence_parallel,
+                reduce_results=pcp_group is None and not self.use_hc_sequence_parallel,
                 overlap_ba_proj=True,
+                tp_rank=pcp_group.rank_in_group if pcp_group is not None else None,
+                tp_size=pcp_size if pcp_group is not None else None,
             )
         elif layer_type in _QSA_LAYER_TYPES:
             use_qsa = getattr(config, "indexer_n_heads", None) is not None
@@ -305,7 +322,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
         input_ids: torch.Tensor | None,
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
+        pcp_hidden_restore_idx: torch.Tensor | None = None,
+        pcp_local_gather_idx: torch.Tensor | None = None,
+        pcp_global_positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        use_pcp = pcp_hidden_restore_idx is not None
+        if use_pcp and pcp_local_gather_idx is None:
+            raise RuntimeError("Qwen4Exp PCP requires a local token mapping")
         if prev_block_output is None:
             assert prev_injection is None
         attn_hc = self.attn_hyper_connection
@@ -320,12 +343,21 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
             if input_ids is None or query_start_loc is None or ngram_context is None:
                 raise RuntimeError("PLE inputs were not prepared")
+            ple_hidden_states = hidden_states
+            if use_pcp:
+                assert pcp_hidden_restore_idx is not None
+                ple_hidden_states = _pcp_restore_global(
+                    hidden_states, pcp_hidden_restore_idx
+                )
             hidden_states = self.ple(
-                hidden_states,
+                ple_hidden_states,
                 input_ids,
                 query_start_loc,
                 ngram_context,
             )
+            if use_pcp:
+                assert pcp_local_gather_idx is not None
+                hidden_states = hidden_states[pcp_local_gather_idx]
 
         # Fuse a pending combine with this HC module's mix when possible.
         if prev_block_output is not None:
@@ -339,11 +371,21 @@ class Qwen4ExpDecoderLayer(nn.Module):
             # Positions retain the full token axis for both text and MRoPE inputs.
             block_input = sp_all_gather(block_input)[: positions.shape[-1]]
         if self.layer_type == "linear_attention":
+            if use_pcp:
+                assert pcp_hidden_restore_idx is not None
+                block_input = _pcp_restore_global(block_input, pcp_hidden_restore_idx)
             attn_out = self.linear_attn(hidden_states=block_input)
+            if self.use_pcp:
+                attn_out = get_pcp_group().all_reduce(attn_out)
+            if use_pcp:
+                assert pcp_local_gather_idx is not None
+                attn_out = attn_out[pcp_local_gather_idx]
         elif self.layer_type in _QSA_LAYER_TYPES:
             attn_out = self.self_attn(
                 hidden_states=block_input,
                 positions=positions,
+                pcp_hidden_restore_idx=pcp_hidden_restore_idx,
+                pcp_global_positions=pcp_global_positions,
             )
         else:
             raise ValueError("Invalid layer_type")
@@ -563,6 +605,10 @@ class Qwen4ExpModel(nn.Module):
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
+        pcp_hidden_restore_idx: torch.Tensor | None = None,
+        pcp_local_gather_idx: torch.Tensor | None = None,
+        pcp_global_positions: torch.Tensor | None = None,
+        pcp_global_input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -594,10 +640,13 @@ class Qwen4ExpModel(nn.Module):
         block_output = None
         injection = None
         last_layer = None
+        ple_input_ids = (
+            pcp_global_input_ids if pcp_global_input_ids is not None else input_ids
+        )
         if self.start_layer < self.end_layer:
             self._start_layer_ple_prefetch(
                 self.layers[self.start_layer],
-                input_ids,
+                ple_input_ids,
                 query_start_loc,
                 ngram_context,
             )
@@ -608,7 +657,7 @@ class Qwen4ExpModel(nn.Module):
             if layer_idx + 1 < self.end_layer:
                 self._start_layer_ple_prefetch(
                     self.layers[layer_idx + 1],
-                    input_ids,
+                    ple_input_ids,
                     query_start_loc,
                     ngram_context,
                 )
@@ -617,9 +666,12 @@ class Qwen4ExpModel(nn.Module):
                 prev_block_output=block_output,
                 prev_injection=injection,
                 positions=positions,
-                input_ids=input_ids,
+                input_ids=ple_input_ids,
                 query_start_loc=query_start_loc,
                 ngram_context=ngram_context,
+                pcp_hidden_restore_idx=pcp_hidden_restore_idx,
+                pcp_local_gather_idx=pcp_local_gather_idx,
+                pcp_global_positions=pcp_global_positions,
             )
             if deepstack_input_embeds is not None and layer_idx < len(
                 deepstack_input_embeds
@@ -878,7 +930,10 @@ class Qwen4ExpForCausalLM(
     ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
-        tp_size = parallel_config.tensor_parallel_size
+        tp_size = max(
+            parallel_config.tensor_parallel_size,
+            parallel_config.prefill_context_parallel_size,
+        )
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
             if vllm_config.speculative_config
@@ -1171,6 +1226,10 @@ class Qwen4ExpForConditionalGeneration(
             query_start_loc=kwargs.get("query_start_loc"),
             ngram_context=kwargs.get("ngram_context"),
             deepstack_input_embeds=deepstack_input_embeds,
+            pcp_hidden_restore_idx=kwargs.get("pcp_hidden_restore_idx"),
+            pcp_local_gather_idx=kwargs.get("pcp_local_gather_idx"),
+            pcp_global_positions=kwargs.get("pcp_global_positions"),
+            pcp_global_input_ids=kwargs.get("pcp_global_input_ids"),
         )
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             self._clear_deepstack_input_embeds(inputs_embeds.size(0))

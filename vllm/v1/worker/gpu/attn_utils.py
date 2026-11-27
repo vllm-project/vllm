@@ -295,7 +295,20 @@ def init_attn_backend(
                 num_metadata_builders=(
                     0
                     if set(group.layer_names).issubset(no_attn_metadata_layer_names)
-                    else get_num_ubatches(vllm_config.parallel_config)
+                    else max(
+                        get_num_ubatches(vllm_config.parallel_config),
+                        2
+                        if (
+                            vllm_config.parallel_config.prefill_context_parallel_size
+                            > 1
+                            and getattr(vllm_config.model_config, "architecture", None)
+                            in (
+                                "Qwen4ExpForCausalLM",
+                                "Qwen4ExpForConditionalGeneration",
+                            )
+                        )
+                        else 1,
+                    )
                 ),
             )
             # The microbatches' builders share the workspace: they all issue
@@ -486,6 +499,7 @@ def build_attn_metadata(
     ubatch_idx: int = 0,
     fast_prefill: FastPrefillBatchMetadata | None = None,
     req_idx: np.ndarray | None = None,
+    metadata_builder_idx: int | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if rswa_prefix_lens is not None and rswa_prefix_lens.shape[0] < num_reqs:
@@ -561,7 +575,10 @@ def build_attn_metadata(
         )
 
         for attn_group in groups:
-            attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
+            builder_idx = (
+                ubatch_idx if metadata_builder_idx is None else metadata_builder_idx
+            )
+            attn_metadata_builder = attn_group.get_metadata_builder(builder_idx)
             reuse_key = None
             if attn_metadata_builder.supports_update_block_table and isinstance(
                 attn_group.kv_cache_spec, MambaSpec
@@ -573,7 +590,7 @@ def build_attn_metadata(
                 )
             elif for_cudagraph_capture:
                 metadata = attn_group.build_metadata_for_cudagraph_capture(
-                    common_attn_metadata, ubatch_idx
+                    common_attn_metadata, builder_idx
                 )
             else:
                 attn_metadata_extra_kwargs = (
@@ -585,7 +602,7 @@ def build_attn_metadata(
                     else {}
                 )
                 metadata = attn_group.build_metadata(
-                    common_attn_metadata, ubatch_idx, **attn_metadata_extra_kwargs
+                    common_attn_metadata, builder_idx, **attn_metadata_extra_kwargs
                 )
             if reuse_key is not None and reuse_key not in cached_metadata:
                 cached_metadata[reuse_key] = metadata

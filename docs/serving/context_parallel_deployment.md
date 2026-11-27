@@ -16,6 +16,48 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### Qwen3.8-Flash-Next on NVIDIA
+
+The Qwen4Exp NVIDIA implementation supports experimental, text-only PCP with
+TP=DP=DCP=1. For four GPUs, configure TP=1 and PCP=4:
+
+```bash
+vllm serve /path/to/Qwen3.8-Flash-Next \
+  --dtype bfloat16 \
+  --kv-cache-dtype bfloat16 \
+  --attention-config '{"indexer_kv_dtype":"bf16"}' \
+  --language-model-only \
+  --tensor-parallel-size 1 \
+  --prefill-context-parallel-size 4 \
+  --enable-expert-parallel \
+  --all2all-backend allgather_reducescatter \
+  --enforce-eager \
+  --no-enable-extensible-kv-cache
+```
+
+QSA computes rank-local query rows and gathers new keys and values. Gated
+DeltaNet restores the global token order and partitions heads across the PCP
+group; its output is summed across ranks, then each rank selects its local
+token rows. PLE
+restores the global sequence for its convolution and n-gram inputs.
+
+The example uses native BF16 weights and attention caches without online FP8
+quantization. QSA retains global
+keys and values on every PCP rank, so its cache capacity differs from TP.
+Use the cache capacity reported at startup to choose `--max-model-len`.
+
+PCP uses the Triton QSA attention path; FlashInfer QSA prefill remains available
+for ordinary TP deployments.
+
+This path requires CUDA graphs to be disabled and does not support LoRA,
+multimodal inputs, or combined TP/DP/DCP layouts. Its performance depends on
+input length, prefix-cache reuse, and the MoE communication backend. Validate
+outputs and measure against TP on the target workload before selecting PCP.
+Long-input deployments are the primary target: distributing query rows reduces
+the per-rank prefill work, while gathering global keys and recurrent-layer
+inputs adds communication. Short-input or decode-heavy workloads may not
+amortize that communication.
+
 ### DeepSeek-V4.1-Flash on ROCm
 
 ROCm supports eager prefill context parallelism for the text-only

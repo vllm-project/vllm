@@ -33,7 +33,16 @@ def check_attention_cp_compatibility(
             get_attn_backend = getattr(layer, "get_attn_backend", None)
             if pcp_size > 1 and check_pcp and get_attn_backend is not None:
                 backend = get_attn_backend()
-                assert backend.supports_pcp(), (
+                qwen4_exp_replicated_backend = (
+                    dcp_size == 1
+                    and vllm_config.model_config.architecture
+                    in (
+                        "Qwen4ExpForCausalLM",
+                        "Qwen4ExpForConditionalGeneration",
+                    )
+                    and backend.get_name() in {"GDN_ATTN", "PLE_SHORT_CONV_ATTN"}
+                )
+                assert backend.supports_pcp() or qwen4_exp_replicated_backend, (
                     "PCP requires attention backend support, "
                     f"but {backend.get_name()} does not support PCP."
                 )

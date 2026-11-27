@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GSM8K and AIME25 accuracy evaluation for Qwen3.8-Flash-Next-FP8."""
 
+import asyncio
+import math
 import shlex
 from pathlib import Path
 from typing import Any
 
 import yaml
+from transformers import AutoTokenizer
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer, multi_gpu_test
 
 
 def run_evalscope(
@@ -66,3 +69,63 @@ def test_qwen4_exp_accuracy(config_filename: Path, tmp_path: Path):
             f"{dataset} score too low: {score:.4f} < {threshold:.4f} - "
             f"{tolerance:.4f} = {minimum_score:.4f}"
         )
+
+
+@multi_gpu_test(num_gpus=4)
+def test_qwen4_pcp_preserves_recurrent_state_for_concurrent_requests():
+    """PCP segments must not become separate GDN requests or read the null slot."""
+    model_name = "Qwen/Qwen3.8-Flash-Next"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    questions = [
+        ("Calculate 17 * 23. Respond with only the integer.", "391"),
+        ("Calculate 124 + 578. Respond with only the integer.", "702"),
+        ("Sort 9, 2, 7 ascending. Output only 2, 7, 9.", "2, 7, 9"),
+        ("What is the capital of France? Answer with one word.", "Paris"),
+    ]
+    server_args = shlex.split(
+        "--tensor-parallel-size 1 --prefill-context-parallel-size 4 "
+        "--enable-expert-parallel --quantization fp8 --dtype bfloat16 "
+        "--kv-cache-dtype fp8 --max-model-len 8192 "
+        "--max-num-batched-tokens 4096 --max-num-seqs 4 "
+        "--enable-prefix-caching --no-enable-extensible-kv-cache "
+        "--enforce-eager --language-model-only"
+    )
+    server_args += [
+        "--engram-config",
+        '{"cpu_offload":true}',
+        "--attention-config",
+        '{"indexer_kv_dtype":"fp8"}',
+    ]
+    with RemoteOpenAIServer(model_name, server_args, max_wait_seconds=1800) as server:
+        client = server.get_async_client()
+
+        async def complete(question, expected):
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": question}],
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+            if hasattr(prompt, "keys"):
+                prompt = prompt["input_ids"]
+            response = await client.completions.create(
+                model=model_name,
+                prompt=prompt,
+                max_tokens=512,
+                temperature=0,
+                logprobs=1,
+                extra_body={"add_special_tokens": False},
+            )
+            choice = response.choices[0]
+            final_answer = choice.text.rsplit("</think>", 1)[-1].strip()
+            assert final_answer == expected
+            assert choice.logprobs is not None
+            assert choice.logprobs.token_logprobs
+            assert all(math.isfinite(value) for value in choice.logprobs.token_logprobs)
+
+        async def run():
+            await asyncio.gather(*(complete(*question) for question in questions))
+            await asyncio.gather(
+                *(complete(*question) for question in reversed(questions))
+            )
+
+        asyncio.run(run())
