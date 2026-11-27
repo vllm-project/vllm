@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -70,6 +71,12 @@ logger = init_logger(__name__)
 
 # A cache reset fence held this long is reported once.
 _RESET_FENCE_WARN_S = 60
+
+
+class _FinishedReqReleaseState(Enum):
+    WAITING_FOR_STORES = auto()
+    WAITING_FOR_CORE = auto()
+
 
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
@@ -294,6 +301,14 @@ class OffloadingConnectorScheduler:
         )
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
+        self._store_finished_decode = (
+            vllm_config.cache_config.enable_prefix_caching
+            and self.config.retention_interval is not None
+            and self.config.supports_handoff
+            and not self.config.offload_prompt_only
+            and vllm_config.speculative_config is None
+        )
+        self._finished_req_releases: dict[ReqId, _FinishedReqReleaseState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
         # Requests loading synchronously in the current engine step
         self._current_batch_sync_loads: set[ReqId] = set()
@@ -1346,6 +1361,30 @@ class OffloadingConnectorScheduler:
                     self._current_batch_jobs_to_flush.add(job_id)
         return job_id
 
+    def _hold_finished_decode_blocks(
+        self,
+        req_status: RequestOffloadState,
+        block_ids: tuple[list[int], ...],
+    ) -> bool:
+        if not block_ids or not self._store_finished_decode:
+            return False
+        if req_status.req.num_in_flight_tokens:
+            return False
+
+        recurrent_block_ids = {
+            group.group_idx: tuple(block_ids[group.group_idx])
+            for group in self.config.kv_group_configs
+            if group.requires_cow_source
+        }
+        if not any(any(group_blocks) for group_blocks in recurrent_block_ids.values()):
+            return False
+
+        req_status.finished_decode_block_ids = recurrent_block_ids
+        self._finished_req_releases[req_status.req.request_id] = (
+            _FinishedReqReleaseState.WAITING_FOR_STORES
+        )
+        return True
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -1433,10 +1472,25 @@ class OffloadingConnectorScheduler:
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
+            req_status.finished_decode_block_ids = None
             req_status.finished_signaled = True
             self.manager.on_request_finished(req_status.req_context)
             if not req_status.transfer_jobs:
                 self._remove_request(req_id)
+
+        # Emit each ready release once. Keep blocks held until the worker echo
+        # arrives in update_connector_output(). A reset removes request state
+        # early, so wait for its flush reports before allowing block reuse.
+        if not self._reset_fence:
+            for req_id, state in self._finished_req_releases.items():
+                if (
+                    state is _FinishedReqReleaseState.WAITING_FOR_STORES
+                    and req_id not in self._req_status
+                ):
+                    meta.finished_store_reqs.add(req_id)
+                    self._finished_req_releases[req_id] = (
+                        _FinishedReqReleaseState.WAITING_FOR_CORE
+                    )
         self._current_batch_load_jobs = {}
         self._current_batch_sync_loads = set()
         self._current_batch_sync_load_bytes = 0
@@ -1465,10 +1519,13 @@ class OffloadingConnectorScheduler:
         A cache reset fence also keeps it stepping: the flush must reach the
         workers and their reports come back before on_reset_flushed().
         """
-        if self._job_statuses or self._reset_fence:
+        if self._job_statuses or self._reset_fence or self._finished_req_releases:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
+
+    def has_pending_block_frees(self) -> bool:
+        return bool(self._finished_req_releases)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -1482,6 +1539,14 @@ class OffloadingConnectorScheduler:
             self._update_connector_output(connector_output)
 
     def _update_connector_output(self, connector_output: KVConnectorOutput):
+        # Keep the source blocks held until the core echoes the release IDs.
+        for req_id in connector_output.finished_sending or ():
+            if (
+                self._finished_req_releases.get(req_id)
+                is _FinishedReqReleaseState.WAITING_FOR_CORE
+            ):
+                del self._finished_req_releases[req_id]
+
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
@@ -1622,6 +1687,7 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
+        block_ids: tuple[list[int], ...] = (),
     ) -> tuple[bool, dict[str, Any] | None]:
         """Called when a request has finished, before its blocks are freed.
 
@@ -1662,6 +1728,7 @@ class OffloadingConnectorScheduler:
         # Update offload keys with final block hash so the store handlers can
         # create store jobs for the last block(s) on the next schedule step.
         req_status.update_offload_keys()
+        hold_blocks = self._hold_finished_decode_blocks(req_status, block_ids)
 
         # Keep req_status alive: the store handlers process finished_req_ids
         # on the next step, and the cleanup follows their store jobs.
@@ -1672,7 +1739,7 @@ class OffloadingConnectorScheduler:
             for bid in job_status.deferred_fence_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
 
-        return False, None
+        return hold_blocks, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         """Drain pending KV cache events.

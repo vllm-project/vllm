@@ -19,23 +19,28 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base
     StoreJobSink,
     StoreTriggerHandler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.boundary import (  # noqa: E501
+    build_aligned_boundary_store_jobs,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.candidates import (  # noqa: E501
     final_swa_tail_start_chunk,
     select_store_candidates,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     OffloadPolicy,
     StoreTrigger,
 )
+from vllm.v1.request import RequestStatus
 
 logger = init_logger(__name__)
 
 
 class OnComputeStoreHandler(StoreTriggerHandler):
-    """Offers each chunk when its KV data is computed (StoreTrigger.ON_COMPUTE)."""
+    """Stores computed chunks and retained recurrent states at request finish."""
 
     trigger = StoreTrigger.ON_COMPUTE
 
@@ -262,3 +267,63 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 fenced_block_ids=fenced_block_ids or None,
                 deferred_fence_block_ids=deferred_fence_block_ids,
             )
+
+        finished_decode_states = {}
+        for req_id in scheduler_output.finished_req_ids or ():
+            req_status = req_states.get(req_id)
+            if req_status is not None:
+                states = self._collect_finished_decode_states(req_status)
+                if states:
+                    finished_decode_states[req_id] = states
+        if finished_decode_states:
+            build_aligned_boundary_store_jobs(
+                self._config,
+                self._events_tracker,
+                finished_decode_states,
+                req_states,
+                sink,
+            )
+
+    def _collect_finished_decode_states(
+        self, req_status: RequestOffloadState
+    ) -> list[tuple[int, int, int]]:
+        block_ids = req_status.finished_decode_block_ids
+        if block_ids is None:
+            return []
+
+        request = req_status.req
+        if (
+            request.num_in_flight_tokens
+            or request.num_preemptions
+            or request.resumable
+            or request.status
+            not in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_REPETITION,
+            )
+        ):
+            return []
+
+        confirmed_tokens = request.num_computed_tokens
+        max_boundary = req_status.num_offloadable_tokens(confirmed_tokens)
+        if max_boundary <= request.num_prompt_tokens:
+            return []
+
+        states = []
+        for group in self._config.kv_group_configs:
+            if not group.requires_cow_source:
+                continue
+            boundary = round_down(confirmed_tokens, group.tokens_per_block)
+            if (
+                boundary <= request.num_prompt_tokens
+                or boundary == confirmed_tokens
+                or boundary > max_boundary
+                or boundary % group.tokens_per_chunk
+            ):
+                continue
+            group_blocks = block_ids.get(group.group_idx, ())
+            block_idx = boundary // group.tokens_per_block - 1
+            if block_idx < len(group_blocks) and (block_id := group_blocks[block_idx]):
+                states.append((group.group_idx, block_id, boundary))
+        return states

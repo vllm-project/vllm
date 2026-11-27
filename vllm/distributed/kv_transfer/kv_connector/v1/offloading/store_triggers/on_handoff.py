@@ -18,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base
     StoreJobSink,
     StoreTriggerHandler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.boundary import (  # noqa: E501
+    build_aligned_boundary_store_jobs,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import get_reusable_prefix_length
 from vllm.v1.kv_offload.base import GPULoadStoreSpec, StoreTrigger
@@ -64,74 +67,12 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
     ) -> None:
         block_state = scheduler_output.kv_connector_block_state
         handoffs = block_state.boundary_state_offloads if block_state else None
-        if not handoffs:
-            return
-        self._build_aligned_boundary_store_jobs(handoffs, req_states, sink)
-        if self._config.supports_partial_tail:
-            self._build_partial_tail_store_jobs(handoffs, req_states, sink)
-
-    def _build_aligned_boundary_store_jobs(
-        self,
-        handoffs: dict[str, list[tuple[int, int, int]]],
-        req_states: Mapping[ReqId, RequestOffloadState],
-        sink: StoreJobSink,
-    ) -> None:
-        num_groups = len(self._config.kv_group_configs)
-        config_group_idx_by_group = {
-            config.group_idx: config_group_idx
-            for config_group_idx, config in enumerate(self._config.kv_group_configs)
-        }
-        for req_id, entries in handoffs.items():
-            req_status = req_states.get(req_id)
-            if req_status is None:
-                continue
-            req = req_status.req
-            max_boundary = req_status.num_offloadable_tokens(req.num_tokens)
-            for group_idx, block_id, boundary in entries:
-                config_group_idx = config_group_idx_by_group.get(group_idx)
-                if config_group_idx is None:
-                    continue
-                group_config = self._config.kv_group_configs[config_group_idx]
-                if (
-                    block_id == 0
-                    or boundary > max_boundary
-                    or boundary % group_config.tokens_per_chunk != 0
-                ):
-                    continue
-
-                key = req_status.register_boundary_key(group_idx, boundary)
-                store_output = sink.prepare_store([key], req_status.req_context)
-                if store_output is None:
-                    continue
-                if store_output.keys_to_retry:
-                    # A hand-off is not offered again.
-                    sink.record_allocation_failure()
-                if not store_output.keys_to_store:
-                    continue
-
-                group_sizes = [0] * num_groups
-                group_sizes[config_group_idx] = 1
-                block_indices = [0] * num_groups
-                block_indices[config_group_idx] = (
-                    boundary // group_config.tokens_per_block - 1
-                )
-                sink.add_job(
-                    req_id,
-                    [key],
-                    GPULoadStoreSpec(
-                        [block_id],
-                        group_sizes=group_sizes,
-                        block_indices=block_indices,
-                    ),
-                    store_output.store_spec,
-                    fenced_block_ids=[block_id],
-                )
-                self._events_tracker.record_store(
-                    req,
-                    group_config,
-                    boundary // group_config.tokens_per_chunk - 1,
-                    key,
-                )
+        if handoffs:
+            build_aligned_boundary_store_jobs(
+                self._config, self._events_tracker, handoffs, req_states, sink
+            )
+            if self._config.supports_partial_tail:
+                self._build_partial_tail_store_jobs(handoffs, req_states, sink)
 
     def _build_partial_tail_store_jobs(
         self,

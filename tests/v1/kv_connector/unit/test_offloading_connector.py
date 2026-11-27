@@ -20,7 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
-from vllm.v1.metrics.reader import Gauge
+from vllm.v1.metrics.reader import Counter, Gauge
 
 # The offloaded block size must stay a whole number of GPU blocks.
 CPU_BLOCK_SIZES: int
@@ -793,6 +793,99 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
 
     finally:
         del llm
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Qwen GDN CPU offload test requires CUDA or ROCm",
+)
+@pytest.mark.parametrize("async_scheduling", [False, True], ids=["sync", "async"])
+def test_gdn_cpu_offload_decode_checkpoint(vllm_runner, monkeypatch, async_scheduling):
+    """A finished decode checkpoint resumes identically from CPU and GPU."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    transfer = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 64 << 20,
+            "offload_prompt_only": False,
+        },
+    )
+    with vllm_runner(
+        "vllm-project/Qwen3.5-0.8B-text-only",
+        max_model_len=2048,
+        max_num_batched_tokens=1024,
+        kv_cache_memory_bytes=512 << 20,
+        enable_prefix_caching=True,
+        prefix_cache_retention_interval=0,
+        enable_chunked_prefill=True,
+        async_scheduling=async_scheduling,
+        enforce_eager=True,
+        disable_log_stats=False,
+        enable_flashinfer_autotune=False,
+        gdn_prefill_backend="triton",
+        kv_transfer_config=transfer,
+    ) as runner:
+        llm = runner.llm
+        engine = llm.llm_engine
+        engine_core = engine.engine_core.engine_core
+        block = engine.vllm_config.cache_config.mamba_block_size
+        assert block is not None
+        tokenizer = llm.get_tokenizer()
+        text = (
+            "Write a list of numbers, one per line, starting at 1. "
+            "Continue until instructed to stop.\n"
+        )
+        prompt_ids = tokenizer.encode(text * (block // 10 + 1))[: block + 4]
+        suffix = tokenizer.encode("\nContinue the sequence.\n")
+
+        def generate(ids, max_tokens):
+            [output] = llm.generate(
+                [TokensPrompt(prompt_token_ids=ids)],
+                SamplingParams(max_tokens=max_tokens, temperature=0, ignore_eos=True),
+                use_tqdm=False,
+            )
+            return output
+
+        def drain_stores():
+            deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
+            while engine_core.scheduler.has_requests() or engine_core.batch_queue:
+                assert time.monotonic() < deadline, "CPU offload did not drain"
+                engine.step()
+
+        def counter(name):
+            return sum(
+                metric.value
+                for metric in llm.get_metrics()
+                if isinstance(metric, Counter)
+                and metric.name.removesuffix("_total") == name
+            )
+
+        before_store = counter("vllm:kv_offload_store_bytes")
+        producer = generate(prompt_ids, block + 8)
+        drain_stores()
+        store_bytes = counter("vllm:kv_offload_store_bytes") - before_store
+        assert llm.reset_prefix_cache(reset_connector=False)
+        followup = [*prompt_ids, *producer.outputs[0].token_ids, *suffix]
+        before_hits = counter("vllm:external_prefix_cache_hits")
+        cpu = generate(followup, 8)
+        external = counter("vllm:external_prefix_cache_hits") - before_hits
+        print(
+            f"block={block} external={external} store_bytes={store_bytes} "
+            f"tokens={cpu.outputs[0].token_ids} text={cpu.outputs[0].text!r}"
+        )
+        assert cpu.num_cached_tokens == external == 2 * block
+
+        drain_stores()
+        assert llm.reset_prefix_cache(reset_connector=True)
+        repeat_producer = generate(prompt_ids, block + 8)
+        assert repeat_producer.outputs[0].token_ids == producer.outputs[0].token_ids
+        drain_stores()
+        before_hits = counter("vllm:external_prefix_cache_hits")
+        gpu = generate(followup, 8)
+        assert gpu.num_cached_tokens == 2 * block
+        assert counter("vllm:external_prefix_cache_hits") == before_hits
+        assert cpu.outputs[0].token_ids == gpu.outputs[0].token_ids
 
 
 def _poll_until(condition, timeout_s: float, what: str) -> None:

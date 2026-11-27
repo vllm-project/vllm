@@ -275,6 +275,9 @@ class RequestOffloadState:
     # In-flight job IDs. Per the connector's invariant, at any given time
     # this contains either a single load job, or one or more store jobs.
     transfer_jobs: set[int] = field(default_factory=set)
+    # Final recurrent block tables from the finish callback, consumed by the
+    # handoff store handler on the next scheduler step.
+    finished_decode_block_ids: dict[int, tuple[int, ...]] | None = None
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
     deferred_lookup_start_time: float | None = None
