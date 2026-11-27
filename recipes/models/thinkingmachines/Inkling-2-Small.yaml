@@ -95,7 +95,7 @@ variants:
       - h200
       - arch:sm100
       - arch:sm103
-    description: "Parse reasoning output with the Inkling reasoning parser."
+    description: "All routed experts in MXFP8; attention, routers, attention-residual queries and the LM head in BF16/FP32. ~623 GB on disk including the DSpark draft. Blackwell quantizes expert activations to MXFP8; Hopper keeps them in BF16 (W8A16)."
     # TP8 on an 8-GPU node (H200, B200, B300).
     tp: 8
     # Probabilistic DSpark drafting caches 7 x 201K-vocab bf16 logits per
