@@ -110,6 +110,7 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
     cg = vllm_config.compilation_config.cudagraph_mode
     max_len = vllm_config.model_config.max_model_len
     index_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("bf16")
+    # Fusion is per MoE layer; the runner requires all fused or all separate.
     moes = [layer.block_sparse_moe for layer in model.layers if layer.is_moe_layer]
     fused_shared = bool(moes) and all(m.is_fused_shared_expert_enabled for m in moes)
     cus = _compute_units()
