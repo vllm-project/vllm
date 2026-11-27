@@ -415,7 +415,7 @@ def test_flat_encoder_getters_are_preferred():
     def features(*args, **kwargs):
         pass
 
-    get_getter = TransformersMultiModalMixin._get_encoder_getter
+    get_getter = TransformersMultiModalMixin._get_modality_embeddings
     flat = SimpleNamespace(
         model=SimpleNamespace(
             get_audio_embeddings=embeddings, get_audio_features=features
