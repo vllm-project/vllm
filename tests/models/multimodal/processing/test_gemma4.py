@@ -10,6 +10,7 @@ import torch
 from PIL import Image as PILImage
 from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
+from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
@@ -21,6 +22,8 @@ from vllm.model_executor.models.gemma3n_mm import (
     batch_audio_features,
 )
 from vllm.model_executor.models.gemma4_mm import (
+    _VIDEO_MAX_FRAMES,
+    _VIDEO_MAX_SOFT_TOKENS,
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
     Gemma4ProcessingInfo,
@@ -38,6 +41,8 @@ from ...utils import build_model_context
 
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
+EMBEDDING_GEMMA2_MODEL_ID = "google/embeddinggemma-2"
+GEMMA4_UNIFIED_MODEL_ID = "google/gemma-4-12B-it"
 DIFFUSION_GEMMA_MODEL_ID = "google/diffusiongemma-26B-A4B-it"
 
 
@@ -223,6 +228,162 @@ def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
     assert tokens is not None
     assert tokens["image"] == 280
     assert tokens["video"] == expected_video_tokens
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "max_soft_tokens"),
+    [(None, 280), ({"max_soft_tokens": 70}, 70), ({"max_soft_tokens": 1120}, 1120)],
+)
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        GEMMA4_MODEL_ID,
+        EMBEDDING_GEMMA2_MODEL_ID,
+        GEMMA4_UNIFIED_MODEL_ID,
+        DIFFUSION_GEMMA_MODEL_ID,
+    ],
+)
+def test_dummy_image_reaches_max_soft_tokens(
+    model_id: str,
+    mm_processor_kwargs: dict[str, object] | None,
+    max_soft_tokens: int,
+):
+    model_config = ModelConfig(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=model_config.max_model_len,
+        mm_counts={"image": 1},
+    )
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["image"])
+
+    assert tokens is not None
+    assert num_embeds == max_soft_tokens
+    assert num_embeds <= tokens["image"]
+
+
+@pytest.mark.parametrize(
+    "model_id", [GEMMA4_MODEL_ID, GEMMA4_UNIFIED_MODEL_ID, DIFFUSION_GEMMA_MODEL_ID]
+)
+def test_dummy_video_frames_reach_frame_budget(model_id: str):
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
+
+    assert num_embeds == _VIDEO_MAX_FRAMES * _VIDEO_MAX_SOFT_TOKENS
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, GEMMA4_UNIFIED_MODEL_ID])
+def test_dummy_audio_reaches_audio_budget(model_id: str):
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"audio": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"audio": 1},
+    )
+    dummy = processor.get_dummy_mm_inputs({"audio": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["audio"])
+
+    assert tokens is not None
+    assert num_embeds == tokens["audio"]
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "modality", "options", "expected_embeds"),
+    [
+        (None, "image", {"width": 224}, 280),
+        (None, "image", {"height": 80}, 280),
+        (None, "image", {"width": 1280, "height": 80}, 280),
+        ({"max_soft_tokens": 1120}, "image", {"width": 32, "height": 560}, 1120),
+        ({"max_soft_tokens": 1120}, "image", {"width": 28, "height": 40}, 1120),
+        ({"do_resize": False}, "image", {"width": 500}, 280),
+        (None, "video", {"num_frames": 2, "width": 32, "height": 560}, 140),
+        (None, "video", {"num_frames": 2, "width": 8, "height": 8}, 132),
+        ({"do_resize": False}, "video", {"num_frames": 2, "width": 200}, 140),
+    ],
+)
+def test_dummy_reaches_budget_within_size_hints(
+    mm_processor_kwargs: dict[str, object] | None,
+    modality: str,
+    options: dict[str, int],
+    expected_embeds: int,
+    caplog_vllm,
+):
+    model_config = ModelConfig(
+        GEMMA4_MODEL_ID,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={modality: {"count": 1, **options}},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    items = processor.dummy_inputs.get_dummy_mm_data(
+        model_config.max_model_len,
+        {modality: 1},
+        model_config.get_multimodal_config().limit_per_prompt,
+    )[modality]
+    assert isinstance(items, list)
+    if modality == "image":
+        assert isinstance(items[0], PILImage.Image)
+        width, height = items[0].size
+    else:
+        assert isinstance(items[0], tuple)
+        frames = items[0][0]
+        assert isinstance(frames, np.ndarray)
+        assert frames.shape[0] == options["num_frames"]
+        height, width = frames.shape[1:3]
+    dummy = processor.get_dummy_mm_inputs({modality: 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"][modality])
+
+    assert width <= options.get("width", width)
+    assert height <= options.get("height", height)
+    assert num_embeds == expected_embeds
+    assert "exceeds model's maximum" not in caplog_vllm.text
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_unresized_dummy_rejects_hint_below_one_cell(modality: str):
+    model_config = ModelConfig(
+        GEMMA4_MODEL_ID,
+        mm_processor_kwargs={"do_resize": False},
+        limit_mm_per_prompt={modality: {"count": 1, "width": 32}},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    with pytest.raises(ValueError, match="divisible by 48"):
+        processor.get_dummy_mm_inputs({modality: 1})
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"num_frames": 2, "width": 32, "height": 560}, {"num_frames": 2, "height": 96}],
+)
+def test_embedding_gemma2_dummy_video_respects_size_hints(options: dict[str, int]):
+    model_config = ModelConfig(
+        EMBEDDING_GEMMA2_MODEL_ID,
+        limit_mm_per_prompt={"video": {"count": 1, **options}},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    videos = processor.dummy_inputs.get_dummy_mm_data(
+        model_config.max_model_len,
+        {"video": 1},
+        model_config.get_multimodal_config().limit_per_prompt,
+    )["video"]
+    assert isinstance(videos, list) and isinstance(videos[0], tuple)
+    frames = videos[0][0]
+    assert isinstance(frames, np.ndarray)
+    height, width = frames.shape[1:3]
+
+    assert width <= options.get("width", width)
+    assert height <= options.get("height", height)
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])

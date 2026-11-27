@@ -14,6 +14,7 @@ processor inserts `mm:ss` timestamps between frames so the model can
 reason about temporal order.
 """
 
+import dataclasses
 import itertools
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
@@ -25,7 +26,6 @@ from PIL import Image as PILImage
 from torch import nn
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma4 import (
-    Gemma4AudioFeatureExtractor,
     Gemma4Config,
     Gemma4Processor,
     Gemma4VisionConfig,
@@ -330,16 +330,10 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
     def get_mm_max_tokens_per_item(
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
-        config = self.get_hf_config()
         # Upper bound: the pooler outputs max_soft_tokens slots per image.
         # After padding is stripped the actual count is ≤ this value, but
         # vLLM needs the max for memory planning.
-        tokens_per_image = config.vision_config.default_output_length
-        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
-        val, _ = _get_max_soft_tokens(merged_kwargs)
-        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
-            tokens_per_image = val
-        tokens: dict[str, int] = {"image": tokens_per_image}
+        tokens: dict[str, int] = {"image": self.get_max_image_soft_tokens()}
         if self.has_audio():
             # Audio max tokens from the processor's audio_seq_length.
             processor = self.get_hf_processor()
@@ -352,6 +346,64 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
+
+    def get_default_image_soft_tokens(self) -> int:
+        return self.get_hf_config().vision_config.default_output_length
+
+    def get_max_image_soft_tokens(self) -> int:
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        val, _ = _get_max_soft_tokens(merged_kwargs)
+        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
+            return val
+        return self.get_default_image_soft_tokens()
+
+    def get_dummy_size_for_soft_tokens(
+        self,
+        max_soft_tokens: int,
+        do_resize: bool,
+        max_width: int | None,
+        max_height: int | None,
+    ) -> tuple[int, int]:
+        vision_cfg = self.get_hf_config().vision_config
+        unit = vision_cfg.patch_size * vision_cfg.pooling_kernel_size
+        if not do_resize:
+            max_cols = max(max_width // unit, 1) if max_width else max_soft_tokens
+            max_rows = max(max_height // unit, 1) if max_height else max_soft_tokens
+            cols, rows = max(
+                (
+                    (min(max_cols, max_soft_tokens // r), r)
+                    for r in range(1, min(max_rows, max_soft_tokens) + 1)
+                ),
+                key=lambda grid: (grid[0] * grid[1], min(grid)),
+            )
+            width, height = cols * unit, rows * unit
+            return min(width, max_width or width), min(height, max_height or height)
+
+        width_limit = max_width or max_soft_tokens * unit
+        height_limit = max_height or max_soft_tokens * unit
+        grids = sorted(
+            (
+                (max_soft_tokens // r, r)
+                for r in range(1, max_soft_tokens + 1)
+                if max_soft_tokens % r == 0
+            ),
+            key=lambda grid: (abs(grid[0] - grid[1]), -grid[0]),
+        )
+        exact = (
+            (c * s, r * s)
+            for c, r in grids
+            for s in range(unit, 0, -1)
+            if unit % s == 0 and c * s <= width_limit and r * s <= height_limit
+        )
+        if size := next(exact, None):
+            return size
+        return max(
+            itertools.product(range(1, width_limit + 1), range(1, height_limit + 1)),
+            key=lambda size: (
+                self._compute_num_soft_tokens(*size, max_soft_tokens),
+                size[0] * size[1],
+            ),
+        )
 
     def get_data_parser(self) -> MultiModalDataParser:
         kwargs: dict[str, Any] = {"video_needs_metadata": True}
@@ -549,23 +601,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 
 
 def _dummy_audio_num_samples(processor: Any) -> int:
-    """Length in samples of a worst-case dummy audio item.
-
-    `fft_length` is set in `Gemma4AudioFeatureExtractor.__init__` and is not
-    defined by `Gemma4UnifiedAudioFeatureExtractor`, which the encoder-free
-    Gemma 4 variant uses. Reading it unconditionally therefore raises
-    `AttributeError` during memory profiling on that variant, which is reached
-    whenever audio is the modality with the largest per-item token count.
-
-    For any other extractor, fall back to the audio budget the processor itself
-    declares -- the same pair of values used to warn about over-long audio
-    elsewhere in this file.
-    """
-    feature_extractor = processor.feature_extractor
-    if isinstance(feature_extractor, Gemma4AudioFeatureExtractor):
-        return feature_extractor.fft_length
-
-    sampling_rate = feature_extractor.sampling_rate
+    sampling_rate = processor.feature_extractor.sampling_rate
     max_duration_s = processor.audio_seq_length * processor.audio_ms_per_token / 1000.0
     return int(max_duration_s * sampling_rate)
 
@@ -596,21 +632,22 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         num_audios = mm_counts.get("audio", 0)
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
-        image_processor = processor.image_processor
-        # Use processor's configured image size for dummies.
-        # Gemma4ImageProcessor sets size=None (it uses patch_size /
-        # max_soft_tokens instead of the standard size dict), so we
-        # guard against None with `or {}`.
-        size = getattr(image_processor, "size", None) or {}
-        img_width = size.get("width", 224)
-        img_height = size.get("height", 224)
+        image_overrides = mm_options.get("image") if mm_options else None
+        img_width, img_height = self.info.get_dummy_size_for_soft_tokens(
+            self.info.get_max_image_soft_tokens(),
+            _get_do_resize(
+                self.info.ctx.get_merged_mm_kwargs({}),
+                processor.image_processor.do_resize,
+            ),
+            image_overrides.width if image_overrides else None,
+            image_overrides.height if image_overrides else None,
+        )
 
         data: dict[str, Any] = {
             "image": self._get_dummy_images(
                 width=img_width,
                 height=img_height,
                 num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image") if mm_options else None,
             ),
         }
 
@@ -623,12 +660,28 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             )
 
         if num_videos > 0:
+            video_overrides = mm_options.get("video") if mm_options else None
+            video_mm_kwargs = {
+                "images_kwargs": {},
+                "max_soft_tokens": _VIDEO_MAX_SOFT_TOKENS,
+            }
+            frame_width, frame_height = self.info.get_dummy_size_for_soft_tokens(
+                _VIDEO_MAX_SOFT_TOKENS,
+                _get_do_resize(
+                    self.info.ctx.get_merged_mm_kwargs(video_mm_kwargs),
+                    self.info.get_hf_processor(
+                        **video_mm_kwargs
+                    ).image_processor.do_resize,
+                ),
+                video_overrides.width if video_overrides else None,
+                video_overrides.height if video_overrides else None,
+            )
             data["video"] = self._get_dummy_videos(
-                width=img_width,
-                height=img_height,
+                width=frame_width,
+                height=frame_height,
                 num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
-                overrides=mm_options.get("video") if mm_options else None,
+                overrides=video_overrides,
             )
 
         return data
@@ -648,7 +701,9 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             height=height,
             num_frames=num_frames,
             num_videos=num_videos,
-            overrides=overrides,
+            overrides=dataclasses.replace(overrides, width=None, height=None)
+            if overrides
+            else None,
         )
         videos = [v.copy() for v in videos]
 
