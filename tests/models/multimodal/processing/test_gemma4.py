@@ -236,7 +236,12 @@ def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
 )
 @pytest.mark.parametrize(
     "model_id",
-    [GEMMA4_MODEL_ID, EMBEDDING_GEMMA2_MODEL_ID, GEMMA4_UNIFIED_MODEL_ID],
+    [
+        GEMMA4_MODEL_ID,
+        EMBEDDING_GEMMA2_MODEL_ID,
+        GEMMA4_UNIFIED_MODEL_ID,
+        DIFFUSION_GEMMA_MODEL_ID,
+    ],
 )
 def test_dummy_image_reaches_max_soft_tokens(
     model_id: str,
@@ -262,7 +267,9 @@ def test_dummy_image_reaches_max_soft_tokens(
     assert num_embeds <= tokens["image"]
 
 
-@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, GEMMA4_UNIFIED_MODEL_ID])
+@pytest.mark.parametrize(
+    "model_id", [GEMMA4_MODEL_ID, GEMMA4_UNIFIED_MODEL_ID, DIFFUSION_GEMMA_MODEL_ID]
+)
 def test_dummy_video_frames_reach_frame_budget(model_id: str):
     ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
@@ -339,6 +346,19 @@ def test_dummy_reaches_budget_within_size_hints(
     assert height <= options.get("height", height)
     assert num_embeds == expected_embeds
     assert "exceeds model's maximum" not in caplog_vllm.text
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_unresized_dummy_rejects_hint_below_one_cell(modality: str):
+    model_config = ModelConfig(
+        GEMMA4_MODEL_ID,
+        mm_processor_kwargs={"do_resize": False},
+        limit_mm_per_prompt={modality: {"count": 1, "width": 32}},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    with pytest.raises(ValueError, match="divisible by 48"):
+        processor.get_dummy_mm_inputs({modality: 1})
 
 
 @pytest.mark.parametrize(

@@ -11,8 +11,6 @@ MODEL_ID = "google/gemma-4-E2B-it"
 
 @pytest.mark.core_model
 def test_unresized_image_engine_starts_and_generates(vllm_runner) -> None:
-    """With resizing disabled, startup profiling must build a patch-aligned
-    dummy, and a patch-aligned image must keep its full grid of soft tokens."""
     from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(MODEL_ID)

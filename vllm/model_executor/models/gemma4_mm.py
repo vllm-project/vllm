@@ -376,7 +376,8 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
                 ),
                 key=lambda grid: (grid[0] * grid[1], min(grid)),
             )
-            return cols * unit, rows * unit
+            width, height = cols * unit, rows * unit
+            return min(width, max_width or width), min(height, max_height or height)
 
         width_limit = max_width or max_soft_tokens * unit
         height_limit = max_height or max_soft_tokens * unit
