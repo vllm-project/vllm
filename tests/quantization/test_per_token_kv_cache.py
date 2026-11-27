@@ -389,13 +389,13 @@ def test_per_token_head_round_trip_accuracy(
                 )
 
 
-@pytest.mark.parametrize("dominant_dim", [0, 1])
+@pytest.mark.parametrize("dominant_value", [1.0, -1.0])
 @torch.inference_mode()
-def test_int4_round_trip_one_dominant_coordinate(dominant_dim: int):
-    """INT4 must reconstruct a row whose energy sits in one coordinate.
+def test_int4_round_trip_one_dominant_coordinate(dominant_value: float):
+    """INT4 must reconstruct a row whose energy sits in coordinate 0.
 
-    Coordinate 0 rotates to a row of equal-sign values, so its range excludes
-    zero.  Some BOS value rows of Llama-3.2-1B look like this.
+    Such a row rotates to equal-sign values, so its range excludes zero.
+    Some BOS value rows of Llama-3.2-1B look like this.
     """
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
         triton_reshape_and_cache_flash_per_token_head_quant,
@@ -406,7 +406,7 @@ def test_int4_round_trip_one_dominant_coordinate(dominant_dim: int):
 
     num_heads, head_size, block_size = 4, 64, 16
     data = torch.randn(1, num_heads, head_size) * 0.02
-    data[..., dominant_dim] = 1.0
+    data[..., 0] = dominant_value
     data = data.to(torch.bfloat16)
 
     key_cache = torch.zeros(1, block_size, num_heads, head_size // 2, dtype=torch.uint8)
