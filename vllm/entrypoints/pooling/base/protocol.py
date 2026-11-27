@@ -20,7 +20,61 @@ from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
-class PoolingBasicRequestMixin(OpenAIBaseModel):
+class MultimodalRequestMixin(OpenAIBaseModel):
+    """Request fields for controlling multimodal inputs and prefix caching."""
+
+    # --8<-- [start:multimodal-extra-params]
+    cache_salt: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1024,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional kwargs to pass to the HF processor.",
+    )
+    # --8<-- [end:multimodal-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        validate_cache_salt(data.get("cache_salt"))
+        return data
+
+    def build_prompt_extras(self):
+        merged: dict[str, Any] = {}
+
+        if self.cache_salt is not None:
+            merged["cache_salt"] = self.cache_salt
+
+        if self.media_io_kwargs is not None:
+            merged["media_io_kwargs"] = self.media_io_kwargs
+
+        if self.mm_processor_kwargs is not None:
+            merged["mm_processor_kwargs"] = self.mm_processor_kwargs
+
+        return merged
+
+
+class PoolingBasicRequestMixin(MultimodalRequestMixin):
     # --8<-- [start:pooling-common-params]
     model: str | None = None
     user: str | None = None
@@ -65,33 +119,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description="Additional kwargs to pass to the HF processor.",
-    )
-    cache_salt: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=1024,
-        description=(
-            "If specified, the prefix cache will be salted with the provided "
-            "string to prevent an attacker to guess prompts in multi-user "
-            "environments. The salt should be random, protected from "
-            "access by 3rd parties, and long enough to be "
-            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit)."
-        ),
-    )
     # --8<-- [end:pooling-common-extra-params]
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-
-        validate_cache_salt(data.get("cache_salt"))
-        return data
 
     def _build_pooling_tok_params(
         self,
@@ -288,13 +316,6 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
-    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
-        default=None,
-        description=(
-            "Additional kwargs to pass to the media IO connectors, "
-            "keyed by modality. Merged with engine-level media_io_kwargs."
-        ),
-    )
     # --8<-- [end:chat-extra-params]
 
     @model_validator(mode="before")
@@ -334,7 +355,6 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                 ),
             ),
-            media_io_kwargs=self.media_io_kwargs,
         )
 
 

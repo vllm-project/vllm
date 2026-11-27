@@ -71,6 +71,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         pooling_task: PoolingTask | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        cache_salt: str | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
         prompts.
@@ -92,6 +95,12 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             lora_request: LoRA request to use for generation, if any.
             pooling_task: Override the pooling task to use.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
 
         Returns:
             A list of `PoolingRequestOutput` objects containing the
@@ -116,6 +125,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 pooling_params=pooling_params,
                 lora_request=lora_request,
                 priorities=None,
+                cache_salt=cache_salt,
+                media_io_kwargs=media_io_kwargs,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
         else:
             ctx = OfflineEncodeInputsContext(
@@ -125,6 +137,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 pooling_params=pooling_params,
                 lora_request=lora_request,
                 priorities=None,
+                cache_salt=cache_salt,
+                media_io_kwargs=media_io_kwargs,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)
@@ -205,6 +220,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        cache_salt: str | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[EmbeddingRequestOutput] | list[PoolingRequestOutput]:
         """Generate embeddings using the model's configured pooling task.
 
@@ -224,6 +242,12 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
 
         Returns:
             For `embed`, `EmbeddingRequestOutput` objects with one vector per
@@ -242,6 +266,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             if self.pooling_task == "token_embed"
             else "embed",
             tokenization_kwargs=tokenization_kwargs,
+            cache_salt=cache_salt,
+            media_io_kwargs=media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         if self.pooling_task == "token_embed":
@@ -256,6 +283,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        cache_salt: str | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[ClassificationRequestOutput]:
         """Generate class logits for each prompt.
 
@@ -275,6 +305,12 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
 
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
@@ -288,6 +324,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             lora_request=lora_request,
             pooling_task="classify",
             tokenization_kwargs=tokenization_kwargs,
+            cache_salt=cache_salt,
+            media_io_kwargs=media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
@@ -304,6 +343,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        cache_salt: str | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -343,6 +385,12 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 structured content blocks, or "auto" to detect from the
                 template. Defaults to "auto".
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
 
         Returns:
             A list of `ScoringRequestOutput` objects containing the
@@ -401,6 +449,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             priorities=None,
+            cache_salt=cache_salt,
+            media_io_kwargs=media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)

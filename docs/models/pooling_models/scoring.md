@@ -177,6 +177,7 @@ The following Score API parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:multimodal-extra-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
 --8<-- "vllm/entrypoints/pooling/scoring/protocol.py:scoring-common-params"
 --8<-- "vllm/entrypoints/pooling/scoring/protocol.py:score-request-params"
@@ -389,6 +390,7 @@ The following rerank api parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:multimodal-extra-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
 --8<-- "vllm/entrypoints/pooling/scoring/protocol.py:scoring-common-params"
 --8<-- "vllm/entrypoints/pooling/scoring/protocol.py:rerank-request-params"

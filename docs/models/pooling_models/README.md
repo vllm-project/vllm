@@ -238,6 +238,29 @@ for output in response.json()["data"]:
     print(f"Data: {data!r} (size={len(data)})")
 ```
 
+## vLLM Pooling Options
+
+### Multimodal options
+
+The offline `LLM.encode`, `LLM.embed`, `LLM.classify`, and `LLM.score` methods
+accept `media_io_kwargs` and `mm_processor_kwargs`. `media_io_kwargs` is keyed by
+modality and is merged with the engine-level media IO settings. These options
+are forwarded to media IO connectors and the Hugging Face multimodal processor,
+respectively.
+
+The OpenAI-compatible `/v1/embeddings`, Cohere `/v2/embed`, `/classify`, `/score`,
+and reranking requests accept these fields as well. For online requests,
+non-empty `media_io_kwargs` and `mm_processor_kwargs` require starting the server
+with `--trust-request-mm-kwargs`; they are rejected by default because they can
+change media loading and preprocessing. See [the security guide](../../usage/security.md#per-request-multimodal-arguments).
+
+### Cache options
+
+The offline `LLM.encode`, `LLM.embed`, `LLM.classify`, and `LLM.score` methods
+and the supported online pooling requests accept `cache_salt` to separate
+prefix-cache entries between callers. Use an unpredictable value when callers
+share a prefix cache.
+
 ## Configuration
 
 In vLLM, pooling models implement the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.

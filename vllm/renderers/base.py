@@ -1342,6 +1342,26 @@ class BaseRenderer(ABC, Generic[_T]):
                     target.get("media_io_kwargs"), req_media_io_kwargs
                 )
 
+    def _apply_prompt_media_io_defaults(
+        self,
+        prompts: Sequence[DictPrompt],
+    ) -> None:
+        default_media_io_kwargs = self._get_default_media_io_kwargs()
+        if not default_media_io_kwargs:
+            return
+
+        for target in self._iter_media_io_targets(prompts):
+            if "multi_modal_data" in target or "multi_modal_uuids" in target:
+                target["media_io_kwargs"] = merge_media_io_kwargs(
+                    default_media_io_kwargs,
+                    target.get("media_io_kwargs"),
+                )
+
+    def _get_default_media_io_kwargs(self) -> dict[str, dict[str, Any]] | None:
+        model_config = getattr(self, "model_config", None)
+        mm_config = getattr(model_config, "multimodal_config", None)
+        return getattr(mm_config, "media_io_kwargs", None)
+
     def _apply_chat_media_io_kwargs(
         self,
         prompts: Sequence[DictPrompt],
@@ -1446,6 +1466,7 @@ class BaseRenderer(ABC, Generic[_T]):
         req_media_io_kwargs = prompt_extras.pop("media_io_kwargs", None)
 
         dict_prompts = self.render_prompts(prompts)
+        self._apply_prompt_media_io_defaults(dict_prompts)
         self._merge_prompt_extras_media_io_kwargs(dict_prompts, req_media_io_kwargs)
 
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
@@ -1476,6 +1497,7 @@ class BaseRenderer(ABC, Generic[_T]):
         req_media_io_kwargs = prompt_extras.pop("media_io_kwargs", None)
 
         dict_prompts = await self.render_prompts_async(prompts)
+        self._apply_prompt_media_io_defaults(dict_prompts)
         self._merge_prompt_extras_media_io_kwargs(dict_prompts, req_media_io_kwargs)
 
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
@@ -1507,6 +1529,15 @@ class BaseRenderer(ABC, Generic[_T]):
 
         prompt_extras = dict(prompt_extras or {})
         req_media_io_kwargs = prompt_extras.pop("media_io_kwargs", None)
+        default_media_io_kwargs = self._get_default_media_io_kwargs()
+        if default_media_io_kwargs:
+            chat_params = replace(
+                chat_params,
+                media_io_kwargs=merge_media_io_kwargs(
+                    default_media_io_kwargs,
+                    chat_params.media_io_kwargs,
+                ),
+            )
         if req_media_io_kwargs:
             merged_media_io_kwargs = merge_media_io_kwargs(
                 chat_params.media_io_kwargs, req_media_io_kwargs
@@ -1554,6 +1585,15 @@ class BaseRenderer(ABC, Generic[_T]):
 
         prompt_extras = dict(prompt_extras or {})
         req_media_io_kwargs = prompt_extras.pop("media_io_kwargs", None)
+        default_media_io_kwargs = self._get_default_media_io_kwargs()
+        if default_media_io_kwargs:
+            chat_params = replace(
+                chat_params,
+                media_io_kwargs=merge_media_io_kwargs(
+                    default_media_io_kwargs,
+                    chat_params.media_io_kwargs,
+                ),
+            )
         if req_media_io_kwargs:
             merged_media_io_kwargs = merge_media_io_kwargs(
                 chat_params.media_io_kwargs, req_media_io_kwargs

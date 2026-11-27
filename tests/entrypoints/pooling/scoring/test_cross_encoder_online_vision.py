@@ -584,3 +584,50 @@ async def test_rerank_preserves_structured_text_and_image(server):
         backend,
         "structured_text_and_image",
     )
+
+
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
+@pytest.mark.asyncio
+async def test_score_api_mm_and_cache_kwargs(
+    server: tuple[RemoteOpenAIServer, str],
+):
+    remote_server, backend = server
+    score_response = requests.post(
+        remote_server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": query,
+            "documents": {"content": [documents[1]]},
+            "cache_salt": "test-salt-value",
+            "media_io_kwargs": {},
+            "mm_processor_kwargs": {},
+        },
+    )
+    score_response.raise_for_status()
+    score = ScoreResponse.model_validate(score_response.json())
+
+    assert score.id is not None
+    assert score.data is not None
+    assert len(score.data) == 1
+    assert score.usage.prompt_tokens == 98
+    assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "mm_and_cache_kwargs")
+
+
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
+@pytest.mark.parametrize("invalid_salt", ["", "bad/salt"])
+@pytest.mark.asyncio
+async def test_score_api_invalid_cache_salt_rejected(
+    server: tuple[RemoteOpenAIServer, str],
+    invalid_salt: str,
+):
+    remote_server, _ = server
+    score_response = requests.post(
+        remote_server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": query,
+            "documents": document,
+            "cache_salt": invalid_salt,
+        },
+    )
+    assert score_response.status_code in (400, 422)

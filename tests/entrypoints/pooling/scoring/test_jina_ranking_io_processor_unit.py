@@ -38,7 +38,9 @@ def offline_processor_and_context():
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     proc = JinaRankingIOProcessor.__new__(JinaRankingIOProcessor)
     proc.tokenizer = TokenizersBackend(tokenizer_object=backend)
-    proc.model_config = SimpleNamespace(max_model_len=1024, is_encoder_decoder=False)
+    proc.model_config = SimpleNamespace(
+        max_model_len=1024, is_encoder_decoder=False, multimodal_config=None
+    )
     proc.renderer = SimpleNamespace(
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024)
     )

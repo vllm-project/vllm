@@ -20,6 +20,7 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
 
+from ..generate.base.protocol import validate_cache_salt
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -145,18 +146,58 @@ class OfflineInputsContext:
     add_special_tokens: bool | None = None
     tokenization_kwargs: dict[str, Any] | None = None
 
+    # mm_params->prompt_extras:
+    cache_salt: str | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+
     def build_tok_params(
         self,
         default_tok_params: TokenizeParams,
     ) -> TokenizeParams:
-        # User-provided `tokenization_kwargs` still wins over the default.
-        tok_kwargs: dict[str, Any] = {}
+        # Priority:
+        # explicit `add_special_tokens` > `tokenization_kwargs` > per-path default.
+        tok_kwargs: dict[str, Any] = dict(self.tokenization_kwargs or {})
         if self.add_special_tokens is not None:
             tok_kwargs["add_special_tokens"] = self.add_special_tokens
-        tok_kwargs.update(self.tokenization_kwargs or {})
         if not tok_kwargs:
             return default_tok_params
         return default_tok_params.with_kwargs(**tok_kwargs)
+
+    def build_prompt_extras(
+        self,
+        params: PoolingParams | None,
+    ) -> dict[str, Any]:
+        prompt_extras: dict[str, Any] = dict(
+            params.extra_kwargs if params and params.extra_kwargs else {}
+        )
+        merged = {
+            k: v
+            for k in ("cache_salt", "mm_processor_kwargs")
+            if (v := prompt_extras.get(k)) is not None
+        }
+
+        req_media_io_kwargs = (
+            self.media_io_kwargs
+            if self.media_io_kwargs is not None
+            else prompt_extras.get("media_io_kwargs")
+        )
+
+        if self.cache_salt is not None:
+            merged["cache_salt"] = self.cache_salt
+
+        if req_media_io_kwargs is not None:
+            merged["media_io_kwargs"] = req_media_io_kwargs
+
+        if self.mm_processor_kwargs is not None:
+            merged["mm_processor_kwargs"] = self.mm_processor_kwargs
+
+        # Validate the final resolved `cache_salt` (from context or `extra_kwargs`)
+        # before passing `prompt_extras` downstream.
+        if "cache_salt" in merged:
+            validate_cache_salt(merged["cache_salt"])
+
+        return merged
 
 
 @dataclass(slots=True)
@@ -198,8 +239,6 @@ class OfflineOutputsContext:
 class RenderParams(TypedDict):
     tok_params: TokenizeParams
     prompt_extras: dict[str, Any] | None
-    skip_mm_cache: bool
-
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int

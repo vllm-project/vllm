@@ -55,7 +55,9 @@ def test_rejects_mismatched_lora_requests(processor: PoolingIOProcessor):
 
 
 def test_rejects_conflicting_pooling_task(processor: PoolingIOProcessor):
-    processor.model_config = SimpleNamespace(is_encoder_decoder=False)
+    processor.model_config = SimpleNamespace(
+        is_encoder_decoder=False, multimodal_config=None
+    )
     processor.renderer = SimpleNamespace(
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=None)
     )
@@ -258,3 +260,46 @@ def test_score_leaves_caller_pooling_params_untouched(monkeypatch):
         "PoolingParams; reusing that object with another pooling model now "
         "fails with 'You cannot overwrite ...' before any inference runs."
     )
+
+
+# =============================================================================
+# Prompt Extras Isolation
+# =============================================================================
+
+
+def _make_prompt_token_ids_dict():
+    return {"prompt_token_ids": [11, 12, 13]}
+
+
+def _call_copy_prompt_for_render(prompt):
+    return PoolingIOProcessor._copy_prompt_for_render(prompt)
+
+
+class TestRequestLocalPromptExtras:
+    """Extras belong to each rendered request and never persist on caller input."""
+
+    def test_reused_prompt_dict_does_not_carry_mm_processor_kwargs(self):
+        prompt = _make_prompt_token_ids_dict()
+
+        first_request = _call_copy_prompt_for_render(prompt)
+        first_request["mm_processor_kwargs"] = {"do_rescale": False}
+        second_request = _call_copy_prompt_for_render(prompt)
+
+        assert "mm_processor_kwargs" not in prompt
+        assert "mm_processor_kwargs" not in second_request
+        assert first_request["mm_processor_kwargs"] == {"do_rescale": False}
+
+    def test_encoder_decoder_prompt_copies_each_target_mapping(self):
+        encoder_prompt = {"prompt_token_ids": [1, 2]}
+        decoder_prompt = {"prompt_token_ids": [3]}
+        prompt = {
+            "encoder_prompt": encoder_prompt,
+            "decoder_prompt": decoder_prompt,
+        }
+
+        copied = _call_copy_prompt_for_render(prompt)
+        copied["encoder_prompt"]["mm_processor_kwargs"] = {"do_rescale": False}
+        copied["decoder_prompt"]["mm_processor_kwargs"] = {"do_rescale": False}
+
+        assert "mm_processor_kwargs" not in encoder_prompt
+        assert "mm_processor_kwargs" not in decoder_prompt

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from itertools import groupby
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -172,6 +172,7 @@ def score_data_to_prompts(
     data_list: list[ScoreData],
     role: str,
     model_config: ModelConfig,
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
 ) -> list[PromptType]:
     """Convert a list of ScoreData into PromptType objects.
 
@@ -188,7 +189,9 @@ def score_data_to_prompts(
         if isinstance(data, str):
             prompts.append(data)
         else:
-            text, mm_data, mm_uuids = parse_score_data_single(data, role, model_config)
+            text, mm_data, mm_uuids = parse_score_data_single(
+                data, role, model_config, media_io_kwargs
+            )
             prompt: TextPrompt = TextPrompt(prompt=text)
             if mm_data is not None:
                 prompt["multi_modal_data"] = mm_data
@@ -233,6 +236,7 @@ def parse_score_data_single(
     data: ScoreData,
     role: str,
     model_config: ModelConfig,
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
     """Parse **one** ScoreData into a text prompt and its own multi-modal
     data.
@@ -242,7 +246,7 @@ def parse_score_data_single(
     This is the correct behaviour for late-interaction scoring, where
     query and document are encoded independently.
     """
-    mm_tracker = MultiModalItemTracker(model_config)
+    mm_tracker = MultiModalItemTracker(model_config, media_io_kwargs)
     content = _parse_score_content(role, data, mm_tracker)
 
     prompt = _ensure_str(content)
@@ -255,11 +259,12 @@ def parse_score_messages(
     data_2: ScoreData,
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat = "string",
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[
     list[ConversationMessage], MultiModalDataDict | None, MultiModalUUIDDict | None
 ]:
     """Parse a scoring pair, retaining content blocks for OpenAI-format templates."""
-    mm_tracker = MultiModalItemTracker(model_config)
+    mm_tracker = MultiModalItemTracker(model_config, media_io_kwargs)
     conversation = _parse_score_content("query", data_1, mm_tracker, content_format)
     conversation += _parse_score_content("document", data_2, mm_tracker, content_format)
     mm_items, mm_uuids = mm_tracker.resolve_items()

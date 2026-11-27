@@ -11,6 +11,7 @@ from vllm import (
 )
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateConfig
@@ -19,7 +20,12 @@ from vllm.renderers.chat_utils.item_tracker import (
     MediaRequestBudgets,
     use_media_request_budgets,
 )
-from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.inputs import EncoderDecoderDictPrompt
+from vllm.renderers.inputs.preprocess import (
+    DictPrompt,
+    parse_model_prompt,
+    prompt_to_seq,
+)
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -38,6 +44,8 @@ from ..types import (
     RequestGenerator,
     ScoringRenderParams,
 )
+
+logger = init_logger(__name__)
 
 
 class PoolingIOProcessor:
@@ -112,18 +120,12 @@ class PoolingIOProcessor:
                 ),
             )
 
-            mm_config = self.model_config.multimodal_config
             chat_tok_params = request.build_tok_params(
                 self.model_config, self.renderer.default_chat_tok_params
             )
             chat_params = request.build_chat_params(
                 self.chat_template, self.chat_template_content_format
-            ).with_defaults(
-                default_template_kwargs,
-                default_media_io_kwargs=(
-                    mm_config.media_io_kwargs if mm_config else None
-                ),
-            )
+            ).with_defaults(default_template_kwargs)
 
             params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
             seq_lora_requests = self._lora_request_to_seq(
@@ -137,7 +139,6 @@ class PoolingIOProcessor:
                     chat_params=chat_params,
                     tok_params=chat_tok_params,
                     prompt_extras=ctx.prompt_extras,
-                    skip_mm_cache=False,
                     params=params_seq[i],
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
@@ -175,7 +176,6 @@ class PoolingIOProcessor:
                     prompts=parsed_prompts[i],
                     tok_params=cmpl_tok_params,
                     prompt_extras=ctx.prompt_extras,
-                    skip_mm_cache=False,
                     params=params_seq[i],
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
@@ -222,6 +222,16 @@ class PoolingIOProcessor:
         else:
             pooling_params = ctx.pooling_params
 
+        if isinstance(pooling_params, Sequence):
+            logger.warning(
+                "Received a Sequence of PoolingParams; skipping prompt_extras"
+                "construction because per-item pooling params are not supported here."
+            )
+            target_params = None
+        else:
+            target_params = pooling_params
+        prompt_extras = ctx.build_prompt_extras(target_params)
+
         # Clone to avoid modifying the caller's pooling parameters.
         params_seq = [
             param.clone() for param in self._params_to_seq(pooling_params, num_requests)
@@ -246,8 +256,7 @@ class PoolingIOProcessor:
                 yield EncodeCMPLRenderParams(
                     prompts=parsed_prompts[i],
                     tok_params=cmpl_tok_params,
-                    prompt_extras=None,
-                    skip_mm_cache=False,
+                    prompt_extras=prompt_extras,
                     params=params_seq[i],
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
@@ -277,15 +286,18 @@ class PoolingIOProcessor:
                 chat_params=render_params["chat_params"],
                 tok_params=render_params["tok_params"],
                 prompt_extras=render_params["prompt_extras"],
-                skip_mm_cache=render_params["skip_mm_cache"],
             )
         elif "prompts" in render_params:
             render_params = cast(EncodeCMPLRenderParams, render_params)
+            prompt = render_params["prompts"]
+            if isinstance(prompt, dict):
+                prompts = [self._copy_prompt_for_render(prompt)]
+            else:
+                prompts = [prompt]
             engine_input = self.renderer.render_cmpl(
-                prompts=[render_params["prompts"]],
+                prompts=prompts,
                 tok_params=render_params["tok_params"],
                 prompt_extras=render_params["prompt_extras"],
-                skip_mm_cache=render_params["skip_mm_cache"],
             )
         else:
             raise ValueError(
@@ -298,6 +310,20 @@ class PoolingIOProcessor:
             lora_requests=render_params["lora_requests"],
             priorities=render_params["priorities"],
         )
+
+    @staticmethod
+    def _copy_prompt_for_render(prompt: DictPrompt) -> DictPrompt:
+        # Copy top-level and nested dicts to avoid mutating caller arguments.
+        if "encoder_prompt" in prompt:
+            enc_dec_prompt = cast(EncoderDecoderDictPrompt, prompt)
+            copied = dict(enc_dec_prompt)
+            copied["encoder_prompt"] = dict(enc_dec_prompt["encoder_prompt"])
+            decoder_prompt = enc_dec_prompt["decoder_prompt"]
+            if decoder_prompt is not None:
+                copied["decoder_prompt"] = dict(decoder_prompt)
+            return copied  # type: ignore[return-value]
+
+        return dict(prompt)  # type: ignore[return-value]
 
     def _validate_chat_template(
         self,

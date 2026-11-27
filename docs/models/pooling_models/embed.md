@@ -203,6 +203,7 @@ The following extra parameters are supported:
 
     ```python
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:multimodal-extra-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-extra-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"
@@ -227,6 +228,7 @@ these extra parameters are supported instead:
 
     ```python
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:multimodal-extra-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-extra-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"

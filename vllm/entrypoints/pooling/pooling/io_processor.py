@@ -99,7 +99,6 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
                 prompts=parsed_prompts[i],
                 tok_params=tok_params,
                 prompt_extras=ctx.prompt_extras,
-                skip_mm_cache=False,
                 params=params_seq[i],
                 lora_requests=seq_lora_requests[i],
                 priorities=seq_priority[i],
@@ -169,6 +168,9 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
                 tokenization_kwargs=ctx.tokenization_kwargs,
                 lora_request=ctx.lora_request,
                 priorities=ctx.priorities,
+                cache_salt=ctx.cache_salt,
+                media_io_kwargs=ctx.media_io_kwargs,
+                mm_processor_kwargs=ctx.mm_processor_kwargs,
             )
         )
 

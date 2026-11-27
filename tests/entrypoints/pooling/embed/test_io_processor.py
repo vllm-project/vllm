@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for EmbedIOProcessor."""
 
-from typing import get_args
+from typing import cast, get_args
 
 import pytest
 import torch
+from PIL import Image
 from pydantic import TypeAdapter, ValidationError
 
 from vllm import PoolingParams
@@ -26,7 +27,33 @@ from vllm.entrypoints.pooling.types import (
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import mm_input, tokens_input
 from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
+
+
+class TestChatMediaIOOptions:
+    """Pooling chat requests must preserve media IO options."""
+
+    def test_chat_embedding_preserves_media_io_kwargs(self):
+        rgba = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+        request = EmbeddingChatRequest(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": encode_image_url(rgba)},
+                        }
+                    ],
+                }
+            ],
+            media_io_kwargs={"image": {"image_mode": None}},
+        )
+
+        assert request.build_prompt_extras()["media_io_kwargs"] == {
+            "image": {"image_mode": None}
+        }
 
 
 class TestEmbeddingRequestParsing:
@@ -595,3 +622,72 @@ class TestChunkedEmbeddingProcessing:
             ctx.final_res_batch[1].outputs.data,
             torch.tensor([9.0, 9.0]),
         )
+
+
+# =============================================================================
+# Multimodal & caching parameters tests for EmbedIOProcessor
+# =============================================================================
+
+
+def _make_embed_serve_context(
+    *,
+    prompt_extras: dict[str, object] | None = None,
+) -> PoolingServeContext[EmbeddingCompletionRequest]:
+    request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
+        {"model": "test", "input": [[1, 2, 3]]}
+    )
+    assert isinstance(request, EmbeddingCompletionRequest)
+    pooling_params = PoolingParams()
+    return PoolingServeContext(
+        request=request,
+        pooling_params=pooling_params,
+        model_name="test",
+        request_id="embd-test-req-1",
+        engine_inputs=[
+            PoolingEngineInput(
+                prompts=tokens_input(prompt_token_ids=[1, 2, 3]),
+                params=pooling_params,
+                lora_requests=None,
+                priorities=0,
+            )
+        ],
+        lora_request=None,
+        priorities=0,
+        prompt_extras=prompt_extras,  # type: ignore[arg-type]
+    )
+
+
+class TestEmbedPromptExtrasAndCache:
+    def test_context_preserves_mm_and_cache_prompt_extras(self):
+        # Verify context holds explicit cache and multimodal extras as passed.
+        extras = {
+            "cache_salt": "embed-salt-01",
+            "mm_processor_kwargs": {"do_rescale": False},
+            "media_io_kwargs": {"image": {"resize": [64, 64]}},
+        }
+        ctx = _make_embed_serve_context(prompt_extras=extras)
+
+        assert ctx.prompt_extras == extras
+
+
+class TestEmbedRequestCacheSaltValidation:
+    """`cache_salt` validation boundaries on embedding requests."""
+
+    @pytest.mark.parametrize("salt", ["a", "s" * 128])
+    def test_valid_cache_salt_accepted(self, salt: str):
+        request = cast(
+            EmbeddingRequest,
+            TypeAdapter(EmbeddingRequest).validate_python(
+                {"model": "test", "input": "hello", "cache_salt": salt}
+            ),
+        )
+        assert request.cache_salt == salt
+
+    @pytest.mark.parametrize(
+        "bad_salt", ["", "s" * 129, "a@b", "a/b", "a\\b", "a\x00b"]
+    )
+    def test_invalid_cache_salt_rejected(self, bad_salt: str):
+        with pytest.raises(VLLMValidationError):
+            TypeAdapter(EmbeddingRequest).validate_python(
+                {"model": "test", "input": "hello", "cache_salt": bad_salt}
+            )

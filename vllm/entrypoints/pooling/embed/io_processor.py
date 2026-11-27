@@ -350,16 +350,12 @@ class EmbedIOProcessor(PoolingIOProcessor):
             ),
         )
 
-        mm_config = self.model_config.multimodal_config
         chat_tok_params = request.build_tok_params(
             self.model_config, self.renderer.default_chat_tok_params
         )
         chat_params = request.build_chat_params(
             self.chat_template, self.chat_template_content_format
-        ).with_defaults(
-            default_template_kwargs,
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
-        )
+        ).with_defaults(default_template_kwargs)
 
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
@@ -371,7 +367,6 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 chat_params=chat_params,
                 tok_params=chat_tok_params,
                 prompt_extras=ctx.prompt_extras,
-                skip_mm_cache=False,
                 params=params_seq[i],
                 lora_requests=seq_lora_requests[i],
                 priorities=seq_priority[i],
