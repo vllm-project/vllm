@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -28,6 +28,8 @@ class DFlashCorrectnessConfig:
     disable_flashinfer_sampler: bool = False
     language_model_only: bool = False
     chat_template_kwargs: dict[str, object] | None = None
+    dtype: str = "auto"
+    draft_dtype: str | None = None
 
 
 QWEN3_DFLASH = DFlashCorrectnessConfig(
@@ -86,6 +88,12 @@ QWEN3_5_4B_DFLASH2 = DFlashCorrectnessConfig(
     chat_template_kwargs={"enable_thinking": False},
 )
 
+# A float16 target with its bfloat16-trained draft, which overflows when cast
+# to float16 and then never gets a draft accepted.
+QWEN3_5_4B_DFLASH2_FP16_TARGET = replace(
+    QWEN3_5_4B_DFLASH2, dtype="float16", draft_dtype="bfloat16"
+)
+
 LAGUNA_DFLASH_NVFP4 = DFlashCorrectnessConfig(
     model="poolside/Laguna-XS-2.1-NVFP4",
     draft_model="poolside/Laguna-XS-2.1-DFlash-NVFP4",
@@ -137,6 +145,9 @@ def test_dflash_reference_acceptance_lengths(vllm_runner):
         pytest.param(QWEN3_8_DFLASH2_ANCHOR, id="qwen3.8-dflash2-anchor"),
         pytest.param(QWEN3_8_DSPINE, id="qwen3.8-dspine"),
         pytest.param(QWEN3_5_4B_DFLASH2, id="qwen3.5-4b-dflash2"),
+        pytest.param(
+            QWEN3_5_4B_DFLASH2_FP16_TARGET, id="qwen3.5-4b-dflash2-fp16-target"
+        ),
     ],
 )
 def test_dflash_correctness(
@@ -148,15 +159,19 @@ def test_dflash_correctness(
     if config.disable_flashinfer_sampler:
         monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
+    speculative_config = {
+        "method": "dflash",
+        "model": config.draft_model,
+        "num_speculative_tokens": config.num_speculative_tokens,
+        "max_model_len": config.max_model_len,
+    }
+    if config.draft_dtype is not None:
+        speculative_config["dtype"] = config.draft_dtype
     with vllm_runner(
         config.model,
+        dtype=config.dtype,
         block_size=None,
-        speculative_config={
-            "method": "dflash",
-            "model": config.draft_model,
-            "num_speculative_tokens": config.num_speculative_tokens,
-            "max_model_len": config.max_model_len,
-        },
+        speculative_config=speculative_config,
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
         enforce_eager=config.enforce_eager,

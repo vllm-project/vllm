@@ -21,6 +21,9 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     supports_watermarking = True
     # Its context K/V is projected from the target's hidden states.
     projects_context_kv = True
+    # The DFlash draft models cast at the target/draft boundary, so the draft
+    # can run in its own dtype (see SpeculativeConfig.dtype).
+    supported_options = frozenset({"dtype"})
 
     @classmethod
     def matches(cls, spec: "SpeculativeConfig") -> bool:

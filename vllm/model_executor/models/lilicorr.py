@@ -488,7 +488,7 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.candidate_logits_processor.get_top_k_tokens(
             self.lm_head,
-            hidden_states,
+            self.cast_to_lm_head_dtype(hidden_states),
             self.model.lilicorr.candidate_topk,
             return_log_probs=True,
         )

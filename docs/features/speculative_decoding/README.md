@@ -182,6 +182,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `draft_decode_context_parallel_size` | `integer >= 1` | `None` | Decode context parallel size for the draft model: `1` or the target's `decode_context_parallel_size`. Defaults to the target's, except `dflash`/`dspark` drafts, which default to `1` unless they are full-attention MLA. |
 | `draft_enable_eplb` | `boolean` | `true` | Enable EPLB for the draft when target EPLB is enabled. Set to `false` to disable EPLB for the draft. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
+| `dtype` | `string` | `None` | Draft model dtype, for `dflash` drafts. Defaults to the target's `--dtype`; `auto` uses the draft checkpoint's dtype. Set `bfloat16` to run a bfloat16-trained DFlash2 draft next to a `float16` target: cast to `float16`, its activations overflow and no draft is accepted. |
 | `parallel_drafting` | `boolean` | `null` | Deprecated and has no effect. `dflash` and `dspark` always draft in parallel, and no other method supports it. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |

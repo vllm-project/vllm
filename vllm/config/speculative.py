@@ -13,7 +13,7 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
-from vllm.config.model import HfOverrides, ModelConfig
+from vllm.config.model import HfOverrides, ModelConfig, ModelDType
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import (
     CompileFactors,
@@ -130,6 +130,7 @@ _METHOD_SPECIFIC_OPTIONS = (
     "index_share_for_mtp_iteration",
     "xpress_topc",
     "speculator_options",
+    "dtype",
 )
 
 # RoPE types for which get_rope uses max_position_embeddings only to size the
@@ -513,6 +514,14 @@ class SpeculativeConfig:
     """KV cache dtype for the draft model. When `None`, the draft inherits the
     target model's `--kv-cache-dtype`. Custom dtypes registered by platform
     backends are accepted."""
+    dtype: ModelDType | None = None
+    """Data type of the draft model's weights and activations. When `None`, the
+    draft runs in the target model's `--dtype`; `"auto"` uses the draft
+    checkpoint's own dtype. Useful when the draft must not be cast to the
+    target's dtype, e.g. a bfloat16-trained DFlash2 draft, whose activations
+    overflow in float16, next to a float16 target. Only supported by the DFlash
+    drafters. Unless `kv_cache_dtype` is set, the draft's KV cache follows this
+    dtype."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""

@@ -245,7 +245,7 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             trust_remote_code=target.trust_remote_code,
             allowed_local_media_path=target.allowed_local_media_path,
             allowed_media_domains=target.allowed_media_domains,
-            dtype=target.dtype,
+            dtype=spec.dtype if spec.dtype is not None else target.dtype,
             seed=target.seed,
             revision=spec.revision,
             code_revision=spec.code_revision,

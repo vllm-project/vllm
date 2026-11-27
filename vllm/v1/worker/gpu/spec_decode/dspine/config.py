@@ -7,3 +7,6 @@ class DSpineSpeculatorConfig(DFlash2SpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspine.speculator.DSpineSpeculator"
     )
+    # The DSpine model's transition scoring has not been checked for a draft
+    # dtype that differs from the target's.
+    supported_options = DFlash2SpeculatorConfig.supported_options - {"dtype"}

@@ -245,6 +245,8 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
 class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
     # The speculator this is a draft model of (see SpeculativeDraftModel).
     speculator_config_class = DFlashSpeculatorConfig
+    # The activation dtype of the target head it shares; set by load_dflash_model.
+    lm_head_dtype: torch.dtype | None = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
@@ -296,6 +298,8 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        if self.lm_head_dtype is not None:
+            hidden_states = hidden_states.to(self.lm_head_dtype)
         return self.logits_processor(self.lm_head, hidden_states)
 
     def precompute_and_store_context_kv(

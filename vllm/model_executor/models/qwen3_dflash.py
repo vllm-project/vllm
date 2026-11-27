@@ -462,6 +462,7 @@ class DFlashQwen3Model(nn.Module):
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
         self.config = speculative_config.draft_model_config.hf_config
+        self.dtype = vllm_config.model_config.dtype
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
         if self.quant_config is not None and self.quant_config_mapper is not None:
@@ -543,7 +544,9 @@ class DFlashQwen3Model(nn.Module):
             self._context_kv_proj = self._make_mxfp8_context_kv_proj(layers_attn)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        embeds = self.embed_tokens(input_ids)
+        # A target embedding shared with a draft that runs in its own dtype
+        # (SpeculativeConfig.dtype) returns the target's dtype.
+        embeds = self.embed_tokens(input_ids).to(self.dtype)
         if self.has_separate_mask_embedding and self.mask_token_id is not None:
             # Replace masked slots with the dedicated mask embedding.
             is_mask = (input_ids == self.mask_token_id).unsqueeze(-1)
@@ -880,6 +883,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     speculator_config_class = DFlashSpeculatorConfig
 
     model_cls = DFlashQwen3Model
+    # The activation dtype of a head shared with the target; set by
+    # load_dflash_model.
+    lm_head_dtype: torch.dtype | None = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
@@ -943,11 +949,20 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         get_draft_kv_cache_layer_names."""
         return [layer.self_attn.causal for layer in self.model.layers]
 
+    def cast_to_lm_head_dtype(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """A head shared with the target takes the target's activation dtype,
+        which differs from the draft's under SpeculativeConfig.dtype."""
+        if self.lm_head_dtype is None:
+            return hidden_states
+        return hidden_states.to(self.lm_head_dtype)
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(
+            self.lm_head, self.cast_to_lm_head_dtype(hidden_states)
+        )
         if self.draft_id_to_target_id is None:
             return logits
 
