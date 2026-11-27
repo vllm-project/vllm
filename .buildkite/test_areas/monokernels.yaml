@@ -38,6 +38,7 @@ steps:
   - tests/models/common/specialized_decode/reference.py
   - tests/models/common/specialized_decode/harness.py
   - tests/models/common/specialized_decode/inputs.py
+  - tests/models/common/specialized_decode/bounds.py
   - tests/models/deepseek_v41/amd/mono/test_primitives.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
@@ -118,6 +119,7 @@ steps:
   - tests/models/common/specialized_decode/reference.py
   - tests/kernels/models/amd/test_dsv41_largestep_moe.py
   - tests/kernels/models/amd/dsv41_largestep_reference.py
+  - tests/models/common/specialized_decode/bounds.py
   commands:
   - >-
     pytest -v -s
