@@ -909,23 +909,22 @@ def test_chat_template_kwargs_rejects_tools_override_and_malformed_tools(
         },
     }
 
-    ok = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "stub",
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": [real_tool],
-            "tool_choice": "none",
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
-    )
-    assert ok.status_code == 200, ok.text
-    assert len(captured) == 1
-    if tokenizer_mode == "hf":
-        assert (
-            renderer.tokenizer.decode(captured[0], skip_special_tokens=False)
-            == "user hi"
+    def post(endpoint: str, payload: dict[str, Any]) -> tuple[Any, str, int]:
+        before = len(captured)
+        resp = client.post(
+            endpoint,
+            json={
+                "model": "stub",
+                "messages": [{"role": "user", "content": "hi"}],
+                **payload,
+            },
         )
+        calls = len(captured) - before
+        ids = captured[-1] if calls else resp.json().get("tokens", [])
+        prompt = (
+            renderer.tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
+        )
+        return resp, prompt, calls
 
     bad_kwargs_cases: tuple[dict[str, Any], ...] = (
         {"tools": None},
@@ -934,12 +933,39 @@ def test_chat_template_kwargs_rejects_tools_override_and_malformed_tools(
         {"tools": [{}]},
     )
     for endpoint in ("/v1/chat/completions", "/tokenize"):
-        for bad_kwargs in bad_kwargs_cases:
-            resp = client.post(
+        for tool_choice in ("none", "auto"):
+            resp, prompt, calls = post(
                 endpoint,
-                json={
-                    "model": "stub",
-                    "messages": [{"role": "user", "content": "hi"}],
+                {"tools": [real_tool], "tool_choice": tool_choice},
+            )
+            assert resp.status_code == 200, resp.text
+            assert ("real_fn" in prompt) == (
+                endpoint == "/tokenize" or tool_choice == "auto"
+            ), prompt
+            if (
+                tokenizer_mode == "hf"
+                and endpoint == "/v1/chat/completions"
+                and tool_choice == "none"
+            ):
+                assert prompt == "user hi"
+            assert "evil_fn" not in prompt
+            assert calls == (1 if endpoint == "/v1/chat/completions" else 0)
+
+        resp, _, calls = post(
+            endpoint,
+            {"chat_template_kwargs": {"enable_thinking": False, "custom_x": "value"}},
+        )
+        assert resp.status_code == 200, resp.text
+        assert calls == (1 if endpoint == "/v1/chat/completions" else 0)
+
+        resp, _, calls = post(endpoint, {"tools": [{}]})
+        assert 400 <= resp.status_code < 500, resp.text
+        assert calls == 0
+
+        for bad_kwargs in bad_kwargs_cases:
+            resp, _, calls = post(
+                endpoint,
+                {
                     "tools": [real_tool],
                     "tool_choice": "none",
                     "chat_template_kwargs": bad_kwargs,
@@ -949,8 +975,7 @@ def test_chat_template_kwargs_rejects_tools_override_and_malformed_tools(
             error = resp.json()["error"]
             assert error["param"] == "chat_template_kwargs"
             assert "tools" in error["message"]
-
-    assert len(captured) == 1
+            assert calls == 0
 
 
 def test_online_renderer_pins_server_tools_above_chat_template_kwargs(tmp_path):
