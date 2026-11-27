@@ -22,7 +22,7 @@ vllm serve tencent/Hy4-flash-FP8 \
 
 ## Supported configurations
 
-- NVIDIA GPUs and the GPU Model Runner V2.
+- NVIDIA GPUs or AMD gfx950 GPUs (MI350X, MI355X), and the GPU Model Runner V2.
 - HY4 and HY4 Flash checkpoints with compatible DFly configuration and draft
   weights.
 - BF16 computation with unquantized weights, online MoE-only block FP8
@@ -35,17 +35,41 @@ vllm serve tencent/Hy4-flash-FP8 \
   activations, independent of the target's scheme.
 - Matching target and draft KV cache dtype: BF16 (`auto` or `bfloat16`)
   or `fp8_ds_mla`. Omit the draft KV override to inherit the target dtype.
-- Matching target and draft tensor parallelism. Pipeline, prefill context,
-  and decode context parallel sizes must be one. HY4 Flash supports data
-  parallelism, with each DP replica running a TP-local draft.
+  Both are supported on ROCm (gfx950).
+- Matching target and draft tensor parallelism. Prefill and decode context
+  parallel sizes must be one. HY4 requires a pipeline parallel size of one;
+  HY4 Flash supports pipeline parallelism when every target index and KV layer
+  the draft reads sits on the last pipeline stage (true for an even two-stage
+  split of the published checkpoints). HY4 Flash supports data parallelism,
+  with each DP replica running a TP-local draft.
 - Greedy or probabilistic draft sampling (`draft_sample_method`) with standard
   target verification. Probabilistic drafts sample at each request's
   temperature, which can improve acceptance when HY4 Flash samples at a
   nonzero temperature.
 
-DFly currently rejects LoRA, microbatching, disaggregated prefill/decode,
+DFly supports disaggregated prefill/decode with `NixlConnector` or
+`MooncakeConnector`, validated with HY4 Flash FP8. The draft layers share the
+target's KV storage, so the decode instance drafts from the transferred KV. Run
+the prefill and decode instances with the same speculative config.
+
+DFly currently rejects LoRA, microbatching, other KV connectors,
 heterogeneous vocabularies, adaptive verification, and a separate draft
-attention backend. DFly support on ROCm has not been validated.
+attention backend.
+
+On ROCm, DFly is validated with HY4 FP8 (`tencent/Hy4-FP8`), HY4 Flash FP8
+(`tencent/Hy4-flash-FP8`) and HY4 Flash BF16 (`tencent/Hy4-flash`) on eight
+MI355X GPUs with TP8. Other targets, such as HY4 BF16, NVFP4 experts, or
+MXFP4, are accepted on gfx950 but have not been validated. Set
+`VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`, as described in the
+[HY4 model notes](../../models/supported_models.md):
+
+```bash
+VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 \
+vllm serve tencent/Hy4-flash-FP8 \
+    --tensor-parallel-size 8 \
+    --dtype bfloat16 \
+    --speculative_config '{"num_speculative_tokens":5,"method":"dfly"}'
+```
 
 Measure acceptance and latency on your own workload using the
 [acceptance metrics](acceptance_metrics.md) and

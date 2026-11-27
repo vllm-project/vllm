@@ -1010,6 +1010,12 @@ def context_attention_fwd(
     BLOCK_M = 128
     BLOCK_N = 64
     TRITON_BLOCK_SIZE = 32
+    num_unroll_cache = 4
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_rdna
+
+        if on_rdna():
+            BLOCK_M, BLOCK_N, TRITON_BLOCK_SIZE, num_unroll_cache = 64, 32, 16, 1
 
     num_unroll_cache = 4
     # Unroll 4 spills above head size 128 on gfx942; it only repays that past 2 GiB.

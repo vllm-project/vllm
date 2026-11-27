@@ -31,7 +31,6 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
-import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -42,7 +41,6 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -67,8 +65,17 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.hy_v4.nvidia.mrope import set_token_rope
-from vllm.models.hy_v4.weight_utils import HYV4_MLP_MAPPER, HYV4_WEIGHTS_MAPPER
+from vllm.models.hy_v4.common.mrope import set_token_rope
+from vllm.models.hy_v4.common.sequence_parallel import (
+    IHC_SP_MIN_TOKENS,
+    ihc_sequence_parallel_enabled,
+)
+from vllm.models.hy_v4.weight_utils import (
+    HYV4_MLP_MAPPER,
+    HYV4_PACKED_MODULES_MAPPING,
+    HYV4_WEIGHTS_MAPPER,
+    remap_block_fp8_scale,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -81,9 +88,6 @@ from .hc import HYV4HCHeadLayer, HYV4HCLayer, IHCBoundary
 from .moe import HYV4FeedForward, HYV4MoEFused
 
 logger = init_logger(__name__)
-
-# Smallest step that shards the iHC rows; shorter ones keep them replicated.
-_IHC_SP_MIN_TOKENS = 1024
 
 
 def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
@@ -183,11 +187,7 @@ class HYV4DecoderLayer(nn.Module):
         """Build the fused iHC boundaries used by `forward_ihc_fused`."""
         self.ihc_attn_boundary: IHCBoundary | None = None
         self.ihc_mlp_boundary: IHCBoundary | None = None
-        if (
-            self.enable_ihc
-            and not self.defer_reduction
-            and IHCBoundary.supported(self.config)
-        ):
+        if self.enable_ihc and IHCBoundary.supported(self.config):
             self.ihc_attn_boundary = IHCBoundary(
                 self.hc_attn_layer.hc_pre, self.input_layernorm
             )
@@ -209,6 +209,8 @@ class HYV4DecoderLayer(nn.Module):
         """
         assert self.ihc_attn_boundary is not None
         assert self.ihc_mlp_boundary is not None
+        full_num_tokens = positions.shape[-1]
+        sequence_parallel = hidden_states.shape[0] < full_num_tokens
         if carry is None:
             boundary = self.ihc_attn_boundary(
                 self.hc_attn_layer.prepare_input(hidden_states)
@@ -218,11 +220,29 @@ class HYV4DecoderLayer(nn.Module):
                 carry.residual, carry.mlp_out, carry.post_gates
             )
         residual, hidden_states, post_gates = boundary
+        if sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        hidden_states = self._deferred_reduce(hidden_states, sequence_parallel)
         residual, hidden_states, post_gates = self.ihc_mlp_boundary(
             residual, hidden_states, post_gates
         )
-        return IHCCarry(self.mlp(hidden_states), residual, post_gates)
+        if sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+        hidden_states = self._deferred_reduce(
+            self.mlp(hidden_states), sequence_parallel
+        )
+        return IHCCarry(hidden_states, residual, post_gates)
+
+    def _deferred_reduce(
+        self, hidden_states: torch.Tensor, sequence_parallel: bool
+    ) -> torch.Tensor:
+        """Finish the TP reduction a sub-block skipped under `defer_reduction`."""
+        if not self.defer_reduction:
+            return hidden_states
+        if sequence_parallel:
+            return sp_reduce_scatter(hidden_states)
+        return tensor_model_parallel_all_reduce(hidden_states)
 
     def forward(
         self,
@@ -276,12 +296,7 @@ class HYV4DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
-        if self.defer_reduction:
-            hidden_states = (
-                sp_reduce_scatter(hidden_states)
-                if use_ihc_sequence_parallel
-                else tensor_model_parallel_all_reduce(hidden_states)
-            )
+        hidden_states = self._deferred_reduce(hidden_states, use_ihc_sequence_parallel)
         hidden_states = self.hc_attn_layer.post(hidden_states, residual, post_gates)
 
         hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
@@ -290,12 +305,7 @@ class HYV4DecoderLayer(nn.Module):
         if use_ihc_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.mlp(hidden_states)
-        if self.defer_reduction:
-            hidden_states = (
-                sp_reduce_scatter(hidden_states)
-                if use_ihc_sequence_parallel
-                else tensor_model_parallel_all_reduce(hidden_states)
-            )
+        hidden_states = self._deferred_reduce(hidden_states, use_ihc_sequence_parallel)
         hidden_states = self.hc_mlp_layer.post(hidden_states, residual, post_gates)
 
         # Under iHC the residual is carried inside hidden_states.
@@ -336,26 +346,14 @@ class HYV4Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.enable_ihc = getattr(config, "enable_ihc", False)
-        speculative_config = vllm_config.speculative_config
-        self.ihc_sequence_parallel = (
-            self.enable_ihc
-            and self.supports_ihc_sequence_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and parallel_config.data_parallel_size == 1
-            and parallel_config.pipeline_parallel_size == 1
-            and parallel_config.prefill_context_parallel_size == 1
-            and parallel_config.decode_context_parallel_size == 1
-            and parallel_config.all2all_backend != "passthrough"
-            and vllm_config.lora_config is None
-            and not envs.VLLM_BATCH_INVARIANT
-            and (
-                speculative_config is None
-                or not speculative_config.uses_aux_hidden_states
-            )
+        self.ihc_sequence_parallel = ihc_sequence_parallel_enabled(
+            vllm_config, self.supports_ihc_sequence_parallel
         )
 
+        # The DFly drafter on the last stage embeds through the target table.
         if get_pp_group().is_first_rank or (
-            self.config.tie_word_embeddings and get_pp_group().is_last_rank
+            (self.config.tie_word_embeddings or self.dfly_enabled)
+            and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -488,7 +486,7 @@ class HYV4Model(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         full_num_tokens = positions.shape[-1]
         use_ihc_sequence_parallel = is_sequence_parallel_active(
-            self.ihc_sequence_parallel, full_num_tokens, _IHC_SP_MIN_TOKENS
+            self.ihc_sequence_parallel, full_num_tokens, IHC_SP_MIN_TOKENS
         )
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -515,11 +513,20 @@ class HYV4Model(nn.Module):
         if use_ihc_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
         layers = islice(self.layers, self.start_layer, self.end_layer)
-        if self.uses_fused_ihc(use_ihc_sequence_parallel):
+        if self.uses_fused_ihc():
             carry: IHCCarry | None = None
             for layer in layers:
                 carry = layer.forward_ihc_fused(positions, hidden_states, carry)
             assert carry is not None
+            output = (
+                self.hc_head.fused_post(*carry, self.norm)
+                if get_pp_group().is_last_rank
+                else None
+            )
+            if output is not None:
+                if use_ihc_sequence_parallel:
+                    output = sp_all_gather(output)[:full_num_tokens]
+                return output
             hidden_states = layer.hc_mlp_layer.post(*carry)
         else:
             for layer in layers:
@@ -546,10 +553,9 @@ class HYV4Model(nn.Module):
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         return hidden_states
 
-    def uses_fused_ihc(self, use_ihc_sequence_parallel: bool) -> bool:
+    def uses_fused_ihc(self) -> bool:
         return (
             self.start_layer < self.end_layer
-            and not use_ihc_sequence_parallel
             and self.layers[self.start_layer].ihc_attn_boundary is not None
         )
 
@@ -648,15 +654,7 @@ class HYV4Model(nn.Module):
             if is_expert or is_pp_missing_parameter(name, self):
                 continue
 
-            if (
-                isinstance(self.quant_config, Fp8Config)
-                and self.quant_config.weight_block_size is not None
-                and name.endswith(".scale")
-            ):
-                name = name.removesuffix(".scale") + ".weight_scale_inv"
-                if weight.dtype == torch.uint8:
-                    # UINT8 stores UE8M0 exponents, not numeric scales.
-                    weight = weight.view(torch.float8_e8m0fnu)
+            name, weight = remap_block_fp8_scale(name, weight, self.quant_config)
 
             if name not in params_dict:
                 if ".indexer." not in name:
@@ -686,11 +684,7 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
         }
     )
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        # MLA runs both latent down-projections as one GEMM.
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-    }
+    packed_modules_mapping = HYV4_PACKED_MODULES_MAPPING
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

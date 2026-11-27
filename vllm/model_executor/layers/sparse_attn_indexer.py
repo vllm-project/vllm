@@ -69,7 +69,7 @@ from vllm.utils.deep_gemm import (
     mqa_logits_use_mx_scales,
 )
 from vllm.utils.import_utils import has_cutedsl
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -543,6 +543,21 @@ def _gather_workspace_shapes(
     )
 
 
+def dcp_decode_logits_width(
+    max_model_len: int, dcp_world_size: int, cp_kv_cache_interleave_size: int
+) -> int:
+    """Logits columns a decode row can use on one rank.
+
+    Under DCP each rank scores only the KV it holds, so its decode context
+    lengths are local (`get_dcp_local_seq_lens`): at most
+    `cdiv(max_model_len, dcp_world_size * interleave) * interleave` tokens.
+    """
+    if dcp_world_size <= 1:
+        return max_model_len
+    interleave = cp_kv_cache_interleave_size
+    return cdiv(max_model_len, dcp_world_size * interleave) * interleave
+
+
 def kv_cache_as_quant_view(
     kv_cache: torch.Tensor,
     head_dim: int,
@@ -719,13 +734,19 @@ def sparse_attn_indexer(
                 decode_budget // (logits_dtype.itemsize * max_model_len),
             )
             decode_copy_bytes = 0
+        decode_width = max_model_len
+        if not use_pcp:
+            # Decode rows score only this rank's KV shard, as below.
+            decode_width = dcp_decode_logits_width(
+                max_model_len, dcp_world_size, cp_kv_cache_interleave_size
+            )
         prefill_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         max_logits_bytes = max(
             prefill_budget
             // torch.float32.itemsize
             * (logits_dtype.itemsize + copy_bytes),
             max_decode_tokens
-            * round_up(max_model_len, row_align)
+            * round_up(decode_width, row_align)
             * (logits_dtype.itemsize + decode_copy_bytes),
         )
         _ = torch.empty(
@@ -971,9 +992,12 @@ def sparse_attn_indexer(
                     ).squeeze(-1)
                 # Chunks planned for fused_mqa_topk are not bounded by the logits
                 # budget: split their rows (budget-planned chunks, the only ones
-                # under DCP, are one window, so the merge below sees all the
-                # rows).
+                # under pure DCP, are one window, so the merge below sees all
+                # the rows).
                 for sub in range(0, q_slice.shape[0], dense_rows):
+                    if sub:
+                        # Startup reserves logits for one window at a time.
+                        del logits
                     rows = slice(sub, min(sub + dense_rows, q_slice.shape[0]))
                     tokens = slice(row_start + rows.start, row_start + rows.stop)
                     if current_platform.is_xpu():
@@ -1182,6 +1206,13 @@ def sparse_attn_indexer(
                         end,
                     )
                 return topk_indices_buffer
+        # With localized (DCP) seq_lens a row scores only this rank's KV
+        # shard: size its logits by that, not by the whole model length.
+        decode_width = max_model_len
+        if decode_metadata.global_seq_lens is not None:
+            decode_width = dcp_decode_logits_width(
+                max_model_len, dcp_world_size, cp_kv_cache_interleave_size
+            )
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
@@ -1195,7 +1226,7 @@ def sparse_attn_indexer(
                 seq_lens_xpu,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
-                max_model_len,
+                decode_width,
             )
         else:
             padded_q_scale, decode_weights = mqa_logits_mx_inputs(
@@ -1211,7 +1242,7 @@ def sparse_attn_indexer(
                 seq_lens,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
+                max_model_len=decode_width,
                 logits_dtype=logits_dtype,
                 indices=decode_metadata.indices,
             )

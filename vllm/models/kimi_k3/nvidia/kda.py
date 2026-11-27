@@ -430,11 +430,13 @@ def _flashkda_prefill(
         A_log.contiguous(),
         dt_bias.view(-1, q.shape[-1]).contiguous(),
         lower_bound,
-        initial_state.contiguous(),
-        final_state,
-        cu_seqlens.contiguous(),
-        checkpoint_state,
-        checkpoint_offsets.contiguous() if checkpoint_offsets is not None else None,
+        cu_seqlens=cu_seqlens.contiguous(),
+        initial_state=initial_state.contiguous(),
+        final_state=final_state,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=(
+            checkpoint_offsets.contiguous() if checkpoint_offsets is not None else None
+        ),
     )
     return out, final_state
 
@@ -914,7 +916,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def forward(

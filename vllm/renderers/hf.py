@@ -10,7 +10,7 @@ import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -23,7 +23,7 @@ from typing_extensions import override
 
 from vllm import envs
 from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
-from vllm.inputs import EmbedsPrompt
+from vllm.inputs import EmbedsPrompt, TokensPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal.hasher import MultiModalHasher
@@ -48,7 +48,11 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.tokenizers.hf import (
+    HfTokenizer,
+    encode_with_special_tokens_mask,
+)
+from vllm.tokenizers.protocol import TokenizerLike
 from vllm.transformers_utils.chat_templates import (
     get_chat_template_fallback_path,
     get_chat_template_override_path,
@@ -57,14 +61,18 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
-from .base import BaseRenderer
+from .base import HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS, BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
 
 if TYPE_CHECKING:
-    from collections.abc import Set
+    from collections.abc import Awaitable, Callable, Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs import (
+        MultiModalDataDict,
+        MultiModalUUIDDict,
+        TextPrompt,
+    )
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
@@ -78,7 +86,7 @@ if TYPE_CHECKING:
     )
 
     from .inputs import DictPrompt
-    from .params import ChatParams
+    from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -1045,7 +1053,110 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-class HfRenderer(BaseRenderer[HfTokenizer]):
+class HfTokensPrompt(TokensPrompt, total=False):
+    """Tokenized HF prompt with metadata for rebuilding echoed text."""
+
+    prompt_special_tokens_mask: list[int]
+    """Encoding mask, sliced alongside prompt tokens before any padding."""
+
+
+def tokenize_prompt(
+    tokenizer: TokenizerLike,
+    prompt: TextPrompt,
+    params: TokenizeParams,
+    *,
+    want_offsets: bool = False,
+) -> HfTokensPrompt:
+    """Tokenize text, preserving an optional mask for truncated echoes."""
+    # The mask identifies truncated text inputs even when no tokens were added.
+    want_special_tokens_mask = (
+        params.needs_detokenization and params.truncate_prompt_tokens is not None
+    )
+    kwargs = params.get_encode_kwargs()
+    if want_offsets:
+        kwargs["return_offsets_mapping"] = True
+    if want_special_tokens_mask:
+        encoding = encode_with_special_tokens_mask(
+            tokenizer, prompt["prompt"], **kwargs
+        )
+    else:
+        encoding = tokenizer(prompt["prompt"], **kwargs)
+
+    tokenized = cast(
+        HfTokensPrompt,
+        BaseRenderer._build_tokens_prompt(
+            encoding["input_ids"],
+            prompt,
+            offset_mapping=encoding["offset_mapping"] if want_offsets else None,
+        ),
+    )
+    token_ids = tokenized["prompt_token_ids"]
+    if (
+        want_special_tokens_mask
+        and (mask := encoding.get("special_tokens_mask")) is not None
+        and len(mask) == len(token_ids)
+    ):
+        tokenized["prompt_special_tokens_mask"] = mask
+    return tokenized
+
+
+def _get_detokenization_tokens(prompt: TokensPrompt) -> list[int]:
+    token_ids = prompt["prompt_token_ids"]
+    special_tokens_mask = cast(HfTokensPrompt, prompt).pop(
+        "prompt_special_tokens_mask", None
+    )
+    if special_tokens_mask is None or not any(special_tokens_mask):
+        return token_ids
+    # The mask already follows truncation; TokenizeParams pads only token_ids.
+    # IDs beyond the mask are therefore padding tokens.
+    echo_mask = [
+        index >= len(special_tokens_mask) or not special_tokens_mask[index]
+        for index in range(len(token_ids))
+    ]
+    prompt["prompt_echo_mask"] = echo_mask
+    return [token_id for token_id, visible in zip(token_ids, echo_mask) if visible]
+
+
+def detokenize_prompt(tokenizer: TokenizerLike, prompt: TokensPrompt) -> TokensPrompt:
+    """Rebuild prompt text without tokenizer-added special tokens."""
+    prompt["prompt"] = tokenizer.decode(_get_detokenization_tokens(prompt))
+    return prompt
+
+
+async def detokenize_prompt_async(
+    decode: Callable[[list[int]], Awaitable[str]], prompt: TokensPrompt
+) -> TokensPrompt:
+    """Rebuild prompt text using the renderer's asynchronous decoder."""
+    prompt["prompt"] = await decode(_get_detokenization_tokens(prompt))
+    return prompt
+
+
+_T = TypeVar("_T", bound=TokenizerLike)
+
+
+class BaseHfRenderer(BaseRenderer[_T]):
+    """Shared tokenization and echo reconstruction for HF-family renderers."""
+
+    def _tokenize_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> TokensPrompt:
+        return tokenize_prompt(
+            self.get_tokenizer(),
+            prompt,
+            params,
+            want_offsets=self._wants_offsets(prompt, params),
+        )
+
+    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
+        return detokenize_prompt(self.get_tokenizer(), prompt)
+
+    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
+
+
+class HfRenderer(BaseHfRenderer[HfTokenizer]):
+    _server_owned_chat_template_kwargs = HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+
     def __init__(
         self,
         config: VllmConfig,

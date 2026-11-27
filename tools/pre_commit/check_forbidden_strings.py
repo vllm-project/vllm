@@ -24,6 +24,20 @@ _TRANSFORMERS_LEGACY_MODULES = (
     r"|models\.\w+\.\w+_fast"
 )
 
+_TORCH_CUDA_NAMES = (
+    r"empty_cache|synchronize|device_count|current_device|memory_reserved"
+    r"|memory_allocated|max_memory_allocated|max_memory_reserved"
+    r"|reset_peak_memory_stats|memory_stats|mem_get_info|set_device|device"
+)
+_TORCH_CUDA_ALLOWED_DIRS = {"vllm/platforms/", "vllm/device_allocator/"}
+_TORCH_CUDA_ALLOWED_FILES = {
+    "vllm/distributed/weight_transfer/ipc_engine.py",
+    "vllm/distributed/weight_transfer/sharded_rdt_engine.py",
+    "tests/distributed/test_packed_tensor.py",
+    # Wraps (rather than calls) the torch.cuda sync APIs.
+    "vllm/v1/conf_compute_utils.py",
+}
+
 
 @dataclass(slots=True)
 class ForbiddenString:
@@ -76,6 +90,8 @@ CHECK_STRINGS = {
             "benchmarks/kernels/benchmark_machete.py",
             "benchmarks/fused_kernels/layernorm_rms_benchmarks.py",
             # cloudpickle
+            # Only a trusted, inherited pipe connects the worker and planner.
+            "vllm/distributed/eplb/policy_process.py",
             "vllm/v1/executor/multiproc_executor.py",
             "vllm/entrypoints/llm.py",
             "tests/utils.py",
@@ -164,6 +180,39 @@ CHECK_STRINGS = {
             "normalised by `patch_rope_parameters` in "
             "vllm/transformers_utils/config.py."
         ),
+    ),
+    "torch.cuda": ForbiddenString(
+        pattern=r"\btorch\.cuda\.(?:" + _TORCH_CUDA_NAMES + r")\b",
+        tip=(
+            "Please refer RFC https://github.com/vllm-project/vllm/issues/30679, "
+            "use torch.accelerator API instead."
+        ),
+        allowed_files=_TORCH_CUDA_ALLOWED_FILES,
+        allowed_dirs=_TORCH_CUDA_ALLOWED_DIRS,
+    ),
+    "torch.cuda.manual_seed": ForbiddenString(
+        pattern=r"\btorch\.cuda\.manual_seed(?:_all)?\b",
+        tip="Use set_random_seed instead.",
+        allowed_files=_TORCH_CUDA_ALLOWED_FILES,
+        allowed_dirs=_TORCH_CUDA_ALLOWED_DIRS,
+    ),
+    # Platform.__getattr__ forwards this to torch.cuda.mem_get_info.
+    "current_platform.mem_get_info": ForbiddenString(
+        pattern=r"\bcurrent_platform\.mem_get_info\(",
+        tip="Use torch.accelerator.get_memory_info() instead.",
+        allowed_files=_TORCH_CUDA_ALLOWED_FILES
+        | {
+            # Predate this check; migrate to torch.accelerator.get_memory_info
+            # and drop from this list.
+            "tests/kernels/core/test_mrope.py",
+            "tests/kernels/fla/test_chunk_int64_offsets.py",
+            "tests/kernels/fla/test_fla_layernorm_guard.py",
+            "tests/kernels/fla/test_fused_gdn_post_conv.py",
+            "tests/kernels/mamba/test_checkpoint_exporter.py",
+            "tests/kernels/test_fused_qk_norm_rope_gate.py",
+            "tests/kernels/turboquant/test_flydsl_turboquant_decode.py",
+        },
+        allowed_dirs=_TORCH_CUDA_ALLOWED_DIRS,
     ),
 }
 
@@ -352,6 +401,27 @@ def test_regex():
         result = matches("rope_scaling", content)
         assert result == should_match, (
             f"rope_scaling case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
+        )
+
+    torch_cuda_cases = [
+        # Should match
+        ("torch.cuda", "torch.cuda.synchronize()", True),
+        ("torch.cuda", "with torch.cuda.device(idx):", True),
+        ("torch.cuda", "ctx = torch.cuda.device", True),
+        ("torch.cuda", "torch.cuda.device(\n    idx)", True),
+        ("torch.cuda.manual_seed", "torch.cuda.manual_seed_all(0)", True),
+        ("current_platform.mem_get_info", "current_platform.mem_get_info()", True),
+        # Should not match
+        ("torch.cuda", "torch.accelerator.synchronize()", False),
+        ("torch.cuda", "torch.cuda.device_capability", False),
+        ("torch.cuda", "torch.cuda.Stream()", False),
+        ("current_platform.mem_get_info", "def mem_get_info(self):", False),
+    ]
+    for i, (rule, content, should_match) in enumerate(torch_cuda_cases):
+        result = matches(rule, content)
+        assert result == should_match, (
+            f"torch.cuda case {i} failed: {content!r} "
             f"(expected {should_match}, got {result})"
         )
 

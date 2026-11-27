@@ -224,6 +224,19 @@ def test_decisions_api_refuses_duplicate_labels(tokenizer):
         strategy._suffix(make_read_question(0, question))
 
 
+def test_decisions_score_uses_trained_slot_prompt(tokenizer):
+    strategy, _ = make_strategy(tokenizer)
+    question = ScoreQuestion(
+        type="score",
+        instructions="How urgent?",
+        levels=[{"label": "low"}, {"label": "high", "description": "act now"}],
+    )
+    read = make_read_question(0, question)
+    assert strategy._suffix(read) == slot_prompt.render_suffix(
+        "score", "How urgent?", ["low", "high - act now"]
+    )
+
+
 @pytest.mark.asyncio
 async def test_refuses_a_prompt_without_room_for_the_answer(tokenizer):
     strategy, engine = make_strategy(tokenizer)
