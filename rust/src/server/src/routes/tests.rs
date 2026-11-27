@@ -6709,6 +6709,85 @@ async fn non_stream_chat_rejects_invalid_media_as_bad_request() {
     .assert_eq(&rendered.join("\n"));
 }
 
+/// Renders like [`FakeChatBackend`] but leaves media out, as a chat template
+/// that renders only text does.
+struct MediaDroppingChatRenderer;
+
+impl ChatRenderer for MediaDroppingChatRenderer {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
+        let mut prompt = String::new();
+        for message in &request.messages {
+            prompt.push_str(&render_fake_message_content(message, "")?);
+        }
+        Ok(vllm_chat::RenderedPrompt {
+            prompt: Prompt::Text(prompt),
+            media_order: None,
+            effective_template_kwargs: request.chat_options.template_kwargs.clone(),
+        })
+    }
+}
+
+/// An image whose placeholder the rendered prompt leaves out is the request's
+/// error on chat and render, whichever template rendered it, as in Python
+/// (`PromptUpdateMismatchError`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_rejects_media_the_template_renders_no_placeholder_for() {
+    let backend = Arc::new(FakeChatBackend {
+        chat_renderer: Some(Arc::new(MediaDroppingChatRenderer)),
+        multimodal_model_info: Some(qwen_multimodal_model_info()),
+        ..FakeChatBackend::new()
+    });
+    // The request fails before submission, so the mock engine task is never
+    // awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-missing-placeholder",
+        default_stream_output_specs(),
+        backend.clone(),
+    )
+    .await;
+    let chat_app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+    let render_app = build_render_router(Arc::new(RenderState {
+        text: TextRequestProcessor::new(backend.clone(), u32::MAX),
+        chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
+        ..test_render_state(None)
+    }));
+
+    let mut rendered = Vec::new();
+    for (mut app, uri, model) in [
+        (chat_app, "/v1/chat/completions", "Qwen/Qwen1.5-0.5B-Chat"),
+        (render_app, "/v1/chat/completions/render", "render-model"),
+    ] {
+        let (status, json) = post_json(
+            &mut app,
+            uri,
+            json!({
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe "},
+                        {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}}
+                    ]
+                }]
+            }),
+        )
+        .await;
+        rendered.push(format!(
+            "{uri} {} {}: {}",
+            status.as_u16(),
+            json["error"]["type"].as_str().unwrap_or_default(),
+            json["error"]["message"].as_str().unwrap_or_default()
+        ));
+    }
+    expect_test::expect![[r#"
+        /v1/chat/completions 400 BadRequestError: placeholder token `<|image_pad|>` was not found in tokenized prompt for 1 remaining `image` item(s)
+        /v1/chat/completions/render 400 BadRequestError: placeholder token `<|image_pad|>` was not found in tokenized prompt for 1 remaining `image` item(s)"#]].assert_eq(&rendered.join("\n"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn selected_logprobs_invalid_requests_return_client_errors() {
