@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the zentorch DA8W4 (W4A8) int4 linear and MoE paths on Zen CPUs.
+"""Tests for the zentorch DA8W4 (W4A8) int4 linear and MoE paths on Zen CPUs,
+plus the zentorch int8 (W8A8) scaled-mm weight-scale contract.
 
 The zentorch ops are mocked with reference implementations when zentorch is not
 installed, so the layout and dispatch contracts are covered in CI.
@@ -19,6 +20,12 @@ from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
 from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
     ZentorchWNA16LinearKernel,
     _import_unpack_from_int32,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    Int8ScaledMMLinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
+    ZentorchInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe.oracle import int_wna16
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
@@ -386,6 +393,69 @@ def test_can_implement_group_size_must_divide_k(monkeypatch, group_size, expecte
     if not expected_ok:
         assert reason is not None
         assert "must divide input size" in reason
+
+
+# ---------------------------------------------------------------------------
+# Dense W8A8 (int8 scaled_mm)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("trailing_one", [False, True])
+@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.bfloat16])
+def test_zentorch_int8_weight_scale_is_f32(monkeypatch, trailing_one, scale_dtype):
+    """Per-channel scales are stored as fp32 (N,), matching the MoE experts."""
+    # process_weights_after_loading only rewrites parameters; is_supported()
+    # gates construction on the platform and the op, which it does not use.
+    monkeypatch.setattr(
+        ZentorchInt8ScaledMMLinearKernel,
+        "is_supported",
+        classmethod(lambda cls, compute_capability=None: (True, None)),
+    )
+    kernel = ZentorchInt8ScaledMMLinearKernel(
+        Int8ScaledMMLinearLayerConfig(
+            is_channelwise=True,
+            is_static_input_scheme=False,
+            input_symmetric=True,
+        ),
+        layer_param_names=[
+            "weight",
+            "weight_scale",
+            "input_scale",
+            "input_zero_point",
+            "azp_adj",
+        ],
+    )
+
+    n, k = 32, 16
+    # Small integers are exact in both fp32 and bf16.
+    values = torch.arange(1, n + 1, dtype=torch.float32)
+    scale = values.to(scale_dtype)
+    if trailing_one:
+        scale = scale.unsqueeze(-1)
+
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight",
+        torch.nn.Parameter(
+            torch.randint(-128, 127, (n, k), dtype=torch.int8),
+            requires_grad=False,
+        ),
+    )
+    layer.register_parameter(
+        "weight_scale",
+        torch.nn.Parameter(scale, requires_grad=False),
+    )
+
+    kernel.process_weights_after_loading(layer)
+
+    weight_scale = layer.weight_scale
+    assert weight_scale.dtype == torch.float32
+    assert tuple(weight_scale.shape) == (n,)
+    assert weight_scale.is_contiguous()
+    torch.testing.assert_close(weight_scale, values)
+    assert layer.weight.dtype == torch.int8
+    assert tuple(layer.weight.shape) == (n, k)
+    assert layer.weight.is_contiguous()
 
 
 # ---------------------------------------------------------------------------
