@@ -27,3 +27,26 @@ def test_benchmarks_disabled_only_when_an_input_cannot_be_copied():
         "benchmark_combo_kernel": False,
         "triton.autotune_at_compile_time": False,
     }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+def test_benchmarks_disabled_for_cpu_offloaded_weights():
+    # A device copy of a CPU-offloaded weight undoes the offload, whatever its
+    # size: it is counted as peak activation memory and taken from the KV cache.
+    from vllm.model_executor.offloader.uva import UVAOffloader
+    from vllm.utils.platform_utils import is_uva_available
+
+    if not is_uva_available():
+        pytest.skip("requires UVA")
+    linear = torch.nn.Linear(32, 32, device="cuda")
+    (linear,) = UVAOffloader(cpu_offload_max_bytes=1 << 30).wrap_modules(
+        module for module in [linear]
+    )
+    assert getattr(linear.weight, "_vllm_is_uva_offloaded", False)
+    config = {"benchmark_combo_kernel": True}
+
+    disable_benchmarks_for_oversized_inputs(config, [linear.weight])
+    assert config == {
+        "benchmark_combo_kernel": False,
+        "triton.autotune_at_compile_time": False,
+    }
