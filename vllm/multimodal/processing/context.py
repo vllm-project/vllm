@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -810,3 +810,15 @@ class BaseProcessingInfo:
 
         """
         return None
+
+    def get_dummy_seq_len(
+        self,
+        seq_len: int,
+        max_encoder_tokens: int | None = None,
+    ) -> int:
+        return seq_len
+
+    def get_extra_profiled_modalities(
+        self, modalities: Collection[str]
+    ) -> Collection[str]:
+        return ()
