@@ -83,10 +83,11 @@ def _coerce_tool_calls_to_list(tool_calls: Any) -> Any:
     """Materialize one-shot tool_calls iterators without crashing on bad types.
 
     Generators must be converted to lists before union-type matching, but
-    ``list()`` on a non-iterable value (for example ``tool_calls: 1``) raises
-    ``TypeError``, which escapes Pydantic as an HTTP 500. Leave strings,
-    bytes, mappings, and other non-iterables for field validation so the
-    API returns 400.
+    ``list()`` on a non-iterable scalar (for example ``tool_calls: 1``) raises
+    ``TypeError``, which escapes Pydantic as an HTTP 500. Non-iterable scalars
+    are surfaced so field validation can reject them (400). Strings and
+    mappings are left to field validation, and handling of empty
+    string/object — normalized to [] — is unchanged by this patch.
     """
     if tool_calls is None or isinstance(tool_calls, list):
         return tool_calls
