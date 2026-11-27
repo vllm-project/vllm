@@ -5,7 +5,7 @@ import pytest
 import torch
 from transformers import GPT2Config
 
-from vllm import LLM
+from vllm import LLM, SamplingParams
 from vllm.exceptions import VLLMValidationError
 
 
@@ -91,3 +91,37 @@ def test_model_seed_out_of_numpy_range_fails_during_initialization(tmp_path, see
             max_model_len=16,
             enforce_eager=True,
         )
+
+
+def test_truncation_preserves_reusable_prompt(vllm_runner):
+    """Request-local truncation must not shorten a later reuse of the input."""
+    with vllm_runner(
+        "HuggingFaceTB/SmolLM2-135M-Instruct",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.1,
+    ) as runner:
+        llm = runner.llm
+        original_token_ids = llm.get_tokenizer().encode(
+            "Remember this secret word: pineapple. What was the secret word?"
+        )
+        sampling_params = SamplingParams(temperature=0, max_tokens=1)
+        for side in ("left", "right"):
+            prompt = {"prompt_token_ids": original_token_ids.copy()}
+            truncated = llm.generate(
+                prompt,
+                sampling_params,
+                tokenization_kwargs={
+                    "truncate_prompt_tokens": 6,
+                    "truncation_side": side,
+                },
+                use_tqdm=False,
+            )[0]
+            expected_token_ids = (
+                original_token_ids[-6:] if side == "left" else original_token_ids[:6]
+            )
+            assert truncated.prompt_token_ids == expected_token_ids
+            assert prompt == {"prompt_token_ids": original_token_ids}
+            reused = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+            assert reused.prompt_token_ids == original_token_ids

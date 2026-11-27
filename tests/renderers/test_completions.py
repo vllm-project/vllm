@@ -10,12 +10,13 @@ from typing import Any
 import pybase64
 import pytest
 import torch
+from transformers import GPT2Config
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import SingletonPrompt
+from vllm.inputs import SingletonPrompt, TokensPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
@@ -917,3 +918,31 @@ class TestRenderEmbedPrompt:
         assert len(results[0]["prompt_token_ids"]) == len(text_input)
         # Second should be embed prompt
         assert torch.equal(results[1]["prompt_embeds"], tensor_input)
+
+
+@pytest.mark.asyncio
+async def test_async_truncation_preserves_caller_prompt(tmp_path):
+    GPT2Config(n_embd=4, n_head=1, n_layer=1, n_positions=16).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            max_model_len=16,
+            dtype="float32",
+        )
+    )
+    renderer = HfRenderer(config, tokenizer=None)
+    prompt: TokensPrompt = {"prompt_token_ids": [1, 2, 3, 4]}
+    try:
+        result = await renderer.tokenize_prompt_async(
+            prompt,
+            TokenizeParams(
+                max_total_tokens=16,
+                truncate_prompt_tokens=2,
+                truncation_side="left",
+            ),
+        )
+        assert result == {"prompt_token_ids": [3, 4]}
+        assert prompt == {"prompt_token_ids": [1, 2, 3, 4]}
+    finally:
+        renderer.shutdown()
