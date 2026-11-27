@@ -37,7 +37,7 @@ from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
@@ -184,6 +184,7 @@ def test_without_a_logprobs_request_derender_keeps_every_candidate(
     derendered = _resolve_logprobs(
         _generate(token_ids, dicts), tokenizer, top_limit=top_limit
     )
+    assert derendered.content is not None
     assert [len(e.top_logprobs) for e in derendered.content] == [len(d) for d in dicts]
 
 
