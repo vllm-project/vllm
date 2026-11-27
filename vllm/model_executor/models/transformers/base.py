@@ -55,14 +55,11 @@ from vllm.model_executor.layers.attention import (
 )
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import MoERunner, UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.linear import (
     LinearBase,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
-    UnquantizedLinearMethod,
-)
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
 )
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
@@ -116,13 +113,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
-UNQUANTIZED_METHODS = (
-    type(None),
-    UnquantizedLinearMethod,
-    UnquantizedEmbeddingMethod,
-    UnquantizedFusedMoEMethod,
-)
 
 VLLM_ATTN_ATTR = "attn"
 """Attribute in which to store the vLLM `Attention` instance that serves a Transformers
@@ -1088,29 +1078,61 @@ class Base(
                     "k": kv_heads * module.head_size,
                     "v": kv_heads * module.v_head_size,
                 }[shard_id]
+            elif isinstance(module, MergedColumnParallelLinear) and isinstance(
+                shard_id, int
+            ):
+                size = module.output_sizes[shard_id]
             else:
                 raise ValueError(f"Cannot size {name!r} for `Split` from {module}")
             return torch.empty(size, device="meta")
+
+        def split_like_weight(
+            name: str, tensor: torch.Tensor
+        ) -> dict[str, torch.Tensor] | None:
+            """Split another tensor of a module whose weight a converter splits (e.g. a
+            quantized checkpoint's `weight_scale`) like the weight: by its rows or by
+            blocks of them, and copy a single value or a 1-D tensor of another length
+            (e.g. `weight_shape`) to every piece. `None` if `name` is no such tensor."""
+            module, _, param = name.rpartition(".")
+            weight, pattern = rename_source_key(
+                f"{module}.weight", renamings, converters
+            )
+            if param == "weight" or pattern is None or loaded_by(weight) is None:
+                return None
+            targets = pattern_to_converter[pattern].target_patterns
+            if len(targets) < 2:
+                return None
+            weights = [weight.replace(targets[0], target) for target in targets]
+            rows = [get_parameter(w).shape[0] for w in weights]
+            if tensor.dim() <= 1 and tensor.shape[:1] != (sum(rows),):
+                pieces = (tensor,) * len(rows)
+            else:
+                block, rest = divmod(sum(rows), tensor.shape[0])
+                if rest or any(r % block for r in rows):
+                    raise ValueError(
+                        f"Cannot split {name!r} of shape {tuple(tensor.shape)} like "
+                        f"its weight, into {rows} rows."
+                    )
+                pieces = tensor.split([r // block for r in rows])
+            return {
+                w.removesuffix("weight") + param: piece
+                for w, piece in zip(weights, pieces)
+            }
 
         # Stands in for the model whose parameters `Split` reads the sizes of
         unfused = SimpleNamespace(get_parameter=get_parameter)
         # Each target collects its sources in its own converter copy, as in Transformers
         pending: dict[str, WeightConverter] = {}
         for name, tensor in weights:
+            if (split := split_like_weight(name, tensor)) is not None:
+                yield from split.items()
+                continue
             renamed, converter_pattern = rename_source_key(name, renamings, converters)
             # Left for the loader to drop or report if no module here loads it
-            if converter_pattern is None or (loader := loaded_by(renamed)) is None:
+            if converter_pattern is None or loaded_by(renamed) is None:
                 yield renamed, tensor
                 continue
             converter = pattern_to_converter[converter_pattern]
-            quant_method = getattr(loader[0], "quant_method", None)
-            # Online quantization loads unquantized weights and quantizes them after
-            online = getattr(quant_method, "uses_meta_device", False)
-            if not isinstance(quant_method, UNQUANTIZED_METHODS) and not online:
-                raise ValueError(
-                    f"Cannot convert {name!r} into {converter.target_patterns}: "
-                    "converting quantized tensors is not supported."
-                )
             target = pending.setdefault(renamed, deepcopy(converter))
             target.add_tensor(renamed, name, converter_pattern, tensor)
             if len(target.collected_tensors) == len(converter.source_patterns):
