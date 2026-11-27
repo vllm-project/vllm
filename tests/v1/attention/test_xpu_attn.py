@@ -72,7 +72,9 @@ def run_split(monkeypatch, query_lens, seq_lens, num_speculative_tokens=None):
         None
         if num_speculative_tokens is None
         else SimpleNamespace(
-            num_speculative_tokens=num_speculative_tokens, parallel_drafting=False
+            num_speculative_tokens=num_speculative_tokens,
+            parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         )
     )
     vllm_config = SimpleNamespace(
