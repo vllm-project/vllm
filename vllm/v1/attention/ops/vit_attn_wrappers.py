@@ -361,25 +361,57 @@ def flashinfer_wrapper(
     is_reshaped = q.dim() == 4
 
     if is_reshaped:
-        reshape_batch_size = q.shape[0]
+        reshape_batch_size, q_len = q.shape[:2]
+        kv_len = k.shape[1]
         q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     # cuDNN <= 9.10.2.21 requires q, k to be contiguous
     # this comes with no cost for ViTs with RoPE because
     # RoPE has already made q and k contiguous.
     q, k = q.contiguous(), k.contiguous()
 
-    assert cu_seqlens is not None
-    assert max_seqlen is not None
-    assert sequence_lengths is not None
-    assert len(cu_seqlens) % 2 == 0, "cu_seqlens must be divisible by 2"
-    cu_seqlength = len(cu_seqlens) // 2
-    batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
-    batch_offsets_v = cu_seqlens[cu_seqlength:].view(-1, 1, 1, 1)
-    sequence_lengths = sequence_lengths.view(-1, 1, 1, 1)
-    # `cudnn_batch_prefill_with_kv_cache` needs Python ints for the
-    # max-token-per-seq bounds.
-    with gpu_sync_allowed():
-        max_seqlen = max_seqlen.item()
+    if cu_seqlens is None:
+        assert is_reshaped, "Fixed-length attention requires batched Q/K/V"
+        offsets = torch.arange(
+            reshape_batch_size + 1, dtype=torch.int32, device=q.device
+        ).view(-1, 1, 1, 1)
+        batch_offsets_qko = offsets * q_len * q.stride(0)
+        batch_offsets_k = offsets * kv_len * k.stride(0)
+        batch_offsets_v = offsets * kv_len * v.stride(0)
+        sequence_lengths = torch.full(
+            (reshape_batch_size, 1, 1, 1), q_len, dtype=torch.int32, device=q.device
+        )
+        sequence_lengths_kv = torch.full_like(sequence_lengths, kv_len)
+        max_seqlen = q_len
+        max_seqlen_kv = kv_len
+    elif sequence_lengths is None:
+        # Other encoder backends accept cumulative token offsets. Derive
+        # cuDNN's element offsets from the actual (possibly interleaved) views.
+        offsets = cu_seqlens.view(-1, 1, 1, 1)
+        batch_offsets_qko = offsets * q.stride(0)
+        batch_offsets_k = offsets * k.stride(0)
+        batch_offsets_v = offsets * v.stride(0)
+        sequence_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).view(-1, 1, 1, 1)
+        sequence_lengths_kv = sequence_lengths
+        if max_seqlen is None:
+            # The packed token count is a safe bound without a device sync.
+            max_seqlen = q.shape[0]
+        else:
+            with gpu_sync_allowed():
+                max_seqlen = int(max_seqlen)
+        max_seqlen_kv = max_seqlen
+    else:
+        assert max_seqlen is not None
+        assert len(cu_seqlens) % 2 == 0, "cu_seqlens must be divisible by 2"
+        cu_seqlength = len(cu_seqlens) // 2
+        batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
+        batch_offsets_k = batch_offsets_qko
+        batch_offsets_v = cu_seqlens[cu_seqlength:].view(-1, 1, 1, 1)
+        sequence_lengths = sequence_lengths.view(-1, 1, 1, 1)
+        sequence_lengths_kv = sequence_lengths
+        # cuDNN needs Python ints for the max-token-per-sequence bounds.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
+        max_seqlen_kv = max_seqlen
 
     output_buffer = torch.empty_like(
         q,
@@ -393,13 +425,13 @@ def flashinfer_wrapper(
         scale,
         workspace_buffer,
         max_token_per_sequence=max_seqlen,
-        max_sequence_kv=max_seqlen,
+        max_sequence_kv=max_seqlen_kv,
         actual_seq_lens_q=sequence_lengths,
-        actual_seq_lens_kv=sequence_lengths,
+        actual_seq_lens_kv=sequence_lengths_kv,
         causal=False,
         return_lse=False,
         batch_offsets_q=batch_offsets_qko,
-        batch_offsets_k=batch_offsets_qko,
+        batch_offsets_k=batch_offsets_k,
         batch_offsets_v=batch_offsets_v,
         batch_offsets_o=batch_offsets_qko,
         q_scale=q_scale,

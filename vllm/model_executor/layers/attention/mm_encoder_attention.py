@@ -743,6 +743,14 @@ class MMEncoderAttention(CustomOp):
         sequence_lengths: torch.Tensor
         | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
+        is_reshaped = query.dim() == 3 and cu_seqlens is None
+        if is_reshaped:
+            bsz, q_len = query.size()[:2]
+            kv_len = key.size(1)
+            query, key, value = self.view_qkv_to_4d(
+                query, key, value, bsz, q_len, kv_len
+            )
+
         if self.fp8_enabled:
             query, key, value = self._quantize_qkv_fp8(query, key, value)
 
@@ -764,6 +772,8 @@ class MMEncoderAttention(CustomOp):
         if self.fp8_enabled and output.shape[-1] != self.head_size:
             output = output[..., : self.head_size].contiguous()
 
+        if is_reshaped:
+            output = output.reshape(bsz, q_len, -1)
         return output
 
     def _forward_aiter_fp8(
