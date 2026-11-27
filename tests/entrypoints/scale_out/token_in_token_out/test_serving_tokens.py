@@ -532,9 +532,9 @@ async def test_stop_string_workflow(client, tokenizer, messages):
     # stop_checker = StopChecker(
     #     max_model_len=1024, get_tokenizer_for_seq=lambda _: tokenizer
     # )
-    stop_str, truncate_to = check_stop_strings(
-        generate_res, len(generate_res), ["27 member"], False
-    )
+    stop = check_stop_strings(generate_res, len(generate_res), ["27 member"], False)
+    assert stop is not None
+    stop_str, truncate_to = stop
     assert stop_str == "27 member"
     # abort request that hit stop string (requires tokens-only mode)
     # res = await client.post("/abort_requests", json={"request_ids": ["generate-tokens-42"]}) # noqa: E501
@@ -614,8 +614,8 @@ async def test_bad_words_rejected_without_tokenizer(client):
         [
             "--enable-lora",
             "--lora-modules",
-            "Alice=vllm-project/self_cognition_Alice",
-            "Bob=vllm-project/self_cognition_Bob",
+            "Alice=vllm/self_cognition_Alice",
+            "Bob=vllm/self_cognition_Bob",
             "--max-lora-rank",
             "64",
             "--max-cpu-loras",

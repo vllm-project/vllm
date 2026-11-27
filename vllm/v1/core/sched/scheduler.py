@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
+from math import lcm
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -454,20 +455,24 @@ class Scheduler(SchedulerInterface):
         self.pp_microbatch_cap = PPMicrobatchCap.create(
             self, self.parallel_config.pipeline_parallel_size
         )
-        # TODO: Support models with multiple Mamba specs that require different
-        # prefill checkpoint alignments instead of selecting the first one.
-        self.mamba_prefill_checkpoint_alignment = next(
-            (
-                group.manager_config.params.prefill_checkpoint_alignment
-                for group in kv_cache_config.kv_cache_groups
-                if isinstance(group.manager_config.params, MambaManager.Params)
-            ),
-            None,
-        )
-        self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
-            not isinstance(group.manager_config.params, MambaManager.Params)
-            or group.manager_config.params.num_prefill_checkpoint_blocks > 0
+        mamba_params = [
+            group.manager_config.params
             for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.manager_config.params, MambaManager.Params)
+        ]
+        self.mamba_has_prefill_checkpoint_blocks = bool(mamba_params) and all(
+            p.num_prefill_checkpoint_blocks > 0 for p in mamba_params
+        )
+        mamba_alignments = [
+            p.prefill_checkpoint_alignment
+            for p in mamba_params
+            if p.prefill_checkpoint_alignment is not None
+        ]
+        self.mamba_prefill_checkpoint_alignment = (
+            lcm(*mamba_alignments)
+            if self.mamba_has_prefill_checkpoint_blocks
+            and len(mamba_alignments) == len(mamba_params)
+            else None
         )
         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
         # Split there only if the backend cannot save it within the final chunk.

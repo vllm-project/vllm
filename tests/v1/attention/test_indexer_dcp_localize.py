@@ -265,6 +265,27 @@ def _merge_local_topks_global_with_fake_dcp(
         sparse_indexer.get_dcp_group = original_get_dcp_group
 
 
+@pytest.mark.parametrize("world", [1, 2, 4, 8])
+@pytest.mark.parametrize("interleave", [1, 16, 64])
+@pytest.mark.parametrize("max_model_len", [1, 127, 100_003])
+def test_decode_logits_width_covers_local_contexts(
+    world: int, interleave: int, max_model_len: int
+):
+    """The allocation covers every KV shard, including partial interleaves."""
+    width = sparse_indexer.dcp_decode_logits_width(max_model_len, world, interleave)
+    seq_lens = torch.arange(max_model_len + 1, dtype=torch.int32)
+    local_max = max(
+        int(get_dcp_local_seq_lens(seq_lens, world, rank, interleave).max())
+        for rank in range(world)
+    )
+    assert local_max <= width
+    assert width - local_max < interleave
+    if world == 1:
+        assert width == max_model_len
+    elif max_model_len >= world * interleave:
+        assert width < max_model_len
+
+
 @pytest.mark.parametrize("world", [1, 2, 4])
 @pytest.mark.parametrize("interleave", [1, 2, 4])
 def test_get_dcp_local_seq_lens_matches_naive(world: int, interleave: int):

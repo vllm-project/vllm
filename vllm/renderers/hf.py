@@ -61,7 +61,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
-from .base import BaseRenderer
+from .base import HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS, BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
 
 if TYPE_CHECKING:
@@ -1070,9 +1070,7 @@ def tokenize_prompt(
     """Tokenize text, preserving an optional mask for truncated echoes."""
     # The mask identifies truncated text inputs even when no tokens were added.
     want_special_tokens_mask = (
-        params.needs_detokenization
-        and params.truncate_prompt_tokens is not None
-        and params.truncation_side is not None
+        params.needs_detokenization and params.truncate_prompt_tokens is not None
     )
     kwargs = params.get_encode_kwargs()
     if want_offsets:
@@ -1157,6 +1155,8 @@ class BaseHfRenderer(BaseRenderer[_T]):
 
 
 class HfRenderer(BaseHfRenderer[HfTokenizer]):
+    _server_owned_chat_template_kwargs = HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+
     def __init__(
         self,
         config: VllmConfig,

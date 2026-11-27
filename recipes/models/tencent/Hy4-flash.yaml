@@ -5,7 +5,7 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent HY4 Flash multimodal MoE for everyday productivity and agent workflows — 220B total / 12B active, 1M context, DFly speculative decoding"
   date_added: 2026-11-17
-  date_updated: 2026-11-23
+  date_updated: 2026-11-25
   tasks:
     - text
     - multimodal
@@ -171,7 +171,7 @@ guide: |
   cache passes 4 GiB, which HY4 Flash reaches after a few hundred thousand
   tokens. It can be dropped once vLLM's AITER includes
   [ROCm/aiter#6277](https://github.com/ROCm/aiter/pull/6277). On ROCm the KV
-  cache must stay BF16 (the default); `fp8_ds_mla` is not supported.
+  cache may be BF16 (the default) or `fp8_ds_mla`.
 
   ## Context and memory
 
