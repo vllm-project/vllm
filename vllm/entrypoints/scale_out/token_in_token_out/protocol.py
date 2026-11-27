@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -43,6 +43,7 @@ from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.s3_transport import S3MMReference
 from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -53,6 +54,7 @@ logger = init_logger(__name__)
 ####### Tokens IN <> Tokens OUT #######
 
 OutputMode: TypeAlias = Literal["tokens", "text", "derender"]
+MMTensorReference: TypeAlias = S3MMReference
 
 
 class ParseContext(BaseModel):
@@ -159,6 +161,14 @@ class MultiModalFeatures(BaseModel):
     `None` for metadata-only (cache-hit) responses.
     """
 
+    kwargs_refs: dict[str, list[MMTensorReference | None]] | None = None
+    """Per-modality references to processed tensors in external storage.
+
+    Each value is a list parallel to `mm_hashes[modality]`. The server
+    downloads each referenced SafeTensors object before engine submission.
+    An item can set `kwargs_data` or `kwargs_refs`, but not both.
+    """
+
     mm_metadata: dict[str, list[str | None]] | None = None
     """Per-modality serialized metadata for disaggregated prefill.
 
@@ -180,10 +190,12 @@ class MultiModalFeatures(BaseModel):
             )
         if self.kwargs_data is not None and set(self.kwargs_data) != modalities:
             raise ValueError("kwargs_data must use the same modalities as mm_hashes")
+        if self.kwargs_refs is not None and set(self.kwargs_refs) != modalities:
+            raise ValueError("kwargs_refs must use the same modalities as mm_hashes")
         if self.mm_metadata is not None and set(self.mm_metadata) != modalities:
             raise ValueError("mm_metadata must use the same modalities as mm_hashes")
 
-        flattened_ranges: list[tuple[int, int]] = []
+        spans: dict[tuple[int, int], list[tuple[str, list[bool] | None]]] = {}
         for modality in modalities:
             num_hashes = len(self.mm_hashes[modality])
             num_placeholders = len(self.mm_placeholders[modality])
@@ -199,6 +211,21 @@ class MultiModalFeatures(BaseModel):
                 raise ValueError(
                     f"{modality} kwargs_data and mm_hashes must have the same length"
                 )
+            if self.kwargs_refs is not None:
+                refs = self.kwargs_refs[modality]
+                if len(refs) != num_hashes:
+                    raise ValueError(
+                        f"{modality} kwargs_refs and mm_hashes must have the same "
+                        "length"
+                    )
+                data = (self.kwargs_data or {}).get(modality, [None] * num_hashes)
+                if any(
+                    d is not None and r is not None
+                    for d, r in zip(data, refs, strict=True)
+                ):
+                    raise ValueError(
+                        f"{modality} items cannot set both kwargs_data and kwargs_refs"
+                    )
             if (
                 self.mm_metadata is not None
                 and len(self.mm_metadata[modality]) != num_hashes
@@ -206,17 +233,29 @@ class MultiModalFeatures(BaseModel):
                 raise ValueError(
                     f"{modality} mm_metadata and mm_hashes must have the same length"
                 )
-            flattened_ranges.extend(
-                (placeholder.offset, placeholder.offset + placeholder.length)
-                for placeholder in self.mm_placeholders[modality]
-            )
-
-        flattened_ranges.sort()
-        for (_, end), (next_offset, _) in zip(flattened_ranges, flattened_ranges[1:]):
-            if next_offset < end:
-                raise ValueError(
-                    "mm_placeholders must be globally non-overlapping and sorted"
+            for placeholder in self.mm_placeholders[modality]:
+                spans.setdefault((placeholder.offset, placeholder.length), []).append(
+                    (modality, placeholder.is_embed)
                 )
+
+        # Placeholders must not overlap, except that items of different
+        # modalities may share one span when they embed disjoint positions:
+        # Qwen2.5-Omni and Qwen3-Omni place a video and its audio track this
+        # way with `use_audio_in_video`.
+        end = 0
+        for (offset, length), items in sorted(spans.items()):
+            masks = [is_embed or [True] * length for _, is_embed in items]
+            if (
+                offset < end
+                or len({modality for modality, _ in items}) < len(items)
+                or any(sum(position) > 1 for position in zip(*masks))
+            ):
+                raise ValueError(
+                    "mm_placeholders must be non-overlapping, except that items "
+                    "of different modalities may share one span with disjoint "
+                    "is_embed masks"
+                )
+            end = offset + length
         return self
 
 
@@ -264,21 +303,28 @@ class GenerateRequest(BaseModel):
     placeholders. With `features`, these placeholders must follow the
     last `features` range, which is left as is."""
 
+    _metadata_only_requires_ec: ClassVar[bool] = True
+
     @model_validator(mode="after")
     def _require_ec_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
-        if features is None:
+        if features is None or not self._metadata_only_requires_ec:
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
         if self.ec_transfer_params:
             return self
         kwargs_data = features.kwargs_data or {}
+        kwargs_refs = features.kwargs_refs or {}
         for modality, metadata_items in (features.mm_metadata or {}).items():
-            kwargs_items = kwargs_data.get(modality, [None] * len(metadata_items))
+            n = len(metadata_items)
+            kwargs_items = kwargs_data.get(modality, [None] * n)
+            ref_items = kwargs_refs.get(modality, [None] * n)
             if any(
-                metadata is not None and kwargs is None
-                for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
+                metadata is not None and kwargs is None and ref is None
+                for metadata, kwargs, ref in zip(
+                    metadata_items, kwargs_items, ref_items, strict=True
+                )
             ):
                 raise ValueError(
                     "metadata-only multimodal items require ec_transfer_params"
@@ -466,6 +512,17 @@ class GenerateRequest(BaseModel):
             max_total_tokens=None,
             max_output_tokens=0,
         )
+
+
+class RenderedGenerateRequest(GenerateRequest):
+    """A `GenerateRequest` produced by `/render`.
+
+    `ec_transfer_params` come from the encode response, so a render with
+    `mm_payload="metadata"` cannot have them yet. `/inference/v1/generate`
+    still validates the request it receives as a `GenerateRequest`.
+    """
+
+    _metadata_only_requires_ec: ClassVar[bool] = False
 
 
 class GenerateLogProb(BaseModel):

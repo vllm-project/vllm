@@ -3,7 +3,7 @@
 """Hybrid W4A16 kernel: Triton for prefill, HIP skinny for decode.
 
 Routes based on the activation shape:
-  M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
+  M <= _max_skinny_batch_size() and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
       HIP skinny GEMM (wvSplitK_int4_g)
   M >= MIN_DENSE_M:  dense GEMM on a cached dequantized copy, when
       `KernelConfig.rdna_hybrid_w4a16_prefill_dequant` is "enable"
@@ -82,7 +82,8 @@ def _profile_scope(name: str) -> AbstractContextManager:
     return torch.profiler.record_function(name)
 
 
-# Maximum activation rows supported by HIP skinny (Python M maps to C++ N_in).
+# Maximum activation rows routed to HIP skinny (Python M maps to C++ N_in),
+# except on gfx1151, which uses MAX_SKINNY_BATCH_SIZE_GFX1151.
 # When K*M exceeds regular LDS capacity, the C++ medium kernel caches the
 # prefix in LDS and reads the remaining activation elements from global memory.
 # On gfx115x the K*M term is dropped entirely: deep-K shapes stage every
@@ -90,6 +91,9 @@ def _profile_scope(name: str) -> AbstractContextManager:
 # multiple of the kernel's row tile does the medium kernel fall back to reading
 # the rows that do not fit from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
+# On gfx1151 HIP beats Triton up to 8 rows and is level with it by 16. Other
+# gfx115x are untested and keep 5.
+MAX_SKINNY_BATCH_SIZE_GFX1151 = 8
 # 64 KiB per-workgroup LDS limit expressed in fp16 elements.
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
@@ -293,7 +297,9 @@ def _triton_w4a16_skinny_fmt_kernel(
 
 
 # Per-shape (group_size, K, N) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,
-# num_stages) tile-config overrides for prefill (M <= 128).
+# num_stages) tile-config overrides for prefill and selected decode-sized
+# batches (M <= 128). bf16 gfx1151 batches with 9 <= M <= 64 bypass these
+# overrides and use the decode tile selector.
 # Picked by sweeping benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py + a
 # per-config sweep script; only added when better than the generic heuristic
 # by > 20% at M=128. Re-run benchmarks after edits.
@@ -317,6 +323,33 @@ _GFX1151_PREFILL_OVERRIDES: dict[
 }
 
 
+def _gfx1151_bf16_decode_tile(
+    M: int, N: int, K: int, group_size: int
+) -> tuple[int, int, int, int] | None:
+    """bf16 (BLOCK_M, BLOCK_N, BLOCK_K, num_warps) for 9 <= M <= 128 (decode
+    batches, speculative-decoding verify) where it beats the ladder below;
+    None keeps the ladder.
+
+    Swept on gfx1151 over 25 Qwen3, Qwen3.8 and SmolLM2 shapes at group sizes
+    32, 64 and 128. At 33..64 the ladder's (64, 64, 32, 4) falls to about
+    30 GB/s on wide-N layers.
+    """
+    if M <= 8 or M > 128:
+        return None
+    tall = K >= 2 * N
+    if M <= 16:
+        return (16, 32, 128, 2) if group_size >= 128 else None
+    if M <= 32:
+        return None
+    if M <= 64:
+        if group_size == 32:
+            return (64, 32, 32, 4) if not tall and N >= 2 * K else None
+        return (64, 64, 64, 4) if tall else (64, 32, 64, 2)
+    if group_size == 32:
+        return (128, 128, 32, 8) if tall else (128, 64, 32, 8)
+    return (128, 64, 64, 8) if tall else None
+
+
 def _select_skinny_gfx1151_config(
     M: int,
     N: int,
@@ -330,7 +363,8 @@ def _select_skinny_gfx1151_config(
     packed_dequant) for gfx1151.
 
     The packed fp16 dequant and the scalar bf16 dequant want different tiles,
-    so selection is dtype-aware. bf16 always uses the scalar-tuned ladder.
+    so selection is dtype-aware. bf16 uses the scalar-tuned ladder except where
+    gfx1151 decode tiles provide a better configuration.
 
     num_stages None means "leave Triton's default pipeline depth alone".
     Re-run benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py after edits.
@@ -369,7 +403,17 @@ def _select_skinny_gfx1151_config(
         packed_dequant = dtype == torch.float16 and not has_zp
         key = (group_size, K, N)
         override = _GFX1151_PREFILL_OVERRIDES.get(key) if M <= 128 else None
-        if override is not None:
+        if dtype == torch.bfloat16 and 8 < M <= 64:
+            # Tuned at M=128; 2-4x slower than the ladder at 9..64.
+            override = None
+        bf16_tile = (
+            _gfx1151_bf16_decode_tile(M, N, K, group_size)
+            if dtype == torch.bfloat16 and override is None
+            else None
+        )
+        if bf16_tile is not None:
+            block_m, block_n, block_k, num_warps = bf16_tile
+        elif override is not None:
             block_m, block_n, block_k, num_warps, num_stages = override
         elif M <= 32:
             block_m, block_n, block_k, num_warps = 32, 32, 128, 4
@@ -681,6 +725,12 @@ def pack_scale_zp_carrier(scales: torch.Tensor, zp: torch.Tensor) -> torch.Tenso
 # ---------------------------------------------------------------------------
 
 
+def _max_skinny_batch_size() -> int:
+    if _on_gfx1151():
+        return MAX_SKINNY_BATCH_SIZE_GFX1151
+    return MAX_SKINNY_BATCH_SIZE
+
+
 def _pad_activation_rows(x_2d: torch.Tensor) -> torch.Tensor:
     """Copy `x_2d` into a row-padded buffer when its row stride is on the cliff.
 
@@ -725,7 +775,7 @@ def _rdna_hybrid_w4a16_apply_impl(
     K = x_2d.shape[1]
     N = w_q.shape[0]
 
-    if M <= MAX_SKINNY_BATCH_SIZE and (
+    if _max_skinny_batch_size() >= M and (
         K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x()
     ):
         with _profile_scope(f"wvsplitk_int4 {M}x{N}x{K}"):

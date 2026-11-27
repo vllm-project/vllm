@@ -366,7 +366,7 @@ def _hybrid_kv_cache_config() -> KVCacheConfig:
     )
     mamba = MambaManager.layer_config(
         MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     return KVCacheConfig(
         num_blocks=8,
@@ -453,6 +453,7 @@ def make_scheduler_output(
         ),
         num_scheduled_tokens=dict(scheduled_tokens or {}),
         kv_connector_block_state=block_state,
+        new_block_ids_to_zero=None,
     )
 
 

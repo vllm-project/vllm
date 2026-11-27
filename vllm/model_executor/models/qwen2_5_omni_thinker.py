@@ -34,7 +34,6 @@ from packaging.version import Version
 from transformers import PreTrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
-    Qwen2_5OmniConfig,
     Qwen2_5OmniThinkerConfig,
 )
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
@@ -461,7 +460,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
     processor_kwargs_cls: type = Qwen2_5OmniProcessorKwargs
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen2_5OmniConfig).thinker_config
+        return self.ctx.get_hf_config(Qwen2_5OmniThinkerConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
         return self.ctx.get_hf_processor(
@@ -1283,9 +1282,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config
-        thinker_config: Qwen2_5OmniThinkerConfig = (
-            vllm_config.model_config.hf_config.thinker_config
-        )
+        thinker_config: Qwen2_5OmniThinkerConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config

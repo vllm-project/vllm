@@ -332,6 +332,33 @@ async def test_generate_stream(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("server", [["--enable-force-include-usage"]], indirect=True)
+async def test_generate_stream_force_include_usage(client):
+    """`--enable-force-include-usage` adds usage without `stream_options`."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0},
+        "stream": True,
+    }
+    async with client.stream("POST", GEN_ENDPOINT, json=payload) as resp:
+        resp.raise_for_status()
+        chunks = [
+            json.loads(line[len("data: ") :])
+            async for line in resp.aiter_lines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+
+    assert all(chunk.get("usage") is not None for chunk in chunks)
+    usage_chunk = chunks[-1]
+    assert usage_chunk["choices"] == []
+    num_tokens = sum(len(chunk["choices"][0]["token_ids"]) for chunk in chunks[:-1])
+    assert usage_chunk["usage"]["prompt_tokens"] == 3
+    assert usage_chunk["usage"]["completion_tokens"] == num_tokens
+    assert usage_chunk["usage"]["total_tokens"] == 3 + num_tokens
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("logprobs_value", [0, 1, 5])
 async def test_generate_logprobs(client, logprobs_value):
     payload = {
@@ -531,10 +558,12 @@ async def test_stop_string_workflow(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
-async def test_stop_strings_rejected_when_tokens_only(client):
-    """--tokens-only forces detokenize=False after request validation, so
-    stop strings must be rejected explicitly rather than silently ignored."""
+@pytest.mark.parametrize(
+    "server", [["--tokens-only"], ["--skip-tokenizer-init"]], indirect=True
+)
+async def test_stop_strings_rejected_without_tokenizer(client):
+    """A server without a tokenizer (or with detokenization forced off) must
+    reject stop strings explicitly rather than silently ignore them."""
     sampling_params = {"max_tokens": 5, "stop": ["never"]}
     payload = {
         "model": MODEL_NAME,

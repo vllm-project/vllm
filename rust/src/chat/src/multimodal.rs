@@ -26,12 +26,14 @@ use llm_multimodal::{
     TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_tokenizer::parse_checkpoint_json;
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
@@ -62,14 +64,19 @@ pub struct MultimodalModelInfo {
     image: Option<VisionModalitySupport>,
     video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
+    /// Modalities the engine accepts for this checkpoint but no lane above
+    /// serves, so requests carrying them name the Rust frontend.
+    unserved_modalities: Vec<MmModality>,
     media_connector: Arc<MediaConnector>,
-    /// Maximum number of input items allowed per prompt for each modality.
-    limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Maximum number of input items allowed per prompt for each modality:
+    /// the `--limit-mm-per-prompt` count, else the model's default, else 999.
+    item_limits: HashMap<MmModality, usize>,
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
 ///
-/// Modalities absent from the map default to 999 items.
+/// Modalities absent from the map default to the model's default count, else
+/// 999 items.
 pub type MmLimitPerPrompt = HashMap<MmModality, MmLimitSpec>;
 
 pub use vllm_engine_core_client::protocol::multimodal::MmModality;
@@ -316,6 +323,16 @@ pub struct MultimodalConfigFiles<'a> {
     pub processor_config: Option<&'a Path>,
 }
 
+/// A modality's processor config as the checkpoint writes it, kept as JSON
+/// until startup options are merged in, so they use the checkpoint's own key
+/// names (`resample`, not the parsed config's `resampling`).
+#[derive(Debug, Clone, Default)]
+struct CheckpointProcessorConfig {
+    /// Where the config came from, for parse errors.
+    source: String,
+    config: serde_json::Map<String, Value>,
+}
+
 /// Load a modality's section from the combined processor config, falling back
 /// to its legacy standalone file.
 fn load_preprocessor_config(
@@ -323,19 +340,17 @@ fn load_preprocessor_config(
     dedicated_name: &str,
     processor_config_path: Option<&Path>,
     processor_section: &str,
-) -> Result<Option<PreProcessorConfig>> {
+) -> Result<Option<CheckpointProcessorConfig>> {
     if let Some(path) = processor_config_path {
         let text = fs::read_to_string(path)
             .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
+        let value: serde_json::Value = parse_checkpoint_json(&text)
             .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
         if let Some(processor) = value.get(processor_section).filter(|value| !value.is_null()) {
-            let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
-                multimodal!(
-                    "failed to parse {processor_section} from processor_config.json: {error}"
-                )
-            })?;
-            return Ok(Some(config));
+            let source = format!("{processor_section} from processor_config.json");
+            let config = serde_json::from_value(processor.clone())
+                .map_err(|error| multimodal!("failed to parse {source}: {error}"))?;
+            return Ok(Some(CheckpointProcessorConfig { source, config }));
         }
     }
     let Some(path) = dedicated_path else {
@@ -343,9 +358,61 @@ fn load_preprocessor_config(
     };
     let text = fs::read_to_string(path)
         .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
-    let config = PreProcessorConfig::from_json(&text)
+    let config = parse_checkpoint_json(&text)
         .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
-    Ok(Some(config))
+    Ok(Some(CheckpointProcessorConfig {
+        source: dedicated_name.to_owned(),
+        config,
+    }))
+}
+
+/// Resolve startup options into an effective config.
+fn resolve_processor_config_overrides(
+    checkpoint: CheckpointProcessorConfig,
+    kwargs: &HashMap<String, Value>,
+    scope: &str,
+) -> Result<PreProcessorConfig> {
+    if kwargs.get("text_kwargs").is_some_and(|value| {
+        !value.is_null() && !value.as_object().is_some_and(|values| values.is_empty())
+    }) {
+        bail_multimodal!("mm_processor_kwargs.text_kwargs is not supported");
+    }
+    let flat = kwargs
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "images_kwargs" | "videos_kwargs" | "audio_kwargs" | "text_kwargs"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut effective = Value::Object(checkpoint.config);
+    merge_processor_config(&mut effective, &Value::Object(flat));
+    if let Some(scoped) = kwargs.get(scope).filter(|value| !value.is_null()) {
+        if !scoped.is_object() {
+            bail_multimodal!("mm_processor_kwargs.{scope} must be an object");
+        }
+        merge_processor_config(&mut effective, scoped);
+    }
+    PreProcessorConfig::from_value(effective)
+        .map_err(|error| multimodal!("failed to parse {}: {error}", checkpoint.source))
+}
+
+/// Recursively merge mappings; other values replace the checkpoint value.
+fn merge_processor_config(config: &mut Value, overrides: &Value) {
+    if let (Value::Object(config), Value::Object(overrides)) = (&mut *config, overrides) {
+        for (key, value) in overrides {
+            merge_processor_config(config.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    } else {
+        *config = overrides.clone();
+    }
+}
+
+/// Whether `--limit-mm-per-prompt` disables `modality` altogether.
+fn limited_to_zero(limit_mm_per_prompt: &MmLimitPerPrompt, modality: MmModality) -> bool {
+    limit_mm_per_prompt.get(&modality).and_then(MmLimitSpec::count) == Some(0)
 }
 
 /// Request-scoped fetched media, split per modality with tracker UUID
@@ -380,47 +447,55 @@ struct PreparedItem {
 impl MultimodalModelInfo {
     /// Load and resolve multimodal support from model files.
     ///
-    /// Returns `Ok(Some(_))` only when the model spec is registered and at
-    /// least one modality resolves. File read/parse failures are real errors;
-    /// unsupported model families are logged and returned as `Ok(None)`.
+    /// Returns `Ok(None)` for a text-only model: no registered model spec and
+    /// no media preprocessor config (or every modality limited to 0), or a
+    /// spec that declares no modality for this checkpoint. A model whose media
+    /// the engine accepts but the frontend can serve none of (media
+    /// preprocessor config but no registered spec, or no declared modality
+    /// resolving) is an error, so it fails at launch instead of rejecting
+    /// every media request. A declared modality that does not resolve while
+    /// another does is warned about and rejected per request. File read/parse
+    /// failures are errors too.
     pub fn from_paths(
         model_id: String,
         model_type: Option<String>,
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        mm_processor_kwargs: &HashMap<String, serde_json::Value>,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
                 let text = fs::read_to_string(path)
                     .map_err(|error| multimodal!("failed to read config.json: {error}"))?;
-                serde_json::from_str(&text)
+                parse_checkpoint_json(&text)
                     .map_err(|error| multimodal!("failed to parse config.json: {error}"))?
             }
             None => serde_json::Value::Object(Default::default()),
         };
-        let preprocessor_config = load_preprocessor_config(
+        let image_config = load_preprocessor_config(
             files.preprocessor_config,
             "preprocessor_config.json",
             files.processor_config,
             "image_processor",
-        )?
-        .unwrap_or_default();
-        let video_preprocessor_config = load_preprocessor_config(
+        )?;
+        let video_config = load_preprocessor_config(
             files.video_preprocessor_config,
             "video_preprocessor_config.json",
             files.processor_config,
             "video_processor",
-        )?
-        .unwrap_or_else(|| preprocessor_config.clone());
-
-        let audio_preprocessor_config = load_preprocessor_config(
+        )?;
+        let audio_config = load_preprocessor_config(
             files.preprocessor_config,
             "preprocessor_config.json",
             files.processor_config,
             "feature_extractor",
-        )?
-        .unwrap_or_else(|| preprocessor_config.clone());
+        )?;
+        let has_media_config =
+            image_config.is_some() || video_config.is_some() || audio_config.is_some();
+        let preprocessor_config = image_config.unwrap_or_default();
+        let video_preprocessor_config = video_config.unwrap_or_else(|| preprocessor_config.clone());
+        let audio_preprocessor_config = audio_config.unwrap_or_else(|| preprocessor_config.clone());
 
         let context = MultimodalModelContext {
             model_id,
@@ -429,11 +504,38 @@ impl MultimodalModelInfo {
             tokenizer: TokenizerResolver(tokenizer),
         };
 
+        let Some(model_spec) = context.resolve_model_spec() else {
+            // Every limit at 0 is Python's `--language-model-only`.
+            let media_disabled = [MmModality::Image, MmModality::Video, MmModality::Audio]
+                .into_iter()
+                .all(|modality| limited_to_zero(&limit_mm_per_prompt, modality));
+            if has_media_config && !media_disabled {
+                return Err(Error::MultimodalModelUnsupported {
+                    model_id: context.model_id,
+                    model_type: context.model_type.unwrap_or_default(),
+                });
+            }
+            return Ok(None);
+        };
+
         Self::from_loaded(
             context,
-            preprocessor_config,
-            video_preprocessor_config,
-            audio_preprocessor_config,
+            model_spec,
+            resolve_processor_config_overrides(
+                preprocessor_config,
+                mm_processor_kwargs,
+                "images_kwargs",
+            )?,
+            resolve_processor_config_overrides(
+                video_preprocessor_config,
+                mm_processor_kwargs,
+                "videos_kwargs",
+            )?,
+            resolve_processor_config_overrides(
+                audio_preprocessor_config,
+                mm_processor_kwargs,
+                "audio_kwargs",
+            )?,
             limit_mm_per_prompt,
         )
     }
@@ -442,14 +544,56 @@ impl MultimodalModelInfo {
     /// preprocessor configs.
     fn from_loaded(
         context: MultimodalModelContext,
+        model_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
         audio_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
-        let (image, video) =
-            Self::resolve_vision_lanes(&context, preprocessor_config, video_preprocessor_config)?;
-        let audio = Self::resolve_audio_lane(&context, &audio_preprocessor_config)?;
+        let (image, video) = Self::resolve_vision_lanes(
+            &context,
+            model_spec,
+            preprocessor_config,
+            video_preprocessor_config,
+        )?;
+        let audio = Self::resolve_audio_lane(&context, model_spec, &audio_preprocessor_config)?;
+
+        // The engine accepts the modalities the spec declares for this
+        // checkpoint (read from its config), except those limited to 0.
+        let mut served = false;
+        let mut unserved_modalities = Vec::new();
+        for modality in model_spec.modality_limits(&context.metadata())?.into_keys() {
+            let (resolved, modality) = match modality {
+                Modality::Image => (image.is_some(), MmModality::Image),
+                Modality::Video => (video.is_some(), MmModality::Video),
+                Modality::Audio => (audio.is_some(), MmModality::Audio),
+                Modality::ImageEmbeds => continue,
+            };
+            if limited_to_zero(&limit_mm_per_prompt, modality) {
+                continue;
+            }
+            if resolved {
+                served = true;
+            } else {
+                unserved_modalities.push(modality);
+            }
+        }
+        if !served && !unserved_modalities.is_empty() {
+            return Err(Error::MultimodalModelUnsupported {
+                model_id: context.model_id,
+                model_type: context.model_type.unwrap_or_default(),
+            });
+        }
+        for modality in &unserved_modalities {
+            warn!(
+                model_id = context.model_id,
+                "the Rust frontend does not support `{modality}` input for this model, and \
+                 requests carrying it will be rejected; pass --limit-mm-per-prompt \
+                 '{{\"{modality}\": 0}}' to disable it, or set VLLM_USE_RUST_FRONTEND=0 to use \
+                 the Python frontend",
+                modality = modality.as_str(),
+            );
+        }
 
         if image.is_none() && video.is_none() && audio.is_none() {
             warn!(
@@ -479,36 +623,53 @@ impl MultimodalModelInfo {
         .copied()
         .collect();
 
+        let item_limits = [MmModality::Image, MmModality::Video, MmModality::Audio]
+            .into_iter()
+            .map(|modality| {
+                let limit = (limit_mm_per_prompt.get(&modality))
+                    .and_then(MmLimitSpec::count)
+                    .or_else(|| models::default_item_limit(&context.metadata(), modality))
+                    .unwrap_or(DEFAULT_MM_ITEMS_PER_PROMPT);
+                (modality, limit)
+            })
+            .collect();
+
         Ok(Some(Self {
             context,
             placeholder_token_ids,
             image,
             video,
             audio,
+            unserved_modalities,
             media_connector,
-            limit_mm_per_prompt,
+            item_limits,
         }))
+    }
+
+    /// The error for a request carrying `modality`, which no lane serves.
+    fn unsupported_modality(&self, modality: MmModality) -> Error {
+        if self.unserved_modalities.contains(&modality) {
+            Error::RustFrontendUnsupportedModality {
+                modality: modality.as_str(),
+            }
+        } else {
+            Error::UnsupportedModality {
+                modality: modality.as_str().to_owned(),
+            }
+        }
     }
 
     /// Resolve the spec-backed vision lanes (image and video).
     ///
-    /// A missing model spec or vision processor disables both lanes but is
-    /// not an error: unsupported model families are logged and skipped.
+    /// A lane whose placeholder or vision processor does not resolve is
+    /// disabled here; [`Self::from_loaded`] decides whether that is an error.
     /// Processor construction errors propagate to model loading.
     fn resolve_vision_lanes(
         context: &MultimodalModelContext,
+        raw_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
     ) -> Result<(Option<VisionModalitySupport>, Option<VisionModalitySupport>)> {
-        let Some(raw_spec) = context.resolve_model_spec() else {
-            warn!(
-                model_id = context.model_id,
-                model_type = context.model_type,
-                "multimodal model spec is not registered; disabling image/video support for this model"
-            );
-            return Ok((None, None));
-        };
-
         // Warn and disable the modality if the placeholder resolution fails.
         let resolve_placeholder =
             |modality: Modality| match ResolvedPlaceholder::resolve(raw_spec, context, modality) {
@@ -572,11 +733,9 @@ impl MultimodalModelInfo {
     /// Resolve a spec-backed audio lane when the model advertises audio support.
     fn resolve_audio_lane(
         context: &MultimodalModelContext,
+        raw_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: &PreProcessorConfig,
     ) -> Result<Option<AudioModalitySupport>> {
-        let Some(raw_spec) = context.resolve_model_spec() else {
-            return Ok(None);
-        };
         if !raw_spec.modality_limits(&context.metadata())?.contains_key(&Modality::Audio) {
             return Ok(None);
         }
@@ -609,6 +768,46 @@ impl MultimodalModelInfo {
             Modality::Audio => self.audio.as_ref()?.placeholder.token.as_str().into(),
             Modality::ImageEmbeds => None,
         }
+    }
+
+    /// Rewrite the text a chat template writes for each media item to the
+    /// modality's placeholder token, for specs that declare one (Nemotron's
+    /// `<video>`). Such text cannot be matched as a multi-token marker: its
+    /// tokens depend on the text around it. Like Python, at most one
+    /// occurrence per item is rewritten.
+    fn rewrite_rendered_markers(
+        &self,
+        mut prompt: String,
+        media_parts: &[MediaContentPart],
+    ) -> String {
+        let lanes = [
+            (
+                self.image.as_ref().map(|support| (&support.spec, &support.placeholder)),
+                MmModality::Image,
+            ),
+            (
+                self.video.as_ref().map(|support| (&support.spec, &support.placeholder)),
+                MmModality::Video,
+            ),
+            (
+                self.audio.as_ref().map(|support| (&support.spec, &support.placeholder)),
+                MmModality::Audio,
+            ),
+        ];
+        for (lane, modality) in lanes {
+            let Some((spec, placeholder)) = lane else {
+                continue;
+            };
+            let Some(marker) = spec.raw.rendered_marker_for(spec.modality) else {
+                continue;
+            };
+            let items = media_parts
+                .iter()
+                .filter(|part| media_part_limit_modality(part) == Some(modality))
+                .count();
+            prompt = prompt.replacen(marker, &placeholder.token, items);
+        }
+        prompt
     }
 
     fn vision_preprocessing_context(
@@ -647,7 +846,10 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::Text(prompt) => info
             .context
             .tokenizer()
-            .encode(&prompt, request.add_special_tokens)
+            .encode(
+                &info.rewrite_rendered_markers(prompt, &media_parts),
+                request.add_special_tokens,
+            )
             .map_err(|error| multimodal!("{error}"))?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
@@ -729,42 +931,49 @@ fn extract_media_parts(
                 detail,
                 uuid,
             } => Ok(MediaContentPart::ImageUrl {
-                url: image_url.clone(),
+                url: Arc::new(image_url.clone()),
                 detail: *detail,
                 uuid: uuid.clone(),
                 max_long_side_pixel: None,
             }),
             ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
-                url: video_url.clone(),
+                url: Arc::new(video_url.clone()),
                 uuid: uuid.clone(),
                 fps: None,
                 max_long_side_pixel: None,
             }),
             ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
-                url: input_audio_data_url(data, format.as_deref())?,
+                url: Arc::new(input_audio_data_url(data, *format)),
                 uuid: uuid.clone(),
             }),
             ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
-                url: audio_url.clone(),
+                url: Arc::new(audio_url.clone()),
                 uuid: uuid.clone(),
             }),
         })
         .collect()
 }
 
+/// Container format of an `input_audio` content block. Serde takes OpenAI's
+/// lowercase names, as the HTTP schema does; `FromStr` ignores case.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::Display,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum InputAudioFormat {
+    Wav,
+    Mp3,
+}
+
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.
-fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
+fn input_audio_data_url(data: &str, format: Option<InputAudioFormat>) -> String {
     let mime_type = match format {
-        Some(format) if format.eq_ignore_ascii_case("wav") => "audio/wav",
-        Some(format) if format.eq_ignore_ascii_case("mp3") => "audio/mpeg",
-        Some(format) => {
-            return Err(Error::UnsupportedInputAudioFormat {
-                format: format.to_owned(),
-            });
-        }
+        Some(InputAudioFormat::Wav) => "audio/wav",
+        Some(InputAudioFormat::Mp3) => "audio/mpeg",
         None => "application/octet-stream",
     };
-    Ok(format!("data:{mime_type};base64,{data}"))
+    format!("data:{mime_type};base64,{data}")
 }
 
 /// The modality a content part counts against, or `None` for plain text.
@@ -776,11 +985,12 @@ fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmModality> {
     match part {
         MediaContentPart::Text { .. } => None,
         MediaContentPart::ImageUrl { .. }
+        | MediaContentPart::ImageBase64 { .. }
         | MediaContentPart::ImageData { .. }
         | MediaContentPart::ImageEmbeds { .. } => Some(MmModality::Image),
-        MediaContentPart::AudioUrl { .. } | MediaContentPart::AudioData { .. } => {
-            Some(MmModality::Audio)
-        }
+        MediaContentPart::AudioUrl { .. }
+        | MediaContentPart::AudioBase64 { .. }
+        | MediaContentPart::AudioData { .. } => Some(MmModality::Audio),
         MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
             Some(MmModality::Video)
         }
@@ -795,7 +1005,8 @@ impl MultimodalModelInfo {
     /// Reject requests exceeding `--limit-mm-per-prompt`'s configured
     /// per-modality item count, before any fetch/decode work is spent on them.
     ///
-    /// Modalities without a configured count default to 999 items.
+    /// Modalities without a configured count default to the model's default
+    /// count, else 999 items.
     fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
         self.validate_modality_limits(media_parts.iter().filter_map(media_part_limit_modality))
     }
@@ -810,11 +1021,7 @@ impl MultimodalModelInfo {
         }
 
         for (modality, count) in counts {
-            let limit = self
-                .limit_mm_per_prompt
-                .get(&modality)
-                .and_then(MmLimitSpec::count)
-                .unwrap_or(DEFAULT_MM_ITEMS_PER_PROMPT);
+            let limit = self.item_limits[&modality];
             if count > limit {
                 return Err(Error::MmLimitExceeded {
                     modality: modality.as_str().to_string(),
@@ -843,9 +1050,7 @@ impl MultimodalModelInfo {
                 MmModality::Audio => self.audio.is_some(),
             };
             if !supported {
-                return Err(Error::UnsupportedModality {
-                    modality: feature.modality.as_str().to_owned(),
-                });
+                return Err(self.unsupported_modality(feature.modality));
             }
         }
         self.validate_modality_limits(features.iter().map(|feature| feature.modality))?;
@@ -1169,7 +1374,9 @@ impl TokenResolver for TokenizerResolver {
 mod tests {
     use std::sync::Arc;
 
+    use expect_test::expect;
     use llm_multimodal::TokenId;
+    use serde_json::json;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -1221,12 +1428,32 @@ mod tests {
             .with_regular_token("<patch_newline>", STEP3_PATCH_NEWLINE_ID)
     }
 
-    fn test_info_with_limits(
+    /// Resolve multimodal support as model loading does after its spec lookup
+    /// succeeded.
+    pub(super) fn from_context(
+        context: MultimodalModelContext,
+        preprocessor_config: PreProcessorConfig,
+        video_preprocessor_config: PreProcessorConfig,
+        audio_preprocessor_config: PreProcessorConfig,
+        limit_mm_per_prompt: MmLimitPerPrompt,
+    ) -> Result<Option<MultimodalModelInfo>> {
+        let model_spec = context.resolve_model_spec().expect("model spec should resolve");
+        MultimodalModelInfo::from_loaded(
+            context,
+            model_spec,
+            preprocessor_config,
+            video_preprocessor_config,
+            audio_preprocessor_config,
+            limit_mm_per_prompt,
+        )
+    }
+
+    fn test_context_info(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
         limit_mm_per_prompt: MmLimitPerPrompt,
-    ) -> MultimodalModelInfo {
+    ) -> Result<Option<MultimodalModelInfo>> {
         let context = MultimodalModelContext {
             model_id: format!("{model_type}-test"),
             model_type: Some(model_type.to_string()),
@@ -1234,15 +1461,24 @@ mod tests {
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             limit_mm_per_prompt,
         )
-        .unwrap()
-        .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
+    }
+
+    fn test_info_with_limits(
+        model_type: &str,
+        config: serde_json::Value,
+        tokenizer: TestTokenizer,
+        limit_mm_per_prompt: MmLimitPerPrompt,
+    ) -> MultimodalModelInfo {
+        test_context_info(model_type, config, tokenizer, limit_mm_per_prompt)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
     }
 
     pub(super) fn test_info(
@@ -1314,7 +1550,7 @@ mod tests {
             }),
             tokenizer: TokenizerResolver(Arc::new(glm53_flash_tokenizer())),
         };
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             video_config,
@@ -1328,7 +1564,7 @@ mod tests {
     #[test]
     fn request_video_fps_scopes_the_uuid_and_needs_a_rate_based_sampling() {
         let part = |fps| MediaContentPart::VideoUrl {
-            url: "https://example.com/clip.mp4".to_owned(),
+            url: "https://example.com/clip.mp4".to_owned().into(),
             uuid: Some("clip".to_owned()),
             fps,
             max_long_side_pixel: None,
@@ -1521,18 +1757,18 @@ mod tests {
         );
     }
 
-    fn nemotron_omni_info() -> MultimodalModelInfo {
+    pub(super) fn nemotron_omni_info() -> MultimodalModelInfo {
         let tokenizer = TestTokenizer::new()
             .with_regular_token("<image>", 1018)
             .with_regular_token("<img>", 1019)
-            .with_regular_token("</img>", 1020);
-        // The upstream spec refuses a config whose geometry differs from the
-        // checkpoint family it implements, so the test config spells the real
-        // checkpoint values.
+            .with_regular_token("</img>", 1020)
+            .with_regular_token("<SPECIAL_30>", 1030);
+        // The fields of the Nemotron 3 Nano Omni config the spec reads.
         let config = serde_json::json!({
             "model_type": "NemotronH_Nano_Omni_Reasoning_V3",
             "patch_size": 16,
             "downsample_ratio": 0.5,
+            "force_image_size": 512,
             "norm_mean": [0.48145466, 0.4578275, 0.40821073],
             "norm_std": [0.26862954, 0.26130258, 0.27577711],
             "vision_config": {
@@ -1548,7 +1784,7 @@ mod tests {
             config,
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
@@ -1559,13 +1795,15 @@ mod tests {
         .expect("Nemotron-H Omni multimodal support")
     }
 
+    const ONE_PIXEL_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
     #[tokio::test]
     async fn nemotron_preprocessing_builds_engine_features() {
         use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
 
         let info = nemotron_omni_info();
         let media = MediaContentPart::ImageUrl {
-            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
+            url: ONE_PIXEL_PNG.to_string().into(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
@@ -1591,16 +1829,16 @@ mod tests {
         // The 1x1 image is upscaled to the 1024-patch minimum grid of 16px
         // patches; the 2x2 pixel shuffle turns them into 256 feature tokens.
         assert!(matches!(
-            data["pixel_values"].data.as_ref(),
+            data["pixel_values_flat"].data.as_ref(),
             Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [1024, 3 * 16 * 16]
         ));
         assert!(matches!(
-            data["patches_per_image"].data.as_ref(),
-            Some(MmKwargValue::Tensor(tensor)) if tensor.shape.is_empty()
+            data["imgs_sizes"].data.as_ref(),
+            Some(MmKwargValue::List(size)) if size.len() == 2
         ));
         assert!(matches!(
-            data["image_grid_hw"].data.as_ref(),
-            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [2]
+            data["num_tokens_per_image"].data.as_ref(),
+            Some(MmKwargValue::Int(256))
         ));
     }
 
@@ -1608,7 +1846,7 @@ mod tests {
     /// `<img>`) on Nemotron-H Omni when the token budget allows.
     fn png_640x480() -> MediaContentPart {
         MediaContentPart::ImageUrl {
-            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string().into(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
@@ -1638,9 +1876,9 @@ mod tests {
                 .unwrap();
             let feature = &features[0];
             let Some(MmKwargValue::Tensor(pixel_values)) =
-                feature.data.as_ref().unwrap()["pixel_values"].data.as_ref()
+                feature.data.as_ref().unwrap()["pixel_values_flat"].data.as_ref()
             else {
-                panic!("pixel_values should be a tensor");
+                panic!("pixel_values_flat should be a tensor");
             };
             (feature.mm_position.length, pixel_values.shape[0])
         }
@@ -1657,6 +1895,78 @@ mod tests {
         // Python's tiler does, and the length check refuses the prompt
         // downstream.
         assert_eq!(prepare(&info, Some(100)).await, (254, 1008));
+    }
+
+    /// One flat preprocessing batch is split into per-image engine items,
+    /// preserving each image's patch count and identifier.
+    #[tokio::test]
+    async fn nemotron_images_of_different_sizes_are_separate_items() {
+        use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+        let info = nemotron_omni_info();
+        let small = MediaContentPart::ImageUrl {
+            url: ONE_PIXEL_PNG.to_string().into(),
+            detail: None,
+            uuid: Some("small".to_string()),
+            max_long_side_pixel: None,
+        };
+        let mut tokens = vec![1018, 11, 1018];
+        let features = info
+            .prepare_multimodal(
+                vec![small, png_640x480()],
+                &mut tokens,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let summary = features
+            .iter()
+            .map(|feature| {
+                let Some(MmKwargValue::Tensor(pixel_values)) =
+                    feature.data.as_ref().unwrap()["pixel_values_flat"].data.as_ref()
+                else {
+                    panic!("pixel_values_flat should be a tensor");
+                };
+                let position = &feature.mm_position;
+                (
+                    feature.identifier == "uuid:small",
+                    position.offset,
+                    position.length,
+                    pixel_values.shape.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            [
+                (true, 0, 258, vec![1024, 3 * 16 * 16]),
+                (false, 259, 302, vec![1200, 3 * 16 * 16]),
+            ]
+        );
+    }
+
+    /// The template's `<video>` text becomes the video placeholder token
+    /// before tokenizing, once per video in the request.
+    #[test]
+    fn rewrites_one_rendered_marker_per_media_item() {
+        let info = nemotron_omni_info();
+        let video = MediaContentPart::VideoUrl {
+            url: "https://example.com/clip.mp4".to_owned().into(),
+            uuid: None,
+            fps: None,
+            max_long_side_pixel: None,
+        };
+        let prompt = "<image> <video>\nwhat is a <video> tag?".to_string();
+        assert_eq!(
+            info.rewrite_rendered_markers(prompt.clone(), &[video]),
+            "<image> <SPECIAL_30>\nwhat is a <video> tag?"
+        );
+        assert_eq!(
+            info.rewrite_rendered_markers(prompt.clone(), &[png_640x480()]),
+            prompt
+        );
     }
 
     /// Prepare a full-size 640x480 image after 100 text tokens, then append
@@ -1708,9 +2018,9 @@ mod tests {
         let info = nemotron_omni_info();
         let (mut tokens, mut features) = nemotron_prompt_with_preprocessed_image(&info).await;
         let data = features[0].data.as_mut().unwrap();
-        match &mut data.get_mut("pixel_values").unwrap().field {
+        match &mut data.get_mut("pixel_values_flat").unwrap().field {
             MmField::Flat(field) => field.dim = 1,
-            other => panic!("unexpected pixel_values batching: {other:?}"),
+            other => panic!("unexpected pixel_values_flat batching: {other:?}"),
         }
 
         let error = info
@@ -1726,7 +2036,7 @@ mod tests {
 
         assert_eq!(
             error.to_report_string(),
-            r#"invalid inline multimodal features: incompatible batching for image field "pixel_values""#
+            r#"invalid inline multimodal features: incompatible batching for image field "pixel_values_flat""#
         );
     }
 
@@ -1779,6 +2089,62 @@ mod tests {
     }
 
     #[test]
+    fn model_specific_values_survive_scoped_config_merging() {
+        let kwargs = serde_json::from_value(json!({
+            "custom_options": {"width": 512, "height": 256},
+            "images_kwargs": {"custom_options": {"width": 1024}},
+            "audio_kwargs": {"max_samples": 16000},
+        }))
+        .unwrap();
+        let checkpoint = CheckpointProcessorConfig {
+            source: "preprocessor_config.json".to_owned(),
+            config: serde_json::from_value(json!({"custom_options": {"checkpoint": true}}))
+                .unwrap(),
+        };
+        let config = |scope| {
+            resolve_processor_config_overrides(checkpoint.clone(), &kwargs, scope)
+                .unwrap()
+                .extra
+        };
+        let configs = json!({
+            "audio": config("audio_kwargs"),
+            "image": config("images_kwargs"),
+            "video": config("videos_kwargs"),
+        });
+        assert_eq!(
+            configs,
+            json!({
+                "audio": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 512},
+                    "max_samples": 16000,
+                },
+                "image": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 1024},
+                },
+                "video": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 512},
+                },
+            })
+        );
+    }
+
+    /// Options use the HF key names the checkpoint config uses, including
+    /// ones the parsed config renames (`resample` → `resampling`).
+    #[test]
+    fn processor_kwargs_override_checkpoint_keys_by_hf_name() {
+        let kwargs = serde_json::from_value(json!({"resample": 3})).unwrap();
+        for checkpoint in [json!({"resample": 2}), json!({})] {
+            let checkpoint = CheckpointProcessorConfig {
+                source: "preprocessor_config.json".to_owned(),
+                config: serde_json::from_value(checkpoint).unwrap(),
+            };
+            let config =
+                resolve_processor_config_overrides(checkpoint, &kwargs, "images_kwargs").unwrap();
+            assert_eq!(config.resampling, Some(3));
+        }
+    }
+
+    #[test]
     fn processor_sections_take_precedence_over_legacy_files() {
         let dir = tempfile::tempdir().unwrap();
         let legacy = dir.path().join("preprocessor_config.json");
@@ -1798,7 +2164,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(24000));
+            assert_eq!(config.config["sampling_rate"], 24000);
         }
         fs::write(&combined, "{}").unwrap();
         let config = load_preprocessor_config(
@@ -1809,7 +2175,35 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(8000));
+        assert_eq!(config.config["sampling_rate"], 8000);
+    }
+
+    #[test]
+    fn processor_configs_accept_python_json_non_finite_literals() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("preprocessor_config.json");
+        let combined = dir.path().join("processor_config.json");
+        fs::write(&legacy, r#"{"sampling_rate":8000,"max_value":Infinity}"#).unwrap();
+        fs::write(
+            &combined,
+            r#"{"image_processor":{"sampling_rate":24000,"min_value":-Infinity},"eps":NaN}"#,
+        )
+        .unwrap();
+
+        let config = load_preprocessor_config(
+            Some(&legacy),
+            "preprocessor_config.json",
+            Some(&combined),
+            "image_processor",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.config["sampling_rate"], 24000);
+
+        let config = load_preprocessor_config(Some(&legacy), "preprocessor_config.json", None, "")
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.config["sampling_rate"], 8000);
     }
 
     #[tokio::test]
@@ -1848,6 +2242,7 @@ mod tests {
             },
             Arc::new(muse_spark_tokenizer()),
             HashMap::new(),
+            &std::collections::HashMap::new(),
         )
         .unwrap()
         .unwrap();
@@ -1963,22 +2358,153 @@ mod tests {
 
     #[test]
     fn step5_text_only_model_does_not_resolve_multimodal_support() {
-        let context = MultimodalModelContext {
-            model_id: "step5-test".to_string(),
-            model_type: Some("step5".to_string()),
-            config: serde_json::json!({"model_type": "step5"}),
-            tokenizer: TokenizerResolver(Arc::new(TestTokenizer::new())),
+        let config = serde_json::json!({"model_type": "step5"});
+        let info =
+            load_from_files(config, &[], HashMap::new()).expect("resolution should not error");
+
+        assert!(info.is_none());
+    }
+
+    /// Load multimodal support from a temporary model directory holding
+    /// `config.json` and the given `(file name, content)` media config files.
+    fn load_from_files(
+        config: serde_json::Value,
+        media_files: &[(&str, &str)],
+        limit_mm_per_prompt: MmLimitPerPrompt,
+    ) -> Result<Option<MultimodalModelInfo>> {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        fs::write(&config_path, config.to_string()).unwrap();
+        let path_of = |name: &str| {
+            let (name, content) = media_files.iter().find(|(file, _)| *file == name)?;
+            let path = dir.path().join(name);
+            fs::write(&path, content).unwrap();
+            Some(path)
+        };
+        let preprocessor_config = path_of("preprocessor_config.json");
+        let processor_config = path_of("processor_config.json");
+        MultimodalModelInfo::from_paths(
+            "test-model".to_string(),
+            config["model_type"].as_str().map(str::to_string),
+            MultimodalConfigFiles {
+                config: Some(&config_path),
+                preprocessor_config: preprocessor_config.as_deref(),
+                processor_config: processor_config.as_deref(),
+                ..Default::default()
+            },
+            Arc::new(qwen3_vl_tokenizer()),
+            limit_mm_per_prompt,
+            &HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn multimodal_model_without_spec_fails_launch_unless_media_is_disabled() {
+        let config = serde_json::json!({"model_type": "gemma3", "image_token_index": 262144});
+        // Each media section the Rust processors read, standalone or inside
+        // the combined processor config.
+        let cases = [
+            (
+                "preprocessor_config.json",
+                r#"{"image_processor_type": "Gemma3ImageProcessor"}"#,
+            ),
+            (
+                "processor_config.json",
+                r#"{"image_processor": {"image_processor_type": "Gemma3ImageProcessor"}}"#,
+            ),
+            (
+                "processor_config.json",
+                r#"{"video_processor": {"video_processor_type": "Qwen2VLVideoProcessor"}}"#,
+            ),
+            (
+                "processor_config.json",
+                r#"{"feature_extractor": {"feature_extractor_type": "WhisperFeatureExtractor"}}"#,
+            ),
+        ];
+        // Every modality limited to 0 is `--language-model-only`.
+        let disabled = [MmModality::Image, MmModality::Video, MmModality::Audio]
+            .map(|modality| (modality, MmLimitSpec::Count(0)));
+
+        for media_file in cases {
+            let error = load_from_files(config.clone(), &[media_file], HashMap::new())
+                .err()
+                .unwrap_or_else(|| panic!("{media_file:?} without a spec should fail to load"));
+            expect!["the Rust frontend cannot serve multimodal input for model `test-model` (model_type `gemma3`); pass --language-model-only to serve it as a text-only model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"].assert_eq(&error.to_report_string());
+
+            let info = load_from_files(
+                config.clone(),
+                &[media_file],
+                HashMap::from(disabled.clone()),
+            )
+            .unwrap_or_else(|error| panic!("{media_file:?} with all media disabled: {error}"));
+            assert!(info.is_none());
+        }
+    }
+
+    #[test]
+    fn processor_config_without_media_sections_is_text_only() {
+        let config = serde_json::json!({"model_type": "qwen3"});
+        let media_files = [(
+            "processor_config.json",
+            r#"{"processor_class": "TextOnlyProcessor"}"#,
+        )];
+
+        let info = load_from_files(config, &media_files, HashMap::new())
+            .expect("a text-only processor config should load");
+        assert!(info.is_none());
+    }
+
+    #[tokio::test]
+    async fn unsupported_declared_modality_is_rejected_per_request() {
+        // The checkpoint declares video (`video_token_id`), but the tokenizer
+        // has no `<|video_pad|>` placeholder, so only the image lane resolves.
+        let tokenizer =
+            TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN3_IMAGE_PAD_ID);
+        let info = test_info_with_limits("qwen3_vl", qwen3_vl_config(), tokenizer, HashMap::new());
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some("<|image_pad|>")
+        );
+
+        let error = info
+            .prepare_videos(Vec::new(), Vec::new(), ModelDtype::Float32)
+            .await
+            .err()
+            .expect("video input should be rejected");
+        expect![[r#"`video` input is not supported by the Rust frontend for this model; set VLLM_USE_RUST_FRONTEND=0 to serve it with the Python frontend, or pass --limit-mm-per-prompt '{"video": 0}' to disable it"#]].assert_eq(&error.to_report_string());
+
+        // The checkpoint does not declare audio, so the model itself does not
+        // take it.
+        let error = info
+            .prepare_audios(Vec::new(), Vec::new())
+            .await
+            .err()
+            .expect("audio input should be rejected");
+        expect!["`audio` input is not supported by this model"]
+            .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn spec_without_resolved_modality_fails_launch_unless_limited_to_zero() {
+        // Neither placeholder is in the tokenizer, so no declared modality
+        // resolves.
+        let load = |limit_mm_per_prompt| {
+            test_context_info(
+                "qwen3_vl",
+                qwen3_vl_config(),
+                TestTokenizer::new(),
+                limit_mm_per_prompt,
+            )
         };
 
-        let info = MultimodalModelInfo::from_loaded(
-            context,
-            PreProcessorConfig::default(),
-            PreProcessorConfig::default(),
-            PreProcessorConfig::default(),
-            HashMap::new(),
-        )
-        .expect("resolution should not error");
+        let error = load(HashMap::new())
+            .err()
+            .expect("a spec serving no declared modality should fail to load");
+        expect!["the Rust frontend cannot serve multimodal input for model `qwen3_vl-test` (model_type `qwen3_vl`); pass --language-model-only to serve it as a text-only model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"].assert_eq(&error.to_report_string());
 
+        let disabled = [MmModality::Image, MmModality::Video]
+            .map(|modality| (modality, MmLimitSpec::Count(0)));
+        let info = load(HashMap::from(disabled)).expect("disabled media should load text-only");
         assert!(info.is_none());
     }
 
@@ -2052,21 +2578,16 @@ mod tests {
     #[test]
     fn input_audio_uses_connector_data_urls() {
         assert_eq!(
-            input_audio_data_url("AAAA", Some("wav")).unwrap(),
+            input_audio_data_url("AAAA", Some(InputAudioFormat::Wav)),
             "data:audio/wav;base64,AAAA"
         );
         assert_eq!(
-            input_audio_data_url("BBBB", Some("MP3")).unwrap(),
+            input_audio_data_url("BBBB", Some(InputAudioFormat::Mp3)),
             "data:audio/mpeg;base64,BBBB"
         );
         assert_eq!(
-            input_audio_data_url("CCCC", None).unwrap(),
+            input_audio_data_url("CCCC", None),
             "data:application/octet-stream;base64,CCCC"
-        );
-        assert!(
-            input_audio_data_url("AAAA", Some("flac"))
-                .unwrap_err()
-                .is_request_validation_error()
         );
     }
 
@@ -2141,7 +2662,7 @@ mod tests {
 
     fn image_url_part() -> MediaContentPart {
         MediaContentPart::ImageUrl {
-            url: "https://example.com/image.png".to_string(),
+            url: "https://example.com/image.png".to_string().into(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
@@ -2216,7 +2737,7 @@ mod tests {
         );
         // Confirms the HTTP-mapping bug found during implementation stays fixed:
         // this must map to 400, not 500.
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 
     #[test]
@@ -2255,6 +2776,64 @@ mod tests {
             error.to_report_string(),
             "At most 999 image(s) may be provided in one prompt."
         );
+    }
+
+    fn video_url_part() -> MediaContentPart {
+        MediaContentPart::VideoUrl {
+            url: "https://example.com/clip.mp4".to_string().into(),
+            uuid: None,
+            fps: None,
+            max_long_side_pixel: None,
+        }
+    }
+
+    /// A model's default item cap applies to a modality that
+    /// `--limit-mm-per-prompt` gives no count, as in Python.
+    #[test]
+    fn validate_mm_limits_applies_the_model_default_without_a_configured_count() {
+        let videos = |count| std::iter::repeat_with(video_url_part).take(count).collect::<Vec<_>>();
+        let count_less_options = MmLimitSpec::Options {
+            count: None,
+            extra: BTreeMap::from([("num_frames".to_string(), serde_json::json!(4))]),
+        };
+
+        for info in [
+            qwen3_vl_info(),
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Video, count_less_options)])),
+        ] {
+            assert!(info.validate_mm_limits(&videos(32)).is_ok());
+            let error = info.validate_mm_limits(&videos(33)).unwrap_err();
+            assert_eq!(
+                error.to_report_string(),
+                "At most 32 video(s) may be provided in one prompt."
+            );
+        }
+
+        let configured =
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Video, MmLimitSpec::Count(64))]));
+        assert!(configured.validate_mm_limits(&videos(64)).is_ok());
+
+        // The default follows the checkpoint's architecture, not a path that
+        // happens to select the `qwen3_vl` spec.
+        let mut config = qwen3_vl_config();
+        config["model_type"] = "qwen2_5_vl".into();
+        let context = MultimodalModelContext {
+            model_id: "qwen3-eval/Qwen2.5-VL-3B-Instruct".to_string(),
+            model_type: Some("qwen2_5_vl".to_string()),
+            config,
+            tokenizer: TokenizerResolver(Arc::new(qwen3_vl_tokenizer())),
+        };
+        assert_eq!(context.resolve_model_spec().unwrap().name(), "qwen3_vl");
+        let path_matched = from_context(
+            context,
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+            HashMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(path_matched.validate_mm_limits(&videos(999)).is_ok());
     }
 
     fn parse_limits(json: &str) -> MmLimitPerPrompt {
@@ -2371,7 +2950,7 @@ mod tests {
 
         let info = hy4_vl_info();
         let media = MediaContentPart::ImageUrl {
-            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string().into(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,

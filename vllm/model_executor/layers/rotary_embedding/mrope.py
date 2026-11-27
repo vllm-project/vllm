@@ -549,26 +549,6 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_cuda(positions, query, key, offsets)
-        if positions.ndim == 2:
-            assert key is not None
-            assert self.mrope_section is not None
-            import vllm._xpu_ops  # noqa: F401
-
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            torch.ops._xpu_C.multimodal_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-                self.mrope_section,
-                self.mrope_interleaved,
-            )
-            return query, key
-        assert positions.ndim == 1
-        assert key is not None
-        return self._forward_text_rope(positions, query, key)
 
     @staticmethod
     def get_next_input_positions(
