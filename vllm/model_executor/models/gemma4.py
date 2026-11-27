@@ -537,6 +537,7 @@ class Gemma4Attention(nn.Module):
         # KV sharing: layers in the last `num_kv_shared_layers` share KV
         # cache with earlier layers of the same type.
         kv_sharing_target_layer_name = None
+        kv_owner_layer_idx = layer_idx
         if self.is_kv_shared_layer:
             # Find the last non-shared layer of the same attention type
             prev_layers = config.layer_types[:first_kv_shared_layer_idx]
@@ -545,6 +546,7 @@ class Gemma4Attention(nn.Module):
                 len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
             )
             if kv_shared_layer_index >= 0:
+                kv_owner_layer_idx = kv_shared_layer_index
                 if ".layers." in prefix:
                     param_name_before_layers = prefix.split(".layers.")[0]
                 else:
@@ -584,6 +586,28 @@ class Gemma4Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
         self._fused_glue = self._can_fuse_qkv_glue()
+        self.kv4 = False
+        kv4_layers = {int(i) for i in envs.VLLM_ROCM_GEMMA4_KV4_LAYERS.split(",") if i.strip()}
+        if kv4_layers and not self.is_sliding and kv_owner_layer_idx in kv4_layers:
+            if not self._fused_glue or self.head_dim != 512 or self.num_kv_heads != 2:
+                raise ValueError(
+                    "VLLM_ROCM_GEMMA4_KV4_LAYERS needs the fused qkv glue (fp8 KV cache, "
+                    "ROCM_AITER_UNIFIED_ATTN) and head_dim 512 with 2 KV heads"
+                )
+            self.kv4 = True
+            self.attn.kv4 = True
+            self.attn.impl.kv4 = True
+            self.attn.impl.kv4_k_scale = envs.VLLM_ROCM_GEMMA4_KV4_K_SCALE
+            self.attn.impl.kv4_v_scale = envs.VLLM_ROCM_GEMMA4_KV4_V_SCALE
+            if torch.get_default_device().type == "cuda":
+                from vllm.v1.attention.ops.rocm_kv4_attention import scale_tensor
+
+                scale_tensor(self.attn.impl.kv4_k_scale, torch.get_default_device())
+                scale_tensor(self.attn.impl.kv4_v_scale, torch.get_default_device())
+            logger.info_once(
+                "Gemma4 attention: 4-bit KV cache on global layers %s",
+                envs.VLLM_ROCM_GEMMA4_KV4_LAYERS,
+            )
         if self._fused_glue:
             logger.info_once(
                 "Gemma4 attention: fused qkv norm + RoPE + FP8 quant + KV cache "

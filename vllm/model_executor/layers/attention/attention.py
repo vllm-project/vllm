@@ -746,6 +746,12 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                # 4-bit e2m1 K and V rows: half a byte per element
+                state_content_bytes=(
+                    (self.head_size + self.head_size_v) // 2
+                    if getattr(self, "kv4", False)
+                    else None
+                ),
             )
             return FullAttentionManager.layer_config(spec)
 

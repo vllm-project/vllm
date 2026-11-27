@@ -77,6 +77,23 @@ def _fp8(x, scale, FP8_MAX: tl.constexpr, dtype: tl.constexpr):
 
 
 @triton.jit
+def _e2m1_nibble(x, scale):
+    # nearest OCP e2m1 code of x / scale (ties go to the smaller magnitude), sign in bit 3
+    y = x / scale
+    a = tl.abs(y)
+    c = (
+        (a > 0.25).to(tl.int32)
+        + (a > 0.75).to(tl.int32)
+        + (a > 1.25).to(tl.int32)
+        + (a > 1.75).to(tl.int32)
+        + (a > 2.5).to(tl.int32)
+        + (a > 3.5).to(tl.int32)
+        + (a > 5.0).to(tl.int32)
+    )
+    return c | ((y < 0).to(tl.int32) << 3)
+
+
+@triton.jit
 def _qkv_glue_kernel(
     x_ptr,
     stride_x,
@@ -110,6 +127,7 @@ def _qkv_glue_kernel(
     RQ: tl.constexpr,
     RKV: tl.constexpr,
     WRITE_KV: tl.constexpr,
+    KV4: tl.constexpr,
 ):
     HALF: tl.constexpr = HD // 2
     NQP: tl.constexpr = NQ // RQ
@@ -149,8 +167,11 @@ def _qkv_glue_kernel(
                     )
                     ks = tl.load(ks_ptr)
                     o = kc_ptr + blk * stride_kb + off * stride_ks + h[:, None] * stride_kh + offs[None, :]
-                    tl.store(o, _fp8(n1, ks, FP8_MAX, fp8_ty))
-                    tl.store(o + HALF, _fp8(n2, ks, FP8_MAX, fp8_ty))
+                    if KV4:
+                        tl.store(o, (_e2m1_nibble(n1, ks) | (_e2m1_nibble(n2, ks) << 4)).to(tl.uint8))
+                    else:
+                        tl.store(o, _fp8(n1, ks, FP8_MAX, fp8_ty))
+                        tl.store(o + HALF, _fp8(n2, ks, FP8_MAX, fp8_ty))
                 else:
                     h = (part - NQP - NKP) * RKV + rbk
                     n1, n2 = _norm_rope_rows(
@@ -158,8 +179,11 @@ def _qkv_glue_kernel(
                     )
                     vs = tl.load(vs_ptr)
                     o = vc_ptr + blk * stride_vb + off * stride_vs + h[:, None] * stride_vh + offs[None, :]
-                    tl.store(o, _fp8(n1, vs, FP8_MAX, fp8_ty))
-                    tl.store(o + HALF, _fp8(n2, vs, FP8_MAX, fp8_ty))
+                    if KV4:
+                        tl.store(o, (_e2m1_nibble(n1, vs) | (_e2m1_nibble(n2, vs) << 4)).to(tl.uint8))
+                    else:
+                        tl.store(o, _fp8(n1, vs, FP8_MAX, fp8_ty))
+                        tl.store(o + HALF, _fp8(n2, vs, FP8_MAX, fp8_ty))
 
 
 _FP8_MAX = float(torch.finfo(current_platform.fp8_dtype()).max)
@@ -185,6 +209,7 @@ def qkv_glue(
     num_warps: int = 1,
     rq: int | None = None,
     rkv: int | None = None,
+    kv4: bool = False,
 ) -> torch.Tensor:
     rq = rq or num_heads
     rkv = rkv or num_kv_heads
@@ -236,6 +261,7 @@ def qkv_glue(
         RQ=rq,
         RKV=rkv,
         WRITE_KV=write_kv,
+        KV4=kv4,
         num_warps=num_warps,
     )
     return out
@@ -262,11 +288,19 @@ def _gemma4_qkv_glue_impl(
         _resolve_layer_name(layer_name)
     )
     key_cache = value_cache = None
+    k_scale, v_scale = attn_layer._k_scale, attn_layer._v_scale
+    impl = attn_layer.impl
+    kv4 = bool(getattr(impl, "kv4", False))
     if write_kv and layer_slot_mapping is not None and kv_cache.numel() > 0:
-        impl = attn_layer.impl
         key_cache, value_cache = impl._split_kv_cache(kv_cache)
-        key_cache = key_cache.view(impl.fp8_dtype)
-        value_cache = value_cache.view(impl.fp8_dtype)
+        dt = torch.uint8 if kv4 else impl.fp8_dtype
+        key_cache = key_cache.view(dt)
+        value_cache = value_cache.view(dt)
+        if kv4:
+            from vllm.v1.attention.ops.rocm_kv4_attention import scale_tensor
+
+            k_scale = scale_tensor(impl.kv4_k_scale, qkv.device)
+            v_scale = scale_tensor(impl.kv4_v_scale, qkv.device)
     return qkv_glue(
         qkv,
         positions,
@@ -274,8 +308,8 @@ def _gemma4_qkv_glue_impl(
         q_weight,
         k_weight,
         attn_layer._q_scale,
-        attn_layer._k_scale,
-        attn_layer._v_scale,
+        k_scale,
+        v_scale,
         key_cache,
         value_cache,
         layer_slot_mapping if key_cache is not None else None,
@@ -284,6 +318,7 @@ def _gemma4_qkv_glue_impl(
         head_dim,
         rot_pairs,
         eps,
+        kv4=kv4,
     )
 
 
