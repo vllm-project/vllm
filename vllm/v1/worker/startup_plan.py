@@ -55,6 +55,10 @@ def compute_plan_fingerprint(
     added here. The vLLM version is also pinned as an explicit factor so
     version invalidation holds no matter how `compile_factors` evolves.
     Rank is included because per-rank memory use differs under TP/PP.
+    `encoder_cache_size` is hashed separately: it changes how much memory
+    profiling leaves for the KV cache, but SchedulerConfig deliberately
+    ignores it in the compilation hash because it does not affect the
+    compute graph.
     Driver-only changes are not part of the key; the free-memory gate at
     apply time bounds the residual risk.
     """
@@ -67,6 +71,9 @@ def compute_plan_fingerprint(
         "schema": PLAN_SCHEMA_VERSION,
         "vllm": vllm_version,
         "vllm_config": hash_config(vllm_config),
+        # Resized without invalidating the compilation hash, but it moves
+        # the KV-cache bytes the plan records.
+        "encoder_cache_size": vllm_config.scheduler_config.encoder_cache_size,
         "device_name": current_platform.get_device_name(),
         "device_total_memory": current_platform.get_device_total_memory(),
         "device_capability": str(capability) if capability else "",

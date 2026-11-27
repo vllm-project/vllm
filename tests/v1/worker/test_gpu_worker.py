@@ -403,10 +403,18 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
 
-def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None):
+def _plan_worker(
+    config_hash="abc123",
+    free_memory=78 * GiB_bytes,
+    kv_bytes=None,
+    encoder_cache_size=16384,
+):
     """The minimal Worker surface the startup-plan entry points touch."""
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(compile_factors=lambda: {"id": config_hash}),
+        vllm_config=SimpleNamespace(
+            compile_factors=lambda: {"id": config_hash},
+            scheduler_config=SimpleNamespace(encoder_cache_size=encoder_cache_size),
+        ),
         rank=0,
         parallel_config=SimpleNamespace(world_size=1),
         init_snapshot=SimpleNamespace(free_memory=free_memory),
@@ -439,6 +447,7 @@ def test_startup_plan_fingerprint_sensitivity(plan_env):
     base = fp(_plan_worker().vllm_config, 0, 1)
     assert base == fp(_plan_worker().vllm_config, 0, 1)
     assert base != fp(_plan_worker("other").vllm_config, 0, 1)
+    assert base != fp(_plan_worker(encoder_cache_size=65536).vllm_config, 0, 1)
     assert base != fp(_plan_worker().vllm_config, 1, 2)
     assert base != fp(_plan_worker().vllm_config, 0, 1, "copy_engine")
     with patch.object(startup_plan, "current_platform", _plan_platform("NVIDIA A100")):
