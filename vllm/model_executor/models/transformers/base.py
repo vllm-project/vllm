@@ -1080,8 +1080,8 @@ class Base(
         renamed, pattern = rename_source_key(weight, renamings, converters)
         if pattern is None:
             return None
-        converter = next(c for c in converters if pattern in c.source_patterns)
-        targets = converter.target_patterns
+        pattern_to_converter = {p: c for c in converters for p in c.source_patterns}
+        targets = pattern_to_converter[pattern].target_patterns
         if len(targets) < 2:
             return None
         return [renamed.replace(targets[0], target) for target in targets]
@@ -1100,8 +1100,9 @@ class Base(
             return None
 
     def _output_size(self, name: str) -> int:
-        """The full output size of the linear that loads `name`, which `Split` reads.
-        vLLM's linears keep it when sharded or fused."""
+        """The full output size of the linear that loads `name`: what `Split` reads, and
+        the rows of its piece of a split tensor or LoRA. vLLM's linears keep it when
+        sharded or fused."""
         module, shard_id = self._loaded_by(name) or (None, None)
         # Once LoRA is enabled, a LoRA layer wraps the linear
         if isinstance(module, BaseLayerWithLoRA):
@@ -1168,7 +1169,10 @@ class Base(
                 continue
             renamed, converter_pattern = rename_source_key(name, renamings, converters)
             # Left for the loader to drop or report if no module here loads it
-            if converter_pattern is None or not (loader := self._loaded_by(renamed)):
+            if (
+                converter_pattern is None
+                or (loader := self._loaded_by(renamed)) is None
+            ):
                 yield renamed, tensor
                 continue
             converter = pattern_to_converter[converter_pattern]

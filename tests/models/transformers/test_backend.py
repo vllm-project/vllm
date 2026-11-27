@@ -1382,7 +1382,7 @@ def test_convert_weights_rejects_quantized_tensors_that_dont_split(
 )
 @pytest.mark.parametrize("source", ["safetensors", "bin", "memory"])
 def test_lora_is_split_like_converted_weights(
-    source, tmp_path, dist_init, default_vllm_config
+    source, tmp_path, monkeypatch, dist_init, default_vllm_config
 ):
     """A LoRA for a fused checkpoint module (Molmo2's `att_proj` and `ff_proj`) loads
     into the modules its weight is split into: `lora_B` by rows, with its `lora_A`,
@@ -1422,6 +1422,10 @@ def test_lora_is_split_like_converted_weights(
     }
     stacked |= {".gate_proj": (".gate_up_proj", 0), ".up_proj": (".gate_up_proj", 1)}
     stub.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=stacked)
+    # Missing layers are cached by `id`, which a later model may reuse
+    monkeypatch.setattr(
+        "vllm.model_executor.models.utils._model_to_pp_missing_layer_names", {}
+    )
     lora = {
         "att_proj": (torch.rand(2, 4), torch.rand(8, 2)),
         "attn_out": (torch.rand(2, 4), torch.rand(4, 2)),
