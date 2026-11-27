@@ -14,6 +14,11 @@ use serde_json::json;
 use crate::state::{ApiKeyHash, AppState, hash_api_key};
 
 const GUARDED_PREFIXES: &[&str] = &["/v1", "/v2", "/inference"];
+const GUARDED_PATHS: &[&str] = &[
+    "/reset_prefix_cache",
+    "/reset_mm_cache",
+    "/reset_encoder_cache",
+];
 
 /// Authenticate guarded HTTP routes with an OpenAI-compatible bearer token.
 ///
@@ -40,7 +45,7 @@ pub async fn authenticate_api_key(
 }
 
 fn requires_auth(path: &str) -> bool {
-    GUARDED_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
+    GUARDED_PATHS.contains(&path) || GUARDED_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
 }
 
 fn verify_token(authorization: Option<&HeaderValue>, api_key_hashes: &[ApiKeyHash]) -> bool {

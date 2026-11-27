@@ -634,6 +634,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_scale_out: Option<bool>,
 
+    /// Enable the three cache-reset routes without development mode.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_cache_reset: bool,
+
     /// If set to True, only enable the Tokens In<>Out endpoint.
     /// This is intended for use in a Disaggregated Everything setup.
     ///
@@ -1255,6 +1260,7 @@ impl SharedRuntimeArgs {
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.tokens_only
                 || self.enable_scale_out.unwrap_or(self.server_dev_mode),
+            enable_cache_reset: self.enable_cache_reset,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
             allow_runtime_lora_updating: self.allow_runtime_lora_updating,

@@ -223,6 +223,12 @@ class BaseFrontendArgs:
     Has no effect on `vllm launch render` or `vllm serve --tokens-only` which
     always register their required endpoints regardless of this flag.
     """
+    enable_cache_reset: bool = False
+    """Enable `/reset_prefix_cache`, `/reset_mm_cache`, and
+    `/reset_encoder_cache` without enabling developer mode. Disabled by default;
+    developer mode also enables these routes. When an API key is configured,
+    cache-reset requests require Bearer authentication. Cache resets affect
+    all clients of the server; restrict these routes to trusted operators."""
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the `system_fingerprint` field on responses.
 
@@ -352,7 +358,8 @@ class FrontendArgs(BaseFrontendArgs):
     the header.
 
     Warning: this only authenticates endpoints under the `/v1`, `/v2`,
-    `/inference`, and `/cohere` path prefixes. Other endpoints on the same
+    `/inference`, and `/cohere` path prefixes, plus the three cache-reset
+    endpoints when enabled. Other endpoints on the same
     server, including `/invocations` (which exposes the same inference
     capabilities as `/v1`), remain unauthenticated. Do not rely on `--api-key`
     alone to secure vLLM; see

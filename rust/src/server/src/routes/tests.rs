@@ -11313,6 +11313,99 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn cache_reset_can_be_enabled_without_development_routes_and_requires_auth() {
+    let (state, engine_task) = test_admin_state_with_backend_and_engine_script(
+        default_ready_response(),
+        Arc::new(FakeChatBackend::new()),
+        |state| {
+            state.with_api_keys(vec!["secret".to_string()]).with_api_server_options(
+                ApiServerOptions {
+                    enable_cache_reset: true,
+                    ..ApiServerOptions::default()
+                },
+            )
+        },
+        |dealer, push| {
+            boxed_test_future(async move {
+                for method in [
+                    "reset_prefix_cache",
+                    "reset_mm_cache",
+                    "reset_encoder_cache",
+                ] {
+                    let utility = recv_engine_message(dealer).await;
+                    let payload = decode_value(&utility[1]).expect("decode utility payload");
+                    let array = payload.as_array().expect("utility payload array");
+                    assert_eq!(array[2], Value::from(method));
+                    let call_id = array[1].as_u64().expect("call id");
+                    let result = if method == "reset_prefix_cache" {
+                        utility_result_value(false)
+                    } else {
+                        utility_none_result()
+                    };
+                    send_outputs(push, utility_outputs(call_id, result)).await;
+                }
+            })
+        },
+    )
+    .await;
+    let app = build_router(state);
+    for path in [
+        "/reset_prefix_cache",
+        "/reset_mm_cache",
+        "/reset_encoder_cache",
+    ] {
+        let unauthorized = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        if path == "/reset_prefix_cache" {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"success": false})
+            );
+        }
+    }
+    for path in ["/sleep", "/collective_rpc"] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn reset_prefix_cache_route_accepts_python_spelled_bool_query_values() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {

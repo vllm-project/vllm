@@ -123,6 +123,8 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
     let has_engine_core = state.has_engine_core_client();
     gates.dev_mode &= has_engine_core;
     gates.runtime_lora_updating &= has_engine_core;
+    let cache_reset =
+        has_engine_core && (gates.dev_mode || state.api_server_options.enable_cache_reset);
 
     let mut router = Router::new()
         // Health & monitoring
@@ -220,12 +222,16 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
             .route("/v1/unload_lora_adapter", post(lora::unload_lora_adapter));
     }
 
-    if gates.dev_mode {
-        // Development-only
+    if cache_reset {
         router = router
             .route("/reset_prefix_cache", post(cache::reset_prefix_cache))
             .route("/reset_mm_cache", post(cache::reset_mm_cache))
-            .route("/reset_encoder_cache", post(cache::reset_encoder_cache))
+            .route("/reset_encoder_cache", post(cache::reset_encoder_cache));
+    }
+
+    if gates.dev_mode {
+        // Development-only
+        router = router
             .route("/collective_rpc", post(collective_rpc::collective_rpc))
             .route(
                 "/init_weight_transfer_engine",

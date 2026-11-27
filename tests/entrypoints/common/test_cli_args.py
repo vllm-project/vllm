@@ -51,6 +51,11 @@ def test_cors_origins_require_explicit_opt_in(serve_parser):
     ).allowed_origins == ["http://trusted.example"]
 
 
+def test_cache_reset_requires_explicit_cli_opt_in(serve_parser):
+    assert serve_parser.parse_args([]).enable_cache_reset is False
+    assert serve_parser.parse_args(["--enable-cache-reset"]).enable_cache_reset is True
+
+
 ### Test config parsing
 def test_config_arg_parsing(serve_parser, cli_config_file):
     args = serve_parser.parse_args([])

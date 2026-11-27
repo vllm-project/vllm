@@ -92,6 +92,8 @@ pub struct ApiServerOptions {
     pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// Register cache-reset routes without enabling development routes.
+    pub enable_cache_reset: bool,
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,

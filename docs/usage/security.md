@@ -190,7 +190,7 @@ firewall configuration instructions.
 
 ### Overview
 
-The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for endpoints under the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
+The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server for endpoints under the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes, and for the cache-reset endpoints when enabled. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
 
 **Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
 
@@ -226,6 +226,36 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires `VLLM_ENABLE_COHERE_API=1` and either `--enable-scale-out` or `--tokens-only`)
 - `/v2/embed` - Cohere Embed API
 - `/v2/rerank` - Cohere Rerank API
+
+### Cache-Reset Endpoints
+
+Use `--enable-cache-reset` to enable the following operational endpoints without
+enabling developer mode. The flag is disabled by default and is supported by
+the Python and Rust HTTP frontends:
+
+- `POST /reset_prefix_cache` - Reset the prefix cache.
+- `POST /reset_mm_cache` - Reset the multimodal processor cache.
+- `POST /reset_encoder_cache` - Reset the encoder cache.
+
+```bash
+vllm serve <model> --enable-cache-reset --api-key <your-api-key>
+
+curl -X POST http://localhost:8000/reset_prefix_cache \
+    -H "Authorization: Bearer <your-api-key>"
+```
+
+`/reset_prefix_cache` returns `{"success": true}` on success. If blocks are
+still held by running requests or connector transfers, it can return
+`{"success": false}`; callers must check the result. The existing
+`reset_running_requests` and `reset_external` query parameters select whether
+to reset running requests or the external connector cache.
+
+These operations affect the server's shared caches and can disrupt other
+clients. The flag does not enable RPC, sleep/wake, server information, or weight
+update routes. Cache resets require the configured API key, including when
+enabled through developer mode. Without an API key they are unauthenticated.
+An inference API key also authorizes cache resets; use a reverse proxy or
+network policy to restrict these routes to trusted operators.
 
 ### Unprotected Endpoints (No API Key Required)
 
@@ -281,13 +311,14 @@ This endpoint is **only available when the `--enable-tokenizer-info-endpoint` fl
 These endpoints are **only available when the environment variable `VLLM_SERVER_DEV_MODE` is set to `1`**. They are intended for development and debugging purposes and should never be enabled in production:
 
 - `/server_info` - Get detailed server configuration
-- `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
-- `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
-- `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
 - `/sleep` - Put engine to sleep (causes denial of service)
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
 - `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
+
+Developer mode also enables the cache-reset endpoints above. Those three
+endpoints require an API key when one is configured, unlike the other
+development endpoints listed here.
 
 **Profiler endpoints (only when profiling is enabled via `--profiler-config`):**
 
