@@ -1345,27 +1345,34 @@ def test_qsa_sparse_paged_attention_correctness(
     reason="FlashInfer QSA prefill runs on sm_100/sm_103",
 )
 @pytest.mark.parametrize(
-    "kv_dtype, quantize_query, expected_q_dtype",
+    "kv_dtype, quantize_query, disable_q_quantization, expected_q_dtype",
     [
-        (torch.bfloat16, False, torch.bfloat16),
-        (torch.bfloat16, True, torch.bfloat16),
-        (torch.uint8, True, torch.float8_e4m3fn),
+        (torch.bfloat16, False, False, torch.bfloat16),
+        (torch.bfloat16, True, False, torch.bfloat16),
+        (torch.uint8, True, False, torch.float8_e4m3fn),
         # FlashInfer 0.7.4 rejects BF16 Q over an FP8 cache: Triton runs it.
-        (torch.uint8, False, None),
+        (torch.uint8, False, False, None),
+        (torch.uint8, True, True, None),
     ],
-    ids=["bf16", "bf16-quantize", "fp8-quantize", "fp8"],
+    ids=["bf16", "bf16-quantize", "fp8-quantize", "fp8", "fp8-quantize-disabled"],
 )
 def test_qsa_flashinfer_honors_prefill_query_quantization(
     kv_dtype: torch.dtype,
     quantize_query: bool,
+    disable_q_quantization: bool,
     expected_q_dtype: torch.dtype | None,
 ) -> None:
+    from vllm.config import AttentionConfig
     from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
         flashinfer_qsa_query_dtype,
         is_flashinfer_qsa_supported,
     )
 
-    q_dtype = flashinfer_qsa_query_dtype(kv_dtype, quantize_query)
+    attention_config = AttentionConfig(
+        use_prefill_query_quantization=quantize_query,
+        disable_flashinfer_q_quantization=disable_q_quantization,
+    )
+    q_dtype = flashinfer_qsa_query_dtype(kv_dtype, attention_config)
     # Qwen3.8 TP1 geometry: block 4, 512 selected blocks, 24/2 heads of 256.
     supported = is_flashinfer_qsa_supported(kv_dtype, q_dtype, 4, 512, 256, 24, 2)
     assert (q_dtype if supported else None) == expected_q_dtype

@@ -8,6 +8,7 @@ selected blocks, so each K/V block is read once per group rather than per row.
 
 import torch
 
+from vllm.config import AttentionConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
@@ -18,11 +19,16 @@ GROUP_SIZE = 8
 
 
 def flashinfer_qsa_query_dtype(
-    kv_dtype: torch.dtype, quantize_query: bool
+    kv_dtype: torch.dtype, attention_config: AttentionConfig
 ) -> torch.dtype:
     """Q dtype of the FlashInfer prefill: FP8 for an FP8 cache when the
-    operator opts in to prefill query quantization, else BF16."""
-    if kv_dtype == torch.uint8 and quantize_query:
+    operator opts in to prefill query quantization (and does not disable
+    FlashInfer Q quantization), else BF16."""
+    if (
+        kv_dtype == torch.uint8
+        and attention_config.use_prefill_query_quantization
+        and not attention_config.disable_flashinfer_q_quantization
+    ):
         return torch.float8_e4m3fn
     return torch.bfloat16
 

@@ -174,7 +174,6 @@ def _qsa_prepare_kernel(
     MAIN_HK: tl.constexpr,
     MAIN_D: tl.constexpr,
     MAIN_PAGE_SIZE: tl.constexpr,
-    MAIN_FP8_Q: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_index_work = num_k_work + tl.cdiv(num_tokens, TILE_T_Q) * tl.cdiv(HQ, TILE_H_Q)
@@ -234,7 +233,7 @@ def _qsa_prepare_kernel(
                 tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale))
         else:
             out = (token * MAIN_HQ + head) * MAIN_D
-            if MAIN_FP8_Q and token >= main_fp8_q_start:
+            if main_fp8_q_out_ptr is not None and token >= main_fp8_q_start:
                 # Unit scale: the RMS-normalized Q is far inside e4m3's range.
                 fp8_out = ((token - main_fp8_q_start) * MAIN_HQ + head) * MAIN_D
                 _store_rotated(main_fp8_q_out_ptr + fp8_out, y, o1, o2, 1.0)
@@ -649,7 +648,7 @@ def qsa_prepare(
         main_k_norm_weight_ptr=main_k_norm_weight,
         main_eps=main_eps,
         main_q_out_ptr=main_q_out,
-        main_fp8_q_out_ptr=main_q_out if main_fp8_q_out is None else main_fp8_q_out,
+        main_fp8_q_out_ptr=main_fp8_q_out,
         main_fp8_q_start=fp8_q_start,
         main_gate_out_ptr=main_gate_out,
         main_cache_ptr=main_kv_cache,
@@ -663,7 +662,6 @@ def qsa_prepare(
         MAIN_HK=num_main_kv_heads,
         MAIN_D=main_head_dim,
         MAIN_PAGE_SIZE=main_kv_cache.shape[1],
-        MAIN_FP8_Q=main_fp8_q_out is not None,
         num_warps=1,
     )
     return main_q_out, main_gate_out, main_fp8_q_out

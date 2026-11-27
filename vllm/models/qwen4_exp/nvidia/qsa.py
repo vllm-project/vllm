@@ -282,8 +282,7 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
             vllm_config.parallel_config
         )
         self.query_dtype = flashinfer_qsa_query_dtype(
-            kv_cache_spec.dtype,
-            vllm_config.attention_config.use_prefill_query_quantization,
+            kv_cache_spec.dtype, vllm_config.attention_config
         )
         self.use_flashinfer = is_flashinfer_qsa_supported(
             kv_cache_spec.dtype,
@@ -558,9 +557,7 @@ class Qwen4ExpQSAImpl(
                         # The unfused prepare writes BF16 Q. Unit scale: Q is
                         # RMS-normalized, far inside e4m3's range (|Q| <= 19 on
                         # Qwen3.8).
-                        prefill_query = prefill_query.to(
-                            flashinfer_prefill.query_dtype
-                        )
+                        prefill_query = prefill_query.to(flashinfer_prefill.query_dtype)
                 assert prefill_query.dtype == flashinfer_prefill.query_dtype
                 qsa_sparse_paged_prefill(
                     prefill_query,
@@ -865,9 +862,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             prefix=f"{prefix}.indexer",
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
-        quantize_query = vllm_config.attention_config.use_prefill_query_quantization
+        attention_config = vllm_config.attention_config
         self.flashinfer_query_dtype = flashinfer_qsa_query_dtype(
-            self.kv_cache_torch_dtype, quantize_query
+            self.kv_cache_torch_dtype, attention_config
         )
 
         def flashinfer_supported(q_dtype: torch.dtype) -> bool:
@@ -886,7 +883,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         if (
             self.kv_cache_torch_dtype == torch.uint8
-            and not quantize_query
+            and not attention_config.use_prefill_query_quantization
+            and not attention_config.disable_flashinfer_q_quantization
             and flashinfer_supported(torch.float8_e4m3fn)
         ):
             # FlashInfer 0.7.4 takes an FP8 cache only with FP8 Q.
