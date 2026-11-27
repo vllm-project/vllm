@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """--enable-unbounded-streaming-input on a generic sliding-window model.
 
-One streaming-input session runs twice on Llama-3.2-1B, every layer overridden to a
+One streaming-input session runs twice on Qwen3-0.6B, every layer overridden to a
 sliding window: with a small max_model_len and the flag on, then with a max_model_len
 that needs no shift. The greedy logprobs must match up to rounding.
 """
@@ -23,16 +23,19 @@ from vllm.v1.engine.async_llm import AsyncLLM
 if not current_platform.is_cuda():
     pytest.skip(reason="Re-anchoring is CUDA only.", allow_module_level=True)
 
-MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL = "Qwen/Qwen3-0.6B"
 SLIDING_WINDOW = 512
 CHUNK_TOKENS = 120
 NUM_CHUNKS = 40  # 8 to 11 shifts at max_model_len 1536
-# Measured in float32: up to 0.05 with the shifts, up to 2.9 without the rotation.
+# Measured in float32: up to 0.12 with the shifts, 0.33 with the angle off by one
+# position, 1.7 or more with the wrong sign or without the rotation.
 LOGPROB_TOLERANCE = 0.2
 
 HF_OVERRIDES = {
-    "layer_types": ["sliding_attention"] * 16,
+    "use_sliding_window": True,
     "sliding_window": SLIDING_WINDOW,
+    "max_window_layers": 28,
+    "layer_types": ["sliding_attention"] * 28,
 }
 
 

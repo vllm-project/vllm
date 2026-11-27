@@ -85,7 +85,8 @@ def collect_rotary_specs(
         if layer_name not in owners:
             raise ValueError(
                 "--enable-unbounded-streaming-input: no rotary_emb on the parent "
-                f"module of attention layer {layer_name!r}."
+                f"module of attention layer {layer_name!r}. Models served by the "
+                "Transformers modeling backend are not supported."
             )
         rope, attn = owners[layer_name]
         get_inv_freq = _STATIC_ROPE_INV_FREQ.get(type(rope))
