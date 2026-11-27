@@ -30,7 +30,7 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderItemSpec,
 )
 
-from .mm_preprocess import IMAGE, IMAGE_END, IMAGE_NEW_LINE, IMAGE_START
+from .mm_preprocess import IMAGE, IMAGE_END, IMAGE_NEW_LINE
 
 if TYPE_CHECKING:
     from vllm.config.multimodal import MultiModalConfig
@@ -65,14 +65,21 @@ class DeepseekV4VLEncoderCudaGraphMixin:
     ) -> torch.Tensor:
         """Full image span: aligner rows at IMAGE slots, the learned
         delimiter vectors at IMAGE_START/IMAGE_NEW_LINE/IMAGE_END."""
-        types = types.to(image_embeds.device)
-        span = image_embeds.new_empty(types.numel(), image_embeds.shape[-1])
-        dtype = image_embeds.dtype
-        span[types == IMAGE_START] = self.image_start.to(dtype)
-        span[types == IMAGE_END] = self.image_end.to(dtype)
-        span[types == IMAGE_NEW_LINE] = self.image_newline.to(dtype)
-        span[types == IMAGE] = image_embeds
-        return span
+        n_rows = image_embeds.shape[0]
+        is_image = types == IMAGE
+        src_idx = torch.where(
+            is_image,
+            is_image.cumsum(0) - 1,
+            n_rows + (types == IMAGE_NEW_LINE).long() + 2 * (types == IMAGE_END).long(),
+        )
+        if src_idx.device != image_embeds.device:
+            if src_idx.is_cpu:
+                src_idx = async_tensor_h2d(src_idx, image_embeds.device)
+            else:
+                src_idx = src_idx.to(device=image_embeds.device, non_blocking=True)
+        delims = torch.stack([self.image_start, self.image_newline, self.image_end])
+        src = torch.cat([image_embeds, delims.to(image_embeds.dtype)])
+        return src[src_idx]
 
     @staticmethod
     def _get_grid_list(mm_kwargs: dict[str, Any], key: str) -> list[list[int]]:
@@ -321,17 +328,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         span_lens = [lh * (lw + 1) + 2 for lh, lw in llm_grid]
 
         # Batched span assembly: one gather over [aligner rows, START,
-        # NEW_LINE, END] for all items. The index is built from the host-side
-        # ``types`` so that neither the copy nor the gather syncs.
-        is_image = types == IMAGE
-        src_idx = torch.where(
-            is_image,
-            is_image.cumsum(0) - 1,
-            n_rows + (types == IMAGE_NEW_LINE).long() + 2 * (types == IMAGE_END).long(),
-        )
-        delims = torch.stack([self.image_start, self.image_newline, self.image_end])
-        src = torch.cat([aligner_out[:n_rows], delims.to(aligner_out.dtype)])
-        span = src[async_tensor_h2d(src_idx, aligner_out.device)]
+        # NEW_LINE, END] for all items.
+        span = self._build_image_span(aligner_out[:n_rows], types)
 
         # Freshly allocated, so later replays cannot clobber the results.
         offset = 0
