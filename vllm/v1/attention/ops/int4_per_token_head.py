@@ -117,6 +117,15 @@ def _reshape_cache_int4_kernel(
     k_even = tl.load(key_base + even_offs, mask=even_k_mask, other=0.0).to(tl.float32)
     k_odd = tl.load(key_base + odd_offs, mask=odd_k_mask, other=0.0).to(tl.float32)
 
+    # V is loaded before K is stored so that both loads are in flight together.
+    half_v = head_size_v // 2
+    even_v_mask = even_offs < head_size_v
+    odd_v_mask = odd_offs < head_size_v
+    val_base = value_ptr + tok * stride_val_tok + head * stride_val_head
+
+    v_even = tl.load(val_base + even_offs, mask=even_v_mask, other=0.0).to(tl.float32)
+    v_odd = tl.load(val_base + odd_offs, mask=odd_v_mask, other=0.0).to(tl.float32)
+
     k_min = tl.minimum(
         tl.min(tl.where(even_k_mask, k_even, float("inf"))),
         tl.min(tl.where(odd_k_mask, k_odd, float("inf"))),
@@ -161,14 +170,6 @@ def _reshape_cache_int4_kernel(
         k_packed,
         mask=half_offs < half_k,
     )
-
-    half_v = head_size_v // 2
-    even_v_mask = even_offs < head_size_v
-    odd_v_mask = odd_offs < head_size_v
-    val_base = value_ptr + tok * stride_val_tok + head * stride_val_head
-
-    v_even = tl.load(val_base + even_offs, mask=even_v_mask, other=0.0).to(tl.float32)
-    v_odd = tl.load(val_base + odd_offs, mask=odd_v_mask, other=0.0).to(tl.float32)
 
     v_min = tl.minimum(
         tl.min(tl.where(even_v_mask, v_even, float("inf"))),
