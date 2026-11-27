@@ -6,6 +6,7 @@ vLLM provides a pluggable weight update system for synchronizing model weights f
 
 | Topic | Document | Key Flags / Concepts |
 | --- | --- | --- |
+| **Trainer without importing vLLM (HTTP-only)** | [Trainer Without Importing vLLM](#trainer-without-importing-vllm-http-only) | `VLLM_SERVER_DEV_MODE=1`, [NCCL](engines/nccl.md#trainer-without-vllm-over-http) & [IPC](engines/ipc.md#trainer-without-vllm-over-http) wire contracts |
 | **In-place reload (default)** | [Direct Weight Reload](direct_reload.md) | `VLLM_RELOAD_MODE=auto`, Refused Configurations, online quantization |
 | **Layerwise reload & QeRL** | [Layerwise (Re)loading](layerwise.md) | `VLLM_RELOAD_MODE=layerwise`, online quantization, CUDA graph preservation |
 | **Correctness verification** | [Weight Checker](weight_checker.md) | SHA-256 parameter digest verification across ranks |
@@ -48,9 +49,11 @@ applies, else [layerwise reload](layerwise.md).
 | [NCCL](engines/nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
 | [IPC](engines/ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 | [sparse_nccl](engines/nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
+| [sparse_disk](engines/sparse_disk.md) | Shared storage and a host copy per worker | Sparse weight patches without an NCCL group, applied by a full reload |
 | [sharded_rdt](engines/sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 | [nccl_m2n](engines/m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
 | [ModelExpress](engines/modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
+| [Connex](engines/connex.md) | One-sided RDMA reads with tree fan-out | Elastic rollout pools where engines join, leave or fail during updates |
 
 ## Quickstart
 
@@ -70,10 +73,10 @@ llm = LLM(
 )
 ```
 
-Or, for online serving:
+Or, for online serving (set `VLLM_SERVER_DEV_MODE=1` to expose the HTTP weight-transfer endpoints):
 
 ```bash
-vllm serve my-model \
+VLLM_SERVER_DEV_MODE=1 vllm serve my-model \
     --weight-transfer-config '{"backend": "nccl"}'
 ```
 
@@ -115,6 +118,22 @@ trainer's broadcast, since both rendezvous inside the same NCCL calls).
 
 There is no `backend=` argument on the trainer side: each `TrainerInitInfo`
 subclass declares its own `backend`, and the factory dispatches on it.
+
+### Trainer Without Importing vLLM (HTTP-Only)
+
+If your trainer runs in a separate environment (different PyTorch/vLLM version,
+or a non-PyTorch framework such as JAX), it does **not** need to install or
+import `vllm`. Start the server with `VLLM_SERVER_DEV_MODE=1` (and
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1` for IPC) and speak the four-phase
+[HTTP endpoints](#api-endpoints) directly alongside the data-plane wire contract:
+
+- **NCCL (separate GPUs)**: [NCCL wire contract](engines/nccl.md#trainer-without-vllm-over-http) · example [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_nccl_no_vllm.py)
+- **IPC (colocated GPUs)**: [IPC wire contract](engines/ipc.md#trainer-without-vllm-over-http) · example [`rlhf_http_ipc_no_vllm.py`](../../../examples/rl/rlhf_http_ipc_no_vllm.py)
+
+Key invariants when driving NCCL directly over HTTP:
+
+- **Concurrency**: send `/init_weight_transfer_engine` and `/update_weights` in the background while the trainer joins/broadcasts on NCCL, otherwise both sides deadlock.
+- **Warm-up**: immediately after init, issue a matching `all_reduce` (sum) of `torch.zeros(1)` (`float32`) before any weight broadcast.
 
 ## Where Each Setting Lives
 
@@ -181,7 +200,7 @@ and start from `tools/state_transition_verifier/README.md`.
 
 ## API Endpoints
 
-When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you. A trainer may also implement the protocol directly without importing vLLM: see the wire contracts in [NCCL](engines/nccl.md#trainer-without-vllm-over-http) and [IPC](engines/ipc.md#trainer-without-vllm-over-http). This keeps the trainer decoupled from vLLM: it needs no vLLM install or version pin, only this documented HTTP and wire contract, so trainer and server can upgrade independently (non-PyTorch trainers such as JAX can use it too).
+When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you, or a trainer can drive them directly without importing vLLM (see [Trainer Without Importing vLLM](#trainer-without-importing-vllm-http-only)).
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
