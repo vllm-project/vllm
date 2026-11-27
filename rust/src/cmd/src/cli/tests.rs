@@ -3150,39 +3150,20 @@ fn frontend_args_json_rejects_unsupported_fields() {
     .unwrap_err();
 
     expect![[r#"
-        error: The following arguments are not implemented in Rust frontend yet:
-        - tool_server
-
-        Remove these arguments to continue.
+        error: invalid JSON arguments: tool_server: argument is not implemented in Rust frontend yet
     "#]]
     .assert_eq(&error.to_string());
-}
 
-#[test]
-fn frontend_args_json_aggregates_multiple_unsupported_fields() {
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "frontend",
-        "--listen-fd",
-        "3",
-        "--input-listener-fd",
-        "999999",
-        "--output-listener-fd",
-        "999998",
-        "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","tool_server":"demo"}"#,
-    ])
-    .unwrap_err();
-
-    let actual = error.to_string().replace(": \n", ":\n");
-    expect![[r#"
-        error: The following arguments are not implemented in Rust frontend yet:
-        - response_role
-        - tool_server
-
-        Remove these arguments to continue.
-    "#]]
-    .assert_eq(&actual);
+    // With several failing fields in different flattened groups, the error
+    // names the first key with its own error, though serde fails on
+    // `ModelArgs`' `hf_token` first.
+    expect!["invalid JSON arguments: enable_prompt_embeds: argument is not implemented in Rust frontend yet"]
+        .assert_eq(
+            &parse_runtime_args_json(
+                r#"{"enable_prompt_embeds":true,"hf_token":false,"model_tag":"Qwen/Qwen3-0.6B"}"#,
+            )
+            .unwrap_err(),
+        );
 }
 
 /// Python args that have no meaningful Rust equivalent are accepted on both the
@@ -3324,7 +3305,10 @@ fn unsupported_args_fail_startup() {
         ])
         .unwrap_err()
         .to_string();
-        assert!(error.contains(&format!("- {key}\n")), "{key}: {error}");
+        assert!(
+            error.contains(&format!("{key}: argument is not implemented")),
+            "{key}: {error}"
+        );
     }
 }
 
@@ -3351,17 +3335,9 @@ fn unsupported_env_settings_fail_startup() {
         assert!(error.contains("--max-tokenize-tokens"), "{value}: {error}");
     }
 
-    expect![[r#"
-        The following arguments are not implemented in Rust frontend yet:
-        - max_tokenize_tokens (VLLM_MAX_TOKENIZE_TOKENS)
-        - tool_server
-
-        Remove these arguments, or unset the environment variables bound to them, to continue."#]]
-    .assert_eq(
-        &parse_runtime_args_json(
-            r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":4096,"tool_server":"demo"}"#,
-        )
-        .unwrap_err(),
+    expect!["invalid JSON arguments: max_tokenize_tokens (VLLM_MAX_TOKENIZE_TOKENS): argument is not implemented in Rust frontend yet"].assert_eq(
+        &parse_runtime_args_json(r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":4096}"#)
+            .unwrap_err(),
     );
 }
 

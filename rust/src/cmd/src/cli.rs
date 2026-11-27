@@ -1528,7 +1528,9 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     deserializer
         .end()
         .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
-    args.unsupported.check()?;
+    if let Ok(object) = serde_json::from_str(value) {
+        UnsupportedArgs::warn_noops(&object);
+    }
     Ok(args)
 }
 

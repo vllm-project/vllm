@@ -8,17 +8,13 @@ use std::str::FromStr;
 
 use clap::Args;
 use clap::builder::{TypedValueParser, ValueParserFactory};
-use itertools::Itertools;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 
 /// Marker type for frontend-owned `serve` arguments that `vllm-rs` recognizes
-/// but does not support yet.
-///
-/// When passed as JSON args, it can be deserialized from any value, and
-/// serializes back to the original value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Unsupported(pub serde_json::Value);
+/// but does not support yet. Parsing any value fails, on the CLI and in JSON
+/// args alike, so it can sit in any argument group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unsupported;
 
 impl FromStr for Unsupported {
     type Err = String;
@@ -28,6 +24,18 @@ impl FromStr for Unsupported {
 
 Remove this argument, or unset the environment variable bound to it, to continue."
             .to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Unsupported {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Err(serde::de::Error::custom(
+            "argument is not implemented in Rust frontend yet",
+        ))
     }
 }
 
@@ -67,9 +75,9 @@ impl<'de, const ON: bool> Deserialize<'de> for Fixed<ON> {
 /// Marker type for no-op arguments that are accepted by the Rust frontend but
 /// have no effect.
 ///
-/// When passed as JSON args, it can be deserialized from any value, but always
-/// serializes back to `null`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// When passed as JSON args, it can be deserialized from any value; the
+/// `--args-json` parser warns about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Noop;
 
 impl<'de> Deserialize<'de> for Noop {
@@ -115,8 +123,7 @@ impl TypedValueParser for NoopValueParser {
 
 /// Frontend-owned Python `serve` arguments that `vllm-rs` recognizes but does
 /// not support yet.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Deserialize)]
 #[command(next_help_heading = "Options not implemented in Rust frontend yet")]
 pub struct UnsupportedArgs {
     #[command(flatten)]
@@ -131,50 +138,18 @@ pub struct UnsupportedArgs {
 }
 
 impl UnsupportedArgs {
-    /// Check whether any unsupported arguments are set, and if so, return an
-    /// error listing them. Also warn about any no-op arguments that are set
-    /// but will be ignored.
-    pub(crate) fn check(&self) -> Result<(), String> {
-        let value = serde_json::to_value(self).unwrap();
-        let map = value.as_object().unwrap();
+    /// Warn about each no-op argument set in the `--args-json` object `args`,
+    /// as the CLI value parser does. Once `args` has deserialized, every one
+    /// of these arguments it sets is a no-op: an `Unsupported` one fails
+    /// deserialization.
+    pub(crate) fn warn_noops(args: &serde_json::Map<String, serde_json::Value>) {
         let cmd = Self::augment_args(clap::Command::new("unsupported"));
-        let mut unsupported = Vec::new();
-        let mut env_bound = false;
-
-        for (key, value) in map {
-            if value.is_null() {
-                noop_warn(key);
-                continue;
+        for arg in cmd.get_arguments() {
+            let id = arg.get_id().as_str();
+            if args.get(id).is_some_and(|value| !value.is_null()) {
+                noop_warn(id);
             }
-            // Python resolves an environment variable into the argument bound
-            // to it, so name the variable too.
-            let env = (cmd.get_arguments())
-                .find(|arg| arg.get_id() == key)
-                .and_then(|arg| arg.get_env());
-            env_bound |= env.is_some();
-            unsupported.push(match env {
-                Some(env) => format!("{key} ({})", env.to_string_lossy()),
-                None => key.clone(),
-            });
         }
-
-        if !unsupported.is_empty() {
-            unsupported.sort_unstable();
-            let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
-            let remove = if env_bound {
-                "Remove these arguments, or unset the environment variables bound to them, to continue."
-            } else {
-                "Remove these arguments to continue."
-            };
-            return Err(format!(
-                "The following arguments are not implemented in Rust frontend yet:
-{bullets}
-
-{remove}"
-            ));
-        }
-
-        Ok(())
     }
 }
 
@@ -189,8 +164,7 @@ impl UnsupportedArgs {
 /// or `FrontendArgs`. They live on the `serve` command itself and control
 /// managed-engine / multi-process orchestration rather than the shared frontend
 /// runtime config.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Deserialize)]
 pub struct TopLevelUnsupportedArgs {
     /// How many API server processes to run. Defaults to data_parallel_size if
     /// not specified.
@@ -220,8 +194,7 @@ pub struct TopLevelUnsupportedArgs {
 /// for tokenizer setup, request validation, routing, logging, and other
 /// frontend behavior, so Rust must recognize them rather than treating them as
 /// pure engine passthrough.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Deserialize)]
 pub struct EngineUnsupportedArgs {
     /// Allowing API requests to read local images or videos from directories
     /// specified by the server file system. This is a security risk. Should
@@ -353,8 +326,7 @@ pub struct EngineUnsupportedArgs {
 /// frontend / API-server layer itself, for example chat-template configuration,
 /// tool/frontend behavior, TLS / CORS / HTTP server settings, and other
 /// northbound server knobs.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args, Deserialize)]
 pub struct ServerUnsupportedArgs {
     /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
     /// and `media_io_kwargs`). If False, the server rejects non-empty values
