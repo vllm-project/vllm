@@ -529,13 +529,18 @@ class SpeculativeConfig:
     If `None`, use the value from the draft model's Hugging Face config."""
 
     # Advanced control
-    draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
+    draft_lm_head_quantization: (
+        Literal["fp8", "nvfp4", "int4_per_group_32_asym"] | None
+    ) = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
     and DeepSeek-V4/V4.1 DSpark), or, with "fp8", the Muse Spark DSpark
     drafter's own lm_head and Markov head on ROCm. "fp8" uses per-row weight
     and per-token activation scales on the platform's FP8 linear kernel; "nvfp4" is
-    weight-only on the platform's W4A16 kernel. The target verifies with its
-    own head, so only the acceptance length can change."""
+    weight-only on the platform's W4A16 kernel; "int4_per_group_32_asym" is
+    weight-only uint4 with a scale and zero point per 32 input channels on the
+    platform's mixed-precision linear kernel (e.g. RDNA, which has neither of
+    the other two). The target verifies with its own head, so only the
+    acceptance length can change."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
