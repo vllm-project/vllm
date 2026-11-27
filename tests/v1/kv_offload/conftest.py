@@ -77,4 +77,5 @@ def make_offloading_config(
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
+        kv_cache_layout="LBNHC",
     )

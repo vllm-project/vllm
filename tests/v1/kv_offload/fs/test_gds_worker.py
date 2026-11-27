@@ -126,6 +126,7 @@ def mapper(tmp_path) -> FileMapper:
         dcp_size=1,
         rank=0,
         dtype="float16",
+        kv_cache_layout="LBNHC",
     )
 
 

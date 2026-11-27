@@ -41,6 +41,7 @@ def _file_mapper(root_dir: str) -> FileMapper:
         dcp_size=1,
         rank=0,
         dtype="float16",
+        kv_cache_layout="LBNHC",
     )
 
 
