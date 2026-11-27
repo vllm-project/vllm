@@ -162,7 +162,7 @@ def test_segmented_attention_admits_unified_fallback_features(
         RocmSegmentedAttentionImpl,
     )
 
-    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(rocm, "on_rdna", lambda: True)
     monkeypatch.setattr(rocm, "on_gfx12x", lambda: True)
     sinks = torch.zeros(8) if has_sinks else None
 
@@ -202,7 +202,7 @@ def test_segmented_attention_requires_rocm_rdna(monkeypatch, platform, rdna):
         assert platform == "rocm", "Must not probe ROCm on another platform"
         return rdna
 
-    monkeypatch.setattr(rocm, "on_gfx1x", on_rdna)
+    monkeypatch.setattr(rocm, "on_rdna", on_rdna)
     reason = segmented.RocmSegmentedAttentionBackend.supports_combination(
         128,
         torch.bfloat16,
@@ -238,7 +238,7 @@ def test_segmented_triton_cache_survives_standalone_compilation(
         RocmSegmentedAttentionImpl,
     )
 
-    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(rocm, "on_rdna", lambda: True)
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
     monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
     monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
@@ -264,7 +264,7 @@ def test_segmented_attention_is_opt_in(monkeypatch):
         use_mla=False, use_sparse=False
     )
 
-    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(rocm, "on_rdna", lambda: True)
     monkeypatch.setattr(rocm, "on_gfx12x", lambda: True)
     config = AttentionSelectorConfig(
         head_size=128,
@@ -285,7 +285,7 @@ def test_segmented_attention_rejects_mm_prefix_at_selection(monkeypatch):
     from vllm.platforms import rocm
     from vllm.platforms.rocm import RocmPlatform
 
-    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(rocm, "on_rdna", lambda: True)
     config = AttentionSelectorConfig(
         head_size=128,
         dtype=torch.bfloat16,
@@ -308,7 +308,7 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
         RocmSegmentedAttentionImpl,
     )
 
-    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(rocm, "on_rdna", lambda: True)
     impl = RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
     impl._segmented_attention_config = SimpleNamespace(
         kernel_config=KernelConfig(),
