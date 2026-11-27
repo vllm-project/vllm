@@ -599,7 +599,19 @@ def _per_video_list_options(
 def _validate_per_video_kwargs(mm_kwargs: Any, num_videos: int) -> None:
     if not isinstance(mm_kwargs, dict) or not num_videos:
         return
-    for _, key, value in _per_video_list_options(mm_kwargs):
+    load_audio = mm_kwargs.get("load_audio_from_video")
+    if load_audio is None:
+        load_audio = mm_kwargs.get("use_audio_in_video")
+    for scope, key, value in _per_video_list_options(mm_kwargs):
+        if load_audio and scope is mm_kwargs:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Move mm_processor_kwargs.{key} to "
+                    f"mm_processor_kwargs.videos_kwargs.{key} when slicing "
+                    "per-video lists for videos with audio."
+                ),
+            )
         if len(value) < num_videos:
             raise HTTPException(
                 status_code=400,
@@ -1657,7 +1669,8 @@ if __name__ == "__main__":
         help=(
             "Opt in to slicing per-video fps/num_frames lists. Only enable if "
             "all encoder and consumer instances use compatible partition-invariant "
-            "per-video hashing (e.g. Qwen3-VL). Off by default."
+            "per-video hashing (e.g. Qwen3-VL). For videos with audio, put "
+            "per-video lists in mm_processor_kwargs.videos_kwargs. Off by default."
         ),
     )
     parser.add_argument(
