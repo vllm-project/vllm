@@ -8,7 +8,9 @@ temp-file publishing, cleanup) without GDS hardware.
 """
 
 import os
+import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -317,3 +319,64 @@ def test_wait_preserves_failed_store_for_completion_poll(worker, cufile, kv_cach
     assert len(results) == 1
     assert results[0].job_id == 2
     assert results[0].success
+
+
+@pytest.mark.parametrize("separate_job", [False, True])
+def test_failed_store_flush_waits_for_remaining_io(
+    worker, cufile, kv_caches, monkeypatch, separate_job
+):
+    """A failed file must not let a flush return while other I/O is pending."""
+    tensor = kv_caches.tensors[0].tensor
+    pending_started = threading.Event()
+    release_pending = threading.Event()
+    original_write = cufile.cuFileWrite
+
+    def write(fd, dev_ptr, size, file_offset):
+        if dev_ptr == tensor.data_ptr():
+            raise OSError(28, "No space left on device")
+        pending_started.set()
+        assert release_pending.wait(timeout=10)
+        return original_write(fd, dev_ptr, size, file_offset)
+
+    monkeypatch.setattr(gds_worker, "cuFileWrite", write)
+
+    def pointers(blocks):
+        return DevicePointers(
+            ptrs=np.array(
+                [tensor.data_ptr() + block * _PAGE_SIZE for block in blocks],
+                dtype=np.uint64,
+            ),
+            sizes=np.full(len(blocks), _PAGE_SIZE, dtype=np.uint64),
+            group_block_counts=(len(blocks),),
+            group_data_ref_counts=(1,),
+            block_indices=(0,),
+        )
+
+    keys = [make_offload_key(name, 0) for name in (b"failed", b"pending")]
+    job_ids = {1, 2} if separate_job else {1}
+    try:
+        if separate_job:
+            assert worker.submit_store(1, pointers([0]), FSLoadStoreSpec(keys[:1]))
+            assert worker.submit_store(2, pointers([2]), FSLoadStoreSpec(keys[1:]))
+        else:
+            # With two blocks per file, three blocks create two completions.
+            assert worker.submit_store(1, pointers([0, 1, 2]), FSLoadStoreSpec(keys))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            waited = executor.submit(worker.wait, job_ids)
+            try:
+                assert pending_started.wait(timeout=10)
+                with pytest.raises(TimeoutError):
+                    waited.result(timeout=0.1)
+            finally:
+                release_pending.set()
+            waited.result(timeout=10)
+    finally:
+        release_pending.set()
+        # Drain even an incorrect wait(), so its failure is not masked by teardown.
+        worker.shutdown_dispatch()
+        results = worker.get_finished()
+
+    expected = {1: False, 2: True} if separate_job else {1: False}
+    assert {result.job_id: result.success for result in results} == expected
+    assert worker.get_finished() == []

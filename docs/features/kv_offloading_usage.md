@@ -130,8 +130,6 @@ vllm serve <model> \
 
 Files are named by block content hash, so blocks written by an earlier run or by another instance with the same model and parallel configuration are found by an asynchronous on-disk lookup. Set `access_mode` to `read` for an instance that only loads files written elsewhere and never writes; the default, `readwrite`, also stores the blocks it computes. Keys found on disk are remembered in an in-memory LRU index of `fs_index_size` entries so later requests skip the disk lookup; dropping a key from the index does not delete its file.
 
-Cache writes are best effort: failed writes, including out-of-space errors, are reported without publishing the failed blocks or stopping generation. This does not free disk space or automatically evict files. Load failures follow the connector's load-failure handling separately.
-
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
