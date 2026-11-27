@@ -8,11 +8,20 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.quantization.online.fp8 as online_fp8
+from tests.quantization.utils import quant_config_args
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
+from vllm.config.kernel import KernelConfig
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config, Mxfp4MoEMethod
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.utils import mxfp4_utils
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequantize_mxfp4_moe_weights,
     dequantize_mxfp4_weight,
 )
+from vllm.platforms import current_platform
 
 E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
@@ -153,3 +162,63 @@ def test_block_fp8_silu_limit_requires_dispatch_and_ck_stage1(
     probe = rocm_aiter_ops.supports_fp8_block_silu_limit
     # Exercise each installed interface independently of the cached result.
     assert probe.__wrapped__() is (dispatcher and stage1)
+
+
+# 192 is not a multiple of the 128 block: the shard is zero-padded to 256.
+@pytest.mark.parametrize("intermediate_size", [256, 192])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_online_block_fp8_moe_requantizes_mxfp4_checkpoint_exactly(
+    intermediate_size: int, default_vllm_config
+) -> None:
+    """MXFP4 experts targeted by `fp8_per_block` keep every weight value when the
+    E8M0 scales of a 128x128 block span at most 2**14."""
+    from tests.quantization.test_online import _materialize_requantization_source
+
+    # Triton keeps the natural weight layout, so values compare directly.
+    default_vllm_config.kernel_config = KernelConfig(moe_backend="triton")
+    quant_config = Mxfp4Config()
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        quant_config_args(moe="fp8_per_block")
+    )
+    num_experts, hidden_size = 3, 256
+    torch.manual_seed(0)
+    with torch.device(current_platform.device_type):
+        layer = FusedMoEFactory(
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix="model.layers.0.mlp.experts",
+        ).routed_experts
+        method = layer.quant_method
+        assert isinstance(method, online_fp8.Fp8PerBlockOnlineMoEMethod)
+        assert isinstance(method.requantization_source, Mxfp4MoEMethod)
+        _materialize_requantization_source(layer)
+
+        source = {}
+        for name in ("w13", "w2"):
+            weight = getattr(layer, f"{name}_weight")
+            scale = getattr(layer, f"{name}_weight_scale")
+            weight.data.copy_(torch.randint(0, 256, weight.shape, dtype=torch.uint8))
+            scale.data.copy_(torch.randint(113, 128, scale.shape, dtype=torch.uint8))
+            source[name] = (weight.data.cpu(), scale.data.cpu())
+        method.process_weights_after_loading(layer)
+
+    # The source parameters are released once requantized.
+    assert not hasattr(layer, "w13_weight_scale")
+    assert not hasattr(layer, "w2_weight_scale")
+    for name in ("w13", "w2"):
+        weight = getattr(layer, f"{name}_weight")
+        assert weight.dtype == current_platform.fp8_dtype()
+        scale = getattr(layer, f"{name}_weight_scale_inv").double().cpu()
+        scale = scale.repeat_interleave(128, dim=1).repeat_interleave(128, dim=2)
+        restored = weight.double().cpu() * scale
+        if name == "w13":
+            restored = restored.unflatten(1, (2, -1))
+        assert not restored[:, :, intermediate_size:].any()
+        reference = _reference(*source[name])
+        restored = restored[:, :, :intermediate_size].reshape(reference.shape)
+        assert torch.equal(restored, reference)
