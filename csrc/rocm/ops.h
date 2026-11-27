@@ -79,17 +79,6 @@ void rdna_prefill_attn(int64_t config, torch::Tensor& q,
                        const std::optional<torch::Tensor>& query_start_loc,
                        int64_t head_group);
 
-void paged_attention(
-    torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
-    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens,
-    const std::optional<torch::Tensor>& query_start_loc, int64_t block_size,
-    int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type, bool use_interleaved_v_cache);
-
 // RDNA3.5 only: Fused Gated Delta Net prefill kernel.
 // Mutates `out` and `final_state` in place.
 void rdna35_gdn_chunked(torch::Tensor& q, torch::Tensor& k, torch::Tensor& v,

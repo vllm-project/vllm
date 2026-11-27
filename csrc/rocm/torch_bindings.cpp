@@ -122,26 +122,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("rdna_prefill_attn", torch::kCUDA, &rdna_prefill_attn);
 #endif
 
-  // Custom attention op
-  // Compute the attention between an input query and the cached
-  // keys/values using PagedAttention.
-  rocm_ops.def(
-      "paged_attention(Tensor! out, Tensor exp_sums,"
-      "                Tensor max_logits, Tensor tmp_out,"
-      "                Tensor query, Tensor key_cache,"
-      "                Tensor value_cache, int num_kv_heads,"
-      "                float scale, Tensor block_tables,"
-      "                Tensor seq_lens,"
-      "                Tensor? query_start_loc,"
-      "                int block_size,"
-      "                int max_seq_len,"
-      "                Tensor? alibi_slopes,"
-      "                str kv_cache_dtype,"
-      "                Tensor k_scale, Tensor v_scale,"
-      "                Tensor? fp8_out_scale,"
-      "                str mfma_type,"
-      "                bool use_interleaved_v_cache=False) -> ()");
-  rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+  // The paged attention op (paged_attention) is registered into this
+  // namespace by paged_attention_torch_bindings.cpp.
 
 #ifdef VLLM_ROCM_GFX115X
   rocm_ops.def(
