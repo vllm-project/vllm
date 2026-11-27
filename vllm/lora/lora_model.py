@@ -128,7 +128,7 @@ class LoRAModel:
         weights_mapper: WeightsMapper | None,
         skip_prefixes: list[str] | None,
         unsupported_lora_modules: set[str] | None,
-        split_rows: SplitRows | None = None,
+        split_rows: SplitRows | None,
     ) -> None:
         unexpected_modules: list[str] = []
         for lora_module in module_names:
@@ -254,7 +254,7 @@ class LoRAModel:
                 if rows := split_rows(module_name):
                     lora = loras.pop(module_name)
                     sizes = [n for n in rows.values() if n is not None]
-                    # `None` rows: its pieces aren't on this rank, nothing here uses it
+                    # `None` rows: not on this rank, so nothing here uses the LoRA
                     if len(sizes) < len(rows):
                         continue
                     for target, lora_b in zip(rows, lora.lora_b.split(sizes)):

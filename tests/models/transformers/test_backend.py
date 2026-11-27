@@ -1096,6 +1096,7 @@ class _LoadPathStub(nn.Module):
     _split_weights = Base._split_weights
     _loaded_by = Base._loaded_by
     _output_size = Base._output_size
+    lora_split_rows = Base.lora_split_rows
 
 
 def _stub_for(model: nn.Module, *conversions) -> _LoadPathStub:
@@ -1455,7 +1456,7 @@ def test_lora_is_split_like_converted_weights(
         peft_helper=peft_helper,
         device="cpu",
         weights_mapper=stub.hf_to_vllm_mapper.get_rename_mapper(),
-        split_rows=partial(Base.lora_split_rows, stub),
+        split_rows=stub.lora_split_rows,
     )
     expected = {"q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "gate_proj"}
 
