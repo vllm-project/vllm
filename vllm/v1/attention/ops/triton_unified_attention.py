@@ -15,7 +15,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import fp32_dot_precision, tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -406,6 +406,7 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    IN_PRECISION: tl.constexpr = None,
     # 3D only: split the sliding window's tiles, not the whole sequence, into
     # segments so every segment does useful work once seq_len exceeds the
     # window. Enabled by the launcher for plain causal sliding windows only;
@@ -684,9 +685,11 @@ def kernel_unified_attention(
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: fuse softmax_scale with per-head k_scale
             # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-            S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
+            S += tl.dot(Q, K, input_precision=IN_PRECISION) * (
+                score_scale * k_token_head_scales[None, :]
+            )
         else:
-            S += score_scale * tl.dot(Q, K)
+            S += score_scale * tl.dot(Q, K, input_precision=IN_PRECISION)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -726,7 +729,7 @@ def kernel_unified_attention(
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: apply v_scale to P instead of V.
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
-            acc += tl.dot(P_v, V)
+            acc += tl.dot(P_v, V, input_precision=IN_PRECISION)
         else:
             # Keep softmax weights representable when the P @ V dot uses FP8
             # tensor cores. Undo the power-of-two scale after the dot.
@@ -736,7 +739,10 @@ def kernel_unified_attention(
                 p_scale = 128.0
             else:
                 p_scale = 1.0
-            acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale
+            acc += (
+                tl.dot((P * p_scale).to(V.dtype), V, input_precision=IN_PRECISION)
+                / p_scale
+            )
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
@@ -1550,6 +1556,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        IN_PRECISION=fp32_dot_precision(q.dtype),
         WINDOW_SEGMENTS=window_segments,
         v_cache_delta=v_cache_delta,
         K_ALIGN=k_align,
