@@ -65,8 +65,8 @@ class TestHasModule:
     def test_returns_false_when_find_spec_succeeds_but_import_fails(self):
         """Simulate a native extension whose shared library is missing.
 
-        ``find_spec`` finds the package on disk, but the actual import
-        raises ``ImportError`` (e.g. missing ``libcudart.so``).
+        `find_spec` finds the package on disk, but the actual import
+        raises `ImportError` (e.g. missing `libcudart.so`).
         """
         fake_spec = MagicMock()
 
@@ -85,7 +85,7 @@ class TestHasModule:
             assert _has_module("fake_native_ext") is False
 
     def test_returns_false_when_find_spec_raises(self):
-        """``find_spec`` itself can raise for dotted names whose parent package
+        """`find_spec` itself can raise for dotted names whose parent package
         fails to import. This should be treated as the module being unavailable.
         """
         with patch(

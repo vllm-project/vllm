@@ -14,22 +14,32 @@ them.
 
 import functools
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
 )
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.metadata import _token_request
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _apply_candidate_mask_strided,
     _max_decode_logits_rows,
+    exchange_shardq_topk,
+    reserve_shardq_exchange,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -68,11 +78,11 @@ class RocmPagedMxfp4CacheLayout(NamedTuple):
     """The byte order of an indexer K page, as the kernel reads it, and the
     shuffle pattern aiter's K cache op writes it with.
 
-    A page is cut into runs of ``n_per_tile`` tokens. Inside a run, each token's
-    packed values are split into ``d_per_tile``-byte chunks along the head
+    A page is cut into runs of `n_per_tile` tokens. Inside a run, each token's
+    packed values are split into `d_per_tile`-byte chunks along the head
     dimension, and the run stores chunk 0 of every token, then chunk 1, and so
-    on: ``[chunk, token, byte]``. Its e8m0 scales are stored as
-    ``[scale % scale_lanes, token, scale // scale_lanes]``.
+    on: `[chunk, token, byte]`. Its e8m0 scales are stored as
+    `[scale % scale_lanes, token, scale // scale_lanes]`.
     """
 
     n_per_tile: int
@@ -90,7 +100,7 @@ _WAVE_SIZE = 64
 def rocm_paged_mxfp4_cache_layout(
     num_heads: int, head_dim: int, page_entries: int
 ) -> RocmPagedMxfp4CacheLayout:
-    """The K page layout from aiter's ``cache_format``, the only place vLLM
+    """The K page layout from aiter's `cache_format`, the only place vLLM
     reads it, so a change there cannot reach the writer unchecked.
 
     Raises:
@@ -146,7 +156,7 @@ def rocm_mxfp4_indexer_k_store(
     num_heads: int,
 ) -> None:
     """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
-    writes the key in the order its MQA-logits kernel reads with ``num_heads``
+    writes the key in the order its MQA-logits kernel reads with `num_heads`
     query heads."""
     assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
     layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
@@ -238,6 +248,151 @@ def build_rocm_mxfp4_decode_schedule(
     )
 
 
+class RocmMxfp4DecodeRowsKernel(
+    VllmTritonJitKernel["RocmMxfp4DecodeRowsKernel.CompileKey"]
+):
+    TAIL_BLOCK = 256
+
+    @dataclass(frozen=True, slots=True)
+    class CompileKey:
+        compress_ratio: int
+        block_cols: int
+
+    @staticmethod
+    @triton.jit(
+        do_not_specialize=[
+            "num_reqs",
+            "num_rows",
+            "capacity",
+            "num_ctx_reqs",
+            "candidate_block",
+            "block_table_stride",
+            "row_block_table_stride",
+        ]
+    )
+    def kernel(
+        query_start_loc_ptr,
+        seq_lens_ptr,
+        block_table_ptr,
+        row_lens_ptr,
+        row_block_table_ptr,
+        decode_lens_ptr,
+        per_req_lens_ptr,
+        context_lens_ptr,
+        block_ends_ptr,
+        num_reqs,
+        num_rows,
+        capacity,
+        num_ctx_reqs,
+        candidate_block,
+        block_table_stride,
+        row_block_table_stride,
+        COMPRESS_RATIO: tl.constexpr,
+        BLOCK_COLS: tl.constexpr,
+        TAIL_BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        if pid < num_rows:
+            req = _token_request(
+                query_start_loc_ptr, tl.full((1,), pid, tl.int32), num_reqs
+            )
+            req = tl.sum(req, 0)
+            valid = pid < tl.load(query_start_loc_ptr + num_reqs)
+            start = tl.load(query_start_loc_ptr + req)
+            end = tl.load(query_start_loc_ptr + req + 1)
+            seq_len = tl.load(seq_lens_ptr + req)
+            length = tl.maximum(seq_len - (end - start) + pid - start + 1, 0)
+            length = tl.where(valid, length, 0) // COMPRESS_RATIO
+            tl.store(row_lens_ptr + pid, length)
+            tl.store(decode_lens_ptr + pid, 1)
+            if candidate_block > 0:
+                ends = (length + candidate_block - 1) // candidate_block
+                tl.store(block_ends_ptr + pid, ends)
+            cols = tl.arange(0, triton.next_power_of_2(BLOCK_COLS))
+            blocks = tl.load(
+                block_table_ptr + req.to(tl.int64) * block_table_stride + cols,
+                valid & (cols < BLOCK_COLS),
+                other=0,
+            )
+            tl.store(
+                row_block_table_ptr + pid.to(tl.int64) * row_block_table_stride + cols,
+                blocks,
+                cols < BLOCK_COLS,
+            )
+        else:
+            tail = num_rows + (pid - num_rows) * TAIL_BLOCK + tl.arange(0, TAIL_BLOCK)
+            tl.store(row_lens_ptr + tail, 0, tail < capacity)
+        if pid < num_reqs:
+            query_len = tl.load(query_start_loc_ptr + pid + 1) - tl.load(
+                query_start_loc_ptr + pid
+            )
+            tl.store(per_req_lens_ptr + pid, query_len)
+        if pid < num_ctx_reqs:
+            context_len = tl.load(seq_lens_ptr + pid) // COMPRESS_RATIO
+            tl.store(context_lens_ptr + pid, context_len)
+
+    def dispatch(self, *, compress_ratio: int, block_cols: int) -> CompileKey:
+        return self.CompileKey(compress_ratio=compress_ratio, block_cols=block_cols)
+
+    def get_warmup_keys(
+        self, *, compress_ratio: int, block_cols: int
+    ) -> list[CompileKey]:
+        return [self.dispatch(compress_ratio=compress_ratio, block_cols=block_cols)]
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        block_table = TritonWarmupTensor(torch.int32, shape=(1, compile_key.block_cols))
+        return dict(
+            query_start_loc=int32_ptr,
+            seq_lens=int32_ptr,
+            block_table=block_table,
+            row_lens=int32_ptr,
+            row_block_table=block_table,
+            decode_lens=int32_ptr,
+            per_req_lens=int32_ptr,
+            context_lens=int32_ptr,
+            block_ends=int32_ptr,
+            num_reqs=1,
+            num_rows=1,
+            num_ctx_reqs=1,
+            candidate_block=0,
+            compress_ratio=compile_key.compress_ratio,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        row_lens: torch.Tensor,
+        row_block_table: torch.Tensor,
+        decode_lens: torch.Tensor,
+        per_req_lens: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_ends: torch.Tensor,
+        num_reqs: int,
+        num_rows: int,
+        num_ctx_reqs: int,
+        candidate_block: int,
+        compress_ratio: int,
+    ) -> LaunchSpec:
+        capacity = row_lens.shape[0]
+        tail = num_rows + triton.cdiv(capacity - num_rows, self.TAIL_BLOCK)
+        return (max(tail, num_ctx_reqs),), dict(
+            capacity=capacity,
+            block_table_stride=block_table.stride(0),
+            row_block_table_stride=row_block_table.stride(0),
+            COMPRESS_RATIO=compress_ratio,
+            BLOCK_COLS=block_table.shape[1],
+            TAIL_BLOCK=self.TAIL_BLOCK,
+            num_warps=4,
+        )
+
+
+_ROCM_MXFP4_DECODE_ROWS_KERNEL = RocmMxfp4DecodeRowsKernel()
+
+
 def _kv_view(kv_cache: torch.Tensor, head_dim: int) -> torch.Tensor:
     """The indexer cache as [pages, entries, 1, bytes]. The page stride is the
     block-major pool's, not the page's own size."""
@@ -289,19 +444,30 @@ def reserve_rocm_mxfp4_indexer_workspace(
     torch.empty(budget, dtype=torch.uint8, device=hidden_states.device)
 
 
+def _vllm_topk(rows: int, k: int) -> bool:
+    return rows < 128 and k < 2048
+
+
 def _topk(
-    logits: torch.Tensor, lengths: torch.Tensor, out: torch.Tensor, k: int
+    logits: torch.Tensor,
+    lengths: torch.Tensor,
+    out: torch.Tensor,
+    k: int,
+    step_rows: int | None = None,
 ) -> None:
     """Top-k over each row's [0, lengths[row]); -1 pads rows shorter than k.
 
     aiter's kernel is faster on the candidate top-k and from 128 rows on; below
     that, a wide decode step is faster on vLLM's. Shape alone decides, so a FULL
-    graph replays the same choice at every context length.
+    graph replays the same choice at every context length. `step_rows` is the
+    decode step's row count when `logits` holds a TP rank's slice of it, so the
+    slice runs the kernel the whole step would.
     """
     rows, width = logits.shape
     if rows == 0:
         return
-    if width >= k and (k >= 2048 or rows >= 128):
+    kernel_rows = rows if step_rows is None else step_rows
+    if width >= k and not _vllm_topk(kernel_rows, k):
         _aiter_topk()(
             logits,
             1,
@@ -364,7 +530,7 @@ def _remap_compact_topk(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class _Layer:
     """One indexer layer's inputs and outputs for this step."""
 
@@ -389,7 +555,7 @@ class _Layer:
         return self.q.shape[2] * 2
 
     def rows(self, lo: int, hi: int, seqs: int = 1) -> tuple[torch.Tensor, ...]:
-        """Q, its scales and the weights of token rows [lo, hi), as ``seqs``
+        """Q, its scales and the weights of token rows [lo, hi), as `seqs`
         sequences of next_n rows each."""
         return (
             self.q[lo:hi].view(seqs, -1, *self.q.shape[1:]),
@@ -432,6 +598,11 @@ def _layer(
     )
     kv = _kv_view(kv_cache, head_dim)
     num_heads = q_values.shape[1]
+    # Under ShardQ the prefill chunks index the shardq_gather_indices tokens,
+    # which begin with the decode rows.
+    prefill = metadata.prefill
+    if prefill is not None and (indices := prefill.shardq_gather_indices) is not None:
+        q_values, q_scale, weights = (t[indices] for t in (q_values, q_scale, weights))
     return _Layer(
         metadata=metadata,
         kv=kv,
@@ -447,6 +618,17 @@ def _layer(
         block=candidate_block_size,
         full_graph=forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL,
     )
+
+
+def _fill_topk_rows(layer: _Layer, num_tokens: int) -> None:
+    lengths = layer.metadata.decode_row_lens
+    start = 0
+    if layer.metadata.decode is not None and lengths is not None:
+        rows = _decode_step_rows(layer.metadata, lengths.shape[0])
+        if _vllm_topk(rows, layer.topk_tokens):
+            start = rows
+    if start < num_tokens:
+        layer.topk_buffer[start:num_tokens] = -1
 
 
 def _block_scores(layer: _Layer, scores: torch.Tensor | None) -> dict:
@@ -505,6 +687,8 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
     lengths = metadata.decode_row_lens
     assert metadata.decode is not None and lengths is not None
     rows = lengths.shape[0]
+    if rows == 0:
+        return
     specs = [((rows, logits_width), torch.float32)]
     if candidate_write:
         specs.append(((rows, triton.cdiv(logits_width, layer.block)), torch.float32))
@@ -548,6 +732,7 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         lengths,
         layer.topk_buffer[:rows, : layer.topk_tokens],
         layer.topk_tokens,
+        _decode_step_rows(metadata, rows),
     )
 
 
@@ -597,6 +782,8 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
     assert metadata.decode is not None and lengths is not None
     block_table = metadata.decode.block_table
     rows = lengths.shape[0]
+    if rows == 0:
+        return
     if metadata.decode_gather is None:
         metadata.decode_gather = pa.build_candidate_gather(
             layer.candidates[:rows],
@@ -627,8 +814,40 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
         candidates=gather,
     )
     out = layer.topk_buffer[:rows, : layer.topk_tokens]
-    _topk(compact, slot_ends, out, layer.topk_tokens)
+    _topk(compact, slot_ends, out, layer.topk_tokens, _decode_step_rows(metadata, rows))
     _remap_compact_topk(out, gather["positions"], layer.block)
+
+
+def _decode_step_rows(metadata: "RocmMxfp4IndexerMetadata", rows: int) -> int:
+    shard = metadata.decode_shard
+    return rows if shard is None else shard.num_rows
+
+
+def _decode_rank_rows(layer: _Layer) -> _Layer:
+    shard = layer.metadata.decode_shard
+    if shard is None:
+        return layer
+    lo = shard.start
+    return replace(
+        layer,
+        q=layer.q[lo:],
+        q_scale=layer.q_scale[lo:],
+        weights=layer.weights[lo:],
+        topk_buffer=layer.topk_buffer[lo:],
+        candidates=None if layer.candidates is None else layer.candidates[lo:],
+    )
+
+
+def _exchange_decode_rows(layer: _Layer) -> None:
+    shard = layer.metadata.decode_shard
+    if shard is None:
+        return
+    width = layer.topk_tokens
+    local = layer.topk_buffer[shard.start : shard.start + shard.span, :width]
+    gathered = get_tp_group().all_gather(local.contiguous().view(torch.float32), 0)
+    layer.topk_buffer[: shard.num_rows, :width] = gathered.view(torch.int32)[
+        : shard.num_rows
+    ]
 
 
 @eager_break_during_capture
@@ -649,20 +868,23 @@ def rocm_mxfp4_sparse_attn_indexer(
     candidate_write: bool = False,
 ) -> torch.Tensor:
     """Dense indexer: every layer that scores the whole context, the
-    candidate source included. With ``candidate_blocks`` and not
-    ``candidate_write`` the scores are masked to the pool first, as the
+    candidate source included. With `candidate_blocks` and not
+    `candidate_write` the scores are masked to the pool first, as the
     shared path does.
 
-    The model supplies ``q_values`` [T, H, D // 2] packed e2m1, ``q_scale``
+    The model supplies `q_values` [T, H, D // 2] packed e2m1, `q_scale`
     holding each head's D // 32 ue8m0 bytes (one int32 per head at D = 128),
-    fp32 ``weights`` with the softmax and head scales folded in, and
-    ``kv_cache`` pages in `rocm_paged_mxfp4_cache_layout` order for H heads.
+    fp32 `weights` with the softmax and head scales folded in, and
+    `kv_cache` pages in `rocm_paged_mxfp4_cache_layout` order for H heads.
     """
     if not isinstance(get_forward_context().attn_metadata, dict):
         reserve_rocm_mxfp4_indexer_workspace(
             hidden_states,
             max_model_len,
             candidate_block_size if candidate_write else 0,
+        )
+        reserve_shardq_exchange(
+            k_cache_prefix, q_values, q_scale, weights, topk_indices_buffer
         )
         return topk_indices_buffer
     layer = _layer(
@@ -679,12 +901,16 @@ def rocm_mxfp4_sparse_attn_indexer(
         candidate_block_size,
     )
     metadata = layer.metadata
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    _fill_topk_rows(layer, hidden_states.shape[0])
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
             _dense_prefill(layer, chunk, plan, candidate_write)
+        exchange_shardq_topk(
+            k_cache_prefix, metadata.prefill, topk_indices_buffer, topk_tokens
+        )
     if metadata.decode is not None:
-        _dense_decode(layer, max_model_len, candidate_write)
+        _dense_decode(_decode_rank_rows(layer), max_model_len, candidate_write)
+        _exchange_decode_rows(layer)
     return topk_indices_buffer
 
 
@@ -714,6 +940,9 @@ def rocm_mxfp4_sparse_mqa_indexer(
             gather_block_size=candidate_block_size,
             num_candidate_cols=num_candidate_cols,
         )
+        reserve_shardq_exchange(
+            k_cache_prefix, q_values, q_scale, weights, topk_indices_buffer
+        )
         return topk_indices_buffer
     layer = _layer(
         k_cache_prefix,
@@ -729,18 +958,23 @@ def rocm_mxfp4_sparse_mqa_indexer(
         candidate_block_size,
     )
     metadata = layer.metadata
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    _fill_topk_rows(layer, hidden_states.shape[0])
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
             if not plan.use_gather:
                 _dense_prefill(layer, chunk, plan, candidate_write=False)
         for launch in metadata.gather_launches:
             _gather_prefill(layer, launch, num_candidate_cols)
+        exchange_shardq_topk(
+            k_cache_prefix, metadata.prefill, topk_indices_buffer, topk_tokens
+        )
     if metadata.decode is not None:
+        decode = _decode_rank_rows(layer)
         # A FULL graph cannot follow the per-step gate; the gather is the side
         # that stays flat in the context length.
         if metadata.decode_use_gather or layer.full_graph:
-            _gather_decode(layer, num_candidate_cols)
+            _gather_decode(decode, num_candidate_cols)
         else:
-            _dense_decode(layer, max_model_len, candidate_write=False)
+            _dense_decode(decode, max_model_len, candidate_write=False)
+        _exchange_decode_rows(layer)
     return topk_indices_buffer

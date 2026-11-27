@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 import torch
@@ -13,9 +13,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+    restore_dispatched_scale_layout,
+)
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_switch_to_compute_sync,
@@ -67,14 +69,11 @@ def _unwrap_scale_and_prepare_for_moe(
     quant_config: FusedMoEQuantConfig,
 ) -> torch.Tensor:
     assert scales is not None and len(scales) == 1
-    a1q_scale = scales[0]
     # Apply swizzling after a2a if the MoE kernel needs it.
-    if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
-        assert a1q_scale is not None
-        if a1q_scale.element_size() == 1:
-            a1q_scale = a1q_scale.view(torch.uint8)
-        a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
-
+    a1q_scale = restore_dispatched_scale_layout(
+        scales[0], quant_config.quant_dtype, quant_config.is_scale_swizzled
+    )
+    assert a1q_scale is not None
     return a1q_scale
 
 
@@ -150,7 +149,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         return current_platform.is_rocm()
 
     @contextmanager
-    def _comm_region(self) -> Iterator[None]:
+    def _comm_region(self) -> Generator[None]:
         """Scope the dispatch/combine collective runs in.
 
         Without DBO the collective runs on the calling stream. Under DBO it
@@ -322,8 +321,10 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        a1_scale: torch.Tensor | None = None,
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
+        assert a1_scale is None, "naive DP/EP dispatch quantizes its own input"
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
             a1, quant_config, defer_input_quant
         )
@@ -345,6 +346,37 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
             a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
 
         return a1q, a1q_scale, router_logits
+
+    def supports_precomputed_routing(self) -> bool:
+        return True
+
+    def prepare_routed(
+        self,
+        a1: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        """Quantize and dispatch topk weights and ids instead of logits."""
+        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+            a1, quant_config, defer_input_quant
+        )
+        res = get_ep_group().dispatch(
+            a1q,
+            topk_weights,
+            topk_ids,
+            is_sequence_parallel=self.is_sequence_parallel,
+            extra_tensors=scales,
+        )
+        if scales is None:
+            assert len(res) == 3
+            a1q, topk_weights, topk_ids = res
+            return a1q, a1q_scale_orig, topk_weights, topk_ids
+        assert len(res) == 4
+        a1q, topk_weights, topk_ids, gathered_scales = res
+        a1q_scale = _unwrap_scale_and_prepare_for_moe(gathered_scales, quant_config)
+        return a1q, a1q_scale, topk_weights, topk_ids
 
     def finalize(
         self,

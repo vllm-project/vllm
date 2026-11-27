@@ -78,24 +78,22 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
 
 
 def test_logging_config_cli_args(serve_parser):
-    with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
-        args = serve_parser.parse_args(
-            [
-                "--logging-config",
-                '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
-                "--logging-config.formatter",
-                "json",
-                "--log-level",
-                "DEBUG",
-                "--log-config-file",
-                "/tmp/flat.json",
-            ]
-        )
+    args = serve_parser.parse_args(
+        [
+            "--logging-config",
+            (
+                '{"log_level":"WARNING","formatter":"json",'
+                '"pylogging_config_file":"/tmp/json.json"}'
+            ),
+            "--log-level",
+            "DEBUG",
+        ]
+    )
 
     config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
     assert config.log_level == "DEBUG"
     assert config.formatter == "json"
-    assert config.pylogging_config_file == "/tmp/flat.json"
+    assert config.pylogging_config_file == "/tmp/json.json"
 
 
 ### Tests for LoRA module parsing
@@ -273,7 +271,7 @@ def test_auto_tool_choice_with_reasoning_parser_passes(serve_parser):
     """Auto tool choice combined with a reasoning parser is supported.
 
     See docs/features/tool_calling.md, which documents using
-    ``--tool-call-parser`` together with ``--reasoning-parser``. This
+    `--tool-call-parser` together with `--reasoning-parser`. This
     combination must pass validation as long as a tool call parser is set.
     """
     args = serve_parser.parse_args(
@@ -336,10 +334,10 @@ def test_per_request_metrics_requires_log_stats(serve_parser):
 def _build_launch_render_parser():
     """Mirror `vllm launch render`.
 
-    `vllm/entrypoints/cli/main.py` parses subcommands with ``dest="subparser"``,
+    `vllm/entrypoints/cli/main.py` parses subcommands with `dest="subparser"`,
     and `LaunchSubcommandBase.add_cli_args` builds the component parser with
     `make_arg_parser`, so a launch component carries serve args under
-    ``args.subparser == "launch"``.
+    `args.subparser == "launch"`.
     """
     vllm_parser = FlexibleArgumentParser()
     subparsers = vllm_parser.add_subparsers(required=False, dest="subparser")
@@ -431,6 +429,22 @@ def test_middleware(serve_parser, cli_args, expected_middleware):
     assert args.middleware == expected_middleware
 
 
+def test_reasoning_effort_map_parsing(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--reasoning-effort-map", '{"medium": "low", "xhigh": "max"}']
+    )
+    validate_parsed_serve_args(args)
+    assert args.reasoning_effort_map == {"medium": "low", "xhigh": "max"}
+
+
+@pytest.mark.parametrize("value", ['{"ultra": "max"}', '{"medium": 1}', '["medium"]'])
+def test_reasoning_effort_map_rejects_invalid(serve_parser, value):
+    """Typos in the efforts being mapped fail at startup, not silently."""
+    args = serve_parser.parse_args(args=["--reasoning-effort-map", value])
+    with pytest.raises(ValueError, match="--reasoning-effort-map"):
+        validate_parsed_serve_args(args)
+
+
 def test_default_chat_template_kwargs_parsing(serve_parser):
     """Ensure default_chat_template_kwargs JSON is parsed correctly."""
     args = serve_parser.parse_args(
@@ -457,23 +471,37 @@ def test_default_chat_template_kwargs_default_none(serve_parser):
 
 
 @pytest.mark.parametrize(
-    "default_kwargs,cohere_format,expected",
+    "default_kwargs,cohere_format,tokenizer_mode,expected",
     [
-        (None, "cmd3", {"cohere_format": "cmd3"}),
+        (None, "cmd3", "cohere", {"cohere_format": "cmd3"}),
+        (None, "cmd4", "cohere", {"cohere_format": "cmd4"}),
+        (None, "cmd4", "mistral", {}),
+        (None, "cmd4", "hf", {}),
+        (None, "cmd4", "auto", {}),
+        (None, "cmd4", None, {}),
         (
             {"cohere_format": "cmd4", "custom": True},
             "cmd3",
+            "cohere",
             {"cohere_format": "cmd4", "custom": True},
         ),
+        ({"custom": True}, "cmd3", "mistral", {"custom": True}),
     ],
 )
-def test_resolve_default_chat_template_kwargs(default_kwargs, cohere_format, expected):
+def test_resolve_default_chat_template_kwargs(
+    default_kwargs, cohere_format, tokenizer_mode, expected
+):
     args = SimpleNamespace(
         default_chat_template_kwargs=default_kwargs,
         cohere_format=cohere_format,
     )
 
-    assert cli_args_module.resolve_default_chat_template_kwargs(args) == expected
+    assert (
+        cli_args_module.resolve_default_chat_template_kwargs(
+            args, tokenizer_mode=tokenizer_mode
+        )
+        == expected
+    )
 
 
 def test_default_chat_template_kwargs_invalid_json(serve_parser):

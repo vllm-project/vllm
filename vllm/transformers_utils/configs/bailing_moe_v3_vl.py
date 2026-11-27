@@ -77,7 +77,6 @@ class BailingMoeV3TextConfig(PreTrainedConfig):
         max_position_embeddings: int = 32768,
         rope_theta: float = 600000.0,
         rope_parameters: dict[str, Any] | None = None,
-        rope_scaling: dict[str, Any] | None = None,
         partial_rotary_factor: float | None = None,
         mrope_section: list[int] | tuple[int, ...] | None = None,
         use_cache: bool = True,
@@ -125,12 +124,7 @@ class BailingMoeV3TextConfig(PreTrainedConfig):
         if architectures is None:
             architectures = ["BailingMoeV3ForCausalLM"]
 
-        if rope_parameters is not None:
-            self.rope_parameters = dict(rope_parameters)
-        elif rope_scaling is not None:
-            self.rope_parameters = dict(rope_scaling)
-        else:
-            self.rope_parameters = {}
+        self.rope_parameters = dict(rope_parameters or {})
         if (
             "rope_type" not in self.rope_parameters
             and "type" not in self.rope_parameters
@@ -249,6 +243,7 @@ class BailingMoeV3VisionConfig(PreTrainedConfig):
         out_hidden_size: int = 3584,
         num_position_embeddings: int = 2304,
         deepstack_visual_indexes: list[int] | None = None,
+        disable_merger_proj: bool = False,
         initializer_range: float = 0.02,
         **kwargs: Any,
     ) -> None:
@@ -271,6 +266,10 @@ class BailingMoeV3VisionConfig(PreTrainedConfig):
             else deepstack_visual_indexes
         )
         self.initializer_range = initializer_range
+        self.disable_merger_proj = disable_merger_proj
+        if disable_merger_proj:
+            self.deepstack_visual_indexes = []
+            self.out_hidden_size = hidden_size * spatial_merge_size**2
 
 
 class BailingMoeV3VLConfig(PreTrainedConfig):
@@ -296,26 +295,17 @@ class BailingMoeV3VLConfig(PreTrainedConfig):
         **kwargs: Any,
     ) -> None:
         kwargs.pop("model_type", None)
-        if mrope_section is None:
-            mrope_section = [12, 10, 10]
-        self.mrope_section = list(mrope_section)
-
         if text_config is None:
             text_config = BailingMoeV3TextConfig()
         elif isinstance(text_config, dict):
-            text_config = dict(text_config)
-            nested_mrope_section = text_config.pop("mrope_section", None)
-            if (
-                nested_mrope_section is not None
-                and list(nested_mrope_section) != self.mrope_section
-            ):
-                raise ValueError(
-                    "Bailing V3 VL has conflicting M-RoPE sections: "
-                    f"text={nested_mrope_section}, "
-                    f"top-level={self.mrope_section}"
-                )
             text_config = BailingMoeV3TextConfig(**text_config)
         self.text_config = text_config
+
+        if mrope_section is None:
+            mrope_section = text_config.rope_parameters.get("mrope_section")
+        if mrope_section is None:
+            mrope_section = [12, 10, 10]
+        self.mrope_section = list(mrope_section)
         _normalize_mrope_parameters(self.text_config, self.mrope_section)
 
         if vision_config is None:

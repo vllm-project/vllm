@@ -3,19 +3,18 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use serde::Deserialize;
 use thiserror_ext::AsReport;
-use validator::Validate;
 
 use crate::config::LoraModulePath;
 use crate::error::ApiError;
 use crate::lora::{LoadLoraError, LoraPathAccessError, UnloadLoraError};
-use crate::routes::openai::utils::types::Normalizable;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize)]
 pub(crate) struct LoadLoraAdapterRequest {
     lora_name: String,
     lora_path: String,
@@ -25,22 +24,21 @@ pub(crate) struct LoadLoraAdapterRequest {
     is_3d_lora_weight: bool,
 }
 
-impl Normalizable for LoadLoraAdapterRequest {}
-
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize)]
 pub(crate) struct UnloadLoraAdapterRequest {
     lora_name: String,
     #[serde(default)]
     lora_int_id: Option<u64>,
 }
 
-impl Normalizable for UnloadLoraAdapterRequest {}
-
 fn load_lora_api_error(error: LoadLoraError) -> ApiError {
     let message = error.to_report_string();
     match error {
         LoadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
         LoadLoraError::InvalidAdapter { .. } => ApiError::invalid_request(message, None),
+        LoadLoraError::PathAccess(LoraPathAccessError::NotFound { .. }) => {
+            ApiError::not_found(message)
+        }
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => {
             ApiError::invalid_request(message, Some("lora_path"))
         }
@@ -66,21 +64,20 @@ fn unload_lora_api_error(error: UnloadLoraError) -> ApiError {
     let message = error.to_report_string();
     match error {
         UnloadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
-        UnloadLoraError::NotFound { lora_name } => ApiError::model_not_found(lora_name),
+        UnloadLoraError::NotFound { .. } => ApiError::not_found(message),
         UnloadLoraError::IntIdMismatch { .. } => {
             ApiError::invalid_request(message, Some("lora_int_id"))
         }
-        UnloadLoraError::Engine { .. } | UnloadLoraError::NotRemoved { .. } => {
-            ApiError::server_error(message)
-        }
+        UnloadLoraError::Engine { .. } => ApiError::server_error(message),
     }
 }
 
 /// Dynamically load one LoRA adapter and expose it as an OpenAI model id.
 pub async fn load_lora_adapter(
     State(state): State<Arc<AppState>>,
-    ValidatedJson(request): ValidatedJson<LoadLoraAdapterRequest>,
+    request: Result<Json<LoadLoraAdapterRequest>, JsonRejection>,
 ) -> Result<String, ApiError> {
+    let Json(request) = request?;
     let lora_name = request.lora_name;
     let module = LoraModulePath {
         name: lora_name.clone(),
@@ -101,8 +98,9 @@ pub async fn load_lora_adapter(
 /// Remove one LoRA adapter from the engine and frontend registry.
 pub async fn unload_lora_adapter(
     State(state): State<Arc<AppState>>,
-    ValidatedJson(request): ValidatedJson<UnloadLoraAdapterRequest>,
+    request: Result<Json<UnloadLoraAdapterRequest>, JsonRejection>,
 ) -> Result<String, ApiError> {
+    let Json(request) = request?;
     if request.lora_name.is_empty() {
         return Err(ApiError::invalid_request(
             "'lora_name' needs to be provided to unload a LoRA adapter.".to_string(),
@@ -119,4 +117,20 @@ pub async fn unload_lora_adapter(
         "Success: LoRA adapter '{}' removed successfully.",
         lora_request.lora_name
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::load_lora_api_error;
+    use crate::lora::{LoadLoraError, LoraPathAccessError};
+
+    #[test]
+    fn load_lora_reports_missing_adapter_path_as_not_found() {
+        let error = load_lora_api_error(LoadLoraError::PathAccess(LoraPathAccessError::NotFound {
+            lora_path: "/not/an/adapter".to_string(),
+        }));
+        assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+    }
 }

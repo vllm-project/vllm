@@ -13,7 +13,8 @@ use fastokens::pre_tokenized::{
 use fastokens::{PreTokenizer as FastokensPreTokenizer, Split as FastokensSplitPreTokenizer};
 use thiserror_ext::AsReport as _;
 use tokenizers::{
-    AddedVocabulary, Model as _, OffsetType, PreTokenizer as _, Tokenizer as HfTokenizer,
+    AddedVocabulary, Model as _, OffsetType, PreTokenizer as _, PreTokenizerWrapper,
+    Tokenizer as HfTokenizer,
 };
 use tracing::{info, warn};
 
@@ -34,16 +35,19 @@ enum Backend {
 }
 
 /// True if `dec` is effectively a single `ByteLevel` stage — one `ByteLevel`
-/// leaf in a tree of `Sequence`s (fastokens represents `Fuse` as an empty
-/// `Sequence`, which is a no-op for our purposes).
+/// leaf in a tree of `Sequence`s, where `Fuse` is a no-op for our purposes.
 fn is_byte_level_only(dec: &FastokensDecoder) -> bool {
-    fn count_byte_level(dec: &FastokensDecoder) -> usize {
+    fn count_byte_level(dec: &FastokensDecoder) -> Option<usize> {
         match dec {
-            FastokensDecoder::ByteLevel(_) => 1,
+            FastokensDecoder::ByteLevel(_) => Some(1),
+            FastokensDecoder::Fuse => Some(0),
             FastokensDecoder::Sequence(steps) => steps.iter().map(count_byte_level).sum(),
+            FastokensDecoder::ByteFallback(_)
+            | FastokensDecoder::Replace(_)
+            | FastokensDecoder::Strip { .. } => None,
         }
     }
-    count_byte_level(dec) == 1
+    count_byte_level(dec) == Some(1)
 }
 
 fn decode_fastokens_byte_level(
@@ -140,6 +144,37 @@ fn encode_fastokens_ordinary(
     Ok(tokenizer.post_process(ids, false))
 }
 
+/// Find the replacement character (SentencePiece's `▁`) of a Metaspace
+/// pre-tokenizer, alone or inside a `Sequence`, like Python's
+/// `get_leading_space_marker`. Decoding an isolated token strips its leading
+/// occurrence.
+fn leading_space_marker(tokenizer: &HfTokenizer) -> Option<char> {
+    let metaspace_replacement = |pre_tokenizer: &PreTokenizerWrapper| match pre_tokenizer {
+        PreTokenizerWrapper::Metaspace(metaspace) => Some(metaspace.get_replacement()),
+        _ => None,
+    };
+    match tokenizer.get_pre_tokenizer()? {
+        PreTokenizerWrapper::Sequence(sequence) => {
+            sequence.as_ref().iter().find_map(metaspace_replacement)
+        }
+        pre_tokenizer => metaspace_replacement(pre_tokenizer),
+    }
+}
+
+fn restore_leading_spaces(raw_token: &str, decoded: String, marker: char) -> String {
+    let marker_count = raw_token.chars().take_while(|&ch| ch == marker).count();
+    let existing_spaces = decoded.chars().take_while(|&ch| ch == ' ').count();
+    let missing_spaces = marker_count.saturating_sub(existing_spaces);
+    if missing_spaces == 0 {
+        return decoded;
+    }
+
+    let mut restored = String::with_capacity(decoded.len() + missing_spaces);
+    restored.push_str(&" ".repeat(missing_spaces));
+    restored.push_str(&decoded);
+    restored
+}
+
 /// Tokenizer from `tokenizer.json` in HuggingFace format.
 ///
 /// This tries to load with `fastokens` first for better performance, then falls
@@ -150,6 +185,7 @@ pub struct HuggingFaceTokenizer {
     special_token_ids: Arc<[u32]>,
     added_vocab: Box<[(String, u32)]>,
     vocab_size: usize,
+    leading_space_marker: Option<char>,
 }
 
 impl HuggingFaceTokenizer {
@@ -176,11 +212,13 @@ impl HuggingFaceTokenizer {
         };
         // HF materializes the merged vocabulary to count it, so cache the result.
         let vocab_size = tokenizer.get_vocab_size(true);
+        let leading_space_marker = leading_space_marker(&tokenizer);
         Self {
             backend: Backend::Hf(Box::new(tokenizer)),
             special_token_ids,
             added_vocab,
             vocab_size,
+            leading_space_marker,
         }
     }
 
@@ -225,6 +263,9 @@ impl HuggingFaceTokenizer {
             special_token_ids,
             added_vocab,
             vocab_size,
+            // fastokens rejects Metaspace pre-tokenizers, so those tokenizers load
+            // through the HF backend.
+            leading_space_marker: None,
         }
     }
 
@@ -232,8 +273,12 @@ impl HuggingFaceTokenizer {
     pub fn new_fastokens(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with fastokens");
         let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
-        let t = FastokensTokenizer::from_json(tokenizer_json)
-            .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
+        let mut t = FastokensTokenizer::from_json(tokenizer_json)
+            .map_err(|error| backend!("failed to load tokenizer: {}", error.as_report()))?;
+        // fastokens applies `tokenizer.json`'s truncation and padding on encode, but
+        // transformers resets both on every call, so the Python frontend never sees them.
+        t.set_truncation(None);
+        t.set_padding(None);
         Ok(Self::from_fastokens_backend(t))
     }
 
@@ -241,8 +286,12 @@ impl HuggingFaceTokenizer {
     pub fn new_hf(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with huggingface tokenizers");
         let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
-        let t = serde_json::from_value::<HfTokenizer>(tokenizer_json)
-            .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
+        let mut t = serde_json::from_value::<HfTokenizer>(tokenizer_json)
+            .map_err(|error| backend!("failed to load tokenizer: {}", error.as_report()))?;
+        // Like `new_fastokens`: the Python frontend never applies `tokenizer.json`'s
+        // truncation and padding.
+        t.with_truncation(None).expect("clearing truncation cannot fail");
+        t.with_padding(None);
         Ok(Self::from_hf_backend(t))
     }
 
@@ -268,22 +317,22 @@ impl Tokenizer for HuggingFaceTokenizer {
             Backend::Hf(t) => {
                 let encoding = t
                     .encode(text, add_special_tokens)
-                    .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report()))?;
+                    .map_err(|error| backend!("encoding failed: {}", error.as_report()))?;
                 Ok(encoding.get_ids().to_vec())
             }
             Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t
                 .encode_with_special_tokens(text, add_special_tokens)
-                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
+                .map_err(|error| backend!("encoding failed: {}", error.as_report())),
         }
     }
 
     fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
         match &self.backend {
             Backend::Hf(tokenizer) => encode_hf_ordinary(tokenizer, text)
-                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
+                .map_err(|error| backend!("encoding failed: {}", error.as_report())),
             Backend::Fastokens(tokenizer) | Backend::FastokensByteLevel(tokenizer) => {
                 encode_fastokens_ordinary(tokenizer, text)
-                    .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report()))
+                    .map_err(|error| backend!("encoding failed: {}", error.as_report()))
             }
         }
     }
@@ -292,14 +341,25 @@ impl Tokenizer for HuggingFaceTokenizer {
         match &self.backend {
             Backend::Hf(t) => t
                 .decode(token_ids, skip_special_tokens)
-                .map_err(|error| tokenizer_error!("decoding failed: {}", error.as_report())),
+                .map_err(|error| backend!("decoding failed: {}", error.as_report())),
             Backend::Fastokens(t) => t
                 .decode(token_ids, skip_special_tokens)
-                .map_err(|error| tokenizer_error!("decoding failed: {}", error.as_report())),
+                .map_err(|error| backend!("decoding failed: {}", error.as_report())),
             Backend::FastokensByteLevel(t) => {
                 decode_fastokens_byte_level(t, token_ids, skip_special_tokens)
             }
         }
+    }
+
+    fn decode_token(&self, token_id: u32) -> Result<String> {
+        let decoded = self.decode(&[token_id], false)?;
+        let Some(marker) = self.leading_space_marker else {
+            return Ok(decoded);
+        };
+        let Some(raw_token) = self.id_to_token(token_id) else {
+            return Ok(decoded);
+        };
+        Ok(restore_leading_spaces(&raw_token, decoded, marker))
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
@@ -534,16 +594,14 @@ mod tests {
                 "fused={fused}, text={text:?}",
             );
         }
-        if matches!(&tokenizer.backend, super::Backend::Hf(_)) {
-            assert_eq!(
-                tokenizer
-                    .encode_ordinary("hello <|regular|> Cafe\u{301} <|special|> tail")
-                    .unwrap()
-                    .len(),
-                24,
-                "HF post-processing must retain configured truncation",
-            );
-        }
+        assert!(
+            tokenizer
+                .encode_ordinary("hello <|regular|> Cafe\u{301} <|special|> tail")
+                .unwrap()
+                .len()
+                > 24,
+            "configured truncation must be ignored, like the Python frontend",
+        );
     }
 
     #[test]
@@ -601,6 +659,78 @@ mod tests {
             let ids = wrapper.encode(&text, false).expect("encode");
             assert!((256..=258).all(|id| ids.contains(&id)), "ids={ids:?}");
             assert_eq!(wrapper.decode(&ids, true).expect("decode"), text);
+        }
+    }
+
+    /// fastokens reuses regex matches from the previous input on the same thread
+    /// when the two share a long prefix. A whitespace match ending in the shared
+    /// prefix can still depend on the next byte (`\s+(?!\S)` before `x`, or
+    /// `\s*[\r\n]+` absorbing the spaces before `\n`), so it must not be reused.
+    #[test]
+    fn fastokens_encode_does_not_depend_on_previous_input() {
+        let mut value = ordinary_test_tokenizer_json(true, false);
+        value["truncation"] = Value::Null;
+        value["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"] =
+            json!(r"\s*[\r\n]+|\s+(?!\S)|\s+|\S+");
+        value["model"]["vocab"]["ĠĠ"] = json!(256);
+        value["model"]["merges"] = json!(["Ġ Ġ"]);
+        let dir = tempdir().expect("create temp dir");
+        let path = write_tokenizer_json(dir.path(), "tokenizer.json", &value);
+        let fastokens = HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens wrapper");
+        let hf = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+
+        let spaces = " ".repeat(5000);
+        let previous = format!("{spaces}x");
+        let text = format!("{spaces}\n");
+        let expected = hf.encode(&text, false).unwrap();
+
+        fastokens.encode(&previous, false).unwrap();
+        assert_eq!(fastokens.encode(&text, false).unwrap(), expected);
+        fastokens.encode_ordinary(&previous).unwrap();
+        assert_eq!(fastokens.encode_ordinary(&text).unwrap(), expected);
+    }
+
+    /// tencent/Hy3's byte-level vocab has no token for `\r` (ByteLevel's `č`). Hugging Face drops
+    /// it, and the bytes on either side may then merge.
+    #[test]
+    fn fastokens_matches_hf_when_a_byte_has_no_token() {
+        for fused in [false, true] {
+            let mut value = ordinary_test_tokenizer_json(fused, false);
+            let vocab = value["model"]["vocab"].as_object_mut().unwrap();
+            vocab.remove("\u{10d}").expect("ByteLevel maps `\\r` to `č`");
+            for (id, token_id) in vocab.values_mut().enumerate() {
+                *token_id = json!(id);
+            }
+            let pair = vocab.len() as u32;
+            vocab.insert("ĠĠ".to_string(), json!(pair));
+            vocab.insert("ĠĠĊ".to_string(), json!(pair + 1));
+            value["model"]["merges"] = json!(["Ġ Ġ", "ĠĠ Ċ"]);
+            let dir = tempdir().expect("create temp dir");
+            let path = write_tokenizer_json(dir.path(), "tokenizer.json", &value);
+            let fastokens =
+                HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens wrapper");
+            let hf = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+
+            if fused {
+                // `\S+|\s+` keeps "  \r\n" in one piece: HF merges across the dropped byte.
+                assert_eq!(hf.encode("  \r\n", false).unwrap(), vec![pair + 1]);
+            }
+            for text in [
+                "\r",
+                "a\rb",
+                "  \r\n",
+                "line one.\r\nline two",
+                "x  \r\n  y",
+                "é\r中",
+            ] {
+                let expected = hf.encode(text, false).unwrap();
+                assert_eq!(fastokens.encode(text, false).unwrap(), expected, "{text:?}");
+                assert_eq!(
+                    fastokens.encode_ordinary(text).unwrap(),
+                    expected,
+                    "{text:?}"
+                );
+            }
         }
     }
 

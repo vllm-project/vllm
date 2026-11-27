@@ -580,10 +580,10 @@ def segmented_attention_workspace_size(
 ):
     """Size the largest selected attention workspace before graph capture.
 
-    ``max_tokens`` bounds reachable ``(batch, query_len)`` pairs using one
+    `max_tokens` bounds reachable `(batch, query_len)` pairs using one
     longest query and one token for each remaining sequence. Omitting it keeps
     the legacy reservation behavior for callers without scheduler limits.
-    ``autotune`` reserves additional splits for tuned D64 candidates.
+    `autotune` reserves additional splits for tuned D64 candidates.
     """
     largest = 0
     previous_capacity = 0

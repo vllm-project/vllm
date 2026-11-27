@@ -43,17 +43,17 @@ async def derender_chat_completion(
 ):
     """Derender a generate response into a ChatCompletionResponse.
 
-    Accepts both non-streaming (``stream=false``, default) and streaming
-    (``stream=true``) request bodies on the same path; FastAPI validates and
-    routes on the ``stream`` discriminator.
+    Accepts both non-streaming (`stream=false`, default) and streaming
+    (`stream=true`) request bodies on the same path; FastAPI validates and
+    routes on the `stream` discriminator.
 
-    Non-streaming: body is ``DerenderChatRequest`` (``generate_response`` with
-    the complete token list). Returns a ``ChatCompletionResponse``.
+    Non-streaming: body is `DerenderChatRequest` (`generate_response` with
+    the complete token list). Returns a `ChatCompletionResponse`.
 
-    Streaming: body is ``DerenderChatStreamRequest`` (one ``generate_chunk``
-    delta + optional ``stream_state``). Returns a ``DerenderChatStreamResponse``
-    (``chunk`` + ``stream_state``). The client carries ``stream_state`` between
-    successive calls, one per SSE chunk from ``/inference/v1/generate``.
+    Streaming: body is `DerenderChatStreamRequest` (one `generate_chunk`
+    delta + optional `stream_state`). Returns a `DerenderChatStreamResponse`
+    (`chunk` + `stream_state`). The client carries `stream_state` between
+    successive calls, one per SSE chunk from `/inference/v1/generate`.
     """
     handler = derender(raw_request)
     if handler is None:
@@ -93,15 +93,15 @@ async def derender_completion(
 ):
     """Derender a generate response into a CompletionResponse.
 
-    Accepts both non-streaming (``stream=false``, default) and streaming
-    (``stream=true``) request bodies on the same path.
+    Accepts both non-streaming (`stream=false`, default) and streaming
+    (`stream=true`) request bodies on the same path.
 
-    Non-streaming: body is ``DerenderCompletionRequest``. Returns a
-    ``CompletionResponse``.
+    Non-streaming: body is `DerenderCompletionRequest`. Returns a
+    `CompletionResponse`.
 
-    Streaming: body is ``DerenderCompletionStreamRequest`` (one
-    ``generate_chunk`` + optional ``stream_state``). Returns a
-    ``DerenderCompletionStreamResponse`` (``chunk`` + ``stream_state``).
+    Streaming: body is `DerenderCompletionStreamRequest` (one
+    `generate_chunk` + optional `stream_state`). Returns a
+    `DerenderCompletionStreamResponse` (`chunk` + `stream_state`).
     """
     handler = derender(raw_request)
     if handler is None:

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import heapq
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 from typing_extensions import override
 
@@ -12,6 +13,15 @@ from vllm.v1.kv_offload.cpu.policies.base import (
     order_request_keys,
 )
 
+_HeapEntry = tuple[bool, tuple[int, int], OffloadKey]
+
+
+@dataclass(slots=True)
+class _RequestRank:
+    owner: object
+    cache_generation: int
+    rank: int
+
 
 class LRUCachePolicy(CachePolicy):
     """LRU caching policy with logical recency independent of transfer pinning.
@@ -21,6 +31,9 @@ class LRUCachePolicy(CachePolicy):
     evictable, it enters the heap with the order assigned by the request
     rather than its transfer-completion time.
 
+    Active requests share a provisional rank across batches, ordered by token
+    position so tails precede heads. Finalization commits the request's recency.
+
     A use is indicated by,
      - First time the key is added (store).
      - A request-scoped access.
@@ -29,41 +42,64 @@ class LRUCachePolicy(CachePolicy):
     def __init__(self, cache_capacity: int):
         super().__init__(cache_capacity)
         self.chunks: dict[OffloadKey, ChunkStatus] = {}
-        self._ranks: dict[OffloadKey, int] = {}
+        self._ranks: dict[OffloadKey, tuple[int, int]] = {}
         self._evictable: set[OffloadKey] = set()
-        self._heap: list[tuple[int, OffloadKey]] = []
+        self._heap: list[_HeapEntry] = []
         self._next_rank = 0
+        self._cache_generation = 0
+
+    def _get_request_rank(self, req_context: ReqContext) -> int:
+        state = req_context.get_state(_RequestRank)
+        if (
+            state is None
+            or state.owner is not self
+            or state.cache_generation != self._cache_generation
+        ):
+            self._next_rank += 1
+            state = _RequestRank(self, self._cache_generation, self._next_rank)
+            req_context.set_state(state)
+        return state.rank
 
     def _assign_new_rank(self, key: OffloadKey) -> bool:
         if key not in self.chunks:
             return False
         self._next_rank += 1
-        self._ranks[key] = self._next_rank
+        self._ranks[key] = (self._next_rank, 0)
         return key in self._evictable
 
+    def _heap_entry(self, key: OffloadKey) -> _HeapEntry:
+        return self.chunks[key].retained, self._ranks[key], key
+
     def _push_evictable(self, key: OffloadKey) -> None:
-        heapq.heappush(
-            self._heap,
-            (self._ranks[key], key),
+        heapq.heappush(self._heap, self._heap_entry(key))
+
+    def _is_current(self, entry: _HeapEntry) -> bool:
+        retained, rank, key = entry
+        return (
+            key in self._evictable
+            and self._ranks[key] == rank
+            and self.chunks[key].retained == retained
         )
 
-    def _is_current(self, entry: tuple[int, OffloadKey]) -> bool:
-        rank, key = entry
-        return key in self._evictable and self._ranks.get(key) == rank
+    def _rebuild_heap(self) -> None:
+        self._heap = [self._heap_entry(key) for key in self._evictable]
+        heapq.heapify(self._heap)
 
     def _maybe_compact_heap(self) -> None:
-        if len(self._heap) < max(64, 2 * len(self._evictable)):
-            return
-        self._heap = [(self._ranks[key], key) for key in self._evictable]
-        heapq.heapify(self._heap)
+        if len(self._heap) >= max(64, 2 * len(self._evictable)):
+            self._rebuild_heap()
 
     def _update_recency(self, keys: Iterable[OffloadKey]) -> None:
         updated_evictable = [key for key in keys if self._assign_new_rank(key)]
+        self._update_heap(updated_evictable)
+
+    def _update_heap(self, updated_evictable: Sequence[OffloadKey]) -> None:
+        if not updated_evictable:
+            return
         # Rebuilding is linear and substantially cheaper than k heap pushes
         # for a long prefix. Small updates retain the incremental path.
         if len(updated_evictable) >= max(64, len(self._evictable) // 4):
-            self._heap = [(self._ranks[key], key) for key in self._evictable]
-            heapq.heapify(self._heap)
+            self._rebuild_heap()
         else:
             for key in updated_evictable:
                 self._push_evictable(key)
@@ -74,10 +110,16 @@ class LRUCachePolicy(CachePolicy):
         return self.chunks.get(key)
 
     @override
-    def insert(self, key: OffloadKey, chunk: ChunkStatus) -> None:
+    def insert(
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+    ) -> None:
         self.chunks[key] = chunk
-        self._next_rank += 1
-        self._ranks[key] = self._next_rank
+        position = req_context.get_offload_key_position(key)
+        if position is None:
+            self._next_rank += 1
+            self._ranks[key] = (self._next_rank, 0)
+        else:
+            self._ranks[key] = (self._get_request_rank(req_context), -position)
         if chunk.ref_cnt == 0:
             self._evictable.add(key)
             self._push_evictable(key)
@@ -89,8 +131,26 @@ class LRUCachePolicy(CachePolicy):
         self._evictable.discard(key)
 
     @override
-    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        self._update_recency(reversed(list(keys)))
+    def on_request_access(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> None:
+        request_rank = self._get_request_rank(req_context)
+        updated_evictable = []
+        for key in keys:
+            position = req_context.get_offload_key_position(key)
+            if position is None or key not in self.chunks:
+                continue
+            # All batches share one request rank; later positions precede
+            # earlier ones without revisiting the already observed prefix.
+            rank = (request_rank, -position)
+            if self._ranks[key] >= rank:
+                continue
+            self._ranks[key] = rank
+            if key in self._evictable:
+                updated_evictable.append(key)
+        self._update_heap(updated_evictable)
 
     @override
     def on_request_finished(
@@ -110,6 +170,7 @@ class LRUCachePolicy(CachePolicy):
         self._evictable.clear()
         self._heap.clear()
         self._next_rank = 0
+        self._cache_generation += 1
 
     @override
     def evict(
@@ -118,16 +179,16 @@ class LRUCachePolicy(CachePolicy):
         if n == 0:
             return []
 
-        selected: list[tuple[tuple[int, OffloadKey], ChunkStatus]] = []
+        selected: list[tuple[_HeapEntry, ChunkStatus]] = []
         selected_keys: set[OffloadKey] = set()
-        deferred: list[tuple[int, OffloadKey]] = []
+        deferred: list[_HeapEntry] = []
         while self._heap and len(selected) < n:
             entry = heapq.heappop(self._heap)
             if not self._is_current(entry):
                 continue
-            key = entry[1]
-            # Re-pinning without a recency change can leave an equivalent
-            # lazy entry behind. Select each cache key at most once.
+            key = entry[2]
+            # Transfer pinning or retention changes can leave equivalent
+            # lazy entries behind. Select each cache key at most once.
             if key in selected_keys:
                 continue
             if key in protected:
@@ -150,13 +211,19 @@ class LRUCachePolicy(CachePolicy):
 
         candidates: list[tuple[OffloadKey, ChunkStatus]] = []
         for entry, chunk in selected:
-            key = entry[1]
+            key = entry[2]
             self._evictable.remove(key)
             del self.chunks[key]
             del self._ranks[key]
             candidates.append((key, chunk))
         self._maybe_compact_heap()
         return candidates
+
+    @override
+    def on_retention_changed(self, key: OffloadKey, retained: bool) -> None:
+        if key in self._evictable:
+            self._push_evictable(key)
+            self._maybe_compact_heap()
 
     @override
     def mark_evictable(self, key: OffloadKey) -> None:

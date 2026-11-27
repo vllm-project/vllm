@@ -9,6 +9,10 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
 )
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+    get_symmetric_memory_topology,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -75,6 +79,15 @@ class SymmMemCommunicator:
                 "SymmMemCommunicator: World size %d not supported, "
                 "communicator is not available.",
                 self.world_size,
+            )
+            return
+        if (
+            get_symmetric_memory_topology(self.group)
+            is SymmetricMemoryTopology.UNSUPPORTED
+        ):
+            logger.warning(
+                "SymmMemCommunicator: the multi-node group does not share an "
+                "NVLink fabric. Communicator is not available."
             )
             return
         # Use override max_size if provided, otherwise use default

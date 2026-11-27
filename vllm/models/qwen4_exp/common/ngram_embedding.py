@@ -16,7 +16,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.distributed import get_dp_group, get_etp_group, get_tp_group
+from vllm.distributed import (
+    get_dp_group,
+    get_engram_dp_group,
+    get_etp_group,
+    get_tp_group,
+)
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -48,7 +53,8 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
+from vllm.models.deepseek_v41.common.engram import DPSharedEngramStorage
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -159,6 +165,21 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
             return embeddings
         return embeddings.narrow(0, slot_offset, local_num_tokens)
 
+    def bind_file_shards(self) -> None:
+        """Bind the checkpoint files of a disk-offloaded table after loading."""
+        return None
+
+    def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Combine host-table lookup results owned by different ETP ranks."""
+        if self.tp_size == 1:
+            return embeddings
+        assert self.parallel_group is not None
+        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            # Each vocabulary row has one owner, so reduce the raw FP8 bytes.
+            reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
+            return reduced.view(embeddings.dtype)
+        return self.parallel_group.all_reduce(embeddings)
+
     @abstractmethod
     def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Start an asynchronous lookup when supported."""
@@ -173,7 +194,9 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
 class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
     """Quantization interface shared by resident and pinned PLE tables."""
 
-    # PLE post-load processing only validates scales in their current storage.
+    supports_pre_processed_weights: bool = True
+
+    # Scale validation and UVA binding both operate on the final storage.
     requires_device_loading: bool = False
 
     @staticmethod
@@ -270,7 +293,7 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         ids: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """Copy the ETP-owned rows for ``ids`` from pinned host memory."""
+        """Copy the ETP-owned rows for `ids` from pinned host memory."""
         row_bytes = layer.embedding_dim * layer.weight.element_size()
         _lookup_ple_embedding_from_pinned_kernel[(ids.numel(),)](
             layer._uva_weight,
@@ -281,6 +304,20 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             layer.shard_indices.org_vocab_end_index,
             BLOCK_D=triton.next_power_of_2(row_bytes),
         )
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Bind embedding views to the final table storage."""
+        if (
+            isinstance(layer, Qwen4ExpPLEPinnedHostEmbedding)
+            and is_weights_pre_processed()
+        ):
+            if layer.weight.numel() and not layer.weight.is_pinned():
+                raise ValueError(
+                    "A cached host PLE table must be pinned for UVA lookup."
+                )
+            layer._uva_weight = get_accelerator_view_from_cpu_tensor(layer.weight)
+        if isinstance(layer, Qwen4ExpPLEEmbedding):
+            layer.bind_file_shards()
 
     @abstractmethod
     def dequantize(
@@ -371,6 +408,7 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale == sentinel):
             raise ValueError("FP8 PLE checkpoint is missing its global scale")
+        super().process_weights_after_loading(layer)
 
     def dequantize(
         self,
@@ -397,6 +435,8 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     Rows stay packed in storage. A lookup decodes only the selected rows to
     the activation dtype, before the ETP reduction.
     """
+
+    _uva_weight_scale: torch.Tensor
 
     def create_weights(
         self,
@@ -454,6 +494,14 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         sentinel = torch.finfo(torch.float32).min
         if torch.any(layer.weight_scale_2 == sentinel):
             raise ValueError("NVFP4 PLE checkpoint is missing its global scale")
+        if (
+            isinstance(layer, Qwen4ExpPLEPinnedHostEmbedding)
+            and is_weights_pre_processed()
+        ):
+            self._uva_weight_scale = get_accelerator_view_from_cpu_tensor(
+                layer.weight_scale
+            )
+        super().process_weights_after_loading(layer)
 
     def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
         return layer.params_dtype
@@ -474,20 +522,41 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
             dtype=layer.params_dtype,
             device=input_.device,
         )
+        # Device rows are already local, so every ID in range is owned.
+        self.decode_rows(
+            layer.weight,
+            layer.weight_scale,
+            layer.weight_scale_2,
+            ids,
+            output,
+            0,
+            layer.weight.shape[0],
+        )
+        return output
+
+    @staticmethod
+    def decode_rows(
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_scale_2: torch.Tensor,
+        ids: torch.Tensor,
+        output: torch.Tensor,
+        vocab_start: int,
+        vocab_end: int,
+    ) -> None:
+        """Decode the rows of `ids` in `[vocab_start, vocab_end)` into `output`."""
         if ids.numel():
-            # Device rows are already local, so every ID in range is owned.
             _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
-                layer.weight,
-                layer.weight_scale.view(torch.uint8),
-                layer.weight_scale_2,
+                weight,
+                weight_scale.view(torch.uint8),
+                weight_scale_2,
                 ids,
                 output,
-                layer.embedding_dim,
-                0,
-                layer.weight.shape[0],
-                BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
+                output.shape[-1],
+                vocab_start,
+                vocab_end,
+                BLOCK_D=triton.next_power_of_2(output.shape[-1]),
             )
-        return output
 
     def lookup_from_pinned(
         self,
@@ -495,16 +564,14 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         ids: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
+        self.decode_rows(
             layer._uva_weight,
-            self._uva_weight_scale.view(torch.uint8),
+            self._uva_weight_scale,
             layer.weight_scale_2,
             ids,
             output,
-            layer.embedding_dim,
             layer.shard_indices.org_vocab_start_index,
             layer.shard_indices.org_vocab_end_index,
-            BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
         )
 
     def dequantize(
@@ -656,7 +723,8 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             data_parallel_rank=data_parallel_rank,
             reduce_results=reduce_results,
         )
-        self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
+        if not self.weight.is_meta:
+            self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetch_buffer: torch.Tensor | None = None
         self._prefetch_alloc_lock = threading.Lock()
@@ -670,7 +738,11 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         embedding_dim: int,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Allocate the complete PLE weight directly in pinned CPU memory."""
+        """Allocate pinned host storage, or meta storage during IPC construction."""
+        if torch.get_default_device().type == "meta":
+            return torch.empty(
+                num_embeddings, embedding_dim, dtype=dtype, device="meta"
+            )
         return torch.empty(
             num_embeddings,
             embedding_dim,
@@ -723,17 +795,6 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             ngram_ids.shape[0],
             slot_offset,
         )
-
-    def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Combine pinned lookup results owned by different ETP ranks."""
-        if self.tp_size == 1:
-            return embeddings
-        assert self.parallel_group is not None
-        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            # Each vocabulary row has one owner, so reduce the raw FP8 bytes.
-            reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
-            return reduced.view(embeddings.dtype)
-        return self.parallel_group.all_reduce(embeddings)
 
     @eager_break_during_capture
     def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
@@ -820,3 +881,56 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             "Pinned-host PLE embedding requires "
             "start_prefetch() and finalize_prefetch()."
         )
+
+
+class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
+    """Pinned-host PLE tables mapped once per node for co-located DP replicas.
+
+    With `EngramConfig.dp_shared_memory`, the node-local Engram DP group maps
+    each table from one /dev/shm file (as DeepSeek V4.1's Engram does), so
+    lookups are the pinned backend's; only the group leader loads it. A table
+    that cannot be shared stays per rank.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        group = get_engram_dp_group()
+        assert group is not None, "dp_shared_memory requires the Engram DP group"
+        self._shared_group = group
+        self._shared_ptrs: set[int] = set()
+        super().__init__(*args, **kwargs)
+
+    def allocate_embedding_weight(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        num_bytes = num_embeddings * embedding_dim * dtype.itemsize
+        try:
+            table, _ = DPSharedEngramStorage.share_shm_table(
+                num_bytes, self._shared_group
+            )
+        except RuntimeError as exc:
+            # Raised on every rank of the group, so all of them fall back.
+            logger.warning_once("Keeping one PLE table per DP replica: %s", exc)
+            return super().allocate_embedding_weight(
+                num_embeddings, embedding_dim, dtype
+            )
+        weight = table.view(dtype).view(num_embeddings, embedding_dim)
+        self._shared_ptrs.add(weight.data_ptr())
+        return weight
+
+    def weight_loader(
+        self,
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        checkpoint_start: int | None = None,
+    ) -> None:
+        if param.data_ptr() not in self._shared_ptrs:
+            super().weight_loader(param, loaded_weight, checkpoint_start)
+            return
+        if self._shared_group.rank_in_group == 0:
+            super().weight_loader(param, loaded_weight, checkpoint_start)
+        # Read order may differ across ranks. Equal load counts ensure all shared
+        # tables are ready after the last weight-loader call returns.
+        torch.distributed.barrier(group=self._shared_group.cpu_group)

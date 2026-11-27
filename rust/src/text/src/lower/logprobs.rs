@@ -51,8 +51,55 @@ pub enum LogprobsError {
          rows (prompt_len - 1 - prompt_logprob_start)."
     )]
     PromptLogprobRowsMismatch { rows: usize, expected: usize },
-    #[error("prompt_logprob_start requires prompt_logprob_token_ids.")]
-    PromptLogprobStartWithoutTokenIds,
+    #[error("prompt_logprob_start requires prompt_logprobs or prompt_logprob_token_ids.")]
+    PromptLogprobStartWithoutPromptLogprobs,
+    #[error(
+        "prompt_logprob_start must be less than prompt_len - 1 ({max}) so at least \
+         one prompt row is scored."
+    )]
+    PromptLogprobStartOutOfRange { max: u32 },
+}
+
+impl LogprobsError {
+    /// The canonical request parameter name for this validation error.
+    pub fn param(&self) -> &'static str {
+        match self {
+            Self::InvalidCount { parameter, .. } | Self::TooManyCount { parameter, .. } => {
+                parameter
+            }
+            Self::TooManyTokenIds { .. } | Self::TokenIdsMismatch { .. } => "logprob_token_ids",
+            Self::EmptyPromptLogprobTokenIds
+            | Self::PromptLogprobTokenIdsOutOfVocab { .. }
+            | Self::PromptLogprobRowsMismatch { .. } => "prompt_logprob_token_ids",
+            Self::PromptLogprobStartWithoutPromptLogprobs
+            | Self::PromptLogprobStartOutOfRange { .. } => "prompt_logprob_start",
+        }
+    }
+}
+
+/// Validate logprobs parameters that do not depend on model limits or prompt
+/// length.
+pub(crate) fn validate_explicit_logprobs(
+    logprobs: Option<i32>,
+    prompt_logprobs: Option<i32>,
+    logprob_token_ids: Option<&[u32]>,
+    prompt_logprob_token_ids: Option<&[Vec<i32>]>,
+    prompt_logprob_start: Option<u32>,
+) -> Result<(), LogprobsError> {
+    if let Some(value) = logprobs {
+        validate_logprobs_count_sign(value, "logprobs")?;
+    }
+    if let Some(value) = prompt_logprobs {
+        validate_logprobs_count_sign(value, "prompt_logprobs")?;
+    }
+    if prompt_logprob_start.is_some()
+        && prompt_logprobs.is_none()
+        && prompt_logprob_token_ids.is_none()
+    {
+        return Err(LogprobsError::PromptLogprobStartWithoutPromptLogprobs);
+    }
+    validate_prompt_logprob_token_ids(prompt_logprob_token_ids)?;
+    validate_logprob_token_ids(logprobs, logprob_token_ids)
 }
 
 /// Validate logprobs count sampling parameters.
@@ -76,19 +123,34 @@ pub(super) fn validate_logprobs(
         vocab_size,
         "prompt_logprob_token_ids",
     )?;
-    validate_prompt_logprob_token_ids(prompt_logprob_token_ids, prompt_logprob_start)?;
-    validate_logprob_token_ids(logprobs, logprob_token_ids)
+    validate_explicit_logprobs(
+        logprobs,
+        prompt_logprobs,
+        logprob_token_ids,
+        prompt_logprob_token_ids,
+        prompt_logprob_start,
+    )
 }
 
-fn validate_prompt_logprob_token_ids(
-    rows: Option<&[Vec<i32>]>,
-    start: Option<u32>,
-) -> Result<(), LogprobsError> {
+fn validate_prompt_logprob_token_ids(rows: Option<&[Vec<i32>]>) -> Result<(), LogprobsError> {
     match rows {
         Some(rows) if rows.iter().all(Vec::is_empty) => {
             Err(LogprobsError::EmptyPromptLogprobTokenIds)
         }
-        None if start.is_some() => Err(LogprobsError::PromptLogprobStartWithoutTokenIds),
+        _ => Ok(()),
+    }
+}
+
+/// Like Python, a nonzero start must leave at least one prompt row to score.
+pub(super) fn validate_prompt_logprob_start(
+    start: Option<u32>,
+    prompt_len: u32,
+) -> Result<(), LogprobsError> {
+    let max = prompt_len.saturating_sub(1);
+    match start {
+        Some(start) if start > 0 && start >= max => {
+            Err(LogprobsError::PromptLogprobStartOutOfRange { max })
+        }
         _ => Ok(()),
     }
 }
@@ -174,14 +236,22 @@ pub(super) fn validate_logprob_token_ids(
     Ok(())
 }
 
+fn validate_logprobs_count_sign(value: i32, parameter: &'static str) -> Result<(), LogprobsError> {
+    if value < 0 && value != -1 {
+        return Err(LogprobsError::InvalidCount { parameter, value });
+    }
+    Ok(())
+}
+
 fn normalize_logprobs_count(
     value: i32,
     vocab_size: usize,
     parameter: &'static str,
 ) -> Result<usize, LogprobsError> {
-    match value {
-        -1 => Ok(vocab_size),
-        value if value < 0 => Err(LogprobsError::InvalidCount { parameter, value }),
-        value => Ok(value as usize),
-    }
+    validate_logprobs_count_sign(value, parameter)?;
+    Ok(if value == -1 {
+        vocab_size
+    } else {
+        value as usize
+    })
 }

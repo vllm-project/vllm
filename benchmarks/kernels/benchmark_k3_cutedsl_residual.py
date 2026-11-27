@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the Kimi-K3 latent MoE addmm against CuTe residual GEMM.
 
-The benchmark covers ``BF16[M, 3584] @ BF16[7168, 3584].T + BF16[M, 7168]``
+The benchmark covers `BF16[M, 3584] @ BF16[7168, 3584].T + BF16[M, 7168]`
 with FP32 accumulation and BF16 output. Both backends execute through CUDA
 Graph replay. Weights and residuals rotate across buffers exceeding L2 so the
 comparison models the full latent MoE projection-and-add path.

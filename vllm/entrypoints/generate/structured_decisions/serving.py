@@ -73,6 +73,15 @@ class ServingStructuredDecisions(BaseServingDecisions):
     ) -> StructuredDecisionResponse | ErrorResponse:
         if (error := await self._check_model(request)) is not None:  # type: ignore[arg-type]
             return error
+        renderer = self.strategy.context.online_renderer
+        if (
+            error := renderer.validate_chat_template(
+                request_chat_template=None,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=renderer.trust_request_chat_template,
+            )
+        ) is not None:
+            return error
         engine_client = self.strategy.context.engine_client
         if engine_client.errored:
             raise engine_client.dead_error

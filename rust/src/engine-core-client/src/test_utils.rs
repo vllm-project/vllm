@@ -2,9 +2,16 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::future::Future;
+#[cfg(test)]
+use std::io::{Read as _, Write as _};
+#[cfg(test)]
+use std::net::TcpStream;
 use std::path::Path;
 use std::pin::Pin;
+#[cfg(test)]
+use std::time::Duration;
 
+use bytes::Bytes;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use zeromq::{DealerSocket, PushSocket};
@@ -13,9 +20,80 @@ use crate::EngineId;
 pub use crate::mock_engine::{MockCoordinatorSockets, MockEngineSockets};
 use crate::mock_engine::{
     MockEngineConfig, MockEngineDataSockets, connect_to_bootstrapped_frontend, connect_to_frontend,
-    default_ready_response,
+    connect_to_hybrid_frontends, default_ready_response,
 };
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
+use crate::protocol::request::EngineCoreRequest;
+
+#[cfg(test)]
+fn zmtp_greeting() -> [u8; 64] {
+    let mut greeting = [0_u8; 64];
+    greeting[0] = 0xff;
+    greeting[9] = 0x7f;
+    greeting[10] = 3;
+    greeting[12..16].copy_from_slice(b"NULL");
+    greeting
+}
+
+#[cfg(test)]
+fn zmtp_ready(socket_type: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"\x05READY\x0bSocket-Type");
+    body.extend_from_slice(&(socket_type.len() as u32).to_be_bytes());
+    body.extend_from_slice(socket_type);
+
+    let mut frame = vec![0x04, body.len() as u8];
+    frame.extend_from_slice(&body);
+    frame
+}
+
+#[cfg(test)]
+pub(crate) fn read_zmtp_frame(stream: &mut TcpStream) -> Vec<u8> {
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header).unwrap();
+    let length = if header[0] & 0x02 == 0 {
+        header[1] as usize
+    } else {
+        let mut length = [0_u8; 8];
+        length[0] = header[1];
+        stream.read_exact(&mut length[1..]).unwrap();
+        u64::from_be_bytes(length) as usize
+    };
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).unwrap();
+    body
+}
+
+#[cfg(test)]
+pub(crate) fn zmtp_handshake(stream: &mut TcpStream, socket_type: &[u8]) {
+    let timeout = Some(Duration::from_secs(5));
+    stream.set_read_timeout(timeout).unwrap();
+    stream.set_write_timeout(timeout).unwrap();
+    stream.write_all(&zmtp_greeting()).unwrap();
+    let mut peer_greeting = [0_u8; 64];
+    stream.read_exact(&mut peer_greeting).unwrap();
+    stream.write_all(&zmtp_ready(socket_type)).unwrap();
+    read_zmtp_frame(stream);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_zmtp_stream(stream: TcpStream) {
+    socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO)).unwrap();
+    drop(stream);
+}
+
+/// Decode the `[request type, payload, aux frames...]` of an add request,
+/// resolving the arrays sent in auxiliary frames.
+pub fn decode_add_request(frames: &[Bytes]) -> EngineCoreRequest {
+    EngineCoreRequest::from_frames(&frames[1..]).expect("decode add request")
+}
+
+/// The prompt token ids of a request, which must be inline or resolved by
+/// [`decode_add_request`].
+pub fn decode_prompt_token_ids(request: &EngineCoreRequest) -> Option<Vec<u32>> {
+    let ids = request.prompt_token_ids.as_ref()?;
+    Some(ids.to_u32_vec().expect("prompt token ids are inline 32-bit integers"))
+}
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
 ///
@@ -83,6 +161,23 @@ pub async fn setup_mock_engine_sockets(
     connect_to_frontend(engine_handshake, engine_id, test_mock_engine_config())
         .await
         .expect("connect mock engine")
+}
+
+/// Join a rank-0 frontend and the engine's own frontend like an engine on a
+/// node in hybrid or external DP LB.
+pub async fn setup_hybrid_mock_engine_sockets(
+    head_handshake: String,
+    client_handshake: String,
+    engine_id: impl Into<EngineId>,
+) -> MockEngineSockets {
+    connect_to_hybrid_frontends(
+        head_handshake,
+        client_handshake,
+        engine_id,
+        test_mock_engine_config(),
+    )
+    .await
+    .expect("connect hybrid mock engine")
 }
 
 /// Connect one mock engine directly to already-bootstrapped frontend

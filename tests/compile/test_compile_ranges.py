@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import pytest
 import torch
 from torch import fx as fx
 from torch import nn
@@ -22,9 +23,21 @@ from vllm.config.compilation import CompilationConfig, CompilationMode
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import Range
 from vllm.forward_context import set_forward_context
+from vllm.platforms import current_platform
 
 BATCH_SIZE = 64
 MLP_SIZE = 128
+
+DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.fixture(autouse=True, scope="module")
+def reset_default_device():
+    """Tests here set the default device and leave it set, as they always
+    have, so later tests in this file run on it. Reset it when the file ends,
+    so other files run in the same pytest start from the default device."""
+    yield
+    torch.set_default_device(None)
 
 
 @support_torch_compile
@@ -77,7 +90,7 @@ def test_compile_ranges(disable_vllm_compile_cache):
             Range(start=33, end=8192),
         ]
     )
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
@@ -127,6 +140,26 @@ def test_compile_config_get_compile_ranges():
     ]
 
 
+def test_compile_ranges_idempotent():
+    compilation_config = CompilationConfig(
+        compile_ranges_endpoints=[32, 8],
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=compilation_config,
+    )
+
+    compilation_config.pass_config.fuse_rope_kvcache = True
+    vllm_config._set_compile_ranges()
+    vllm_config._set_compile_ranges()
+
+    assert compilation_config.compile_ranges_endpoints == [8, 32, 256, 8192]
+
+
 class PostGradStaticShapeChecker(InductorPass):
     """Asserts that compile_sizes entries produce graphs with fully concrete
     (non-symbolic) shapes, and compile_ranges entries have symbolic shapes."""
@@ -172,7 +205,7 @@ def test_compile_sizes_produce_static_shapes(disable_vllm_compile_cache):
     """Verify that compile_sizes entries are compiled with fully concrete
     shapes (no SymInts), while compile_ranges entries retain dynamic shapes."""
     checker = PostGradStaticShapeChecker()
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
@@ -223,7 +256,7 @@ def test_inductor_cache_compile_ranges(disable_vllm_compile_cache):
         max_model_len=8192,
         is_encoder_decoder=False,
     )
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
 
     def create_vllm_config():
         return VllmConfig(

@@ -4,12 +4,12 @@ import copy
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.kv_transfer import KVTransferConfig
+from vllm.config.kv_transfer import KVCacheAccess, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_K = TypeVar("_K")
+
 
 @dataclass
 class MultiKVConnectorMetadata(KVConnectorMetadata):
@@ -69,6 +71,13 @@ class MultiKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 metadata_list.append(metadata1.aggregate(metadata2))
 
         return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
+
+
+@dataclass
+class MultiKVConnectorHandshakeMetadata(KVConnectorHandshakeMetadata):
+    """One worker's handshake metadata, an entry per sub-connector."""
+
+    metadata: tuple[KVConnectorHandshakeMetadata | None, ...]
 
 
 @dataclass
@@ -216,6 +225,36 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        )
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            connector_cls = KVConnectorFactory.get_connector_class(child_config)
+            if not connector_cls.supports_lookahead_block_hashes(child_config):
+                return False
+        return True
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
+        access = KVCacheAccess.IN_PROCESS
+        for conn_config in kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        ):
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            access |= KVConnectorFactory.kv_cache_access(child_config)
+        return access
+
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
@@ -228,6 +267,30 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         ]
         return bool(children) and all(
             KVConnectorFactory.get_connector_class(c).supports_sleep_mode(c)
+            for c in children
+        )
+
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).only_restores_canonical_kv(c)
+            for c in children
+        )
+
+    @classmethod
+    def requests_sliding_window_replay(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).requests_sliding_window_replay(c)
             for c in children
         )
 
@@ -344,6 +407,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def reset_capture_state(self) -> None:
         for c in self._connectors:
             c.reset_capture_state()
+
+    def on_kv_cache_ready(self) -> None:
+        for c in self._connectors:
+            c.on_kv_cache_ready()
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         for c in self._connectors:
@@ -497,6 +564,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.on_new_request(request)
 
+    def may_load_async(self, request: "Request") -> bool:
+        return any(c.may_load_async(request) for c in self._connectors)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> MultiKVConnectorMetadata:
@@ -532,29 +602,45 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output.kv_connector_worker_meta = multi_connector_worker_meta
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        """Get the KVConnector handshake metadata from sub-connectors.
-        Returns the first non-None metadata from sub-connectors.
+        """Collect every sub-connector's handshake metadata, so that the
+        scheduler side can give each one only its own."""
+        metadata = tuple(c.get_handshake_metadata() for c in self._connectors)
+        if all(m is None for m in metadata):
+            return None
+        return MultiKVConnectorHandshakeMetadata(metadata=metadata)
+
+    def _sub_connector_handshake_metadata(
+        self, metadata: dict[_K, KVConnectorHandshakeMetadata], index: int
+    ) -> dict[_K, KVConnectorHandshakeMetadata]:
+        """Return the entries of `metadata` that sub-connector `index` reported.
+
+        If a subclass overrides `get_handshake_metadata` to report a single
+        sub-connector's metadata (e.g. Dynamo's `PdConnector`), every
+        sub-connector receives `metadata` unchanged.
         """
-        for c in self._connectors:
-            metadata = c.get_handshake_metadata()
-            if metadata is not None:
+        selected: dict[_K, KVConnectorHandshakeMetadata] = {}
+        for key, multi_metadata in metadata.items():
+            if not isinstance(multi_metadata, MultiKVConnectorHandshakeMetadata):
                 return metadata
-        return None
+            if (sub_metadata := multi_metadata.metadata[index]) is not None:
+                selected[key] = sub_metadata
+        return selected
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
     ) -> None:
-        """Set the KV connector handshake metadata for all sub-connectors.
-        This is needed to start the NIXL listener thread for NixlConnector.
-        """
-        for c in self._connectors:
-            c.set_xfer_handshake_metadata(metadata)
+        for i, c in enumerate(self._connectors):
+            c.set_xfer_handshake_metadata(
+                self._sub_connector_handshake_metadata(metadata, i)
+            )
 
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        for c in self._connectors:
-            c.set_xfer_handshake_metadata_pp_aware(metadata)
+        for i, c in enumerate(self._connectors):
+            c.set_xfer_handshake_metadata_pp_aware(
+                self._sub_connector_handshake_metadata(metadata, i)
+            )
 
     def _aggregate_request_finished(
         self,

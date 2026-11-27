@@ -7,21 +7,27 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import builtins
+import importlib
 import importlib.util
+import math
 import pickle
 import runpy
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
+from functools import cached_property
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pybase64 as base64
 import pytest
 import ray
+import safetensors.torch
 import torch
+from huggingface_hub import save_torch_state_dict
 from torch.multiprocessing.reductions import reduce_tensor
 
+from vllm.config.load import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
@@ -29,18 +35,19 @@ from vllm.distributed.weight_transfer import (
     ModuleSource,
     ParamMeta,
     RayVLLMWeightSyncClient,
+    Shard,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
     WeightTransferEngineFactory,
     WeightTransferTrainerFactory,
+    sparse_disk_engine,
 )
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
     WeightTransferEngine,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
-    layerwise_groups,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
@@ -48,6 +55,10 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferEngine,
     IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
+)
+from vllm.distributed.weight_transfer.nccl_common import (
+    run_trainer_rendezvous,
+    uid_init_process_group,
 )
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerInitInfo,
@@ -59,6 +70,12 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+)
+from vllm.distributed.weight_transfer.sparse_disk_engine import (
+    SparseDiskTrainerInitInfo,
+    SparseDiskWeightTransferEngine,
+    patch_file,
+    save_sparse_patches,
 )
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLTrainerInitInfo,
@@ -175,6 +192,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
             dtype_names=["float32", "bfloat16"],
             shapes=[[10, 10], [10]],
             num_updates_list=[4, 2],
+            wire_batch_bytes=1024,
         )
         assert info.num_updates_list == [4, 2]
 
@@ -185,6 +203,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32"],
                 shapes=[[10, 10], [10]],
                 num_updates_list=[4, 2],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_empty_num_updates_list(self):
@@ -194,6 +213,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=[],
                 shapes=[],
                 num_updates_list=[],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_mismatched_num_updates(self):
@@ -203,6 +223,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32", "float32"],
                 shapes=[[10, 10], [10]],
                 num_updates_list=[3],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_negative_num_updates(self):
@@ -212,6 +233,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32"],
                 shapes=[[10, 10]],
                 num_updates_list=[-1],
+                wire_batch_bytes=1024,
             )
 
 
@@ -279,12 +301,248 @@ class TestNCCLEngineParsing:
                 "names": ["w1", "w2"],
                 "dtype_names": ["float32", "bfloat16"],
                 "shapes": [[100, 100], [50]],
+                "src": 1,
             }
         )
         assert isinstance(update_info, NCCLWeightTransferUpdateInfo)
         assert update_info.names == ["w1", "w2"]
         assert update_info.dtype_names == ["float32", "bfloat16"]
         assert update_info.shapes == [[100, 100], [50]]
+        assert update_info.src == 1
+
+    def _planning_engine(self, monkeypatch, plan_loads):
+        """An engine initialised with `use_load_plan`, and the log of its
+        `start_reload` and `plan_loads` calls."""
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+        import vllm.model_executor.model_loader.reload as reload_mod
+
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+        monkeypatch.setattr(
+            nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
+        )
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            reload_mod, "start_reload", lambda model: calls.append(("start", model))
+        )
+
+        def logged_plan_loads(model, metas):
+            calls.append(("plan", model, list(metas)))
+            return plan_loads(model, metas)
+
+        monkeypatch.setattr(reload_mod, "plan_loads", logged_plan_loads)
+        engine = self._make_engine()
+        engine.model._ckpt_param_names = frozenset()  # as a direct cold start records
+        engine.init_transfer_engine(
+            NCCLWeightTransferInitInfo(
+                master_address="127.0.0.1",
+                master_port=12345,
+                rank_offset=1,
+                world_size=2,
+                use_load_plan=True,
+                metadata=[("w", "float32", [4])],
+            )
+        )
+        return engine, calls
+
+    def test_use_load_plan_plans_at_the_first_target_update(self, monkeypatch):
+        """Not at init: after `start_reload`, once, and not for a draft."""
+        engine, calls = self._planning_engine(monkeypatch, lambda m, metas: "plan")
+        assert calls == []
+        target, draft = engine.model, MagicMock(spec=torch.nn.Module)
+        engine.set_weight_update_target(draft, None)
+        engine.start_weight_update()
+        engine.reset_weight_update_target()
+        assert calls == [("start", draft)]
+        for _ in range(2):
+            engine.start_weight_update()
+        assert calls[1:] == [
+            ("start", target),
+            ("plan", target, [ParamMeta("w", torch.float32, (4,))]),
+            ("start", target),
+        ]
+        assert engine._plan == "plan"
+
+    def test_use_load_plan_failure_falls_back_to_load_weights(self, monkeypatch):
+        """A plan failure at the first update raises with a note; later
+        updates skip planning (load_weights repairs the model)."""
+
+        def plan_loads(model, metas):
+            raise RuntimeError("load plan: lonely names")
+
+        engine, calls = self._planning_engine(monkeypatch, plan_loads)
+        with pytest.raises(RuntimeError, match="lonely names") as exc:
+            engine.start_weight_update()
+        assert any("mid-reload" in note for note in exc.value.__notes__)
+        engine.start_weight_update()  # plans no more
+        assert [c[0] for c in calls] == ["start", "plan", "start"]
+        assert engine._plan is None
+
+    @pytest.mark.parametrize("refusal", ["layerwise", "eplb"])
+    def test_use_load_plan_refusal_at_init_leaves_the_model(self, monkeypatch, refusal):
+        """A configuration no plan supports is refused at init, after the
+        group forms (then destroyed) and before any `start_reload` changes the
+        model."""
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+        from vllm.model_executor.model_loader.reload.direct import (
+            record_checkpoint_layout,
+        )
+
+        monkeypatch.setenv(
+            "VLLM_RELOAD_MODE", "layerwise" if refusal == "layerwise" else "direct"
+        )
+        group = MagicMock()
+        monkeypatch.setattr(
+            nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
+        )
+        model = _module_with(("w", torch.arange(6.0).view(2, 3)))
+        if refusal == "eplb":  # a layerwise cold start records no layout
+            record_checkpoint_layout(model)
+        model.w.data = model.w.data.t()  # post-load processing re-laid it out
+        if refusal == "eplb":
+            parallel = SimpleNamespace(enable_eplb=True)
+            model.moe_config = SimpleNamespace(moe_parallel_config=parallel)
+        engine = NCCLWeightTransferEngine(
+            WeightTransferConfig(backend="nccl"),
+            create_mock_vllm_config(),
+            torch.device("cpu"),
+            model,
+        )
+        match = "reloads layerwise" if refusal == "layerwise" else "EPLB"
+        with pytest.raises(RuntimeError, match=match):
+            engine.init_transfer_engine(
+                NCCLWeightTransferInitInfo(
+                    master_address="127.0.0.1",
+                    master_port=12345,
+                    rank_offset=1,
+                    world_size=2,
+                    use_load_plan=True,
+                    metadata=[("w", "float32", [2, 3])],
+                )
+            )
+        group.destroy.assert_called_once()
+        assert engine.model_update_group is None
+        assert model.w.device.type == "cpu"  # not moved to meta (layerwise)
+        assert model.w.shape == (3, 2)  # not viewed back (direct)
+        assert not hasattr(model, "_direct_reload_begun")
+
+    @pytest.mark.parametrize("draft", [False, True])
+    def test_use_load_plan_worker_backstop(self, monkeypatch, draft):
+        """`receive_weights` checks a target update against the init
+        metadata; a draft update is not checked (it uses load_weights)."""
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+        engine = self._make_engine()
+        engine.model_update_group = MagicMock()
+        engine._plan = MagicMock()
+        engine._plan_manifest = nccl_engine_mod._manifest(
+            [ParamMeta("w", torch.float32, (4,))]
+        )
+        consumed = []
+        monkeypatch.setattr(
+            nccl_engine_mod,
+            "packed_nccl_broadcast_consumer",
+            lambda **kw: consumed.append(list(kw["iterator"])),
+        )
+        engine.packed = True
+        if draft:
+            engine.set_weight_update_target(MagicMock(), None)
+        update = NCCLWeightTransferUpdateInfo(
+            names=["w"], dtype_names=["float32"], shapes=[[8]]
+        )
+        if draft:
+            engine.receive_weights(update)
+            assert consumed == [[("w", ([8], torch.float32))]]
+        else:
+            with pytest.raises(ValueError, match="declared at init as"):
+                engine.receive_weights(update)
+            assert consumed == []
+
+
+@pytest.mark.parametrize("backend", ["nccl", "sparse_nccl"])
+def test_use_load_plan_refused_after_the_group_forms(monkeypatch, backend):
+    """The dense backend without metadata, and the sparse backend, refuse
+    `use_load_plan` after the group forms, so the error reaches the trainer,
+    and destroy the group."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+    import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
+
+    sparse = backend == "sparse_nccl"
+    group = MagicMock()
+    monkeypatch.setattr(
+        sparse_mod if sparse else nccl_engine_mod,
+        "worker_init_process_group",
+        lambda info, pc: group,
+    )
+    cls = SparseNCCLWeightTransferEngine if sparse else NCCLWeightTransferEngine
+    engine = cls(
+        WeightTransferConfig(backend=backend),
+        create_mock_vllm_config(),
+        torch.device("cuda"),
+        MagicMock(spec=torch.nn.Module),
+    )
+    init_info = NCCLWeightTransferInitInfo(
+        master_address="127.0.0.1",
+        master_port=12345,
+        rank_offset=1,
+        world_size=2,
+        use_load_plan=True,
+    )
+    match = "dense NCCL backend" if sparse else "metadata"
+    with pytest.raises(ValueError, match=match):
+        engine.init_transfer_engine(init_info)
+    group.destroy.assert_called_once()
+    assert engine.model_update_group is None
+
+
+def test_nccl_update_must_match_the_load_plan_manifest():
+    from vllm.distributed.weight_transfer.nccl_engine import (
+        _check_manifest,
+        _manifest,
+    )
+
+    manifest = _manifest(
+        [ParamMeta("w", torch.float32, (4,)), ParamMeta("v", torch.float32, (4,))]
+    )
+    _check_manifest(manifest, [("w", torch.float32, [4])])  # a subset
+    for sent in (
+        ("x", torch.float32, [4]),
+        ("w", torch.bfloat16, [4]),
+        ("w", torch.float32, [8]),
+    ):
+        problem = "not declared" if sent[0] == "x" else "declared at init as"
+        with pytest.raises(ValueError, match=f"{sent[0]!r}.*{problem}.*re-init"):
+            _check_manifest(manifest, [sent])
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_nccl_trainer_refuses_an_update_off_the_load_plan(monkeypatch, rank):
+    """With `use_load_plan` every trainer rank (the sender, and rank 1 that
+    is outside the transfer group) checks each update against the metadata
+    sent at init, before any RPC, broadcast or gather."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    monkeypatch.setattr(
+        nccl_engine_mod, "open_trainer_endpoint", lambda info, rank: object()
+    )
+    module = _module_with(("w", torch.zeros(4)), ("v", torch.zeros(2)))
+    source = ModuleSource(module)
+    client = RecordingClient()
+    engine = NCCLTrainerWeightTransferEngine.trainer_init(
+        NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=2,
+            rank=rank,
+            use_load_plan=True,
+        ),
+        client=client,
+        source=source,
+    )
+    module.w = torch.nn.Parameter(torch.zeros(8), requires_grad=False)
+    del source.metadata  # cached on first read
+    with pytest.raises(ValueError, match="'w'.*declared at init as"):
+        engine.send_weights()
+    assert client.order == (["init"] if rank == 0 else [])
 
 
 # --- Unit Tests: Engine Registry ---
@@ -353,6 +611,55 @@ class TestEngineRegistry:
         )
         assert engine is module.ModelExpressWeightTransferEngine.return_value
 
+    def test_connex_registration_is_native_and_lazy(self, monkeypatch):
+        from vllm.distributed.weight_transfer import factory
+
+        imported = []
+        module = MagicMock()
+        module.ConnexWeightTransferEngine.__name__ = "ConnexWeightTransferEngine"
+
+        def import_module(name):
+            imported.append(name)
+            return module
+
+        monkeypatch.setattr(factory.importlib, "import_module", import_module)
+        config = WeightTransferConfig(backend="connex")
+        vllm_config = create_mock_vllm_config()
+        device = torch.device("cpu")
+        model = MagicMock(spec=torch.nn.Module)
+
+        assert imported == []
+        engine = WeightTransferEngineFactory.create_engine(
+            config, vllm_config, device, model
+        )
+
+        assert imported == ["vllm.distributed.weight_transfer.connex_engine"]
+        module.ConnexWeightTransferEngine.assert_called_once_with(
+            config, vllm_config, device, model
+        )
+        assert engine is module.ConnexWeightTransferEngine.return_value
+
+    def test_connex_missing_package_raises_install_hint(self, monkeypatch):
+        import sys
+
+        for name in [
+            m for m in sys.modules if m == "connex" or m.startswith("connex.")
+        ]:
+            monkeypatch.delitem(sys.modules, name)
+        monkeypatch.delitem(
+            sys.modules, "vllm.distributed.weight_transfer.connex_engine", raising=False
+        )
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "connex" or name.startswith("connex."):
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        with pytest.raises(ImportError, match="connex-ai"):
+            importlib.import_module("vllm.distributed.weight_transfer.connex_engine")
+
     def test_create_engine_invalid_backend(self):
         config = WeightTransferConfig(backend="invalid")
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
@@ -394,6 +701,13 @@ def test_nccl_receive_weights_without_init_raises():
         engine.receive_weights(update_info)
 
 
+def test_nccl_disabled_communicator_raises(monkeypatch):
+    """A disabled PyNccl communicator would turn every broadcast into a no-op."""
+    monkeypatch.setenv("VLLM_DISABLE_PYNCCL", "1")
+    with pytest.raises(RuntimeError, match="would be a no-op"):
+        uid_init_process_group(b"\x00" * 128, rank=0, world_size=2, device=0)
+
+
 def test_sparse_nccl_receive_weights_without_init_raises():
     """Test that sparse receive raises if init_transfer_engine wasn't called."""
     if torch.accelerator.device_count() < 1:
@@ -412,6 +726,7 @@ def test_sparse_nccl_receive_weights_without_init_raises():
         dtype_names=["float32"],
         shapes=[[10]],
         num_updates_list=[2],
+        wire_batch_bytes=1024,
     )
 
     with pytest.raises(RuntimeError, match="not initialized"):
@@ -625,6 +940,197 @@ def test_nccl_weight_transfer_between_processes(batch_invariant):
     )
 
 
+@ray.remote(num_gpus=1)
+class MultiSourceInferenceWorker:
+    def __init__(self, worker_rank: int, num_workers: int):
+        import contextlib
+
+        device = _set_ray_assigned_device()
+
+        from vllm.config.weight_transfer import WeightTransferConfig
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
+
+        class Recorder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.received: dict[str, float] = {}
+                self.load_counts: dict[str, int] = {}
+
+            def load_weights(self, weights):
+                for name, tensor in weights:
+                    self.received[name] = tensor.sum().item()
+                    self.load_counts[name] = self.load_counts.get(name, 0) + 1
+
+        self.recorder = Recorder()
+        self.engine = NCCLWeightTransferEngine(
+            WeightTransferConfig(backend="nccl"),
+            create_mock_vllm_config(rank=worker_rank, world_size=num_workers),
+            device,
+            self.recorder,
+        )
+        import vllm.config as vllm_config_mod
+
+        vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
+
+    def ready(self):
+        return True
+
+    def initialize(self, init_info):
+        self.engine.init_transfer_engine(self.engine.parse_init_info(init_info))
+
+    def update(self, update_info):
+        self.engine.receive_weights(self.engine.parse_update_info(update_info))
+
+    def results(self):
+        torch.accelerator.synchronize()
+        results = {
+            "received": self.recorder.received,
+            "load_counts": self.recorder.load_counts,
+        }
+        self.engine.shutdown()
+        return results
+
+
+@ray.remote(num_gpus=1)
+def trainer_send_from_source(
+    receivers,
+    master_address: str,
+    master_port: int,
+    world_size: int,
+    num_sources: int,
+    rank: int,
+    tensor_shape: list[int],
+    num_tensors_per_source: int,
+    packed: bool,
+) -> bool:
+    from functools import cached_property
+
+    device = _set_ray_assigned_device()
+
+    from vllm.distributed.weight_transfer import (
+        ParamMeta,
+        WeightSource,
+        WeightTransferTrainerFactory,
+    )
+    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
+
+    class Source(WeightSource):
+        """Rank r owns (and broadcasts) `source_r.*`, like a pipeline stage."""
+
+        @cached_property
+        def metadata(self):
+            return [
+                ParamMeta(
+                    f"source_{r}.weight_{i}",
+                    torch.float32,
+                    tuple(tensor_shape),
+                    owners=(r,),
+                )
+                for r in range(num_sources)
+                for i in range(num_tensors_per_source)
+            ]
+
+        def iter_full(self):
+            for i in range(num_tensors_per_source):
+                value = rank * num_tensors_per_source + i + 1
+                yield (
+                    f"source_{rank}.weight_{i}",
+                    torch.full(tensor_shape, value, dtype=torch.float32, device=device),
+                )
+
+    class Client:
+        def call(self, method, *args):
+            return ray.get(
+                [getattr(receiver, method).remote(*args) for receiver in receivers]
+            )
+
+        def init_weight_transfer_engine(self, init_info):
+            self.call("initialize", init_info)
+
+        def start_weight_update(self):
+            pass
+
+        def update_weights(self, update_info):
+            self.call("update", update_info)
+
+        def finish_weight_update(self, weight_version=None):
+            pass
+
+    engine = WeightTransferTrainerFactory.trainer_init(
+        NCCLTrainerInitInfo(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=world_size,
+            rank=rank,
+            packed=packed,
+            packed_buffer_size_bytes=1024,
+        ),
+        client=Client(),
+        source=Source(),
+    )
+    for _ in range(2):
+        engine.send_weights()
+    engine.shutdown()
+    return True
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4,
+    reason="Need 4 GPUs for two NCCL sources and two inference workers.",
+)
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+def test_nccl_weight_transfer_from_multiple_sources(packed):
+    """Two trainer ranks each own and broadcast half the parameters (like
+    pipeline stages); both workers receive all of them, twice (the second
+    round reusing metadata)."""
+    _init_ray_for_weight_transfer()
+
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
+    num_sources = 2
+    num_workers = 2
+    world_size = num_sources + num_workers
+    tensor_shape = [8, 8]
+    num_tensors_per_source = 10
+
+    receivers = [
+        MultiSourceInferenceWorker.remote(  # type: ignore[attr-defined]
+            worker_rank, num_workers
+        )
+        for worker_rank in range(num_workers)
+    ]
+    ray.get([receiver.ready.remote() for receiver in receivers])
+    futures = [
+        trainer_send_from_source.remote(
+            receivers,
+            master_address,
+            master_port,
+            world_size,
+            num_sources,
+            rank,
+            tensor_shape,
+            num_tensors_per_source,
+            packed,
+        )
+        for rank in range(num_sources)
+    ]
+    assert ray.get(futures, timeout=300) == [True] * num_sources
+    expected_numel = math.prod(tensor_shape)
+    expected = {
+        f"source_{r}.weight_{i}": (r * num_tensors_per_source + i + 1) * expected_numel
+        for r in range(num_sources)
+        for i in range(num_tensors_per_source)
+    }
+    results = ray.get([receiver.results.remote() for receiver in receivers])
+    for result in results:
+        assert result["received"] == expected
+        assert result["load_counts"] == dict.fromkeys(expected, 2)
+    for receiver in receivers:
+        ray.kill(receiver)
+
+
 def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
     """Replay global expert patches through two EP-local loaders on CPU."""
 
@@ -754,6 +1260,386 @@ def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
         receiver.shutdown()
 
     sender.shutdown()
+
+
+def _sparse_test_patch(name, indices, values, dtype, full_shape=(4,)):
+    return SparseWeightPatch(
+        name=name,
+        indices=torch.tensor(indices, dtype=torch.int32),
+        values=torch.tensor(values, dtype=dtype),
+        full_shape=full_shape,
+    )
+
+
+def _replay_sparse_patches(monkeypatch, patches, batch_bytes):
+    """Send patches over a fake wire. Returns the receiving toy model, the wire, the
+    tensors received, the number received at each load, and the receive call."""
+    monkeypatch.setattr(
+        "vllm.distributed.weight_transfer.sparse_nccl_engine._WIRE_BATCH_BYTES",
+        batch_bytes,
+        raising=False,
+    )
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *_, **__: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.accelerator, "device_index", lambda *_: nullcontext())
+
+    client = RecordingClient()
+    sender = SparseNCCLTrainerWeightTransferEngine(client=client)
+    sender.model_update_group = MagicMock()
+    sender.model_update_group.device = torch.device("cpu")
+    wire = []
+    sender.model_update_group.broadcast.side_effect = lambda tensor, **_: wire.append(
+        tensor.clone()
+    )
+    sender.send_weights(patches)
+
+    model = torch.nn.Module()
+    model.a = torch.nn.Parameter(
+        torch.full((4,), -1.0, dtype=torch.bfloat16), requires_grad=False
+    )
+    model.b = torch.nn.Parameter(torch.full((2, 2), -1.0), requires_grad=False)
+
+    received: list[torch.Tensor] = []
+    loads: list[int] = []
+
+    def load_weights(weights):
+        loads.append(len(received))
+        for name, weight in weights:
+            getattr(model, name).data.copy_(weight)
+        return {name for name, _ in weights}
+
+    def receive_broadcast(tensor, **_):
+        tensor.copy_(wire[len(received)])
+        received.append(tensor)
+
+    model.load_weights = load_weights
+    receiver = SparseNCCLWeightTransferEngine(
+        WeightTransferConfig(backend="sparse_nccl"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    receiver.model_update_group = MagicMock()
+    receiver.model_update_group.device = torch.device("cpu")
+    receiver.model_update_group.broadcast.side_effect = receive_broadcast
+    info = SparseNCCLWeightTransferUpdateInfo(**client.last_update_info)
+    return model, wire, received, loads, lambda: receiver.receive_weights(info)
+
+
+@pytest.mark.parametrize(
+    ("batch_bytes", "received_at_each_load"),
+    [(1, [2, 4, 6]), (18, [2, 4]), (1 << 20, [3, 3])],
+)
+def test_sparse_nccl_wire_batches_land_every_patch_cpu(
+    monkeypatch, batch_bytes, received_at_each_load
+):
+    """Each batch is applied before the next is received, and every patch lands in
+    input order, including one name sent in two dtypes."""
+    model, _, _, loads, receive = _replay_sparse_patches(
+        monkeypatch,
+        [
+            _sparse_test_patch("a", [0, 1, 2], [1.0, 2.0, 3.0], torch.bfloat16),
+            _sparse_test_patch("b", [3], [4.0], torch.float32, (2, 2)),
+            _sparse_test_patch("a", [0], [5.0], torch.float32),
+        ],
+        batch_bytes,
+    )
+
+    receive()
+
+    assert loads == received_at_each_load
+    assert model.a.tolist() == [5.0, 2.0, 3.0, -1.0]
+    assert model.b.tolist() == [[-1.0, -1.0], [-1.0, 4.0]]
+
+
+def test_sparse_nccl_failed_batch_still_drains_the_wire_cpu(monkeypatch):
+    """A failed batch skips the rest of the update but raises only once every
+    broadcast has its receive, since an unmatched one would hang the trainer."""
+    model, wire, received, _, receive = _replay_sparse_patches(
+        monkeypatch,
+        [
+            _sparse_test_patch("a", [0], [float("nan")], torch.bfloat16),
+            _sparse_test_patch("b", [2], [6.0], torch.float32, (2, 2)),
+            _sparse_test_patch("b", [3], [7.0], torch.float32, (2, 2)),
+        ],
+        1,
+    )
+
+    with pytest.raises(ValueError, match="NaN"):
+        receive()
+
+    assert len(received) == len(wire)
+    assert model.b.eq(-1).all()
+
+
+_SPARSE_DISK_BASE = {
+    "a": torch.arange(4, dtype=torch.bfloat16),
+    "b": torch.zeros(2, 2),
+    "c": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e4m3fn),
+    "rows": torch.arange(16, dtype=torch.bfloat16).view(4, 4),
+    "cols": torch.arange(16, 32, dtype=torch.bfloat16).view(4, 4),
+    "unused": torch.zeros(2),
+    "norm": torch.ones(3, dtype=torch.bfloat16),
+    "split": torch.arange(8, dtype=torch.bfloat16).view(2, 4),
+    "scale": torch.tensor(2.0),
+}
+_SPARSE_DISK_MODEL_CONFIG = SimpleNamespace(
+    quantization=None, dtype=torch.bfloat16, word_embeddings_untied_by_checkpoint=False
+)
+
+
+def _write_sparse_disk_checkpoint(folder, weights=_SPARSE_DISK_BASE):
+    """A two-shard checkpoint with an index, in three dtypes."""
+    folder.mkdir()
+    save_torch_state_dict(dict(weights), folder, max_shard_size=80)
+    assert len(list(folder.glob("model-*-of-00002.safetensors"))) == 2
+    assert (folder / "model.safetensors.index.json").exists()
+
+
+def _read_sparse_disk_checkpoint(folder):
+    weights: dict[str, torch.Tensor] = {}
+    for file in sorted(folder.glob("*.safetensors")):
+        weights |= safetensors.torch.load_file(file)
+    return weights
+
+
+def _sparse_disk_model(weights):
+    """A model cold-started on `weights` whose loaders take the halves a second
+    tensor-parallel rank takes ("rows" along dim 0, "cols" along dim 1), split
+    "split" along dim 1 over two parameters and double "a" in place, which a load
+    plan leaves to `load_weights`; it skips "unused"."""
+    from vllm.model_executor.model_loader.reload.direct import track_loaded_params
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+    loaders = {
+        "a": lambda p, w: p.copy_(w.mul_(2)),  # changes its input
+        "rows": lambda p, w: p.copy_(w[2:]),
+        "cols": lambda p, w: p.copy_(w[:, 2:]),
+    }
+    shapes = {"rows": (2, 4), "cols": (4, 2)}
+    model = torch.nn.Module()
+    params = {n: (t.shape, t.dtype) for n, t in _SPARSE_DISK_BASE.items()}
+    params |= dict.fromkeys(("split_lo", "split_hi"), ((2, 2), torch.bfloat16))
+    for name, (shape, dtype) in params.items():
+        if name in ("unused", "split"):
+            continue
+        p = torch.nn.Parameter(
+            torch.zeros(shapes.get(name, shape), dtype=dtype), requires_grad=False
+        )
+        p.weight_loader = loaders.get(name, lambda p, w: p.copy_(w))
+        model.register_parameter(name, p)
+
+    def load_weights(weights):
+        params = dict(model.named_parameters())
+        loaded = set()
+        for name, w in weights:
+            if name == "split":
+                params["split_lo"].copy_(w[:, :2])
+                params["split_hi"].copy_(w[:, 2:])
+                loaded |= {"split_lo", "split_hi"}
+            elif name in params:
+                params[name].weight_loader(params[name], w)
+                loaded.add(name)
+        return loaded
+
+    model.load_weights = load_weights
+    track_loaded_params(model)  # as a direct-mode cold start does
+    model.load_weights(weights.items())
+    process_weights_after_loading(model, _SPARSE_DISK_MODEL_CONFIG, torch.device("cpu"))
+    return model
+
+
+def _bits(model):
+    return {
+        n: p.data.reshape(-1).view(torch.uint8).tolist()
+        for n, p in model.named_parameters()
+    }
+
+
+def _dense_patch(weights, versions):
+    """The weights after writing every patch of `versions`, in order."""
+    weights = {name: t.clone() for name, t in weights.items()}
+    for patches in versions:
+        for patch in patches:
+            weights[patch.name].view(-1)[patch.indices.long()] = patch.values
+    return weights
+
+
+_SPARSE_DISK_VERSIONS = [
+    [
+        _sparse_test_patch("a", [0, 3], [9.0, -9.0], torch.bfloat16),
+        _sparse_test_patch("b", [3], [5.0], torch.float32, (2, 2)),
+        _sparse_test_patch("c", [1], [4.0], torch.float8_e4m3fn, (3,)),
+        _sparse_test_patch(
+            "rows", [1, 9, 14], [-1.0, -2.0, -3.0], torch.bfloat16, (4, 4)
+        ),
+        _sparse_test_patch("norm", [0, 2], [0.5, 1.5], torch.bfloat16, (3,)),
+        _sparse_test_patch(
+            "split", [1, 2, 3, 6], [-1.0, -2.0, -3.0, -4.0], torch.bfloat16, (2, 4)
+        ),
+        _sparse_test_patch("scale", [0], [3.0], torch.float32, ()),
+        _sparse_test_patch("cols", [], [], torch.bfloat16, (4, 4)),
+    ],
+    [
+        _sparse_test_patch("a", [3], [7.0], torch.bfloat16),
+        _sparse_test_patch("b", [0, 3], [1.0, 2.0], torch.float32, (2, 2)),
+        _sparse_test_patch("unused", [1], [6.0], torch.float32, (2,)),
+        _sparse_test_patch(
+            "cols", [0, 3, 6, 13], [-4.0, -5.0, -6.0, -7.0], torch.bfloat16, (4, 4)
+        ),
+    ],
+]
+
+
+class _SparseDiskServer:
+    """An inference server with one sparse disk worker on a toy model, driven
+    as a `VLLMWeightSyncClient`."""
+
+    def __init__(self, checkpoint):
+        self.model = _sparse_disk_model(_read_sparse_disk_checkpoint(checkpoint))
+        vllm_config = create_mock_vllm_config()
+        vllm_config.load_config = LoadConfig()
+        vllm_config.model_config = SimpleNamespace(
+            model=str(checkpoint), revision=None, **vars(_SPARSE_DISK_MODEL_CONFIG)
+        )
+        self.engine = WeightTransferEngineFactory.create_engine(
+            WeightTransferConfig(backend="sparse_disk"),
+            vllm_config,
+            torch.device("cpu"),
+            self.model,
+        )
+        assert isinstance(self.engine, SparseDiskWeightTransferEngine)
+
+    def catch_up(self, version):
+        self.start_weight_update()
+        self.update_weights({"version": version})
+        self.finish_weight_update()
+
+    def init_weight_transfer_engine(self, init_info):
+        self.engine.init_transfer_engine(self.engine.parse_init_info(init_info))
+
+    def start_weight_update(self):
+        self.engine.start_weight_update()
+
+    def update_weights(self, update_info):
+        self.engine.receive_weights(self.engine.parse_update_info(update_info))
+
+    def finish_weight_update(self, weight_version=None):
+        self.engine.finish_weight_update()
+
+
+@pytest.fixture
+def _sparse_disk(tmp_path, monkeypatch):
+    """A checkpoint, a patch directory and one server whose trainer published
+    and sent both versions."""
+    from vllm.model_executor.model_loader.reload import lifecycle
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setattr(lifecycle, "_weight_update_active", False)
+    monkeypatch.setattr(sparse_disk_engine, "_APPLY_CHUNK", 3)  # chunks cut names
+    checkpoint, patch_dir = tmp_path / "checkpoint", tmp_path / "patches"
+    _write_sparse_disk_checkpoint(checkpoint)
+    patch_dir.mkdir()
+    server = _SparseDiskServer(checkpoint)
+    trainer = WeightTransferTrainerFactory.trainer_init(
+        SparseDiskTrainerInitInfo(patch_dir=str(patch_dir), rank=0), client=server
+    )
+    for patches in _SPARSE_DISK_VERSIONS:
+        trainer.publish(patches)
+        trainer.send_weights()
+    return checkpoint, patch_dir, server
+
+
+def test_sparse_disk_updates_equal_a_cold_start_on_the_patched_checkpoint_cpu(
+    tmp_path, _sparse_disk
+):
+    """The trainer's sends, a reload after the weights were lost, and servers
+    started later from the startup or a newer checkpoint all end bit for bit as a
+    cold start on the densely patched checkpoint. A re-init with another base
+    version and an update older than the model are refused."""
+    checkpoint, patch_dir, server = _sparse_disk
+    base = _read_sparse_disk_checkpoint(checkpoint)
+    expected = _bits(_sparse_disk_model(_dense_patch(base, _SPARSE_DISK_VERSIONS)))
+    assert _bits(server.model) == expected
+    for p in server.model.parameters():
+        p.data.fill_(0)  # as level 2 sleep discards them
+    server.catch_up(2)
+    assert _bits(server.model) == expected
+    with pytest.raises(FileExistsError):  # each version is written once
+        save_sparse_patches(_SPARSE_DISK_VERSIONS[1], patch_dir, 2)
+    with pytest.raises(ValueError, match="started from version 0"):
+        server.init_weight_transfer_engine(
+            {"patch_dir": str(patch_dir), "base_version": 2}
+        )
+    server.init_weight_transfer_engine({"patch_dir": str(patch_dir)})  # reconnect
+    v2, hidden = patch_file(patch_dir, 2), tmp_path / "v2"
+    v2.rename(hidden)
+    with pytest.raises(FileNotFoundError):
+        server.catch_up(2)  # the rebuilt copy stops at version 1
+    hidden.rename(v2)
+    for older in (0, 1):  # would roll the model back
+        with pytest.raises(RuntimeError, match="only move forward"):
+            server.catch_up(older)
+    newer = tmp_path / "newer"
+    _write_sparse_disk_checkpoint(newer, _dense_patch(base, _SPARSE_DISK_VERSIONS[:1]))
+    for start, base_version in ((checkpoint, 0), (newer, 1)):
+        if base_version:
+            patch_file(patch_dir, 1).unlink()  # pruned: in the newer checkpoint
+        late = _SparseDiskServer(start)
+        late.init_weight_transfer_engine(
+            {"patch_dir": str(patch_dir), "base_version": base_version}
+        )
+        late.catch_up(2)
+        assert _bits(late.model) == expected
+
+
+def _rewrite_patch_file(path, edit):
+    """Rewrite a patch file through `edit(tensors)`, past the writer's checks."""
+    with safetensors.safe_open(path, framework="pt") as f:
+        tensors = {k: f.get_tensor(k) for k in f.keys()}  # noqa: SIM118
+        metadata = f.metadata()
+    edit(tensors)
+    path.write_bytes(safetensors.torch.save(tensors, metadata))
+
+
+@pytest.mark.parametrize(
+    ("bad", "edit", "error"),
+    [
+        (_sparse_test_patch("d", [0], [1.0], torch.float32), None, "not in the"),
+        (
+            _sparse_test_patch("a", [0], [1.0], torch.bfloat16, (2, 2)),
+            None,
+            ", the checkpoint",
+        ),
+        (_sparse_test_patch("a", [0], [1.0], torch.float32), None, ", the checkpoint"),
+        (  # repeated across a chunk boundary
+            _sparse_test_patch("a", [0, 1, 2, 3], [1.0] * 4, torch.bfloat16),
+            lambda t: t["1.indices"].copy_(torch.tensor([0, 1, 2, 2])),
+            "bad indices",
+        ),
+        (
+            _sparse_test_patch("a", [3], [1.0], torch.bfloat16),
+            lambda t: t["1.indices"].fill_(4),
+            "bad indices",
+        ),
+    ],
+)
+def test_sparse_disk_bad_file_is_refused_before_any_write_cpu(
+    _sparse_disk, bad, edit, error
+):
+    """A file with one bad patch is refused before it writes the host copy, so
+    a new update to the last version restores the model."""
+    _, patch_dir, server = _sparse_disk
+    expected = _bits(server.model)
+    good = _sparse_test_patch("b", [1], [3.0], torch.float32, (2, 2))
+    path = save_sparse_patches([good, bad], patch_dir, 3)
+    if edit is not None:
+        _rewrite_patch_file(path, edit)
+    server.start_weight_update()
+    with pytest.raises(ValueError, match=error):
+        server.update_weights({"version": 3})
+    server.catch_up(2)  # a failed update ends the worker's session
+    assert _bits(server.model) == expected
 
 
 # --- Unit Tests: IPCWeightTransferUpdateInfo Validation ---
@@ -1234,6 +2120,65 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         engine.receive_weights(update_info)
 
 
+def _packed_ipc_engine(monkeypatch, bufs: list[torch.Tensor]):
+    """A packed IPC worker engine whose handle `(i, ...)` rebuilds to
+    `bufs[i]`."""
+    import vllm.distributed.weight_transfer.packed_tensor as packed_mod
+    import vllm.model_executor.model_loader.reload as reload_mod
+
+    monkeypatch.setattr(packed_mod, "rebuild_cuda_tensor", lambda *a: bufs[a[0]])
+    monkeypatch.setattr(reload_mod, "start_reload", lambda model: None)
+    monkeypatch.setattr(reload_mod, "finish_reload", lambda *args: None)
+    model = MagicMock(spec=torch.nn.Module)
+    model.load_weights = MagicMock()
+    engine = IPCWeightTransferEngine(
+        WeightTransferConfig(backend="ipc"),
+        create_mock_vllm_config(),
+        torch.device("cuda:0"),
+        model,
+    )
+    engine.init_transfer_engine(IPCWeightTransferInitInfo(packed=True))
+    return engine, model
+
+
+def _packed_ipc_chunk(handle: dict, names: list[str], n: int, last: bool = False):
+    return IPCWeightTransferUpdateInfo(
+        names=names,
+        dtype_names=["float32"] * len(names),
+        shapes=[[n]] * len(names),
+        ipc_handles=handle,
+        chunk_capacity=16 if handle else None,
+        last=last,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
+    """Only each transfer's first chunk carries the handle; finishing before
+    the last chunk raises."""
+    bufs = [
+        torch.arange(k, k + 4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
+        for k in (0, 4)
+    ]
+    engine, model = _packed_ipc_engine(monkeypatch, bufs)
+    uuid = str(torch.cuda.get_device_properties(0).uuid)
+    starts = [_packed_ipc_chunk({uuid: (k, *range(7))}, ["w"], 8) for k in (0, 1)]
+    rest = _packed_ipc_chunk({}, [], 8, last=True)  # each transfer has 2 chunks
+
+    engine.start_weight_update()
+    for start in starts:
+        engine.receive_weights(start)
+        engine.receive_weights(rest)
+    engine.finish_weight_update()
+    loaded = [a[0][0][1].tolist() for a, _ in model.load_weights.call_args_list]
+    assert loaded == [[0, 1, 2, 3] * 2, [4, 5, 6, 7] * 2]
+
+    engine.start_weight_update()
+    engine.receive_weights(starts[0])
+    with pytest.raises(RuntimeError, match="before its last chunk"):
+        engine.finish_weight_update()
+
+
 class RecordingClient:
     """A fake VLLMWeightSyncClient that records the order of calls."""
 
@@ -1361,160 +2306,138 @@ class TestTrainerClients:
         client.shutdown_weight_transfer_engine()
         assert captured == {"path": "shutdown_weight_transfer_engine", "json": None}
 
+    def test_http_client_finish_raises_on_baseline_mismatch(self, monkeypatch):
+        """finish_weight_update sends the baseline and raises on a mismatch."""
+        captured = {}
+
+        def fake_post(self, path, json=None):
+            captured["json"] = json
+            return {"match": False, "mismatches": ["dp0:pp0:pcp0:tp0:w"]}
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        baseline = {"dp0:pp0:pcp0:tp0:w": "0" * 64}
+        with pytest.raises(RuntimeError, match="dp0:pp0:pcp0:tp0:w"):
+            client.finish_weight_update(baseline=baseline)
+        assert captured["json"] == {"baseline": baseline}
+
 
 class TestModuleSource:
-    """`ModuleSource` metadata vs. materialized iteration (dense, no GPU)."""
+    """`ModuleSource` metadata vs. its iteration modes (dense, no GPU)."""
 
-    def test_metadata_reads_shape_and_dtype(self):
+    def test_metadata_agrees_with_both_modes(self):
+        """Engines declare the round from `metadata` and send what a mode
+        yields, so both modes must match it."""
         source = ModuleSource(
             _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
         )
-        meta = source.metadata()
-        assert [m.name for m in meta] == ["w", "b"]
-        assert [m.shape for m in meta] == [(2, 3), (3,)]
-        assert all(m.dtype == torch.float32 for m in meta)
+        declared = [(m.name, m.dtype, m.shape) for m in source.metadata]
+        for pairs in (source.iter_full(), source.iter_local()):
+            assert [(n, t.dtype, tuple(t.shape)) for n, t in pairs] == declared
 
-    def test_iteration_yields_materialized_tensors(self):
-        w = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-        source = ModuleSource(_module_with(("w", w)))
-        pairs = list(source)
-        assert [name for name, _ in pairs] == ["w"]
-        assert torch.equal(pairs[0][1], w)
 
-    def test_source_is_reiterable(self):
-        source = ModuleSource(_module_with(("w", torch.zeros(2))))
-        assert [n for n, _ in source] == [n for n, _ in source] == ["w"]
+@pytest.fixture
+def fake_world():
+    """A 4-rank process group, as rank 1, without other processes: enough to
+    build DTensors and read their layouts."""
+    from torch.testing._internal.distributed.fake_pg import FakeStore
 
-    def test_metadata_agrees_with_iteration(self):
-        """The two channels must line up element-for-element: engines declare
-        the round from `metadata()` and then send what iteration yields."""
+    torch.distributed.init_process_group(
+        "fake", store=FakeStore(), rank=1, world_size=4
+    )
+    try:
+        yield
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+class TestModuleSourceDTensor:
+    """`ModuleSource` declares a DTensor's mesh ranks as its owners."""
+
+    @staticmethod
+    def _dtensor_module(placements_of):
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.distributed.tensor import distribute_tensor
+
+        mesh = init_device_mesh("cpu", (2, 2))
+        module = torch.nn.Module()
+        for name, placements in placements_of.items():
+            module.register_parameter(
+                name,
+                torch.nn.Parameter(
+                    distribute_tensor(torch.zeros(6, 4), mesh, placements),
+                    requires_grad=False,
+                ),
+            )
+        return module
+
+    def test_metadata_declares_mesh_and_placements(self, fake_world):
+        from torch.distributed.tensor import Replicate as TR
+        from torch.distributed.tensor import Shard as TS
+
         source = ModuleSource(
-            _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
+            self._dtensor_module({"w": [TS(0), TS(1)], "r": [TR(), TR()]})
         )
-        meta = source.metadata()
-        pairs = list(source)
-        assert [m.name for m in meta] == [name for name, _ in pairs]
-        assert [m.dtype for m in meta] == [t.dtype for _, t in pairs]
-        assert [m.shape for m in meta] == [tuple(t.shape) for _, t in pairs]
+        w, r = source.metadata
+        assert w.owners == (0, 1, 2, 3)
+        assert w.mesh_shape == (2, 2)
+        assert w.placements == (Shard(0), Shard(1))
+        assert r.owners == (0, 1, 2, 3)
+        assert r.placements is None
+
+    def test_iter_local_yields_this_ranks_shard(self, fake_world):
+        """Rank 1 is mesh coordinate (0, 1): rows 0:3 of 6, columns 2:4 of 4."""
+        from torch.distributed.tensor import Shard as TS
+
+        source = ModuleSource(self._dtensor_module({"w": [TS(0), TS(1)]}))
+        ((name, local),) = list(source.iter_local())
+        assert name == "w"
+        assert tuple(local.shape) == (3, 2)
+
+    def test_partial_placement_is_declared_replicated(self, fake_world):
+        """`Partial` has no `Shard`/`Replicate` spelling, so the source declares
+        the parameter replicated and `iter_local` must gather it."""
+        from torch.distributed.tensor import Partial
+
+        source = ModuleSource(self._dtensor_module({"p": [Partial(), Partial()]}))
+        (meta,) = source.metadata
+        assert meta.owners == (0, 1, 2, 3)
+        assert meta.placements is None
 
 
-class TestWeightSourceGroupContract:
-    """`groups()` / `iter_groups()` on the WeightSource ABC. Groups are what
-    backends gather and free by, so the default must agree with
-    `layerwise_groups` over `metadata()`, restricted to what this rank holds."""
+class TestParamMetaOwnership:
+    """Ownership and layout fields on `ParamMeta`, and how a `WeightSource`
+    declares them. Every engine plans from these without exchanging them."""
 
-    class _Source(WeightSource):
-        """Minimal source over an ordered (name, tensor) list, optionally holding
-        only some names (in which case it iterates only their groups)."""
+    def test_owners_default_to_a_flat_mesh(self):
+        meta = ParamMeta("w", torch.float32, [4], owners=[2, 3])
+        assert meta.shape == (4,)  # engines compare against tuple(t.shape)
+        assert meta.owners == (2, 3)
+        assert meta.mesh_shape == (2,)
+        assert meta.placements is None
 
-        def __init__(self, names, held=None, reverse=False):
-            self._pairs = [(n, torch.full((2,), float(i))) for i, n in enumerate(names)]
-            self._held = held
-            self._reverse = reverse
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"placements": (Shard(0),)}, "without owners"),
+            ({"owners": (0, 0)}, "distinct"),
+            ({"owners": (0, 1, 2), "mesh_shape": (2, 2)}, "does not cover"),
+            ({"owners": (0, 1), "placements": (Shard(0), Shard(0))}, "1-D mesh"),
+            ({"owners": (0, 1), "placements": (Shard(1),)}, "shards dim 1"),
+        ],
+    )
+    def test_inconsistent_layouts_are_rejected(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            ParamMeta("w", torch.float32, (4,), **kwargs)
 
-        def metadata(self):
-            return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
+    @pytest.mark.parametrize("wrap", [lambda f: f, property])
+    def test_metadata_must_be_a_cached_property(self, wrap):
+        """A plain method would hand engines a bound method, and a plain
+        property would rebuild on every read, so both fail at definition."""
+        with pytest.raises(TypeError, match="cached_property"):
 
-        def held_names(self):
-            return self._held
-
-        def __iter__(self):
-            pairs = self._pairs
-            if self._held is not None:
-                keep = set(self._held)
-                pairs = [(n, t) for n, t in pairs if n in keep]
-            return iter(list(reversed(pairs)) if self._reverse else pairs)
-
-    def _source(self, names, held=None, reverse=False):
-        return self._Source(names, held, reverse)
-
-    def test_groups_defaults_to_the_layerwise_partition(self):
-        names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
-        assert self._source(names).groups() == layerwise_groups(names)
-
-    def test_groups_keeps_only_groups_holding_a_held_name(self):
-        names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
-        held = ["model.layers.0.a", "model.layers.1.a"]
-        assert self._source(names, held=held).groups() == [
-            ["model.layers.0.a"],
-            ["model.layers.1.a"],
-        ]
-
-    def test_groups_keeps_a_partially_held_group_whole(self):
-        """One held name selects the WHOLE group, unheld members included.
-
-        A group is the collective unit, so its membership has to be
-        rank-uniform: a rank that narrowed it to what it holds would disagree
-        with its peers about which names group *g* covers, and the gather would
-        desynchronize. Selection is per group, but only whole groups; the
-        per-name split is the backend's, via owner sets. This is the
-        foreign-expert shape under expert parallelism — a rank holds some
-        experts of a layer, not all of them.
-        """
-        names = ["model.layers.0.a", "model.layers.0.b", "model.layers.1.a"]
-        held = ["model.layers.0.a"]
-        assert self._source(names, held=held).groups() == [
-            ["model.layers.0.a", "model.layers.0.b"],
-        ]
-
-    def test_groups_order_follows_metadata_not_the_declaration(self):
-        """The declaration is a SET of names; the groups it selects still come
-        out in metadata order, so each pairs with the right ``iter_groups()``
-        batch however the source listed them."""
-        names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
-        source = self._source(
-            names, held=["model.layers.1.a", "model.layers.0.a", "model.layers.1.a"]
-        )
-        assert source.groups() == [["model.layers.0.a"], ["model.layers.1.a"]]
-        assert [ns for ns, _ in source.iter_groups()] == [
-            ["model.layers.0.a"],
-            ["model.layers.1.a"],
-        ]
-
-    def test_iter_groups_batches_the_stream_per_group(self):
-        names = ["embed.w", "model.layers.0.a", "model.layers.0.b", "norm.w"]
-        batches = list(self._source(names).iter_groups())
-        assert [ns for ns, _ in batches] == [
-            ["embed.w"],
-            ["model.layers.0.a", "model.layers.0.b"],
-            ["norm.w"],
-        ]
-        assert all(len(ns) == len(ts) for ns, ts in batches)
-
-    def test_iter_groups_yields_the_tensors_iteration_produced(self):
-        names = ["model.layers.0.a", "model.layers.0.b"]
-        (batch,) = list(self._source(names).iter_groups())
-        _names, tensors = batch
-        assert [float(t[0]) for t in tensors] == [0.0, 1.0]
-
-    def test_iter_groups_yields_only_held_groups(self):
-        names = ["embed.w", "model.layers.0.a", "model.layers.1.a"]
-        batches = list(self._source(names, held=["model.layers.1.a"]).iter_groups())
-        assert [ns for ns, _ in batches] == [["model.layers.1.a"]]
-
-    def test_out_of_order_iteration_raises(self):
-        """Materializing is usually a collective, so a rank that iterates out of
-        order deadlocks its peers -- fail loudly instead."""
-        source = self._source(["model.layers.0.a", "model.layers.0.b"], reverse=True)
-        with pytest.raises(RuntimeError, match="iteration order must match"):
-            list(source.iter_groups())
-
-    def test_a_source_may_override_iter_groups(self):
-        """The extension point: materialize a whole group in one step instead of
-        one generator resume per tensor."""
-        calls = []
-
-        class _Batched(TestWeightSourceGroupContract._Source):
-            def iter_groups(self):
-                for group in self.groups():
-                    calls.append(len(group))
-                    yield group, [torch.zeros(2) for _ in group]
-
-        source = _Batched(["model.layers.0.a", "model.layers.0.b"])
-        assert [ns for ns, _ in source.iter_groups()] == [
-            ["model.layers.0.a", "model.layers.0.b"]
-        ]
-        assert calls == [2]
+            class _Uncached(WeightSource):
+                metadata = wrap(lambda self: [])
 
 
 class TestDeferredProcessingContract:
@@ -1526,10 +2449,12 @@ class TestDeferredProcessingContract:
 
     def _engines(self):
         registry = dict(WeightTransferEngineFactory._registry)
-        # ModelExpress is an optional, separately installed package, but its
-        # backend is always registered. Skip it when the package is missing.
-        if importlib.util.find_spec("modelexpress") is None:
-            registry.pop("modelexpress")
+        # ModelExpress and Connex are optional, separately installed packages,
+        # but their backends are always registered. Skip each one whose
+        # package is missing.
+        for name, package in (("modelexpress", "modelexpress"), ("connex", "connex")):
+            if importlib.util.find_spec(package) is None:
+                registry.pop(name)
         return {name: loader() for name, loader in registry.items()}
 
     def test_every_engine_declares_whether_it_defers(self):
@@ -1581,6 +2506,36 @@ class TestTrainerFactory:
         finally:
             WeightTransferTrainerFactory._registry = saved
 
+    def test_connex_trainer_registration_is_lazy(self, monkeypatch):
+        from vllm.distributed.weight_transfer import factory
+
+        imported = []
+        module = MagicMock()
+        module.ConnexTrainerWeightTransferEngine.__name__ = (
+            "ConnexTrainerWeightTransferEngine"
+        )
+
+        def import_module(name):
+            imported.append(name)
+            return module
+
+        monkeypatch.setattr(factory.importlib, "import_module", import_module)
+        init_info = MagicMock(backend="connex")
+        client = RecordingClient()
+        source = ModuleSource(_module_with(("w", torch.zeros(2))))
+
+        assert imported == []
+        engine = WeightTransferTrainerFactory.trainer_init(
+            init_info, client=client, source=source
+        )
+
+        assert imported == ["vllm.distributed.weight_transfer.connex_engine"]
+        trainer_init = module.ConnexTrainerWeightTransferEngine.trainer_init
+        trainer_init.assert_called_once_with(
+            init_info=init_info, client=client, source=source
+        )
+        assert engine is trainer_init.return_value
+
     def test_unknown_backend_raises(self):
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
             WeightTransferTrainerFactory.trainer_init(
@@ -1614,7 +2569,7 @@ class TestTrainerEngineBase:
             source=ModuleSource(_module_with(("w", torch.zeros(2)))),
         )
         assert engine.is_sender is True
-        assert [name for name, _ in engine.source] == ["w"]
+        assert [n for n, _ in engine.source.iter_full()] == ["w"]
 
     def test_shutdown_default_is_noop(self):
         engine = _DummyTrainerEngine(
@@ -1669,15 +2624,78 @@ def test_ipc_trainer_init_ships_packed_to_worker():
     assert client.last_init_info == {"packed": True}
 
 
-def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
+def test_ipc_trainer_init_rejects_a_partitioned_source():
+    """Each rank serves its colocated worker, so a rank that lacks a parameter
+    must fail at init, before any inference-side RPC."""
+    client = RecordingClient()
+    meta = [ParamMeta("w", torch.float32, (4,), owners=(1,))]
+    with pytest.raises(ValueError, match="rank 0 does not own every parameter"):
+        IPCTrainerWeightTransferEngine.trainer_init(
+            IPCTrainerInitInfo(rank=0), client=client, source=_ScriptedSource(meta, [])
+        )
+    assert client.order == []
+
+
+def test_nccl_trainer_rendezvous_runs_concurrently_and_waits_for_worker():
+    worker_started = threading.Event()
+    trainer_started = threading.Event()
+    worker_finished = threading.Event()
+    trainer_thread = threading.get_ident()
+
+    def init_worker():
+        assert threading.get_ident() != trainer_thread
+        worker_started.set()
+        assert trainer_started.wait(timeout=5)
+        worker_finished.set()
+
+    def init_trainer():
+        try:
+            assert threading.get_ident() == trainer_thread
+            assert worker_started.wait(timeout=5)
+            assert not worker_finished.is_set()
+        finally:
+            trainer_started.set()
+
+    run_trainer_rendezvous(init_worker=init_worker, init_trainer=init_trainer)
+    assert worker_finished.is_set()
+
+
+@pytest.mark.parametrize("failure_side", ["worker", "trainer"])
+def test_nccl_trainer_rendezvous_propagates_errors_after_worker_exits(failure_side):
+    trainer_started = threading.Event()
+    worker_finished = threading.Event()
+    error = RuntimeError(f"{failure_side} initialization failed")
+
+    def init_worker():
+        assert trainer_started.wait(timeout=5)
+        worker_finished.set()
+        if failure_side == "worker":
+            raise error
+
+    def init_trainer():
+        trainer_started.set()
+        if failure_side == "trainer":
+            raise error
+
+    with pytest.raises(RuntimeError) as exc_info:
+        run_trainer_rendezvous(init_worker=init_worker, init_trainer=init_trainer)
+    assert exc_info.value is error
+    assert worker_finished.is_set()
+
+
+@pytest.mark.parametrize("use_load_plan", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
+def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed, use_load_plan):
     """The sender's trainer_init drives the inference-side init handshake with
     the worker-shaped init info (rank_offset=1) while opening its own endpoint,
-    and propagates the must-agree wire params to the worker."""
+    and propagates the must-agree wire params (and, with `use_load_plan`, the
+    metadata) to the worker."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     # Bypass the real NCCL rendezvous.
+    group = object()
     monkeypatch.setattr(
-        nccl_engine_mod, "open_trainer_endpoint", lambda info: MagicMock()
+        nccl_engine_mod, "open_trainer_endpoint", lambda info, rank: group
     )
 
     client = RecordingClient()
@@ -1687,9 +2705,10 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
             master_port=29500,
             world_size=3,
             rank=0,
-            packed=True,
+            packed=packed,
             packed_buffer_size_bytes=1024,
             packed_num_buffers=3,
+            use_load_plan=use_load_plan,
         ),
         client=client,
         source=ModuleSource(_module_with(("w", torch.zeros(4)))),
@@ -1697,17 +2716,60 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
 
     assert isinstance(engine, NCCLTrainerWeightTransferEngine)
     assert engine.is_sender is True
-    assert engine.packed is True
+    assert engine.packed is packed
+    assert engine.model_update_group is group
     assert client.order == ["init"]
     assert client.last_init_info == {
         "master_address": "127.0.0.1",
         "master_port": 29500,
         "rank_offset": 1,
         "world_size": 3,
-        "packed": True,
+        "packed": packed,
         "packed_buffer_size_bytes": 1024,
         "packed_num_buffers": 3,
+        "use_load_plan": use_load_plan,
+        **({"metadata": [("w", "float32", [4])]} if use_load_plan else {}),
     }
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_nccl_trainer_init_dispatches_subclass_hooks_only_on_sender(rank):
+    group = object()
+    calls = []
+
+    class Trainer(NCCLTrainerWeightTransferEngine):
+        @classmethod
+        def _build_worker_init_payload(cls, init_info):
+            calls.append(("payload", cls, init_info))
+            payload = super()._build_worker_init_payload(init_info)
+            payload["master_port"] += 1
+            return payload
+
+        def _open_trainer_endpoint(self, init_info):
+            calls.append(("endpoint", self, init_info))
+            self.model_update_group = group
+
+    init_info = NCCLTrainerInitInfo(
+        master_address="127.0.0.1", master_port=29500, world_size=3, rank=rank
+    )
+    client = RecordingClient()
+    engine = Trainer.trainer_init(
+        init_info, client=client, source=ModuleSource(_module_with())
+    )
+
+    assert type(engine) is Trainer
+    if rank == 0:
+        assert calls == [
+            ("payload", Trainer, init_info),
+            ("endpoint", engine, init_info),
+        ]
+        assert client.last_init_info is not None
+        assert client.last_init_info["master_port"] == 29501
+        assert engine.model_update_group is group
+    else:
+        assert calls == []
+        assert client.order == []
+        assert engine.model_update_group is None
 
 
 def test_nccl_worker_learns_wire_params_from_init_handshake(monkeypatch):
@@ -1784,7 +2846,7 @@ def test_nccl_trainer_send_weights_drives_client_in_order():
         packed=False,
     )
     # Bypass the real NCCL rendezvous; broadcast is a no-op.
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
 
     engine.send_weights()
 
@@ -1808,7 +2870,7 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
         source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
         packed=False,
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
 
     engine.send_weights()
     assert client.last_update_info is not None
@@ -1820,9 +2882,49 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
     assert client.last_update_info["shapes"] == [[8]]
 
 
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_resends_metadata_after_a_failed_update():
+    """The workers keep the metadata of an update whose finish failed (a
+    partial update a direct reload refuses): the next update must send its
+    own metadata, not reuse the one before the failed update."""
+
+    class FailingFinish(RecordingClient):
+        fail = False
+
+        def finish_weight_update(self, weight_version=None):
+            super().finish_weight_update(weight_version)
+            if self.fail:
+                raise RuntimeError("refused")
+
+    def source(*names):
+        pairs = [(n, torch.zeros(4, device="cuda")) for n in names]
+        return ModuleSource(_module_with(*pairs))
+
+    client = FailingFinish()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client, source=source("v", "w"), packed=False
+    )
+    engine.model_update_group = MagicMock(rank=0)
+
+    engine.send_weights()  # full
+    engine.source, client.fail = source("w"), True  # partial, refused
+    with pytest.raises(RuntimeError, match="refused"):
+        engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    engine.source, client.fail = source("v", "w"), False  # full again
+    engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["v", "w"]
+
+
 def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
-    """Empty update info reuses the previous call's metadata for the same model;
-    target and draft keep separate copies, and re-init clears them."""
+    """Empty update info reuses the previous call's metadata for the same
+    (model, src) and receives from that src; re-init clears every entry, and
+    src must be a trainer rank."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     monkeypatch.setattr(
@@ -1831,7 +2933,9 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
     target, draft = MagicMock(spec=torch.nn.Module), MagicMock(spec=torch.nn.Module)
     received: list = []
     for model in (target, draft):
-        model.load_weights = lambda w, m=model: received.append((m, w[0][0]))
+        model.load_weights = lambda w, m=model: received.append(
+            (m, w[0][0], tuple(w[0][1].shape))
+        )
     engine = NCCLWeightTransferEngine(
         WeightTransferConfig(backend="nccl"),
         create_mock_vllm_config(),
@@ -1839,29 +2943,53 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
         target,
     )
     init_info = NCCLWeightTransferInitInfo(
-        master_address="127.0.0.1", master_port=29500, rank_offset=1, world_size=2
+        master_address="127.0.0.1", master_port=29500, rank_offset=2, world_size=3
     )
     engine.init_transfer_engine(init_info)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
 
-    def update(model, *names):
+    def update(model, src, name=None, shape=None):
         engine.set_weight_update_target(model, None)
         engine.receive_weights(
             NCCLWeightTransferUpdateInfo(
-                names=list(names),
-                dtype_names=["float32"] * len(names),
-                shapes=[[2]] * len(names),
+                names=[name] if name else [],
+                dtype_names=["float32"] if name else [],
+                shapes=[shape] if name else [],
+                src=src,
             )
         )
 
-    update(target, "t")
-    update(draft, "d")
-    update(target)
-    update(draft)
-    engine.init_transfer_engine(init_info)
-    update(target)
+    seeded = {
+        (target, 0): ("t0", [2]),
+        (target, 1): ("t1", [3]),
+        (draft, 0): ("d0", [4]),
+        (draft, 1): ("d1", [5]),
+    }
+    for (model, src), (name, shape) in seeded.items():
+        update(model, src, name, shape)
+    reused = [(draft, 1), (target, 0), (draft, 0), (target, 1)]
+    for model, src in reused:
+        update(model, src)
 
-    assert received == [(target, "t"), (draft, "d"), (target, "t"), (draft, "d")]
+    order = [*seeded, *reused]
+    assert received == [
+        (model, seeded[model, src][0], tuple(seeded[model, src][1]))
+        for model, src in order
+    ]
+    group = engine.model_update_group
+    assert [c.kwargs["src"] for c in group.broadcast.call_args_list] == [
+        src for _, src in order
+    ]
+
+    engine.init_transfer_engine(init_info)
+    for model, src in seeded:
+        update(model, src)
+    assert len(received) == len(order)
+    engine.model_update_group.broadcast.assert_not_called()
+
+    for bad in (-1, 2):
+        with pytest.raises(ValueError, match=r"sender rank in \[0, 2\)"):
+            update(target, bad, "c", [2])
 
 
 class _ScriptedSource(WeightSource):
@@ -1872,10 +3000,11 @@ class _ScriptedSource(WeightSource):
         self._meta = meta
         self._pairs = pairs
 
+    @cached_property
     def metadata(self):
         return list(self._meta)
 
-    def __iter__(self):
+    def iter_full(self):
         yield from self._pairs
 
 
@@ -1884,7 +3013,7 @@ def _mock_group_engine(source, monkeypatch, **kwargs):
     engine = NCCLTrainerWeightTransferEngine(
         client=RecordingClient(), source=source, packed=False, **kwargs
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
     return engine
 
@@ -1901,7 +3030,7 @@ def test_nccl_trainer_init_requires_source():
 
 
 def test_nccl_trainer_send_weights_rejects_reordered_source(monkeypatch):
-    """The worker sizes its buffers (and cuts packed chunks) from metadata(), so
+    """The worker sizes its buffers (and cuts packed chunks) from metadata, so
     iteration disagreeing with it must raise rather than corrupt the stream."""
     meta = [
         ParamMeta("w", torch.float32, (4,)),
@@ -1941,6 +3070,86 @@ def test_nccl_trainer_send_weights_rejects_truncated_source(monkeypatch):
         engine.send_weights()
 
 
+_TWO_STAGES = [
+    ParamMeta("w", torch.float32, (4,), owners=(0, 1)),
+    ParamMeta("b", torch.float32, (2,), owners=(2, 3)),
+]
+
+
+@pytest.mark.parametrize(
+    ("meta", "match"),
+    [
+        (
+            [ParamMeta("w", torch.float32, (4,)), _TWO_STAGES[1]],
+            "'w' has no owners",
+        ),
+        (
+            [*_TWO_STAGES, ParamMeta("x", torch.float32, (2,), owners=(1, 2))],
+            "rank 1 owns parameters broadcast by ranks 0 and 1",
+        ),
+        (
+            [ParamMeta("w", torch.float32, (4,), owners=(1, 0))],
+            r"'w' has owners \(1, 0\)",
+        ),
+        (
+            [ParamMeta("w", torch.float32, (4,), owners=(1, 0)), _TWO_STAGES[1]],
+            r"'w' has owners \(1, 0\)",
+        ),
+    ],
+)
+def test_nccl_trainer_rejects_ranks_spanning_broadcasters(meta, match):
+    """Each broadcaster sends in its own turn, so a rank owning parameters of
+    two broadcasters would gather out of turn; every rank sees the same
+    metadata and raises alike."""
+    for rank in (0, 2):
+        with pytest.raises(ValueError, match=match):
+            NCCLTrainerWeightTransferEngine.trainer_init(
+                NCCLTrainerInitInfo(
+                    master_address="127.0.0.1",
+                    master_port=29500,
+                    world_size=3,
+                    rank=rank,
+                ),
+                client=RecordingClient(),
+                source=_ScriptedSource(meta, []),
+            )
+
+
+def test_nccl_trainer_rejects_world_size_without_workers():
+    with pytest.raises(ValueError, match="leaves no inference workers"):
+        NCCLTrainerWeightTransferEngine.trainer_init(
+            NCCLTrainerInitInfo(
+                master_address="127.0.0.1", master_port=29500, world_size=2, rank=0
+            ),
+            client=RecordingClient(),
+            source=_ScriptedSource(_TWO_STAGES, []),
+        )
+
+
+def test_nccl_trainer_non_sender_owner_drives_its_gathers(monkeypatch):
+    """A non-sender owner (an FSDP peer) still iterates what it owns, since
+    the sender's gathers need it; it never touches the client or the group."""
+    meta = [ParamMeta("w", torch.float32, (4,), owners=(0, 1))]
+    yielded: list[str] = []
+
+    class _Recording(_ScriptedSource):
+        def iter_full(self):
+            for name, tensor in super().iter_full():
+                yielded.append(name)
+                yield name, tensor
+
+    engine = _mock_group_engine(
+        _Recording(meta, [("w", torch.zeros(4))]),
+        monkeypatch,
+        is_sender=False,
+        rank=1,
+    )
+    engine.send_weights()
+    assert yielded == ["w"]
+    assert engine.client.order == []
+    engine.model_update_group.broadcast.assert_not_called()
+
+
 def test_nccl_trainer_send_weights_broadcasts_contiguous(monkeypatch):
     """NCCL sends numel elements from data_ptr(), so a non-contiguous view must
     be linearized first or the worker receives unrelated memory."""
@@ -1973,10 +3182,11 @@ def test_nccl_trainer_send_weights_raises_instead_of_hanging(monkeypatch):
             super().update_weights(update_info)
 
     class _FailingSource(WeightSource):
+        @cached_property
         def metadata(self):
             return [ParamMeta("w", torch.float32, (4,))]
 
-        def __iter__(self):
+        def iter_full(self):
             # Fail only once the RPC is provably in flight.
             rpc_entered.wait(timeout=60)
             raise RuntimeError("broadcast blew up")
@@ -1984,7 +3194,7 @@ def test_nccl_trainer_send_weights_raises_instead_of_hanging(monkeypatch):
     engine = NCCLTrainerWeightTransferEngine(
         client=_BlockingClient(), source=_FailingSource(), packed=False
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
 
     started = time.perf_counter()
@@ -2011,12 +3221,12 @@ def _sparse_patch(device: str = "cpu") -> SparseWeightPatch:
 
 
 def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
-    """The sender's trainer_init drives the init handshake with the
-    worker-shaped init info; sparse ships no packed wire params, so the worker
-    keeps its unpacked defaults. Sparse takes no `source`."""
+    """The sender's trainer_init sends worker-shaped init info with
+    `packed=False` and default buffer settings. Sparse takes no `source`."""
     import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
 
-    monkeypatch.setattr(sparse_mod, "open_trainer_endpoint", lambda info: MagicMock())
+    group = object()
+    monkeypatch.setattr(sparse_mod, "open_trainer_endpoint", lambda info: group)
 
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
@@ -2030,6 +3240,7 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
     )
 
     assert isinstance(engine, SparseNCCLTrainerWeightTransferEngine)
+    assert engine.model_update_group is group
     assert client.order == ["init"]
     assert client.last_init_info == {
         "master_address": "127.0.0.1",
@@ -2039,7 +3250,40 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
         "packed": False,
         "packed_buffer_size_bytes": DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         "packed_num_buffers": DEFAULT_PACKED_NUM_BUFFERS,
+        "use_load_plan": False,
     }
+
+
+class _RefusingClient(RecordingClient):
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        raise ValueError("the workers refused")
+
+
+@pytest.mark.parametrize("backend", ["nccl", "sparse_nccl"])
+def test_trainer_init_destroys_its_group_when_the_workers_refuse(monkeypatch, backend):
+    """A worker refusal reaches the trainer after it opened its endpoint; the
+    trainer destroys that group before raising, so a retry starts clean."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+    import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
+
+    group = MagicMock()
+    sparse = backend == "sparse_nccl"
+    monkeypatch.setattr(
+        sparse_mod if sparse else nccl_engine_mod,
+        "open_trainer_endpoint",
+        (lambda info: group) if sparse else (lambda info, rank: group),
+    )
+    common = dict(master_address="127.0.0.1", master_port=29500, world_size=2, rank=0)
+    if sparse:
+        kwargs = dict(init_info=SparseNCCLTrainerInitInfo(**common))
+    else:
+        kwargs = dict(
+            init_info=NCCLTrainerInitInfo(**common, use_load_plan=True),
+            source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+        )
+    with pytest.raises(ValueError, match="the workers refused"):
+        WeightTransferTrainerFactory.trainer_init(client=_RefusingClient(), **kwargs)
+    group.destroy.assert_called_once()
 
 
 def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
@@ -2059,7 +3303,7 @@ def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
     assert client.last_update_info["names"] == ["w"]
     assert client.last_update_info["shapes"] == [[4, 4]]
     assert client.last_update_info["num_updates_list"] == [2]
-    # One broadcast for indices + one for values per patch.
+    # One broadcast for indices + one for values per wire batch.
     assert engine.model_update_group.broadcast.call_count == 2
     engine.shutdown()
 
@@ -2239,8 +3483,11 @@ def mx_worker(mx_client, monkeypatch):
     worker.weight_transfer_engine = _make_modelexpress_engine()
     worker.vllm_config = worker.weight_transfer_engine.vllm_config
     worker._weight_update_active = False
+    worker._incomplete_weight_updates = set()
     worker._weight_update_is_draft = False
-    worker.model_runner = MagicMock()
+    worker._kv_cache_reclaimable = False
+    worker._weight_update_kv_cache_loan = ExitStack()
+    worker.model_runner = MagicMock(extensible_kv_cache=None)
     return worker
 
 
