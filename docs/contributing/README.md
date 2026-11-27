@@ -282,10 +282,11 @@ For popular features, make sure to update the rendered documentation:
 
 - CLI arguments, config/model fields, and environment variables are documented in
 their docstring, `help=` text, or `environment_variables` comment, which generate the reference pages.
-- Everything else goes on its page under `docs/` (feature, model, hardware, deprecation),
+- Everything else goes on its page under `docs/` (feature, model, hardware, deprecation etc.),
 linked from its index.
 
-Lead with what it is, how to enable it, and the default, using the names users search for. No need to include implementation details in user-facing documentation.
+Lead with what it is, how to enable it, and the default, using the names users search for.
+No need to include implementation details in user-facing documentation.
 
 If the change is niche, you only need to update relevant docstrings or add code comments.
 
