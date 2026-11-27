@@ -840,20 +840,10 @@ class Worker(WorkerBase):
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        from vllm.model_executor.models.vision import (
-            get_unallocated_pos_embed_cache_bytes,
-        )
-
-        pos_embed_cache_reserve = get_unallocated_pos_embed_cache_bytes(
-            getattr(self.model_runner, "model", None)
-        )
-        self.pos_embed_cache_reserve = pos_embed_cache_reserve
-
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate
-            - pos_embed_cache_reserve
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -1206,7 +1196,6 @@ class Worker(WorkerBase):
                 self.total_consumed
                 + self.peak_activation_memory
                 + cuda_graph_memory_bytes
-                + getattr(self, "pos_embed_cache_reserve", 0)
             )
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.init_snapshot.free_memory
@@ -1299,15 +1288,8 @@ class Worker(WorkerBase):
 
         num_kv_blocks = None
         if self.cache_config.enable_extensible_kv_cache:
-            from vllm.model_executor.models.vision import (
-                get_unallocated_pos_embed_cache_bytes,
-            )
-
             kv_cache = self.model_runner.extensible_kv_cache
             assert kv_cache is not None
-            extra_reserve_bytes = get_unallocated_pos_embed_cache_bytes(
-                getattr(self.model_runner, "model", None)
-            )
             # Every rank must size the KV cache identically.
             num_kv_blocks = _min_across_ranks(
                 measure_kv_cache_blocks(
@@ -1316,7 +1298,6 @@ class Worker(WorkerBase):
                     self.device,
                     init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
-                    extra_reserve_bytes=extra_reserve_bytes,
                 )
             )
 

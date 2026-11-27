@@ -602,6 +602,7 @@ def run_dp_sharded_mrope_vision_model(
 
 
 _MAX_POS_EMBED_CACHE_BYTES = 16 * 1024 * 1024  # 16 MiB per module instance
+_POS_EMBED_CACHE_ALIGN_BYTES = 256
 
 
 def interpolate_cls_abs_pos(abs_pos: torch.Tensor, tgt_grid: int) -> torch.Tensor:
@@ -632,26 +633,61 @@ def interpolate_cls_abs_pos(abs_pos: torch.Tensor, tgt_grid: int) -> torch.Tenso
     return vision_pos_embed.view(1, tgt_grid * tgt_grid + 1, dim)
 
 
-class InterpolatedPosEmbedCache:
-    """Memory-bounded per-module cache for interpolated positional embeddings.
+class InterpolatedPosEmbedCache(torch.nn.Module):
+    """Pre-allocated per-module cache for interpolated positional embeddings.
 
-    Safe across weight loading/reloads (`process_weights_after_loading`),
-    encoder graph capture (refreshes entries in place and never evicts live
-    entries), and `torch.compile` (bypasses cache reads/writes).
+    Allocates a fixed non-persistent byte buffer at module initialization so
+    its memory footprint is accounted for during model loading and profiling
+    with zero growth during inference. Safe across weight loading/reloads
+    (`process_weights_after_loading`), encoder graph capture (refreshes slots
+    in place and never evicts live slots), and `torch.compile` (bypasses cache).
     """
 
+    _buffer: torch.Tensor
+
     def __init__(self, max_bytes: int = _MAX_POS_EMBED_CACHE_BYTES) -> None:
+        super().__init__()
         self._max_bytes = max_bytes
-        self._cached_bytes = 0
+        self._offset = 0
+        self._buffer_ptr = 0
+        self.register_buffer(
+            "_buffer",
+            torch.empty(max_bytes, dtype=torch.uint8),
+            persistent=False,
+        )
         # (tgt_size, dtype, device) -> (cached_tensor, weight_data_ptr, weight_version)
         self._entries: dict[
             tuple[int, torch.dtype, torch.device],
             tuple[torch.Tensor, int, int],
         ] = {}
 
-    @property
-    def remaining_bytes(self) -> int:
-        return max(0, self._max_bytes - self._cached_bytes)
+    def _sync_buffer(self) -> torch.Tensor:
+        buf = self._buffer
+        buf_ptr = buf.data_ptr()
+        if buf_ptr != self._buffer_ptr:
+            self._entries.clear()
+            self._offset = 0
+            self._buffer_ptr = buf_ptr
+        return buf
+
+    def _alloc_slot(
+        self, buf: torch.Tensor, tensor: torch.Tensor
+    ) -> torch.Tensor | None:
+        aligned_offset = (
+            (self._offset + _POS_EMBED_CACHE_ALIGN_BYTES - 1)
+            // _POS_EMBED_CACHE_ALIGN_BYTES
+        ) * _POS_EMBED_CACHE_ALIGN_BYTES
+        nbytes = tensor.nbytes
+        if aligned_offset + nbytes > buf.numel():
+            return None
+        slot = (
+            buf[aligned_offset : aligned_offset + nbytes]
+            .view(tensor.dtype)
+            .view(tensor.shape)
+        )
+        slot.copy_(tensor)
+        self._offset = aligned_offset + nbytes
+        return slot
 
     def get_or_compute(
         self,
@@ -662,6 +698,10 @@ class InterpolatedPosEmbedCache:
         if torch.compiler.is_compiling() or (
             torch.is_grad_enabled() and weight.requires_grad
         ):
+            return compute_fn(weight, tgt_size)
+
+        buf = self._sync_buffer()
+        if buf.device != weight.device:
             return compute_fn(weight, tgt_size)
 
         key = (tgt_size, weight.dtype, weight.device)
@@ -676,8 +716,8 @@ class InterpolatedPosEmbedCache:
         if current_platform.is_current_stream_capturing():
             return compute_fn(weight, tgt_size)
 
-        # Materialize outside `inference_mode` so `refresh` can update entries
-        # in place after weight reloads, keeping captured graph addresses valid.
+        # Materialize slot views outside `inference_mode` so `refresh` can
+        # update them in place after weight reloads, keeping graph addresses valid.
         with torch.inference_mode(False), torch.no_grad():
             new_pos_embed = compute_fn(weight, tgt_size).contiguous()
             if entry is not None:
@@ -686,25 +726,20 @@ class InterpolatedPosEmbedCache:
                     cached.copy_(new_pos_embed)
                     self._entries[key] = (cached, ptr, version)
                     return cached
-                delta = new_pos_embed.nbytes - cached.nbytes
-                if self._cached_bytes + delta <= self._max_bytes:
-                    self._entries[key] = (new_pos_embed, ptr, version)
-                    self._cached_bytes += delta
-                else:
-                    del self._entries[key]
-                    self._cached_bytes -= cached.nbytes
-                return new_pos_embed
+                del self._entries[key]
 
-        if self._cached_bytes + new_pos_embed.nbytes <= self._max_bytes:
-            self._entries[key] = (new_pos_embed, ptr, version)
-            self._cached_bytes += new_pos_embed.nbytes
-        elif new_pos_embed.nbytes > self._max_bytes:
+            slot = self._alloc_slot(buf, new_pos_embed)
+            if slot is not None:
+                self._entries[key] = (slot, ptr, version)
+                return slot
+
+        if new_pos_embed.nbytes > buf.numel():
             logger.warning_once(
                 "Interpolated positional embedding for size %s (%d bytes) "
-                "exceeds cache limit (%d bytes); skipping cache.",
+                "exceeds cache buffer size (%d bytes); skipping cache.",
                 tgt_size,
                 new_pos_embed.nbytes,
-                self._max_bytes,
+                buf.numel(),
             )
         return new_pos_embed
 
@@ -716,6 +751,11 @@ class InterpolatedPosEmbedCache:
         """Refresh cached entries in place after weights are loaded or updated."""
         if not self._entries or weight.device.type == "meta":
             return
+        buf = self._sync_buffer()
+        if buf.device != weight.device:
+            self._entries.clear()
+            self._offset = 0
+            return
         ptr = weight.data_ptr()
         version = weight._version
         with torch.no_grad():
@@ -723,32 +763,10 @@ class InterpolatedPosEmbedCache:
                 tgt_size, dtype, device = key
                 if dtype != weight.dtype or device != weight.device:
                     del self._entries[key]
-                    self._cached_bytes -= cached.nbytes
                     continue
                 new_pos_embed = compute_fn(weight, tgt_size).contiguous()
                 if cached.shape == new_pos_embed.shape:
                     cached.copy_(new_pos_embed)
                     self._entries[key] = (cached, ptr, version)
                 else:
-                    delta = new_pos_embed.nbytes - cached.nbytes
-                    if self._cached_bytes + delta <= self._max_bytes:
-                        self._entries[key] = (new_pos_embed, ptr, version)
-                        self._cached_bytes += delta
-                    else:
-                        del self._entries[key]
-                        self._cached_bytes -= cached.nbytes
-
-
-def get_unallocated_pos_embed_cache_bytes(model: object) -> int:
-    """Return remaining byte budget across `InterpolatedPosEmbedCache`
-    instances on `model` not yet allocated during memory profiling."""
-    if not isinstance(model, torch.nn.Module):
-        return 0
-    seen: set[int] = set()
-    total = 0
-    for module in model.modules():
-        for value in module.__dict__.values():
-            if isinstance(value, InterpolatedPosEmbedCache) and id(value) not in seen:
-                seen.add(id(value))
-                total += value.remaining_bytes
-    return total
+                    del self._entries[key]

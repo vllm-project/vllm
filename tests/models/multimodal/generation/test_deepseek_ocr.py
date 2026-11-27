@@ -30,7 +30,7 @@ from vllm.model_executor.models.deepseek_ocr2 import DeepseekOCR2ForCausalLM
 from vllm.model_executor.models.step3_vl import Step3VisionEmbeddings
 from vllm.model_executor.models.step3_vl import get_abs_pos as step3_get_abs_pos
 from vllm.model_executor.models.vision import (
-    get_unallocated_pos_embed_cache_bytes,
+    InterpolatedPosEmbedCache,
     interpolate_cls_abs_pos,
 )
 from vllm.platforms import current_platform
@@ -161,12 +161,19 @@ class TestAbsPosEmbedCache:
             third, ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6)
         )
 
-    def test_sam_cache_bounded_by_memory_without_evicting_live_entries(self):
+    def test_sam_cache_bounded_by_preallocated_buffer(self):
         sam = _make_small_sam()
         assert sam.pos_embed is not None
-        # Size 4 has 4*4*16*4 = 1024 bytes; cap at 3000 bytes so size 4 fits
-        # alongside size 5 (1600 bytes), while larger entries are not cached.
-        sam._abs_pos_cache._max_bytes = 3000
+        # Size 4 has 4*4*16*4 = 1024 bytes; cap buffer at 3000 bytes so size 4
+        # and size 5 (1600 bytes) fit in the pre-allocated buffer while larger
+        # entries are skipped without evicting live slots.
+        sam._abs_pos_cache = InterpolatedPosEmbedCache(max_bytes=3000)
+        buf = sam._abs_pos_cache._buffer
+        buf_start = buf.data_ptr()
+        buf_end = buf_start + buf.numel()
+
+        # Pre-allocated buffer must be non-persistent (absent from state_dict).
+        assert "_abs_pos_cache._buffer" not in sam.state_dict()
 
         with torch.inference_mode():
             pinned = sam.get_abs_pos(sam.pos_embed, 4)
@@ -179,10 +186,8 @@ class TestAbsPosEmbedCache:
                 )
             again = sam.get_abs_pos(sam.pos_embed, 4)
 
-        assert sam._abs_pos_cache._cached_bytes <= 3000
-        assert sam._abs_pos_cache._cached_bytes == sum(
-            t.nbytes for t, _, _ in sam._abs_pos_cache._entries.values()
-        )
+        assert buf_start <= pinned.data_ptr() < buf_end
+        assert sam._abs_pos_cache._offset <= buf.numel()
         assert again is pinned
 
     def test_deepclip_and_step3_embeddings_cache_and_reload(self):
@@ -275,19 +280,7 @@ class TestAbsPosEmbedCache:
 
         assert torch.equal(out, expected)
         assert len(sam._abs_pos_cache._entries) == 0
-        assert sam._abs_pos_cache._cached_bytes == 0
-
-    def test_unallocated_cache_bytes_accounting(self):
-        sam = _make_small_sam()
-        assert sam.pos_embed is not None
-        max_bytes = sam._abs_pos_cache._max_bytes
-        assert get_unallocated_pos_embed_cache_bytes(sam) == max_bytes
-
-        with torch.inference_mode():
-            out = sam.get_abs_pos(sam.pos_embed, 6)
-
-        assert get_unallocated_pos_embed_cache_bytes(sam) == max_bytes - out.nbytes
-        assert get_unallocated_pos_embed_cache_bytes(None) == 0
+        assert sam._abs_pos_cache._offset == 0
 
     def test_torch_compile_bypasses_cache(self):
         sam = _make_small_sam()
