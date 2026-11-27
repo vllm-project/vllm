@@ -50,6 +50,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing.processor import PromptUpdateDetails
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .utils import (
@@ -153,8 +154,8 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
       * config → `Gemma4UnifiedConfig` (not `Gemma4Config`)
       * vision_config.`num_soft_tokens` (not `default_output_length`)
 
-    Everything else (token sequencing, audio limits, video frame budget,
-    parser construction) is inherited unchanged.
+    Audio token counts follow raw frames instead of tower subsampling.
+    Audio limits, video frame budget, and parser construction are inherited.
     """
 
     def get_hf_config(self):
@@ -189,28 +190,44 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
+    def get_audio_repl(
+        self,
+        *,
+        audio_len: int,
+        processor: Gemma4UnifiedProcessor | None,
+    ) -> PromptUpdateDetails:
+        """Emit one audio token per raw frame, without tower downsampling."""
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        samples_per_token = processor.feature_extractor.audio_samples_per_token
+        num_tokens = math.ceil(audio_len / samples_per_token)
+        config = self.get_hf_config()
+        token_ids = (
+            [config.boa_token_id]
+            + [processor.audio_token_id] * num_tokens
+            + [getattr(config, "eoa_token_id", config.eoa_token_index)]
+        )
+        return PromptUpdateDetails.select_token_id(token_ids, processor.audio_token_id)
+
     def _compute_num_soft_tokens(
         self,
         image_width: int,
         image_height: int,
         max_soft_tokens: int | None = None,
+        do_resize: bool = True,
+        *,
+        is_video_frame: bool = False,
     ) -> int:
-        vision_cfg = self.get_hf_config().vision_config
-        patch_size = vision_cfg.patch_size
-        pooling_kernel_size = vision_cfg.pooling_kernel_size
-
         if max_soft_tokens is None:
-            max_soft_tokens = vision_cfg.num_soft_tokens
-
-        unit = patch_size * pooling_kernel_size
-        max_patches = max_soft_tokens * pooling_kernel_size**2
-        num_patches_orig = (image_height / patch_size) * (image_width / patch_size)
-        scale = math.sqrt(max_patches / num_patches_orig)
-        target_h = max(unit, int(math.floor(image_height * scale / unit)) * unit)
-        target_w = max(unit, int(math.floor(image_width * scale / unit)) * unit)
-        num_patches = (target_h // patch_size) * (target_w // patch_size)
-        num_soft_tokens = num_patches // (pooling_kernel_size**2)
-        return min(num_soft_tokens, max_soft_tokens)
+            max_soft_tokens = self.get_hf_config().vision_config.num_soft_tokens
+        return super()._compute_num_soft_tokens(
+            image_width,
+            image_height,
+            max_soft_tokens=max_soft_tokens,
+            do_resize=do_resize,
+            is_video_frame=is_video_frame,
+        )
 
 
 # ---------------------------------------------------------------------------

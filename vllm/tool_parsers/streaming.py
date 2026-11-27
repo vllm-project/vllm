@@ -63,7 +63,7 @@ def extract_named_tool_call_streaming(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class _RequiredToolCallSpan:
     """Where one element of a `tool_choice="required"` array sits in the text.
 
@@ -111,7 +111,7 @@ _IN_SCALAR_VALUE = 5
 _AFTER_VALUE = 6
 
 
-@dataclass
+@dataclass(slots=True)
 class RequiredToolCallScanner:
     """Incremental scanner owning the text of one required-tool-call stream."""
 

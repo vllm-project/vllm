@@ -186,9 +186,9 @@ def test_rope_positions_high_row():
     )
     prefill_len = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
     prefill_len[[0, ROPE_ROW]] = PREFILL_LEN
-    num_computed = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+    input_positions = torch.arange(PREFILL_LEN, device=device).repeat(2)
 
-    rope.prepare_positions(idx_mapping, query_start_loc, prefill_len, num_computed)
+    rope.prepare_positions(idx_mapping, query_start_loc, prefill_len, input_positions)
     torch.accelerator.synchronize()
 
     expect_control = torch.stack([1_000 * (j + 1) + base for j in range(NUM_DIMS)]).to(

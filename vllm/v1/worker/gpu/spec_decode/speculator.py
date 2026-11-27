@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.compilation.wrapper import remove_bytecode_hooks
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config import replace as replace_config
 from vllm.config.compilation import CUDAGraphMode
@@ -18,6 +19,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -43,7 +45,11 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    clear_layer_kv_caches,
+    groups_with_metadata_builders,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -127,9 +133,9 @@ class BaseSpeculator(ABC):
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
 
-    def add_request(self, req_index: int) -> None:
-        """A new request was assigned request-state slot `req_index`, e.g. to
-        reset per-slot state. No-op by default."""
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        """A new or resumed request was assigned request-state slot
+        `req_index`, e.g. to reset per-slot state. No-op by default."""
         return
 
     def on_requests_finished(self, finished_req_ids: set[str]) -> None:
@@ -147,12 +153,16 @@ class BaseSpeculator(ABC):
         when CUDA graphs no longer see Python values. No-op by default."""
         return
 
+    def shutdown(self) -> None:
+        """Called when the model runner shuts down. Detaches a draft `model`'s
+        layer KV caches and bytecode hooks, since the model object can outlive
+        the runner. Overrides must call super().shutdown()."""
+        if model := getattr(self, "model", None):
+            clear_layer_kv_caches(model.modules())
+            remove_bytecode_hooks(model)
+
 
 class DraftModelSpeculator(BaseSpeculator):
-    # Whether every slot mapping the speculator builds goes through its attention
-    # groups' map_to_kernel_slot_mapping, so packed token caches may split.
-    maps_slot_mapping = False
-
     # Draft prefill runs on the target's batch, so it can reuse the target
     # forward's attention metadata. Otherwise the drafter rebuilds it.
     can_reuse_target_attn_metadata: bool = True
@@ -403,15 +413,23 @@ class DraftModelSpeculator(BaseSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
+        # Use the sizes the KV cache was allocated with: draft layers can share a
+        # group with target layers whose backends need smaller kernel blocks.
         self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
             kv_cache_config,
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
-            maps_slot_mapping=self.maps_slot_mapping,
+            kernel_block_sizes=kernel_block_sizes,
+            no_attn_metadata_layer_names=(
+                self.draft_attn_layer_names
+                if self.speculative_config.prefill_context_kv_only
+                else ()
+            ),
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
@@ -462,7 +480,7 @@ class DraftModelSpeculator(BaseSpeculator):
             {
                 attn_group.backend.get_name()
                 for attn_groups in self.attn_groups
-                for attn_group in attn_groups
+                for attn_group in groups_with_metadata_builders(attn_groups)
                 if not attn_group.supports_draft_decode_metadata_update
             }
         )

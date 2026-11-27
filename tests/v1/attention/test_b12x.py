@@ -24,7 +24,7 @@ from vllm.v1.attention.backends.b12x import (
     _max_page_table_width,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 
 def _require_b12x_paged_attention() -> None:
@@ -87,7 +87,7 @@ def _causal_sliding_window_mask(
             torch.bfloat16,
             "auto",
             None,
-            "Install the b12x backend with `pip install vllm[b12x]`",
+            "The b12x backend requires flashinfer-python>=0.7.2",
             id="package-not-installed",
         ),
         pytest.param(
@@ -145,7 +145,7 @@ def test_b12x_attention_head_size_support(head_size: int, supported: bool) -> No
 
 def test_b12x_attention_uses_two_plane_nhd_cache() -> None:
     spec = B12xPagedAttentionBackend.customize_spec(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=128,
             num_kv_heads=4,
             head_size=128,

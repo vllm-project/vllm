@@ -9,6 +9,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    kv_lease_extension,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -58,8 +61,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            token_ids = request.prompt_token_ids or []
-            actual = self._get_remote_prefill_token_count(len(token_ids))
+            actual = self._get_remote_prefill_token_count(request)
             count = actual - num_computed_tokens
             if count > 0:
                 return count, True
@@ -264,12 +266,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                 request.request_id,
                 request_kv_blocks_ttl,
             )
-            self._reqs_need_send[request.request_id] = (
-                time.perf_counter() + request_kv_blocks_ttl
-            )
-            if is_d_node:
-                # D blocks expiry time exported for the turn-2 readback.
-                blocks_expiry_time = self._reqs_need_send[request.request_id]
+            # Lets the consumer decline reads of recycled blocks. P blocks: the
+            # initial lease, extended by heartbeats; D blocks: the turn-2 TTL.
+            blocks_expiry_time = time.perf_counter() + request_kv_blocks_ttl
+            self._reqs_need_send[request.request_id] = blocks_expiry_time
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
@@ -291,6 +291,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
+            # Heartbeat renewal amount; turn-2 D blocks have a fixed TTL.
+            remote_lease_extension=(
+                kv_lease_extension(self._kv_lease_duration) if is_p_node else None
+            ),
             remote_registration_generation=self._registration_generation,
             transfer_mode=self._TRANSFER_MODE,
         )

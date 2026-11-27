@@ -16,7 +16,7 @@ from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 requires_cpu = pytest.mark.skipif(
     not current_platform.is_cpu(), reason="CPU attention backend"
@@ -239,6 +239,99 @@ def test_flash_attention_geometry_comes_from_the_group():
     assert builder.headdim == 64
 
 
+@pytest.mark.parametrize(
+    "layer_heads,spec_kv_heads,has_config,expected",
+    [
+        pytest.param(40, 40, True, 64, id="mha-draft"),
+        pytest.param(24, 4, True, 512, id="gqa"),
+        pytest.param(None, 4, True, 512, id="no-layer"),
+        pytest.param(24, 4, False, 64, id="no-config"),
+    ],
+)
+def test_flashinfer_kernel_pages_use_layer_heads(
+    monkeypatch, layer_heads, spec_kv_heads, has_config, expected
+):
+    """Kernel pages follow the layer's own head counts. The target model's 24
+    query and 4 KV heads allow large pages, which an MHA draft layer cannot use.
+    Without a matching layer, the model-wide counts apply as before."""
+    pytest.importorskip("flashinfer")
+    import vllm.v1.attention.backends.flashinfer as backend
+    from vllm.v1.worker.utils import select_common_block_size
+
+    config = SimpleNamespace(
+        parallel_config=object(),
+        model_config=SimpleNamespace(
+            get_num_attention_heads=lambda _: 24,
+            get_num_kv_heads=lambda _: 4,
+            is_mm_prefix_lm=False,
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "get_current_vllm_config_or_none",
+        lambda: config if has_config else None,
+    )
+    monkeypatch.setattr(
+        backend.current_platform, "is_device_capability_family", lambda _: True
+    )
+    monkeypatch.setattr(backend, "can_use_trtllm_attention", lambda *a, **kw: True)
+    layers = {}
+    if layer_heads is not None:
+        layers["draft"] = SimpleNamespace(num_heads=layer_heads)
+    spec = AttentionSpec(
+        block_size=512,
+        num_kv_heads=spec_kv_heads,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    with patch(
+        "vllm.v1.attention.backends.utils.get_layers_from_vllm_config",
+        return_value=layers,
+    ):
+        selected = select_common_block_size(
+            512, [backend.FlashInferBackend], [spec], [["draft"]]
+        )
+    assert selected == expected
+
+
+def test_connector_groups_layers_by_query_heads():
+    """P/D connectors choose the kernel block from the same groups as the model
+    runner, so a draft layer that shares the target's spec keeps its own heads."""
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        get_current_attn_backends_and_specs,
+    )
+
+    spec = AttentionSpec(
+        block_size=512, num_kv_heads=4, head_size=128, dtype=torch.bfloat16
+    )
+    backend = object()
+    layers = {
+        name: SimpleNamespace(num_heads=heads, get_attn_backend=lambda: backend)
+        for name, heads in [("target.0", 24), ("draft", 4), ("target.1", 24)]
+    }
+    kv_cache_config = SimpleNamespace(
+        transfer_groups=[
+            SimpleNamespace(
+                kv_cache_specs=dict.fromkeys(layers, spec), layer_names=list(layers)
+            )
+        ]
+    )
+    layout = SimpleNamespace(is_block_outermost=False)
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.utils.get_layers_from_vllm_config",
+        return_value=layers,
+    ):
+        backends, specs, layer_names = get_current_attn_backends_and_specs(
+            vllm_config, kv_cache_config, []
+        )
+    assert backends == [backend, backend]
+    assert specs == [spec, spec]
+    assert layer_names == [["target.0", "target.1"], ["draft"]]
+
+
 def _triton_builder(
     spec_num_kv_heads,
     spec_head_size,
@@ -262,7 +355,7 @@ def _triton_builder(
     else:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
         vllm_config.compilation_config.cudagraph_capture_sizes = capture_sizes
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=16,
         num_kv_heads=spec_num_kv_heads,
         head_size=spec_head_size,
@@ -323,3 +416,38 @@ def test_triton_softmax_scratch_matches_the_kernel_stride():
         )
         assert builder.headdim == head_size
         assert builder.softmax_segm_output.shape[-1] == next_power_of_2(head_size)
+
+
+@pytest.mark.parametrize("spec_kv_heads", [4, 40])
+def test_flashinfer_cudagraph_support_ignores_model_heads(monkeypatch, spec_kv_heads):
+    """A draft layer's KV heads need not divide the target's 24 query heads. Its
+    group keeps full CUDA graphs, as the target's own group does."""
+    pytest.importorskip("flashinfer")
+    import vllm.v1.attention.backends.flashinfer as backend
+
+    monkeypatch.setattr(backend, "_use_fa2_native_decode", lambda: False)
+    monkeypatch.setattr(backend, "force_use_trtllm_attention", lambda: None)
+    monkeypatch.setattr(backend, "supports_trtllm_attention", lambda **_: True)
+    monkeypatch.setattr(
+        backend,
+        "can_use_trtllm_attention",
+        lambda num_qo_heads, num_kv_heads, **_: num_qo_heads % num_kv_heads == 0,
+    )
+    monkeypatch.setattr(
+        backend.current_platform, "is_device_capability", lambda _: False
+    )
+    monkeypatch.setattr(
+        backend.current_platform, "is_device_capability_family", lambda f: f == 100
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(use_non_causal=False),
+        model_config=SimpleNamespace(
+            get_num_attention_heads=lambda _: 24, get_num_kv_heads=lambda _: 4
+        ),
+    )
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=spec_kv_heads, head_size=128, dtype=torch.bfloat16
+    )
+    support = backend.FlashInferMetadataBuilder.get_cudagraph_support(config, spec)
+    assert support == backend.AttentionCGSupport.UNIFORM_BATCH

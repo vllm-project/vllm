@@ -68,6 +68,10 @@ _ci_otel_python() {
 # The Docker test commands run as root, while /workdir is owned by the
 # Buildkite checkout user. Run the GPU sampler as that unprivileged identity so
 # any future project-code import cannot leave root-owned files in the checkout.
+# Kubernetes pods have no /workdir and check out as root; there the sampler
+# runs as nobody, which can write only its own spool.
+_CI_INFRA_OTEL_NOBODY_ID=65534
+
 _ci_otel_prepare_gpu_user() {
   _CI_INFRA_GPU_UID=""
   _CI_INFRA_GPU_GID=""
@@ -75,14 +79,20 @@ _ci_otel_prepare_gpu_user() {
   command -v setpriv >/dev/null 2>&1 || return 1
 
   _CI_INFRA_OTEL_WORKSPACE_DIR="${CI_INFRA_OTEL_WORKSPACE_DIR:-/workdir}"
-  [ -d "${_CI_INFRA_OTEL_WORKSPACE_DIR}" ] || return 1
-  # The owner fields are numeric and whitespace-free on GNU stat.
-  # shellcheck disable=SC2046
-  set -- $(stat -c '%u %g' -- "${_CI_INFRA_OTEL_WORKSPACE_DIR}" 2>/dev/null || :)
-  [ "$#" -eq 2 ] || return 1
-  case "$1:$2" in
-    *[!0-9:]* | 0:* | *:0) return 1 ;;
-  esac
+  _CI_INFRA_OTEL_GPU_OWNER=""
+  if [ -d "${_CI_INFRA_OTEL_WORKSPACE_DIR}" ]; then
+    # The owner fields are numeric and whitespace-free on GNU stat.
+    # shellcheck disable=SC2046
+    set -- $(stat -c '%u %g' -- "${_CI_INFRA_OTEL_WORKSPACE_DIR}" 2>/dev/null || :)
+    if [ "$#" -eq 2 ]; then
+      case "$1:$2" in
+        *[!0-9:]* | 0:* | *:0) ;;
+        *) _CI_INFRA_OTEL_GPU_OWNER="$1 $2" ;;
+      esac
+    fi
+  fi
+  # shellcheck disable=SC2086
+  set -- ${_CI_INFRA_OTEL_GPU_OWNER:-${_CI_INFRA_OTEL_NOBODY_ID} ${_CI_INFRA_OTEL_NOBODY_ID}}
 
   _CI_INFRA_GPU_UID="$1"
   _CI_INFRA_GPU_GID="$2"
@@ -93,9 +103,11 @@ _ci_otel_prepare_gpu_user() {
     # Permit traversal to the private child spool, but not directory listing.
     chmod 0711 "${CI_INFRA_OTEL_RUNTIME_DIR}" || return 1
   fi
+  # shellcheck disable=SC2016
   setpriv --reuid="${_CI_INFRA_GPU_UID}" \
     --regid="${_CI_INFRA_GPU_GID}" --clear-groups --no-new-privs \
-    -- test -w "${CI_INFRA_OTEL_SPOOL_DIR}"
+    -- sh -c 'test -w "$1" && test -r "$2/ci_gpu.py" && test -r "$2/ci_otel.py"' \
+    sh "${CI_INFRA_OTEL_SPOOL_DIR}" "${CI_INFRA_OTEL_DIR}"
 }
 
 ci_otel_start() {
@@ -185,8 +197,9 @@ _ci_otel_on_exit() {
   _CI_INFRA_OTEL_EXIT_STATUS=$?
   trap - 0
   ci_otel_finish "${_CI_INFRA_OTEL_EXIT_STATUS}" || :
+  # Above ci_otel.py's FLUSH_MAX_SECONDS, which bounds the upload itself.
   if command -v timeout >/dev/null 2>&1; then
-    PYTHONDONTWRITEBYTECODE=1 timeout 4s \
+    PYTHONDONTWRITEBYTECODE=1 timeout 25s \
       "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
   else
     PYTHONDONTWRITEBYTECODE=1 \

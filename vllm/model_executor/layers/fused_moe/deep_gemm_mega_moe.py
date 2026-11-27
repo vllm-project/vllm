@@ -2,15 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepGEMM MegaMoE experts: fused EP dispatch, expert GEMMs and combine.
 
-Each `MEGA_MOE_*` format is one row of the SM100 feature matrix. MX weights
-and activations carry one UE8M0 scale per 1x32 block. NVFP4 weights carry one
+Each `MEGA_MOE_*` format is one row of the feature matrix. MX weights and
+activations carry one UE8M0 scale per 1x32 block (`MEGA_MOE_MXFP4_SM90`
+activations use one FP32 scale per 1x128 block). NVFP4 weights carry one
 E4M3 scale per 1x16 block plus a per-expert FP32 global scale; NVFP4 dispatch
-scales each token by its own FP32 scale.
+scales each token by its own FP32 scale. `MEGA_MOE_FP8_BLOCK_SM90` weights
+carry one FP32 scale per 128x128 block.
 """
 
 import math
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from inspect import signature
 from typing import Any, ClassVar, Literal
 
@@ -28,18 +30,22 @@ from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_nvfp4_inputs,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP8_DTYPE,
+    GroupShape,
     QuantKey,
+    ScaleDesc,
     kMxfp8Dynamic,
     kNvfp4DynamicToken,
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MegaMoEActivation:
     """Gated activation fused into the MegaMoE L1 epilogue.
 
@@ -82,7 +88,7 @@ class MegaMoEActivation:
         return kwargs
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MegaMoEWeightSpec:
     """Storage of one MegaMoE weight in the kernel layout."""
 
@@ -91,7 +97,7 @@ class MegaMoEWeightSpec:
     values_per_element: int = 1
     # K values per block scale; None for unscaled weights.
     scale_group_k: int | None = None
-    # Block scale dtype: UE8M0 (MX) or E4M3 (NVFP4).
+    # Block scale dtype: UE8M0 (MX), E4M3 (NVFP4) or FP32 (block FP8, SM90).
     scale_dtype: torch.dtype | None = None
 
     @property
@@ -116,9 +122,12 @@ _NVFP4_WEIGHT = MegaMoEWeightSpec(
     scale_dtype=torch.float8_e4m3fn,
 )
 _BF16_WEIGHT = MegaMoEWeightSpec(torch.bfloat16)
+_FP8_BLOCK_WEIGHT = MegaMoEWeightSpec(
+    torch.float8_e4m3fn, scale_group_k=128, scale_dtype=torch.float32
+)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MegaMoEWeightFormat:
     """One routed-expert precision of the MegaMoE feature matrix."""
 
@@ -132,6 +141,8 @@ class MegaMoEWeightFormat:
     # Quantization of the dispatched hidden states; None dispatches BF16.
     hidden_quant: QuantKey | None
     activations: frozenset[str]
+    # SM90 kernel: FP32 1x128 activation scales and a BLOCK_M all ranks agree on.
+    sm90: bool = False
 
     @property
     def uses_nvfp4_api(self) -> bool:
@@ -179,10 +190,31 @@ MEGA_MOE_WEIGHT_FORMATS = {
     fmt.name: fmt
     for fmt in (MEGA_MOE_MXFP4, MEGA_MOE_MXFP8, MEGA_MOE_NVFP4, MEGA_MOE_BF16)
 }
+MEGA_MOE_MXFP4_SM90 = replace(
+    MEGA_MOE_MXFP4,
+    hidden_quant=QuantKey(
+        FP8_DTYPE,
+        ScaleDesc(torch.float32, False, GroupShape(1, 128)),
+        symmetric=True,
+    ),
+    activations=frozenset({"swiglu"}),
+    sm90=True,
+)
+# Block-FP8 routed and shared experts on SM90, lossless (no MXFP8 requant).
+MEGA_MOE_FP8_BLOCK_SM90 = replace(
+    MEGA_MOE_MXFP4_SM90,
+    name="fp8_block_sm90",
+    mma_type="fp8xfp8",
+    routed=_FP8_BLOCK_WEIGHT,
+    shared=(_FP8_BLOCK_WEIGHT,),
+)
 
 
 def check_deep_gemm_mega_moe_supported(
-    device: torch.device, hidden_size: int, intermediate_size: int
+    device: torch.device,
+    hidden_size: int,
+    intermediate_size: int,
+    weight_format: MegaMoEWeightFormat,
 ) -> None:
     """Raise unless DeepGEMM MegaMoE can run on `device` with these shapes.
 
@@ -191,10 +223,17 @@ def check_deep_gemm_mega_moe_supported(
         ValueError: If the shapes are unsupported.
 
     """
-    if not current_platform.is_device_capability_family(
-        100, device_id=device.index or 0
-    ):
-        raise NotImplementedError("DeepGEMM MegaMoE requires SM100 GPUs.")
+    device_id = device.index or 0
+    if current_platform.is_device_capability(90, device_id=device_id):
+        if not (weight_format.sm90 or weight_format == MEGA_MOE_MXFP4):
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE on SM90 supports MXFP4 and block-FP8 experts "
+                f"only, not {weight_format.name}."
+            )
+    elif not current_platform.is_device_capability_family(100, device_id=device_id):
+        raise NotImplementedError("DeepGEMM MegaMoE requires SM90 or SM100 GPUs.")
+    elif weight_format.sm90:
+        raise NotImplementedError(f"{weight_format.name} requires SM90 GPUs.")
     if hidden_size % 128 != 0 or intermediate_size % 128 != 0:
         raise ValueError(
             "DeepGEMM MegaMoE requires hidden and intermediate sizes "
@@ -233,9 +272,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
     Parameters are registered in the kernel layout and every checkpoint shard is
     written straight into it, so loading (and reloading) needs no post-load
-    transform. Whether the shared expert runs inside the launch is decided here,
-    before any weight loads; a fused layer owns the shared-expert weights and
-    the caller drops its shared MLP.
+    transform, except the SM90 requantization of a fused FP8 shared expert
+    and the SM90 layout of FP32 block scales.
+    Whether the shared expert runs inside the launch is decided here, before
+    any weight loads; a fused layer owns the shared-expert weights and the
+    caller drops its shared MLP.
 
     NVFP4 experts also take per-expert `weight_scale_2` (`w1` and `w3`
     must match: one L1 scale per expert) and `w2` `input_scale`; the kernel
@@ -282,17 +323,23 @@ class DeepGemmMegaMoEExperts(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        if activation.name not in weight_format.activations:
-            raise NotImplementedError(
-                f"DeepGEMM MegaMoE {weight_format.name} experts support "
-                f"{sorted(weight_format.activations)}, not {activation.name!r}."
-            )
         device = torch.get_default_device()
         if device.type != current_platform.device_type:  # meta under ipc_cache
             device = torch.device(
                 current_platform.device_type, torch.accelerator.current_device_index()
             )
-        check_deep_gemm_mega_moe_supported(device, hidden_size, intermediate_size)
+        check_deep_gemm_mega_moe_supported(
+            device, hidden_size, intermediate_size, weight_format
+        )
+        if weight_format == MEGA_MOE_MXFP4 and current_platform.is_device_capability(
+            90, device_id=device.index or 0
+        ):
+            weight_format = MEGA_MOE_MXFP4_SM90
+        if activation.name not in weight_format.activations:
+            raise NotImplementedError(
+                f"DeepGEMM MegaMoE {weight_format.name} experts support "
+                f"{sorted(weight_format.activations)}, not {activation.name!r}."
+            )
 
         self.prefix = prefix
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
@@ -322,6 +369,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.l2_activation_scale = 1.0
         # The first of each expert's w1/w3 weight_scale_2 until the other loads.
         self._pending_l1_scales: dict[int, tuple[str, float]] = {}
+        # Shared-expert shards whose weight / scale loaded since the last SM90
+        # requantization.
+        self._new_shared_weights: set[str] = set()
+        self._new_shared_scales: set[str] = set()
 
         self.num_shared_experts, self.shared_spec = self._fusable_shared_experts(
             shared_experts
@@ -451,7 +502,13 @@ class DeepGemmMegaMoEExperts(nn.Module):
             f"{name}_weight",
             torch.zeros(*outer, n, k // spec.values_per_element, dtype=spec.dtype),
         )
-        if spec.scale_group_k is not None:
+        if spec.scale_dtype == torch.float32:
+            # 128x128 block scales, MN-major with a 16-byte aligned MN stride.
+            scale = torch.zeros(
+                *outer, k // 128, round_up(n // 128, 4), dtype=spec.scale_dtype
+            )
+            register(f"{name}_weight_scale", scale[..., : n // 128].transpose(-1, -2))
+        elif spec.scale_group_k is not None:
             # Block scales, MN-major, four per int32 along K.
             scale_k = k // (4 * spec.scale_group_k)
             scale = torch.zeros(*outer, scale_k, n, dtype=torch.int32)
@@ -497,6 +554,16 @@ class DeepGemmMegaMoEExperts(nn.Module):
             return False if return_success else None
         is_global_scale = weight_name.endswith(("weight_scale_2", "input_scale"))
         is_scale = weight_name.endswith("weight_scale")
+        if self.weight_format == MEGA_MOE_MXFP4_SM90 and not param.is_meta:
+            try:
+                loaded_weight = self._sm90_fp4_shard(
+                    loaded_weight.to(param.device), is_scale
+                )
+            except AssertionError as e:
+                raise ValueError(
+                    f"MegaMoE MXFP4 expert {expert_id} {shard_id} ({weight_name}) "
+                    f"cannot run on SM90: {e}"
+                ) from e
         for local_expert_id in local_expert_ids:
             if is_global_scale:
                 param.data[local_expert_id].copy_(loaded_weight.reshape(()))
@@ -623,6 +690,39 @@ class DeepGemmMegaMoEExperts(nn.Module):
         )
         is_scale = "weight_scale" in weight_name
         self._load_weight(param.data, loaded_weight, shard_id, is_scale)
+        if self.weight_format == MEGA_MOE_MXFP4_SM90 and not loaded_weight.is_meta:
+            new = self._new_shared_scales if is_scale else self._new_shared_weights
+            new.add(shard_id)
+
+    @torch.no_grad()
+    def process_weights_after_loading(self) -> None:
+        """Requantize newly loaded shared-expert shards to SM90 scales.
+
+        Requantization is row-local and leaves requantized rows unchanged, so a
+        reloaded shard is exact when both its weight and scale arrived.
+
+        Raises:
+            ValueError: If a shard's weight or scale loaded without the other.
+
+        """
+        weights, scales = self._new_shared_weights, self._new_shared_scales
+        if weights != scales:
+            raise ValueError(
+                f"{self.prefix}: shared-expert shards {sorted(weights ^ scales)} "
+                "loaded without their weight or weight_scale; the SM90 "
+                "requantization needs both."
+            )
+        from vllm.utils.deep_gemm import requantize_fp8_weights_for_sm90_mega_moe
+
+        for name in {"shared_l2" if s == "w2" else "shared_l1" for s in weights}:
+            weight, scale = self._kernel_weights(name)
+            requantized = requantize_fp8_weights_for_sm90_mega_moe(
+                (weight.data, scale.data), is_sf_transposed_for_utccp=True
+            )
+            for param, data in zip((weight, scale), requantized):
+                param.data.copy_(data)
+        weights.clear()
+        scales.clear()
 
     def _load_weight(
         self,
@@ -649,6 +749,26 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 )
         dst, src = self._kernel_layout_shard(dst, src, shard_id, is_scale)
         dst.copy_(src)
+
+    @staticmethod
+    def _sm90_fp4_shard(src: torch.Tensor, is_scale: bool) -> torch.Tensor:
+        """Repack a routed FP4 shard for the SM90 kernel's dequantization.
+
+        Raises:
+            AssertionError: If a row's UE8M0 scales are out of the kernel's range.
+
+        """
+        from vllm.utils.deep_gemm import (
+            relayout_fp4_weights_for_sm90_mega_moe,
+            transform_fp4_sf_for_sm90_mega_moe,
+        )
+
+        if is_scale:
+            # The codes load in a separate call, so rows wider than the kernel
+            # range cannot be clamped here and fail the load.
+            sf = src.view(torch.uint8).contiguous().view(torch.int32)
+            return transform_fp4_sf_for_sm90_mega_moe(sf)
+        return relayout_fp4_weights_for_sm90_mega_moe(src.view(torch.int8))
 
     @staticmethod
     def _pack_scale(sf: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
@@ -731,7 +851,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             # DeepGEMM measures the SM locality-domain map that MegaMoE reads through
             # an MPS helper process, which stays alive until released. vLLM
             # localizes no weights, so cache the map and stop the helper now.
-            if hasattr(deep_gemm, "destroy_localizer"):
+            if current_platform.is_device_capability_family(100) and hasattr(
+                deep_gemm, "destroy_localizer"
+            ):
                 deep_gemm.destroy_localizer()
         return symm_buffer
 
@@ -771,11 +893,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
             assert t.shape[0] == self.num_local_experts
             if t.is_contiguous():
                 return t.view(self.num_local_experts, -1)
-            elif t.dim() == 3 and t.stride(1) == 1 and t.stride(2) == t.shape[1]:
-                # scales have shape (E, M, N) with memory layout (E, N, M)
-                back = torch.transpose(t, 1, 2)
-                assert back.is_contiguous()
-                return back.view(self.num_local_experts, -1)
+            elif (
+                t.dim() == 3
+                and t.stride(1) == 1
+                and t.stride(2) >= t.shape[1]
+                and t.stride(0) == t.shape[2] * t.stride(2)
+            ):
+                # Scales of shape (E, M, N) laid out as (E, N, M'), M' >= M
+                # (SM90 FP32 block scales pad M to a multiple of 4).
+                return t.as_strided((t.shape[0], t.stride(0)), (t.stride(0), 1))
 
             raise AssertionError(
                 f"MegaMoE EPLB {name}: non-contiguous expert tensor with "
@@ -804,6 +930,19 @@ class DeepGemmMegaMoEExperts(nn.Module):
         torch.accelerator.synchronize()
         torch.distributed.barrier(group=ep_group.cpu_group)
         self._synchronized_ep_groups.add(key)
+
+    def _mean_num_tokens(self, num_tokens: int) -> int:
+        """Mean tokens per EP rank of this step, the same on every rank.
+
+        CUDA graph steps pad every DP rank to one count, so it is `num_tokens`.
+        """
+        if is_forward_context_available():
+            dp_metadata = get_forward_context().dp_metadata
+            if dp_metadata is not None:
+                num_dp_tokens = int(dp_metadata.num_tokens_across_dp_cpu.sum())
+                return cdiv(num_dp_tokens, get_ep_group().world_size)
+        # Warmup: every rank runs the same token counts.
+        return num_tokens
 
     def forward(
         self,
@@ -854,12 +993,17 @@ class DeepGemmMegaMoEExperts(nn.Module):
         deep_gemm = _import_deep_gemm()
         fmt = self.weight_format
         symm_buffer = self.get_symm_buffer()
+        kwargs = dict(self._kernel_kwargs)
+        block_m_num_tokens = num_tokens
+        if fmt.sm90:
+            # Pick BLOCK_M from the mean tokens per rank so all ranks agree.
+            block_m_num_tokens = self._mean_num_tokens(num_tokens)
+            kwargs["num_tokens_for_block_m"] = block_m_num_tokens
         shared_x_sf = None
         shared_block_m = None
         if self.shared_spec is not None and self.shared_spec.scale_group_k:
             shared_x_sf = symm_buffer.shared_l1_acts_sf
-            shared_block_m = self.get_block_m(num_tokens)
-        kwargs = dict(self._kernel_kwargs)
+            shared_block_m = self.get_block_m(block_m_num_tokens)
         if fmt.uses_nvfp4_api:
             l2_activation_scale = self.l2_activation_scale
             prepare_megamoe_nvfp4_inputs(

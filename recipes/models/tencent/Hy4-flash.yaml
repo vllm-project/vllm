@@ -1,0 +1,214 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "HY4-Flash"
+  slug: "hy4-flash"
+  provider: "Hunyuan (Tencent)"
+  description: "Tencent HY4 Flash multimodal MoE for everyday productivity and agent workflows — 220B total / 12B active, 1M context, DFly speculative decoding"
+  date_added: 2026-11-17
+  date_updated: 2026-11-25
+  tasks:
+    - text
+    - multimodal
+  related_recipes:
+    - "tencent/Hy4-preview"
+  # The ROCm sparse MLA path requires gfx950, so MI300X and MI325X (gfx942) cannot run it.
+  hardware:
+    mi300x: unsupported
+    mi325x: unsupported
+    mi350x: supported
+    mi355x: verified
+
+model:
+  model_id: "tencent/Hy4-flash"
+  docker_image:
+    nvidia: "vllm/vllm-openai:hy4-flash"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  install:
+    docker:
+      note: "Dedicated HY4 Flash image on NVIDIA, nightly ROCm image on AMD — no released vLLM wheel supports this model yet"
+    pip: false
+  architecture: moe
+  parameter_count: "220B"
+  active_parameters: "12B"
+  context_length: 1048576
+  base_args:
+    - "--dtype"
+    - "bfloat16"
+    - "--max-model-len"
+    - "8192"
+    - "--max-num-seqs"
+    - "4"
+    - "--max-num-batched-tokens"
+    - "8192"
+    - "--limit-mm-per-prompt"
+    - '{"image":1,"video":0}'
+  default_frontend: rust
+
+features:
+  # HY4 pairs its tool and reasoning parsers: either feature emits both
+  # (dedupe is last-wins, so enabling both yields one copy of each flag).
+  tool_calling:
+    description: "HY4 tool call parser with automatic tool choice (also enables the paired hy_v4 reasoning parser)"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hy_v4"
+      - "--reasoning-parser"
+      - "hy_v4"
+  reasoning:
+    description: "HY4 reasoning parser for thinking-content extraction (also enables the paired hy_v4 tool call parser)"
+    args:
+      - "--reasoning-parser"
+      - "hy_v4"
+      - "--tool-call-parser"
+      - "hy_v4"
+  spec_decoding:
+    description: "DFly speculative decoding with the checkpoint's built-in five-layer draft (5 speculative tokens)"
+    args:
+      - "--speculative-config"
+      - '{"num_speculative_tokens":5,"method":"dfly"}'
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 529
+    tp:
+      amd: 8
+    description: "BF16 checkpoint (tencent/Hy4-flash) — 441 GB of weights; Engram tables live in host memory"
+  fp8:
+    model_id: "tencent/Hy4-flash-FP8"
+    precision: fp8
+    vram_minimum_gb: 345
+    tp:
+      amd: 8
+    description: "FP8 checkpoint (tencent/Hy4-flash-FP8), BF16 compute — 287 GB of weights; Engram tables live in host memory"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+
+hardware_overrides:
+  amd:
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      # Temporary: AITER's default sparse MLA decode kernel reads the wrong KV
+      # past 4 GiB of cache. Remove once vLLM's AITER includes ROCm/aiter#6277.
+      VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
+
+notes:
+  - title: "TEP is not validated on AMD"
+    when: { hardware: [amd], strategies: [single_node_tep] }
+    body: |
+      Only TP8 has been run on MI355X. Expert parallelism
+      (`--enable-expert-parallel`) has not been validated on ROCm yet.
+
+guide: |
+  ## Overview
+
+  HY4 Flash is Tencent's multimodal Mixture-of-Experts model for everyday
+  productivity and agent workflows: 220B total parameters (including 64B of
+  Engram embeddings), 12B active per token, and up to 1M tokens of context.
+
+  The model has 42 decoder layers with hybrid sliding-window and compressed
+  sparse attention, Engram embeddings, and a five-layer DFly draft head. Both
+  checkpoints run with BF16 compute:
+
+  - [HY4 Flash BF16](https://huggingface.co/tencent/Hy4-flash) — the default variant
+  - [HY4 Flash FP8](https://huggingface.co/tencent/Hy4-flash-FP8) — the FP8 variant
+
+  DFly speculative decoding is on by default; turn off speculative decoding to
+  serve the target model alone. MTP is not supported by this implementation.
+
+  ## Prerequisites
+
+  - **Hardware**: Hopper or Blackwell data-center GPUs (H100 / H200 / B200 /
+    GB200 / B300 / GB300), or AMD Instinct MI355X / MI350X (see the AMD section below).
+  - **vLLM**: the dedicated `vllm/vllm-openai:hy4-flash` Docker image on
+    NVIDIA, or `vllm/vllm-openai-rocm:nightly` on AMD. No released vLLM wheel
+    registers `HYV4FlashVLForConditionalGeneration` or the DFly drafter yet, so
+    pip installs are not supported.
+  - **Host memory**: Engram tables are offloaded to host RAM by default, so
+    provision host memory in addition to GPU memory.
+  - **Access**: the checkpoints may require Hugging Face authentication with
+    access to the selected repository.
+
+  ## Supported features
+
+  - Tensor parallelism, with optional expert parallelism (TP / TEP strategies).
+  - Data parallelism, pipeline parallelism, context parallelism, EPLB, DBO
+    and LoRA are not supported.
+  - HY4 uses a paired tool-call / reasoning parser (`hy_v4`): turning on either
+    Tool calling or Reasoning configures both parsers; Tool calling additionally
+    adds `--enable-auto-tool-choice`.
+
+  ## AMD (8x MI355X)
+
+  Both checkpoints are verified on 8x MI355X with TP8 and DFly; TEP has not
+  been run on AMD. MI350X is the same gfx950 architecture and is supported,
+  but has not been run. The ROCm path needs gfx950, so MI300X and MI325X are
+  not supported.
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+    --ipc=host --shm-size 16g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 \
+    -p 8000:8000 \
+    vllm/vllm-openai-rocm:nightly \
+    tencent/Hy4-flash-FP8 \
+    --tensor-parallel-size 8 \
+    --dtype bfloat16 \
+    --reasoning-parser hy_v4 \
+    --tool-call-parser hy_v4 \
+    --speculative-config '{"num_speculative_tokens":5,"method":"dfly"}'
+  ```
+
+  Use `tencent/Hy4-flash` for the BF16 checkpoint.
+  `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1` is required for now: AITER's
+  default sparse MLA decode kernel reads the wrong KV rows once a layer's KV
+  cache passes 4 GiB, which HY4 Flash reaches after a few hundred thousand
+  tokens. It can be dropped once vLLM's AITER includes
+  [ROCm/aiter#6277](https://github.com/ROCm/aiter/pull/6277). On ROCm the KV
+  cache may be BF16 (the default) or `fp8_ds_mla`.
+
+  ## Context and memory
+
+  The checkpoint advertises 1,048,576 positions. The recipe starts with an
+  8,192-token context, four concurrent sequences and one image (no video) per
+  prompt; raise `--max-model-len`, `--max-num-seqs` and `--limit-mm-per-prompt`
+  to match your memory budget and workload.
+
+  The VRAM hints (529 GB BF16, 345 GB FP8) are the checkpoint download sizes
+  (440.5 GB and 287.1 GB) × 1.2. They are conservative aggregate estimates, not
+  measured GPU minima: Engram storage offloaded to the CPU lowers the actual GPU
+  footprint.
+
+  ## Client usage
+
+  Use the selected checkpoint ID as the model name (`tencent/Hy4-flash` for the
+  default variant, `tencent/Hy4-flash-FP8` for FP8):
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  resp = client.chat.completions.create(
+      model="tencent/Hy4-flash",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://example.com/chart.png"}},
+              {"type": "text", "text": "Summarize this chart."},
+          ],
+      }],
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## References
+
+  - [HY4 Flash research page](https://hy.tencent.ai/research/hy4-flash?langVersion=en)
+  - [BF16 checkpoint](https://huggingface.co/tencent/Hy4-flash)
+  - [FP8 checkpoint](https://huggingface.co/tencent/Hy4-flash-FP8)

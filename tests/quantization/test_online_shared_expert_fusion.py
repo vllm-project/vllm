@@ -15,6 +15,7 @@ import torch
 
 import vllm.envs as envs
 from tests.quantization.utils import load_model_without_vllm_runner
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import (
@@ -149,37 +150,10 @@ class _StubAttention(torch.nn.Module):
         self.o_proj = SimpleNamespace(reduce_results=True)
 
 
-class _SingleRankGroup:
-    """Minimal stand-in for a size-1 `GroupCoordinator`."""
-
-    world_size = 1
-    rank_in_group = 0
-    rank = 0
-    local_rank = 0
-    ranks = [0]
-    is_first_rank = True
-    is_last_rank = True
-    # Read at model construction, never used for communication here.
-    device_group = SimpleNamespace(size=lambda: 1, rank=lambda: 0)
-    cpu_group = None
-
-
 @pytest.fixture
-def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
-    """Single rank parallel groups without initializing a process group.
-
-    This is faster than the `dist_init` fixture.
-    """
-    for name in ("_WORLD", "_TP", "_ETP", "_DCP", "_PP", "_DP", "_EP", "_PCP"):
-        monkeypatch.setattr(
-            f"vllm.distributed.parallel_state.{name}", _SingleRankGroup()
-        )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
+@override_parallel_groups(SingleRankGroup())
+def single_rank_parallel_state():
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -231,9 +205,7 @@ def _write_minimal_moe_config(
         "rope_theta": 10000,
         "quantization_config": _QUARK_MXFP4_CONFIG,
     }
-    if architecture == "AXK1ForCausalLM":
-        config["model_type"] = "axk1"
-    elif architecture == "MiniMaxM3SparseForCausalLM":
+    if architecture == "MiniMaxM3SparseForCausalLM":
         text_config = {
             **config,
             "model_type": "minimax_m3_text",
@@ -512,7 +484,6 @@ def test_online_shared_expert_reload_compatibility(
 @pytest.mark.parametrize(
     "architecture",
     [
-        "AXK1ForCausalLM",
         "DeepseekForCausalLM",
         "DeepseekV2ForCausalLM",
         "DeepseekV32ForCausalLM",
@@ -641,6 +612,79 @@ def test_online_quantization(
             f"(from targets: {target_pattern}, mxfp4)"
         )
     ]
+
+
+@pytest.mark.parametrize("n_shared_experts", [1, 2])
+def test_transformers_backend_fuses_shared_expert(
+    tmp_path: Path,
+    monkeypatch,
+    single_rank_parallel_state,
+    workspace_init,
+    n_shared_experts: int,
+) -> None:
+    """The Transformers modeling backend runs the shared expert as extra routed
+    experts, each loaded from its slice of the checkpoint's shared expert."""
+    from transformers import DeepseekV3Config, DeepseekV3ForCausalLM
+
+    _enable_aiter(monkeypatch, fse=True)
+    config = DeepseekV3Config(
+        hidden_size=256,
+        intermediate_size=512,
+        moe_intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_hidden_layers=1,
+        vocab_size=256,
+        q_lora_rank=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        n_routed_experts=4,
+        num_experts_per_tok=1,
+        n_group=1,
+        topk_group=1,
+        n_shared_experts=n_shared_experts,
+        first_k_dense_replace=0,
+    )
+    hf_model = DeepseekV3ForCausalLM(config).to(torch.bfloat16)
+    # Make routed expert j a copy of slice j of the shared expert, so each fused
+    # slot can be compared with it after any layout processing.
+    mlp = hf_model.model.layers[0].mlp
+    shared = mlp.shared_experts
+    width = config.moe_intermediate_size
+    with torch.no_grad():
+        for param in hf_model.parameters():
+            torch.nn.init.normal_(param, std=0.02)
+        for j in range(n_shared_experts):
+            rows = slice(j * width, (j + 1) * width)
+            gate_up = torch.cat(
+                [shared.gate_proj.weight[rows], shared.up_proj.weight[rows]]
+            )
+            mlp.experts.gate_up_proj[j] = gate_up
+            mlp.experts.down_proj[j] = shared.down_proj.weight[:, rows]
+    hf_model.save_pretrained(tmp_path)
+
+    model, _ = load_model_without_vllm_runner(
+        str(tmp_path), model_config_kwargs={"model_impl": "transformers"}
+    )
+
+    moe = next(
+        module
+        for module in model.modules()
+        if getattr(module, "is_fused_shared_expert_enabled", False)
+    )
+    assert moe.shared_experts is None
+    routed_experts = moe.experts.routed_experts
+    num_fused = routed_experts.expert_map_manager.num_fused_shared_experts
+    assert num_fused == n_shared_experts
+    w13, w2 = routed_experts.w13_weight, routed_experts.w2_weight
+    for j in range(n_shared_experts):
+        slot = config.n_routed_experts + j
+        torch.testing.assert_close(w13[slot], w13[j])
+        torch.testing.assert_close(w2[slot], w2[j])
+    untouched = n_shared_experts
+    assert not torch.equal(w13[config.n_routed_experts], w13[untouched])
 
 
 _MINIMAX_NVFP4_ROUTED_MXFP8_SHARED_QUANT_CONFIG: dict[str, Any] = {
@@ -1431,7 +1475,7 @@ def test_nvfp4_oracle_only_skipped_for_requantized_layers(
             layers.append(runner.routed_experts)
 
     assert selected == [
-        ("skipped", NvFp4MoeBackend.EMULATION),
+        ("skipped", NvFp4MoeBackend.NONE),
         ("selected", NvFp4MoeBackend.VLLM_CUTLASS),
     ]
     assert isinstance(layers[0].quant_method, Mxfp4OnlineMoEMethod)

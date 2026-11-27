@@ -123,6 +123,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
+    minimax_m3_use_flashinfer_msa,
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
@@ -131,14 +132,19 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.flashinfer import is_flashinfer_autotuning
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
 )
 
+from .specialized_decode import specialized_decode_config
+
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+
+    from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
 
 logger = init_logger(__name__)
 
@@ -962,12 +968,22 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # Python value, which would freeze at capture).
         self.topk_indices_buffer = topk_indices_buffer
         # Indexer (top-k selection) and main attention are separate impls, each
-        # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
+        # picking Triton vs MSA off its cache dtype; the FlashInfer verdict is
+        # computed once so both selectors agree. impl is AttentionImplBase
         # (broader than the AttentionImpl that AttentionLayerBase annotates).
+        use_flashinfer_msa = minimax_m3_use_flashinfer_msa(
+            topk_blocks=config.index_topk_blocks,
+            kv_cache_dtype=self.kv_cache_dtype,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            indexer_kv_dtype=self.indexer_kv_dtype,
+            model_dtype=vllm_config.model_config.dtype,
+        )
         self.attn_backend, impl_cls = select_main_backend_and_impl_cls(
             topk_blocks=config.index_topk_blocks,
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
         self.impl: MiniMaxM3SparseImpl = impl_cls(  # type: ignore[assignment]
             self.num_heads,
@@ -994,6 +1010,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
 
         # Register the main K/V cache so the KV-cache manager allocates it.
@@ -1026,9 +1043,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -1036,6 +1053,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _qkv_proj_fused_epilogue(
         self,
@@ -1494,6 +1512,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         if not supports_fused_moe_finalize(vllm_config):
             return
+        from .specialized_decode import fused_finalize_max_tokens
+
+        max_tokens = fused_finalize_max_tokens(
+            vllm_config, FUSED_MOE_FINALIZE_MAX_TOKENS
+        )
         layers = self.layers[self.start_layer : self.end_layer]
         deferring = [
             layer.block_sparse_moe
@@ -1501,7 +1524,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if layer.is_moe_layer
             and successor.fuse_input_allreduce
             and get_input_quant_key(successor.self_attn.qkv_proj) == kMxfp8Dynamic
-            and layer.block_sparse_moe.defer_finalize(FUSED_MOE_FINALIZE_MAX_TOKENS)
+            and layer.block_sparse_moe.defer_finalize(max_tokens)
         ]
         if not deferring:
             return
@@ -1512,14 +1535,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         )
         init_fused_moe_finalize(
             hidden_size=self.config.hidden_size,
-            max_num_tokens=FUSED_MOE_FINALIZE_MAX_TOKENS,
+            max_num_tokens=max_tokens,
             top_k=self.config.num_experts_per_tok,
             fp32_weights=experts_cls is TrtLlmNvFp4ExpertsModular,
         )
         logger.info_once(
             "MiniMax M3: MoE top-k finalize fused into the next all-reduce + "
             "input norm + MXFP8 quantization for up to %d tokens (%d layers).",
-            FUSED_MOE_FINALIZE_MAX_TOKENS,
+            max_tokens,
             len(deferring),
         )
 
@@ -1532,6 +1555,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -1543,6 +1567,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        if decode_step is not None:
+            # decode_backend=latency_specialized: the executor runs the layers and the
+            # final norm (no pipeline parallelism, so no remote aux).
+            return decode_step.run(hidden_states, positions)
 
         num_tokens = hidden_states.shape[0]
         forward_context = None
@@ -1667,6 +1696,14 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        # decode_backend=latency_specialized: a decode executor over self.model, built
+        # by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
+        if self.specialized_decode_config is not None:
+            # Only then does the model pick its model state; otherwise the model runner
+            # resolves it as it did before.
+            self.get_model_state_cls = self._specialized_decode_model_state_cls
         self.model = MiniMaxM3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -1691,6 +1728,23 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    def build_specialized_decode(self) -> "SpecializedDecode":
+        from .specialized_decode.runtime.decode import SpecializedDecode
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode.for_target(
+            self.model, self.specialized_decode_config, self.lm_head
+        )
+        return self.specialized_decode
+
+    @staticmethod
+    def _specialized_decode_model_state_cls():
+        from .specialized_decode.runtime.model_state import (
+            MiniMaxM3SpecializedDecodeModelState,
+        )
+
+        return MiniMaxM3SpecializedDecodeModelState
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1699,7 +1753,17 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        decode = self.specialized_decode
+        if decode is None:
+            return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        step = decode.plan(positions, intermediate_tensors)
+        return self.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            decode_step=step,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
@@ -1794,6 +1858,9 @@ class MiniMaxM3SparseForConditionalGeneration(
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
+        # decode_backend=latency_specialized: the language model's model state.
+        if hasattr(self.language_model, "get_model_state_cls"):
+            self.get_model_state_cls = self.language_model.get_model_state_cls
 
     # Expose language model / lm_head for EAGLE3 spec decode.
     @property

@@ -25,6 +25,7 @@ def make_offloading_config(
     max_model_len: int = 4096,
     rank: int = 0,
     world_size: int = 1,
+    local_world_size: int | None = None,
     tp_size: int | None = None,
     pp_size: int = 1,
     pcp_size: int = 1,
@@ -62,6 +63,9 @@ def make_offloading_config(
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=world_size,
+            local_world_size=(
+                world_size if local_world_size is None else local_world_size
+            ),
             tp_size=world_size if tp_size is None else tp_size,
             pp_size=pp_size,
             pcp_size=pcp_size,

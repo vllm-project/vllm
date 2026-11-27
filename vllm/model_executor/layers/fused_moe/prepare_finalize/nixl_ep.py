@@ -144,7 +144,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def _map_global_to_physical_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
         if self.global_to_physical is None:
             return topk_ids
-        return self.global_to_physical[topk_ids]
+        return torch.where(topk_ids >= 0, self.global_to_physical[topk_ids], -1)
 
     def _do_quant(
         self,
@@ -175,9 +175,9 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         x = x.view((-1, hidden_dim))
         q_dtype = quant_config.quant_dtype
 
-        if q_dtype == "nvfp4":
+        if q_dtype in ("nvfp4", "mxfp8"):
+            logger.debug_once("Using NIXL EP bfloat16 dispatch for %s MoE.", q_dtype)
             q_dtype = None
-            logger.debug_once("Using NIXL EP bfloat16 dispatch for NVFP4 MoE.")
 
         # The dispatch buffer is worst-case per expert, so rows past
         # `expert_num_tokens[e]` hold stale tokens and must not contribute to

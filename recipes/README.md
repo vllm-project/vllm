@@ -25,6 +25,15 @@ on every build; an unknown or misspelled key is an error. For completion and
 inline errors in YAML-aware editors, start the file with
 `# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json`.
 
+Don't set `--gpu-memory-utilization` for CUDA or ROCm hardware, even when a
+model card recommends a value. There, vLLM sizes the KV cache from the memory
+measured after warmup and defaults the setting to 1.0, so a lower value only
+shrinks the KV cache. Set it only to leave room for something vLLM doesn't
+measure, such as another process sharing the GPU or the CPU on a unified-memory
+device like DGX Spark; see
+[GPU Memory Utilization](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization).
+Values for other hardware (TPU, XPU, CPU) still size the KV cache there.
+
 Follow the recipes repository's
 [add-recipe skill](https://github.com/vllm-project/recipes/blob/main/.agents/skills/add-recipe/SKILL.md)
 for the schema and the validation steps. To validate a change exactly as this

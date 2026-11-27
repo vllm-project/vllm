@@ -477,7 +477,7 @@ def _sel(cond, a, b, ty):
 
 
 class SwapABDecodeKernel(VllmCuTeDSLJitKernel["SwapABDecodeKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         heads: int  # live heads: 16 or 32
         swa_width: int  # columns of the SWA slot list

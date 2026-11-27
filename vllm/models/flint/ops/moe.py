@@ -602,7 +602,7 @@ def flint_moe_bf16_decode(
     return out
 
 
-@dataclass
+@dataclass(slots=True)
 class FlintMoEWeights:
     """Routed-expert NVFP4 weights in FlashInfer's W4A16 layout."""
 
@@ -979,7 +979,7 @@ class FlintNvfp4Experts(nn.Module):
 LL_MOE_MAX_TOKENS = 2
 
 
-@dataclass
+@dataclass(slots=True)
 class LLMoEWeights:
     """Weights of one NVFP4 MoE layer for `flint_moe_ll` (views, no copies).
 

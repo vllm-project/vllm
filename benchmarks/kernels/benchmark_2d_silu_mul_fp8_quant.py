@@ -46,7 +46,7 @@ class ImplType(Enum):
         raise ValueError(f"Unrecognized ImplType {self}")
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkTensors:
     input: torch.Tensor
     output: torch.Tensor

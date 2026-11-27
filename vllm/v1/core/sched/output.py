@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.utils.gc_utils import untrack_long_lists
+from vllm.v1.metrics.iteration_workload import ScheduledWorkload
 
 if TYPE_CHECKING:
     import numpy as np
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
         AuxOutputConnectorMetadata,
     )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+    from vllm.distributed.ec_transfer.ec_events import ECCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
@@ -191,7 +193,7 @@ class CachedRequestData:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class IterationDetails:
     """Scheduled prefill/decode request and input counts."""
 
@@ -201,6 +203,8 @@ class IterationDetails:
     num_decode_tokens: int = 0
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
+    # Only with --enable-logging-iteration-details.
+    scheduled_workload: ScheduledWorkload | None = None
 
     # Temporary aliases for existing EngineCore and worker profiler consumers.
     @property
@@ -220,7 +224,7 @@ class IterationDetails:
         return self.num_decode_tokens
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorBlockState:
     """Scheduler-local block state offered to a producer-side KV connector."""
 
@@ -228,7 +232,7 @@ class KVConnectorBlockState:
     req_ids: set[str]
     # Resolve on access to avoid copying tables the connector never reads.
     resolve_block_ids: Callable[[str], tuple[list[int], ...]]
-    # Exact Mamba "align" boundary-state hand-offs.
+    # Exact Mamba boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
 
     def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
@@ -297,9 +301,6 @@ class SchedulerOutput:
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
 
-    # Used for adjusting acceptance rate calculation.
-    num_invalid_spec_tokens: dict[str, int] | None = None
-
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
@@ -332,6 +333,11 @@ class SchedulerOutput:
     # drafter can skip proposing them.
     skip_drafts: bool = False
 
+    # Publish these events once this step's worker output is processed, even
+    # when the step schedules no tokens but frees encoder cache entries.
+    encoder_cache_events: "list[ECCacheEvent] | None" = None
+    encoder_cache_epoch: int = 0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
@@ -345,8 +351,14 @@ class SchedulerOutput:
             free_encoder_mm_hashes=[],
         )
 
+    def shares_requests_with(self, other: "SchedulerOutput") -> bool:
+        """Whether any request is scheduled in both this step and `other`."""
+        return not self.num_scheduled_tokens.keys().isdisjoint(
+            other.num_scheduled_tokens
+        )
 
-@dataclass
+
+@dataclass(slots=True)
 class GrammarOutput:
     # ids of structured output requests.
     structured_output_request_ids: list[str]

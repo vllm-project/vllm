@@ -442,9 +442,12 @@ def stage_route(c, t):
     lane, wave = c["lane"], c["wave"]
     experts, topk = c["rs"].experts, c["rs"].topk
     a = c["args"]
+    # a Python bool: assigned inside the traced `if` below it would be
+    # carried as one of the branch's results, which a bool cannot be
+    early_bias = c["rs"].tuned or c.get("early_bias", False)
     if wave == 0:
         ept = experts // 64
-        if const_expr(c["rs"].tuned):
+        if const_expr(early_bias):
             # the bias in flight before the logits' wait
             bias = [ld_f32(a["bias"], lane + 64 * i) for i in range(ept)]
         # each logit's router part sums, added in part order (vLLM's gate: f32 out)
@@ -470,7 +473,7 @@ def stage_route(c, t):
             sc = _score(logits[i])
             # aiter's NaN guards: a NaN score weighs 0 and never wins
             orig.append(fx.Float32(fx.isnan(sc).select(fx.Float32(0.0), sc)))
-            b = bias[i] if c["rs"].tuned else ld_f32(a["bias"], e)
+            b = bias[i] if early_bias else ld_f32(a["bias"], e)
             val = fx.max(sc + b, neg)
             vals.append(fx.isnan(val).select(neg, val))
             idxs.append(fx.Int32(e))
@@ -1473,7 +1476,8 @@ def down_weights_942(c, e, task):
     lane, a, d = c["lane"], c["args"], c["d"]
     j = lane // 16
     kd, kc = d.inter_real // 8, d.inter_real // 32
-    assert kc % 4 in (0, 2), kc
+    # The last step of a row is two K blocks at TP4, one at TP8.
+    assert kc % 4 in (0, 1, 2), kc
     # The tile's 16 rows are 16 kd dwords, a 64-byte step of them 256 dwords.
     tile0 = (e * HIDDEN + task * 16) * kd
     base = fresh(tile0 + 4 * lane)
@@ -1500,6 +1504,19 @@ def down_weights_942(c, e, task):
             )
         )
         wd += [fx.Int32(v[i]) for i in range(2)]
+    if const_expr(kc % 4 == 1):
+        # TP8: one dword a lane.
+        wd.append(
+            fx.Int32(
+                bo.buffer_load(
+                    rsrc(a["w2"]),
+                    fresh(tile0 + lane) + 256 * (kc // 4),
+                    vec_width=1,
+                    dtype=T.i32,
+                    cache_modifier=CM_NT,
+                )
+            )
+        )
     # 4 rows' codes: 4 kc bytes from a multiple of 4 kc, so whole dwords.
     sw0 = (e * HIDDEN + task * 16 + 4 * j) * kc // 4
     nwords = kc
@@ -2598,8 +2615,9 @@ def run_moe(c, key, bid, tls, tl0):
     else:
         stage_down(c, [down_task], dsh)
     stamp(timeline, tls, tid, tl0 + 6)
-    for task in range(first_task(bid, RED0), RED_TASKS, BLOCKS):
-        stage_reduce(c, task)
+    if const_expr(not c.get("skip_reduce", False)):
+        for task in range(first_task(bid, RED0), RED_TASKS, BLOCKS):
+            stage_reduce(c, task)
     stamp(timeline, tls, tid, tl0 + 7)
 
 

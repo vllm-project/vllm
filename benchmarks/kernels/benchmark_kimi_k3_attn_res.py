@@ -33,7 +33,7 @@ MAX_BLOCKS = 8
 EPS = 1e-5
 
 
-@dataclass
+@dataclass(slots=True)
 class Inputs:
     prefix: torch.Tensor
     delta: torch.Tensor
@@ -43,7 +43,7 @@ class Inputs:
     output_norm_weight: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class Result:
     num_tokens: int
     num_blocks: int
