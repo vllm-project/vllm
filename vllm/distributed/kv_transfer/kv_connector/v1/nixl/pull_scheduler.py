@@ -281,7 +281,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # With bidirectional transfers this node also receives pulls, so an
             # abort that is no longer receiving waits for the guard too.
             if not receiving and self._defers_release(block_ids):
-                self._reqs_to_release.append(request.request_id)
+                self._reqs_to_release.add(request.request_id)
                 return True, None
             return False, None
 
