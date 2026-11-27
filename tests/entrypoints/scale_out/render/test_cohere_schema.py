@@ -12,7 +12,7 @@ from transformers import Cohere2Config
 from tests.utils import RemoteLaunchRenderServer
 from vllm.tokenizers import get_tokenizer
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module", params=["cohere_command3", "cohere_command4"])
