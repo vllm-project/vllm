@@ -211,7 +211,10 @@ def _unpack_shared_expert_gates(
         yield (
             f"{source_gate}.weight",
             dequantize(
-                unpack_from_int32(packed, args.num_bits, shape), scale, args=args
+                unpack_from_int32(packed, args.num_bits, shape),
+                scale,
+                args=args,
+                dtype=gate.weight.dtype,
             ),
         )
 
