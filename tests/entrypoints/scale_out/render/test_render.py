@@ -40,6 +40,7 @@ from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.multimodal.utils import encode_image_url, encode_video_url
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
+from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
@@ -957,6 +958,7 @@ async def test_completion_render_truncated_token_offsets(client):
     # tokens, so the surviving offsets must cover the end of the prompt. The
     # BOS token is kept as well, and it spans no characters of the prompt.
     assert offsets[-1][1] == len(prompt)
+    assert token_ids[0] == get_tokenizer(MODEL_NAME).bos_token_id
     assert offsets[0] == [0, 0]
     assert offsets[1][0] > 0
 

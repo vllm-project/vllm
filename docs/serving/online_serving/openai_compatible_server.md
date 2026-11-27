@@ -171,14 +171,21 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-extra-params"
     ```
 
-#### Echo with prompt truncation
+#### Prompt truncation
 
-`truncate_prompt_tokens` and `truncation_side` are vLLM extensions. In the Python
-Completions API, when `echo=true` and an explicit `truncation_side` causes
-post-tokenization truncation, the echoed text is rebuilt from the retained tokens.
-Tokenizer-added special tokens are omitted from the text and echoed logprobs;
-special tokens supplied in the text are preserved. Model input IDs, prompt-token
-usage and `return_token_ids` responses retain the full truncated token sequence.
+`truncate_prompt_tokens` and `truncation_side` are vLLM extensions. With an explicit
+`truncation_side`, special tokens that the tokenizer adds to a text prompt (such as
+BOS) are kept and count toward `truncate_prompt_tokens`, unless there are more of
+them than the limit. Only the text is truncated. Token-ID and multimodal prompts
+are sliced without this exception.
+
+In the Python Completions API, when `echo=true` and an explicit `truncation_side`
+causes post-tokenization truncation, the echoed text is rebuilt from the retained
+tokens. Tokenizer-added special tokens are omitted from the text and echoed
+logprobs. Special tokens typed into the prompt are truncated like the rest of the
+text, so they appear in the echo only if they survive truncation. Model input IDs,
+prompt-token usage and `return_token_ids` responses retain the full truncated
+token sequence.
 
 ### Chat API
 

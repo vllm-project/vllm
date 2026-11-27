@@ -22,7 +22,7 @@ from vllm.renderers import TokenizeParams
 from vllm.renderers.cohere import CohereRenderer
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer, DeepseekV41Renderer
 from vllm.renderers.deepseek_v32 import DeepseekV32Renderer
-from vllm.renderers.hf import HfRenderer
+from vllm.renderers.hf import HfRenderer, tokenize_prompt
 from vllm.renderers.inkling import InklingRenderer
 from vllm.renderers.inkling_encoding import (
     OPTIONAL_SPECIAL_TOKENS,
@@ -685,6 +685,27 @@ class TestRenderPrompt:
         )
 
         assert results[0].get("prompt_token_ids") == expected
+
+    @pytest.mark.parametrize(
+        ("add_special_tokens", "needs_detokenization", "wants_mask"),
+        [(True, False, True), (False, True, True), (False, False, False)],
+    )
+    def test_explicit_side_requests_mask_only_when_used(
+        self, add_special_tokens, needs_detokenization, wants_mask
+    ):
+        """The mask serves the tokens that the tokenizer adds and the echo.
+        With neither, as on the default chat path, it isn't requested."""
+        params = TokenizeParams(
+            max_total_tokens=100,
+            truncate_prompt_tokens=3,
+            truncation_side="left",
+            add_special_tokens=add_special_tokens,
+            needs_detokenization=needs_detokenization,
+        )
+
+        tokenized = tokenize_prompt(_cls_sep_tokenizer(), {"prompt": "a b c d"}, params)
+
+        assert ("prompt_special_tokens_mask" in tokenized) is wants_mask
 
     def test_padding_with_left_truncation_keeps_the_prompt(self):
         """Padding must not be truncated away.

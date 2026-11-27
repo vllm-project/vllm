@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
 import vllm.envs as envs
@@ -539,9 +540,10 @@ class TokenizeParams:
         spares the special tokens that the tokenizer added to a text prompt.
 
         `prompt_special_tokens_mask` marks those tokens. HF-family renderers
-        attach it when the side is explicit, since that turns off the
-        tokenizer's own truncation (see `get_encode_kwargs`). As that
-        truncation does, all of them are kept and only the text is truncated.
+        attach it when the side is explicit and the tokenizer adds special
+        tokens, since an explicit side turns off the tokenizer's own
+        truncation (see `get_encode_kwargs`). As that truncation does, all of
+        them are kept and only the text is truncated.
 
         `None` means `_truncation_slice` applies as it is: the prompt needs no
         truncation, the tokenizer added no tokens, or there is no room for
@@ -567,9 +569,10 @@ class TokenizeParams:
         if not added or num_text < 0:
             return None
 
-        # Only the text is truncated, from the same side as `truncation`.
-        text = [i for i, is_added in enumerate(mask) if not is_added]
-        text = text[:num_text] if start == 0 else text[len(text) - num_text :]
+        # Only the text is truncated, from the same side as `truncation`. Walk
+        # in from that side and stop once the text that fits is collected.
+        order = range(len(mask)) if start == 0 else reversed(range(len(mask)))
+        text = islice((i for i in order if not mask[i]), num_text)
         return sorted([*added, *text])
 
     def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
