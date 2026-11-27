@@ -165,10 +165,10 @@ NIXL pull transfers with `--decode-context-parallel-size` greater than 1 require
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
-- `enable_chunked_push` (via `kv_connector_extra_config`, `NixlPushConnector` prefiller only): Write each prefill step's completed KV blocks to the decoder while the request is still running, instead of after its prefill finishes. (Optional)
+- `enable_early_push` (via `kv_connector_extra_config`, `NixlPushConnector` prefiller only): Write a request's KV blocks to the decoder in the prefill step that computes the end of its prompt, instead of after the request finishes. (Optional)
     - Default: `false`
-    - Configurations it does not support yet are pushed whole, with a warning. See [Chunked prefill push](../design/nixl_kv_push_connector.md#chunked-prefill-push).
-    - Example: `--kv-transfer-config '{"kv_connector": "NixlPushConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"enable_chunked_push": true}}'`
+    - Configurations it does not support yet are pushed when the request finishes, with a warning. See [Early push](../design/nixl_kv_push_connector.md#early-push).
+    - Example: `--kv-transfer-config '{"kv_connector": "NixlPushConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"enable_early_push": true}}'`
 
 ## Bidirectional KV Transfer (Multi-turn)
 
