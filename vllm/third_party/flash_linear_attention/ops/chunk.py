@@ -33,8 +33,6 @@ def chunk_gated_delta_rule_fwd(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
-    checkpoint_state: torch.Tensor | None = None,
-    checkpoint_offsets: torch.Tensor | None = None,
 ):
     g = chunk_local_cumsum(
         g, chunk_size=FLA_CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
@@ -70,8 +68,6 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
-        checkpoint_state=checkpoint_state,
-        checkpoint_offsets=checkpoint_offsets,
     )
     o = chunk_fwd_o(
         q=q,
@@ -92,7 +88,6 @@ def chunk_gated_delta_rule_fwd(
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     @staticmethod
-    @input_guard
     @torch.amp.custom_fwd(device_type="cuda")
     def forward(
         ctx,
@@ -109,9 +104,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
         core_attn_out: torch.Tensor | None = None,
-        checkpoint_state: torch.Tensor | None = None,
-        checkpoint_offsets: torch.Tensor | None = None,
     ):
+        q, k, v, g, beta = (x.contiguous() for x in (q, k, v, g, beta))
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
@@ -129,8 +123,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             core_attn_out=core_attn_out,
-            checkpoint_state=checkpoint_state,
-            checkpoint_offsets=checkpoint_offsets,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -157,8 +149,6 @@ def chunk_gated_delta_rule(
     chunk_offsets: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     core_attn_out: torch.Tensor | None = None,
-    checkpoint_state: torch.Tensor | None = None,
-    checkpoint_offsets: torch.Tensor | None = None,
 ):
     r"""
     Args:
@@ -184,12 +174,6 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.Tensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        checkpoint_state (Optional[torch.Tensor]):
-            Contiguous buffer of shape `[N, H, V, K]`; row `n` receives the state of
-            sequence `n` after `checkpoint_offsets[n]` tokens.
-        checkpoint_offsets (Optional[torch.Tensor]):
-            Token offsets of shape `[N]`, `0` for none. Only multiples of the 64-token
-            chunk below the sequence length are stored.
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
@@ -241,24 +225,6 @@ def chunk_gated_delta_rule(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
-    if (checkpoint_state is None) != (checkpoint_offsets is None):
-        raise ValueError("checkpoint_state and checkpoint_offsets go together")
-    if checkpoint_state is not None:
-        N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
-        # Checked here: input_guard would write into a contiguous copy.
-        if checkpoint_state.shape != (N, *v.shape[-2:], k.shape[-1]) or not (
-            checkpoint_state.is_contiguous()
-        ):
-            raise ValueError(
-                f"checkpoint_state must be a contiguous [N, H, V, K] buffer for "
-                f"{N} sequences, got shape {tuple(checkpoint_state.shape)} and "
-                f"strides {checkpoint_state.stride()}"
-            )
-        if checkpoint_offsets.shape != (N,):
-            raise ValueError(
-                f"checkpoint_offsets must have shape [{N}], got "
-                f"{tuple(checkpoint_offsets.shape)}"
-            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
@@ -275,7 +241,5 @@ def chunk_gated_delta_rule(
         chunk_offsets,
         use_qk_l2norm_in_kernel,
         core_attn_out,
-        checkpoint_state,
-        checkpoint_offsets,
     )
     return o, final_state

@@ -2,16 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
-import functools
-import itertools
 import os
-from collections.abc import Callable
 from typing import Literal
 
 import torch
 from einops import rearrange
 from torch import nn
-from transformers import Qwen3NextConfig
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -21,32 +17,21 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
-    UnquantizedLinearMethod,
-)
-from vllm.model_executor.layers.mamba.abstract import (
-    get_mamba_prefill_checkpoint_alignment,
-    get_mamba_prefill_checkpoint_grid,
-)
-from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointExporter,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
@@ -57,25 +42,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
-from vllm.model_executor.layers.mamba.ops.gdn_prefill_conv import (
-    gdn_prefill_conv,
-    gdn_prefill_conv_supported,
-)
-from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
-    chunk_gdn_hip_fwd,
-    is_hip_gdn_available,
-    is_hip_gdn_supported,
-)
-from vllm.model_executor.layers.mamba.ops.replayssm_config import GDN_MAX_BUFFER_LEN
-from vllm.model_executor.layers.mamba.ops.scatter_states import (
-    scatter_states,
-)
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import plan_replayssm_decode
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.layers.utils import cuda_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -87,28 +57,19 @@ from vllm.third_party.flash_linear_attention.ops import (
 from vllm.third_party.flash_linear_attention.ops import (
     fused_post_conv_prep,
     fused_recurrent_gated_delta_rule_packed_decode,
-    fused_recurrent_gated_delta_rule_replayssm,
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
-from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
-    fused_gdn_decode_post_conv_mtp_triton,
-)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
-from vllm.utils.math_utils import cdiv
-from vllm.utils.multi_stream_utils import execute_in_parallel
+from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
-    aux_stream,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.gdn_attn import (
-    FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
-    GDNAttentionMetadata,
-)
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -116,7 +77,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 # import overhead.
 GDN_AITER_TRITON_AVAILABLE = (
     rocm_aiter_ops.are_gdn_triton_kernels_available()
-    or rocm_aiter_ops.are_rdna_gdn_triton_kernels_available()
+    or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
 )
 
 if GDN_AITER_TRITON_AVAILABLE:
@@ -127,118 +88,28 @@ if GDN_AITER_TRITON_AVAILABLE:
         fused_rearrange_sigmoid_gated_delta_rule as gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
     )
 
-# Fused conv1d + delta-rule + gated-RMSNorm decode kernel (one launch per layer).
-GDN_AITER_FUSED_DECODE_AVAILABLE = (
-    GDN_AITER_TRITON_AVAILABLE and rocm_aiter_ops.is_fused_gdn_decode_enabled()
-)
-
-if GDN_AITER_FUSED_DECODE_AVAILABLE:
-    from aiter.ops.triton.gated_delta_net.fused_gdn_decode_qkvz import (
-        fused_gdn_decode_qkvz as gdn_aiter_fused_gdn_decode_qkvz,
-    )
-
 logger = init_logger(__name__)
 
-MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
-# Below this conservative threshold, overlap in_proj_ba with in_proj_qkvz on the aux
-# stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
-# regression was at 272 tokens (27B BF16 TP8).
-_BA_PROJ_OVERLAP_MAX_TOKENS = 256
-FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16, torch.float16)
-# AITER's fused_gdn_decode_qkvz rejects FP16 state.
-AITER_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
-
-
-def supports_fused_mtp_decode() -> bool:
-    """ROCm runs the Triton port; elsewhere the CUDA op must be built."""
-    return current_platform.is_rocm() or hasattr(
-        torch.ops._C, "fused_gdn_decode_post_conv_mtp"
-    )
-
-
-def fused_mtp_decode_impl() -> Callable[..., torch.Tensor]:
-    if current_platform.is_rocm():
-        return fused_gdn_decode_post_conv_mtp_triton
-    return ops.fused_gdn_decode_post_conv_mtp
-
-
-def xpu_gdn_kernel_available() -> bool:
-    """Whether vllm-xpu-kernels was built with the fused SYCL GDN op."""
-    return hasattr(torch.ops._xpu_C, "gdn_attention")
-
-
-def _aiter_flydsl_unsupported_reasons(
-    vllm_config: VllmConfig, head_k_dim: int | None, head_v_dim: int | None
-) -> list[str]:
-    """Every reason the AITER FlyDSL GDN prefill kernels cannot serve this
-    model, or an empty list if they can."""
-    reasons = []
-    if head_k_dim != 128 or head_v_dim != 128:
-        reasons.append(
-            f"linear head dims are K={head_k_dim} V={head_v_dim}; "
-            "FlyDSL requires 128/128"
-        )
-    dtype = vllm_config.model_config.dtype
-    if dtype != torch.bfloat16:
-        reasons.append(f"model dtype is {dtype}; FlyDSL requires bfloat16")
-    return reasons
-
-
-def _hip_gdn_unsupported_reasons(
-    vllm_config: VllmConfig, head_k_dim: int | None, head_v_dim: int | None
-) -> list[str]:
-    """Every reason the HIP GDN prefill kernel cannot serve this model, or an
-    empty list if it can."""
-    reasons = []
-    if head_k_dim != 128 or head_v_dim != 128:
-        reasons.append(
-            f"linear head dims are K={head_k_dim} V={head_v_dim}; "
-            "the HIP kernel requires 128/128"
-        )
-    dtype = vllm_config.model_config.dtype
-    if dtype not in (torch.bfloat16, torch.float16):
-        reasons.append(
-            f"model dtype is {dtype}; the HIP kernel requires bfloat16 or float16"
-        )
-    return reasons
+MAX_FUSED_GDN_MTP_TOKENS = 8
+FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[
-    str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"]
-]:
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
     """Resolve GDN prefill backend.
 
-    The SYCL kernel is chosen when `requested in ["sycl", "auto"]`, the
-    platform is XPU and `_xpu_C::gdn_attention` is built. Unlike the other
-    backends it is a fused whole-layer op, so selecting it also replaces the
-    conv1d and decode kernels, not just prefill.
-
     FlashInfer's GDN prefill kernel is chosen when:
-    * `requested in ["flashinfer", "auto"]`;
-    * `platform == cuda`;
-    * `head_k_dim == head_v_dim == 128`;
+    * ``requested in ["flashinfer", "auto"]``;
+    * ``platform == cuda``;
     * one of the following:
-      - Hopper (SM90);
-      - Blackwell (SM10.x) with `head_k_dim == 128`, `cuda_runtime >= 13`;
-      - Blackwell (SM12.x) with `head_k_dim == 128`, `cuda_runtime >= 13`.
+      - Hopper (SM90) - no further constraints;
+      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``;
+      - Blackwell (SM12.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
-    * Blackwell (SM10.x or SM11.x) with `head_k_dim == 128`,
-      `cuda_runtime >= 13`;
-
-    AITER FlyDSL GDN prefill kernels are chosen when:
-    * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
-    * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
-    * the model uses BF16 activations with `head_k_dim == head_v_dim == 128`.
-
-    The HIP GDN prefill kernel is chosen when:
-    * "hip" is requested on RDNA3.5 (gfx1150-gfx1153), or "auto" on gfx1151;
-    * the build includes `_rocm_C.rdna35_gdn_chunked`;
-    * the model uses BF16 or FP16 activations with
-      `head_k_dim == head_v_dim == 128`.
+    * Blackwell (SM10.x) with ``head_k_dim == 128``;
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -248,32 +119,9 @@ def _resolve_gdn_prefill_backend(
     )
     backend = str(backend_cfg).strip().lower()
 
-    if backend == "sycl" and not current_platform.is_xpu():
-        raise ValueError("GDN prefill backend 'sycl' is only supported on XPU.")
-
-    if current_platform.is_xpu():
-        if getattr(
-            vllm_config.model_config.hf_text_config, "linear_allow_neg_eigval", False
-        ):
-            if backend == "sycl":
-                raise ValueError("The SYCL GDN kernel does not support scaled beta.")
-            return backend, "triton"
-        if backend in ("auto", "sycl") and xpu_gdn_kernel_available():
-            return backend, "sycl"
-        if backend == "sycl":
-            raise ValueError(
-                "GDN prefill backend 'sycl' was requested but "
-                "torch.ops._xpu_C.gdn_attention is not available. Rebuild "
-                "vllm-xpu-kernels with VLLM_GDN_ENABLED."
-            )
-        return backend, "triton"
-
-    head_k_dim = getattr(
-        vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
-    )
-    head_v_dim = getattr(
-        vllm_config.model_config.hf_text_config, "linear_value_head_dim", None
-    )
+    hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    head_k_dim = getattr(hf_text_config, "linear_key_head_dim", None)
+    head_v_dim = getattr(hf_text_config, "linear_value_head_dim", None)
 
     if current_platform.is_rocm():
         if backend == "aiter_flydsl":
@@ -284,58 +132,30 @@ def _resolve_gdn_prefill_backend(
                     "that VLLM_ROCM_USE_AITER=1, that this is a CDNA 3 or "
                     "newer GPU, and that the installed AITER exports them."
                 )
-            reasons = _aiter_flydsl_unsupported_reasons(
-                vllm_config, head_k_dim, head_v_dim
-            )
-            if reasons:
+            if head_k_dim != 128 or head_v_dim != 128:
                 logger.warning_once(
-                    "GDN prefill backend 'aiter_flydsl' was requested but %s. "
+                    "GDN prefill backend 'aiter_flydsl' was requested but "
+                    "linear head dims are K=%s V=%s; FlyDSL requires 128/128. "
                     "Falling back to Triton/FLA.",
-                    "; ".join(reasons),
+                    head_k_dim,
+                    head_v_dim,
+                )
+                return backend, "triton"
+            if vllm_config.model_config.dtype != torch.bfloat16:
+                logger.warning_once(
+                    "GDN prefill backend 'aiter_flydsl' was requested but "
+                    "model dtype is %s; FlyDSL requires bfloat16. "
+                    "Falling back to Triton/FLA.",
+                    vllm_config.model_config.dtype,
                 )
                 return backend, "triton"
             return backend, "aiter_flydsl"
-        if backend == "hip":
-            if not is_hip_gdn_available():
-                raise RuntimeError(
-                    "GDN prefill backend 'hip' was requested but "
-                    "_rocm_C.rdna35_gdn_chunked is unavailable. It is built "
-                    "and registered only for RDNA3.5 (gfx1150-gfx1153)."
-                )
-            reasons = _hip_gdn_unsupported_reasons(vllm_config, head_k_dim, head_v_dim)
-            if reasons:
-                logger.warning_once(
-                    "GDN prefill backend 'hip' was requested but %s. "
-                    "Falling back to Triton/FLA.",
-                    "; ".join(reasons),
-                )
-                return backend, "triton"
-            return backend, "hip"
-        if backend == "auto":
-            from vllm.platforms.rocm import on_gfx1151, on_mi3xx
-
-            if (
-                on_mi3xx()
-                and not _aiter_flydsl_unsupported_reasons(
-                    vllm_config, head_k_dim, head_v_dim
-                )
-                and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
-            ):
-                return backend, "aiter_flydsl"
-            if (
-                on_gfx1151()
-                and not _hip_gdn_unsupported_reasons(
-                    vllm_config, head_k_dim, head_v_dim
-                )
-                and is_hip_gdn_available()
-            ):
-                return backend, "hip"
         return backend, "triton"
 
-    if backend in ("aiter_flydsl", "hip"):
+    if backend == "aiter_flydsl":
         raise RuntimeError(
-            f"GDN prefill backend '{backend}' was requested but it is a ROCm "
-            f"backend and the current platform is {current_platform.device_name}."
+            "GDN prefill backend 'aiter_flydsl' was requested but it is a ROCm "
+            f"AITER backend and the current platform is {current_platform.device_name}."
         )
 
     if not current_platform.is_cuda():
@@ -345,27 +165,21 @@ def _resolve_gdn_prefill_backend(
     supports_cutedsl = False
 
     if current_platform.is_device_capability(90):
-        supports_flashinfer = head_k_dim == head_v_dim == 128
+        supports_flashinfer = True
     elif (
         current_platform.is_device_capability_family(100)
         and head_k_dim == 128
         and current_platform.get_cuda_runtime_major() >= 13
     ):
-        supports_flashinfer = head_v_dim == 128
-        supports_cutedsl = True
-    elif (
-        current_platform.is_device_capability_family(110)
-        and head_k_dim == 128
-        and current_platform.get_cuda_runtime_major() >= 13
-    ):
+        supports_flashinfer = True
         supports_cutedsl = True
     elif (
         current_platform.is_device_capability_family(120)
         and head_k_dim == 128
         and current_platform.get_cuda_runtime_major() >= 13
     ):
-        # The in-tree CuteDSL kernel targets SM100/SM110 only, so it stays off here.
-        supports_flashinfer = head_v_dim == 128
+        # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
+        supports_flashinfer = True
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
@@ -391,16 +205,11 @@ def _log_gdn_backend_decision(
             head_k_dim,
         )
         return
-    elif current_platform.is_xpu():
-        return
 
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
-        "aiter_flydsl": "AITER FlyDSL",
-        "hip": "HIP",
         "triton": "Triton/FLA",
-        "sycl": "SYCL",
     }[active_backend]
     logger.info_once(
         "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
@@ -425,12 +234,6 @@ def fi_chunk_gated_delta_rule(
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = True,
-    state_checkpoints: torch.Tensor | None = None,
-    checkpoint_cu_starts: torch.Tensor | None = None,
-    checkpoint_every_n_tokens: int = 0,
-    use_cp: Literal["auto"] | bool = "auto",
-    output: torch.Tensor | None = None,
-    checkpoint_state_indices: torch.Tensor | None = None,
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -448,27 +251,19 @@ def fi_chunk_gated_delta_rule(
     g = g.squeeze(0).contiguous()
     beta = beta.squeeze(0).contiguous()
     fi_state = initial_state.to(torch.float32)
-    # Like FlashInfer's own API, g is the already-exponentiated gate;
-    # fused_post_conv_prep emits it directly (output_g_exp=True).
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
-    # cu_seqlens goes through as is: FlashInfer accepts int32 and int64.
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int64)
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
         v=v,
-        g=fi_g,
+        g=torch.exp(fi_g),
         beta=fi_beta,
         initial_state=fi_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        output=output,
-        state_checkpoints=state_checkpoints,
-        checkpoint_cu_starts=checkpoint_cu_starts,
-        checkpoint_every_n_tokens=checkpoint_every_n_tokens,
-        use_cp=use_cp,
-        backend="flashinfer",
-        checkpoint_state_indices=checkpoint_state_indices,
     )
     # FlashInfer returns (output, state) when output_final_state=True,
     # or just output when output_final_state=False.
@@ -496,17 +291,10 @@ class ChunkGatedDeltaRule(CustomOp):
             )
         _log_gdn_backend_decision(vllm_config, backend, active_backend)
 
-        # On XPU "sycl" bypasses this module entirely (fused whole-layer op),
-        # so the chunked prefill path stays on Triton/FLA.
-
         if active_backend == "flashinfer":
             self._forward_method = self.forward_cuda
         elif active_backend == "cutedsl":
             self._forward_method = self.forward_cutedsl
-        elif active_backend == "aiter_flydsl":
-            self._forward_method = self.forward_aiter_flydsl
-        elif active_backend == "hip":
-            self._forward_method = self.forward_hip
         else:
             self._forward_method = self.forward_native
 
@@ -525,11 +313,10 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
         aiter_prefill_metadata: object | None = None,
+        final_state: torch.Tensor | None = None,
+        final_state_indices: torch.Tensor | None = None,
     ):
-        # g is in log space in this dispatch layer (shared with the Triton/FLA
-        # backends); FlashInfer takes exp(g), so exp here.
-        g = torch.exp(g.to(torch.float32))
-        o, final_state = fi_chunk_gated_delta_rule(
+        o, out_final_state = fi_chunk_gated_delta_rule(
             q=q,
             k=k,
             v=v,
@@ -544,7 +331,13 @@ class ChunkGatedDeltaRule(CustomOp):
             o_flat = o.squeeze(0).reshape(-1)
             co_flat = core_attn_out.reshape(-1)
             co_flat[: o_flat.numel()].copy_(o_flat)
-        return o, final_state
+        if (
+            final_state is not None
+            and final_state_indices is not None
+            and out_final_state is not None
+        ):
+            final_state[final_state_indices] = out_final_state.to(final_state.dtype)
+        return o, out_final_state
 
     def forward_native(
         self,
@@ -560,7 +353,6 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
-        aiter_prefill_metadata: object | None = None,
     ):
         return fla_chunk_gated_delta_rule(
             q=q,
@@ -592,6 +384,8 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
         aiter_prefill_metadata: object | None = None,
+        final_state: torch.Tensor | None = None,
+        final_state_indices: torch.Tensor | None = None,
     ):
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             chunk_gated_delta_rule_cutedsl,
@@ -621,97 +415,12 @@ class ChunkGatedDeltaRule(CustomOp):
             final_state = None
         return o, final_state
 
-    def forward_aiter_flydsl(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        initial_state: torch.Tensor,
-        output_final_state: bool,
-        cu_seqlens: torch.Tensor | None = None,
-        chunk_indices: torch.Tensor | None = None,
-        chunk_offsets: torch.Tensor | None = None,
-        use_qk_l2norm_in_kernel: bool = True,
-        core_attn_out: torch.Tensor | None = None,
-        aiter_prefill_metadata: object | None = None,
-    ):
-        o, final_state = rocm_aiter_ops.gdn_flydsl_prefill(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            aiter_prefill_metadata=aiter_prefill_metadata,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        )
-        if core_attn_out is not None:
-            o_flat = o.reshape(-1)
-            core_attn_out.reshape(-1)[: o_flat.numel()].copy_(o_flat)
-        return o, final_state
-
-    def forward_hip(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        initial_state: torch.Tensor,
-        output_final_state: bool,
-        cu_seqlens: torch.Tensor | None = None,
-        chunk_indices: torch.Tensor | None = None,
-        chunk_offsets: torch.Tensor | None = None,
-        use_qk_l2norm_in_kernel: bool = True,
-        core_attn_out: torch.Tensor | None = None,
-        aiter_prefill_metadata: object | None = None,
-    ):
-        if not is_hip_gdn_supported(q, v, cu_seqlens):
-            return self.forward_native(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                beta=beta,
-                initial_state=initial_state,
-                output_final_state=output_final_state,
-                cu_seqlens=cu_seqlens,
-                chunk_indices=chunk_indices,
-                chunk_offsets=chunk_offsets,
-                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-                core_attn_out=core_attn_out,
-            )
-
-        if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
-
-        assert cu_seqlens is not None
-        o, final_state = chunk_gdn_hip_fwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            scale=k.shape[-1] ** -0.5,
-            initial_state=initial_state,
-            cu_seqlens=cu_seqlens,
-            core_attn_out=core_attn_out,
-        )
-        if not output_final_state:
-            final_state = None
-        return o, final_state
-
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
@@ -720,17 +429,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.head_v_dim,
             self.conv_kernel_size,
             self.num_spec,
-            self.cache_config.replayssm_buffer_len
-            if self.cache_config.use_replayssm
-            else None,
-        )
-
-    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            self.model_config.dtype,
-            self.cache_config.mamba_cache_dtype,
-            self.cache_config.mamba_ssm_cache_dtype,
-            self.cache_config.use_replayssm,
         )
 
     def __init__(
@@ -740,22 +438,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         prefix: str = "",
         gqa_interleaved_layout=False,
         reduce_results: bool = True,
-        overlap_ba_proj: bool = False,
-        fused_gdn_gated_rms_norm: (
-            Callable[..., torch.Tensor | QuantizedActivation] | None
-        ) = None,
-        norm_eps: float | None = None,
-        a_log_dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
-
-        self.beta_scale = (
-            2.0 if getattr(config, "linear_allow_neg_eigval", False) else 1.0
-        )
-        if self.beta_scale != 1.0 and current_platform.is_cpu():
-            raise NotImplementedError("Scaled GDN beta requires the Triton kernels.")
-        if norm_eps is not None:
-            self.layer_norm_epsilon = norm_eps
 
         self.num_k_heads = config.linear_num_key_heads
         self.num_v_heads = config.linear_num_value_heads
@@ -765,12 +449,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
-        self.gdn_xpu_backend: str | None = None
-        self.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
         if current_platform.is_xpu():
-            requested, gdn_xpu_backend = _resolve_gdn_prefill_backend(vllm_config)
-            _log_gdn_backend_decision(vllm_config, requested, gdn_xpu_backend)
-            self.gdn_xpu_backend = gdn_xpu_backend
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.mamba.ops.cpu.gdn_attention import (
@@ -786,7 +465,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
-        self.conv1d = self.create_conv_proj(prefix)
+        self.conv1d = ColumnParallelLinear(
+            input_size=self.conv_kernel_size,
+            output_size=self.conv_dim,
+            bias=False,
+            prefix=f"{prefix}.conv1d",
+        )
+        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         # projection of the input hidden states
         # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
@@ -811,21 +496,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
-        # Opt-in, for callers outside torch.compile (compiled callers would need a
-        # custom op or Dynamo stream tracing; not validated). Plain cuBLAS ba GEMM only:
-        # FlashInfer GEMMs share a process-wide workspace. Off with ubatching and LoRA.
-        self._ba_stream = None
-        ba_method = getattr(self.in_proj_ba, "quant_method", None)
-        if (
-            overlap_ba_proj
-            and current_platform.is_cuda()
-            and isinstance(ba_method, UnquantizedLinearMethod)
-            and ba_method._gemm_impl is cuda_unquantized_gemm
-            and not vllm_config.parallel_config.use_ubatching
-            and vllm_config.lora_config is None
-        ):
-            self._ba_stream = aux_stream()
-            self._ba_events = (torch.cuda.Event(), torch.cuda.Event())
+
+        query_key_settings = (self.key_dim, 0, False)
+        value_settings = (self.value_dim, 0, False)
+
+        self.conv1d.weight.weight_loader = mamba_v2_sharded_weight_loader(
+            [
+                query_key_settings,
+                query_key_settings,
+                value_settings,
+            ],
+            self.tp_size,
+            self.tp_rank,
+        )
 
         # selective projection used to make dt, B and C input dependent
 
@@ -837,7 +520,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.A_log = nn.Parameter(
             torch.empty(
                 divide(self.num_v_heads, self.tp_size),
-                dtype=a_log_dtype,
+                dtype=torch.float32,
             )
         )
 
@@ -873,53 +556,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
-        self.use_aiter_fused_gdn_decode = False
-        if GDN_AITER_FUSED_DECODE_AVAILABLE:
-            reason = self._aiter_fused_gdn_decode_unsupported_reason(vllm_config)
-            if reason is None:
-                self.use_aiter_fused_gdn_decode = True
-            else:
-                logger.info_once(
-                    "Not using the AITER fused GDN decode kernel: %s", reason
-                )
-        if self.use_aiter_fused_gdn_decode and self.conv1d.bias is None:
-            # The fused kernel requires a conv bias.
-            self.register_buffer(
-                "_aiter_fused_conv_bias",
-                self.conv1d.weight.new_zeros(self.conv1d.weight.shape[0]),
-                persistent=False,
-            )
-        self.vllm_config = vllm_config
-        # The FlashInfer and Triton/FLA prefills emit mid-prefill states, so a
-        # prefix-cache checkpoint needs no split prefill. AITER FlyDSL cannot, so
-        # its steps that carry a checkpoint run the Triton/FLA prefill instead.
-        self._checkpoint_alignment: int | None = None
-        if vllm_config.cache_config.enable_prefix_caching:
-            if self.gdn_prefill_backend == "flashinfer":
-                self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
-                # FlashInfer emits states at one stride for the whole batch,
-                # the gcd of the offsets; keeping every offset on the
-                # prefix-cache grid bounds the states emitted.
-                self.requires_grid_checkpoint_alignment = True
-            elif (
-                self.gdn_prefill_backend in ("triton", "aiter_flydsl")
-                and current_platform.is_cuda_alike()
-            ):
-                self._checkpoint_alignment = FLA_CHUNK_SIZE
-        if self._checkpoint_alignment is not None:
-            self._max_num_batched_tokens = (
-                vllm_config.scheduler_config.max_num_batched_tokens
-            )
-            self._checkpoint_exporter = MambaPrefillCheckpointExporter(
-                state_len=self.conv_kernel_size - 1
-            )
         self.enable_packed_recurrent_decode = (
-            envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE and self.beta_scale == 1.0
+            envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
-        # Off by default; the Qwen3.5 NVIDIA variant passes a fused gated RMS
-        # norm that reads z strided from the packed qkvz projection and
-        # returns the out_proj input: `out`, or a pre-quantized activation.
-        self._fused_gdn_gated_rms_norm = fused_gdn_gated_rms_norm
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
         if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
@@ -928,134 +567,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     raise ValueError(
                         f"VLLM_GDN_DECODE_KERNEL=cuda is not supported: {reason}"
                     )
-                if self.speculative_config is not None:
-                    logger.info_once(
-                        "Falling back to the Triton GDN spec decode path: %s",
-                        reason,
-                    )
+                logger.info_once(
+                    "Falling back to the Triton GDN decode path: %s", reason
+                )
                 self.gdn_decode_kernel = "triton"
         elif current_platform.is_cpu():
             self.gdn_decode_kernel = "CPU"
-        elif current_platform.is_xpu():
-            self.gdn_decode_kernel = "XPU"
 
-        self.enable_fused_gdn_spec_decode = (
-            self.gdn_decode_kernel == "cuda" and self.speculative_config is not None
-        )
-        if self.speculative_config is not None:
-            logger.info_once("GDN spec decode kernel: %s", self.gdn_decode_kernel)
-        # Cached-decode kernel (reuses the engine-level mamba_* flags). When
-        # enabled, the paged GDN page grows to 5 tensors and the non-spec decode
-        # branch decodes through fused_recurrent_gated_delta_rule_replayssm.
-        self.use_replayssm = self.cache_config.use_replayssm
-        if self.use_replayssm and (
-            reason := self._replayssm_unsupported_reason(vllm_config, self.beta_scale)
-        ):
-            raise ValueError(f"GDN ReplaySSM {reason}")
-        self.replayssm_buffer_len = (
-            self.cache_config.replayssm_buffer_len if self.use_replayssm else None
-        )
-        # Per-slot ring counters, bound by initialize_replayssm_ring_trackers().
-        self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
-        self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
-        # Triton plans each decode step in one layer per cache group.
-        self._plans_replayssm_decode = True
+        self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
+        logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    @staticmethod
-    def _replayssm_unsupported_reason(
-        vllm_config: VllmConfig, beta_scale: float = 1.0
-    ) -> str | None:
-        if beta_scale != 1.0:
-            return "does not support scaled beta (linear_allow_neg_eigval)"
-        if vllm_config.num_speculative_tokens > 0:
-            return "does not support speculative decoding yet"
-        if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
-            return "requires --mamba-backend triton"
-        if vllm_config.mamba_config.enable_stochastic_rounding:
-            return "does not support --enable-mamba-cache-stochastic-rounding"
-        if vllm_config.cache_config.replayssm_buffer_len > GDN_MAX_BUFFER_LEN:
-            return f"requires --replayssm-buffer-len <= {GDN_MAX_BUFFER_LEN}"
-        return None
-
-    def _aiter_fused_gdn_decode_unsupported_reason(
-        self, vllm_config: VllmConfig
-    ) -> str | None:
-        if self.cache_config.use_replayssm:
-            return "ReplaySSM decodes through its own kernel"
-        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
-        if (
-            self.beta_scale != 1.0
-            or self.head_k_dim != 128
-            or self.head_v_dim != 128
-            or self.num_v_heads % self.num_k_heads != 0
-            or self.num_v_heads // self.num_k_heads not in (2, 3)
-            or self.conv_kernel_size != 4
-            or self.activation != "silu"
-            or self.norm.activation != "silu"
-            or vllm_config.model_config.dtype != torch.bfloat16
-            or conv_state_dtype != torch.bfloat16
-            or recurrent_state_dtype not in AITER_GDN_STATE_DTYPES
-            # The kernel emits the normed output, so out_proj cannot quantize it.
-            or not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod)
-            or self.speculative_config is not None
-        ):
-            return (
-                "the fused AITER kernel requires a BF16 GDN model with K=V=128, "
-                "unscaled beta, 2 or 3 value heads per key head, conv width 4, "
-                "SiLU conv and gate "
-                "activations, a BF16 convolution cache, a BF16 or FP32 recurrent "
-                "state, an unquantized out_proj and no speculative decoding"
-            )
-        return None
-
-    def get_cache_checkpoint_alignment(self) -> int | None:
-        return self._checkpoint_alignment
-
-    @functools.cached_property
-    def _exports_checkpoints(self) -> bool:
-        # Known only once every layer is built: a Mamba layer that cannot
-        # checkpoint keeps the scheduler splitting the prefill instead.
-        return get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
-
-    @functools.cached_property
-    def _checkpoint_buffer_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
-        state_shape = (
-            self.num_v_heads // self.tp_size,
-            self.head_v_dim,
-            self.head_k_dim,
-        )
-        if self.gdn_prefill_backend != "flashinfer":
-            # One state per sequence, in the cache dtype.
-            return (
-                (self.vllm_config.scheduler_config.max_num_seqs, *state_shape),
-                self.get_state_dtype()[1],
-            )
-        # Offsets on the grid emit at most one state per grid step of a batch.
-        # Read lazily: the block size is final only after the model is built.
-        return (
-            (
-                cdiv(
-                    self._max_num_batched_tokens,
-                    get_mamba_prefill_checkpoint_grid(self.vllm_config),
-                ),
-                *state_shape,
-            ),
-            torch.float32,
-        )
-
     def _fused_gdn_decode_unsupported_reason(
         self, vllm_config: VllmConfig
     ) -> str | None:
-        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
         if (
-            self.beta_scale != 1.0
-            or self.A_log.dtype != torch.float32
-            or self.gqa_interleaved_layout
+            self.gqa_interleaved_layout
             or self.head_k_dim != 128
             or self.head_v_dim != 128
             or self.norm.activation not in ("silu", "sigmoid")
@@ -1067,36 +599,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return (
                 "the fused CUDA kernel requires a BF16 GDN model with "
                 "K=V=128, SiLU or sigmoid gating, non-interleaved GQA "
-                "layout, unscaled beta, FP32 A_log, BF16 convolution cache, "
-                "FP16, BF16 or FP32 recurrent "
+                "layout, BF16 convolution cache, BF16 or FP32 recurrent "
                 "state, and a GPU with compute capability 8.0+"
             )
-        if not supports_fused_mtp_decode():
+        if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
-
-    def create_conv_proj(self, prefix: str) -> ColumnParallelLinear:
-        conv = ColumnParallelLinear(
-            input_size=self.conv_kernel_size,
-            output_size=self.conv_dim,
-            bias=False,
-            prefix=f"{prefix}.conv1d",
-        )
-        conv.weight.data = conv.weight.data.unsqueeze(1)
-        query_key_settings = (self.key_dim, 0, False)
-        value_settings = (self.value_dim, 0, False)
-
-        conv.weight.weight_loader = mamba_v2_sharded_weight_loader(
-            [
-                query_key_settings,
-                query_key_settings,
-                value_settings,
-            ],
-            self.tp_size,
-            self.tp_rank,
-        )
-
-        return conv
 
     def create_qkvz_proj(
         self,
@@ -1130,7 +638,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_v_heads: int,
         quant_config: QuantizationConfig | None,
         prefix: str,
-    ) -> nn.Module:
+    ) -> MergedColumnParallelLinear:
         # When gqa_interleaved_layout=True (Qwen3-Next), in_proj_ba is stored
         # as a single fused weight [b_g0, a_g0, b_g1, a_g1, ...] interleaved
         # by key-head group; a single output shard preserves this across TP.
@@ -1181,7 +689,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkvz: torch.Tensor,
         mixed_ba: torch.Tensor,
     ):
-        """Derives `query`, `key` and `value` tensors from `mixed_qkvzba`."""
+        """
+        Derives `query`, `key` and `value` tensors from `mixed_qkvzba`.
+        """
         new_tensor_shape_qkvz = mixed_qkvz.size()[:-1] + (
             self.num_k_heads // self.tp_size,
             (
@@ -1232,7 +742,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_ba: torch.Tensor,
         num_tokens: int,
     ):
-        """Derives mixed_qkv, z, b, a from projected qkvz/ba for the GDN custom op.
+        """
+        Derives mixed_qkv, z, b, a from projected qkvz/ba for the GDN custom op.
 
         For gqa_interleaved_layout (Qwen3-Next): unpack the interleaved
         [ng, (hk + hk + np/ng*hv + np/ng*hv)] layout into contiguous qkv.
@@ -1340,9 +851,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
 
-        The original code used `rearrange(x, "l (h d) -> 1 l h d", d=...)`
-        followed by `.contiguous()` on each tensor.  This version flattens
-        all three splits into a single buffer via `torch.cat` so that
+        The original code used ``rearrange(x, "l (h d) -> 1 l h d", d=...)``
+        followed by ``.contiguous()`` on each tensor.  This version flattens
+        all three splits into a single buffer via ``torch.cat`` so that
         torch.compile emits one Triton copy kernel instead of three separate
         contiguous() calls.
         """
@@ -1389,8 +900,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
         """
+        z_shape_og = z.shape
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
-        output, _ = self.out_proj(core_attn_out.flatten(-2))
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        output, _ = self.out_proj(core_attn_out)
         return output
 
     def forward_hip(
@@ -1399,11 +915,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
-        if (
-            GDN_AITER_TRITON_AVAILABLE
-            and self.beta_scale == 1.0
-            and not self.enable_fused_gdn_spec_decode
-        ):
+        if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -1414,15 +926,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-            if self.use_aiter_fused_gdn_decode:
-                torch.ops.vllm.qwen_gdn_attention_core_fused_norm_rocm(
-                    projected_states_qkvz,
-                    projected_states_ba,
-                    core_attn_out,
-                    layer_name=_encode_layer_name(self.prefix),
-                )
-                output, _ = self.out_proj(core_attn_out.flatten(-2))
-                return output
             z = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=projected_states_qkvz.dtype,
@@ -1445,48 +948,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
-        qkvz_input: QuantizedActivation | None = None,
     ) -> torch.Tensor:
-        """Forward pass with three parts:
+        """
+        Forward pass with three parts:
         1. Input projection
         2. Core attention (custom op)
         3. Output projection
-
-        `qkvz_input`, if given, is `hidden_states` pre-quantized for
-        in_proj_qkvz; in_proj_ba still reads `hidden_states`.
         """
         num_tokens = hidden_states.size(0)
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        qkvz_in = hidden_states if qkvz_input is None else qkvz_input
-        if self._ba_stream is None:
-            mixed_qkvz, _ = self.in_proj_qkvz(qkvz_in)
-            ba, _ = self.in_proj_ba(hidden_states)
-        else:
-            # Hide the tiny ba GEMM on the aux stream. Only under CUDA graph
-            # capture: eagerly the stream switch costs more host time than it
-            # saves. ba is enqueued first (aux-first order); qkvz-first
-            # regressed block-FP8 qkvz from ~100 tokens.
-            start, done = self._ba_events
-            mixed_qkvz, (ba,) = execute_in_parallel(
-                lambda: self.in_proj_qkvz(qkvz_in)[0],
-                [lambda: self.in_proj_ba(hidden_states)[0]],
-                start,
-                [done],
-                [self._ba_stream],
-                enable=num_tokens <= _BA_PROJ_OVERLAP_MAX_TOKENS
-                and torch.cuda.is_current_stream_capturing(),
-            )
+        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        ba, _ = self.in_proj_ba(hidden_states)
 
-        use_fused_gdn_spec_decode = (
-            self.enable_fused_gdn_spec_decode
+        use_fused_gdn_decode = (
+            self.enable_fused_gdn_decode
             and hidden_states.dtype == torch.bfloat16
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
-        if use_fused_gdn_spec_decode:
-            # Uninitialized like the non-fused path below.
-            core_attn_out = torch.empty(
+        if use_fused_gdn_decode:
+            core_attn_out = torch.zeros(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
@@ -1514,53 +996,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
             z_size = self.value_dim // self.tp_size
             mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-            if self._fused_gdn_gated_rms_norm is None:
-                z = z.reshape(z.size(0), -1, self.head_v_dim)
+            z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = self.split_ba(ba)
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Uninitialized like the other attention backends: _forward_core
-        # writes every row up to num_actual_tokens. Padding rows behind it
-        # are only read by row-wise ops and never reach sampled outputs.
-        core_attn_out = torch.empty(
+        # Note: we should not use torch.empty here like other attention backends,
+        # see discussions in https://github.com/vllm-project/vllm/pull/28182
+        core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
 
-        # b/a may stay strided chunk views of ba: the packed decode, prefill
-        # (fused_post_conv_prep) and ROCm fallback kernels consume row strides
-        # directly, and fused_sigmoid_gating_delta_rule_update contiguous()
-        # internally where needed.
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
-            b,
-            a,
+            b.contiguous(),
+            a.contiguous(),
             core_attn_out,
             layer_name=_encode_layer_name(self.prefix),
         )
-
-        if (
-            self._fused_gdn_gated_rms_norm is not None
-            and not self.gqa_interleaved_layout
-        ):
-            out2d = core_attn_out.view(num_tokens, -1)
-            out_proj_input = self._fused_gdn_gated_rms_norm(
-                x=out2d,
-                z=z,
-                weight=self.norm.weight,
-                out=out2d,
-                out_proj=self.out_proj,
-                eps=self.norm.eps,
-                num_v_heads=self.num_v_heads // self.tp_size,
-                head_v_dim=self.head_v_dim,
-                norm_before_gate=self.norm.norm_before_gate,
-                activation=self.norm.activation,
-            )
-            output, _ = self.out_proj(out_proj_input)
-            return output
 
         # ============================================================
         # Part 3: Output Projection
@@ -1571,9 +1027,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        """Forward pass with three parts:
+        """
+        Forward pass with three parts:
         1. Input projection
-        2. Core attention (custom op, SYCL or Triton per --gdn-prefill-backend)
+        2. Core attention (custom op)
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
@@ -1592,34 +1049,28 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
+        z = torch.empty_like(core_attn_out)
 
-        if self.gdn_xpu_backend == "triton":
-            # Triton consumes unpacked q/k/v/z/b/a; the SYCL op unpacks
-            # internally and takes the raw projections instead.
-            mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
-                projected_states_qkvz, projected_states_ba, num_tokens
-            )
-            torch.ops.vllm.qwen_gdn_attention_core(
-                mixed_qkv,
-                b.contiguous(),
-                a.contiguous(),
-                core_attn_out,
-                layer_name=_encode_layer_name(self.prefix),
-            )
-        else:
-            z = torch.empty_like(core_attn_out)
-            torch.ops.vllm.gdn_attention_core_xpu(
-                core_attn_out,
-                z,
-                projected_states_qkvz,
-                projected_states_ba,
-                self.prefix,
-            )
+        torch.ops.vllm.gdn_attention_core_xpu(
+            core_attn_out,
+            z,
+            projected_states_qkvz,
+            projected_states_ba,
+            self.prefix,
+        )
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        return self._output_projection(core_attn_out, z)
+        z_shape_og = z.shape
+        # Reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        out, _ = self.out_proj(core_attn_out)
+        return out
 
     def forward_cpu(
         self,
@@ -1662,46 +1113,49 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             _encode_layer_name(self.prefix),
         )
 
-        return self._output_projection(core_attn_out, z)
+        z_shape_og = z.shape
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        out, _ = self.out_proj(core_attn_out)
+        return out
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
 
-        During V1 profile runs, `_forward_core` returns early because
-        `attn_metadata` is `None`, so the autotuned kernels used by
-        `chunk_gated_delta_rule` (e.g. `solve_tril`,
-        `chunk_scaled_dot_kkt`) are never invoked.  After profiling,
+        During V1 profile runs, ``_forward_core`` returns early because
+        ``attn_metadata`` is ``None``, so the autotuned kernels used by
+        ``chunk_gated_delta_rule`` (e.g. ``solve_tril``,
+        ``chunk_scaled_dot_kkt``) are never invoked.  After profiling,
         vLLM allocates KV cache using most of the remaining GPU memory.
         When the first real inference triggers the autotuner it OOMs
         because there is not enough memory left for benchmarking.
 
         This method runs minimal forward passes through
-        `chunk_gated_delta_rule` with small dummy tensors to force
+        ``chunk_gated_delta_rule`` with small dummy tensors to force
         autotuning while GPU memory is still plentiful.  The autotuner
         results are cached globally, so only the first layer incurs
         actual benchmarking cost.
 
-        All kernels including `chunk_fwd_kernel_o` now use a fixed
-        `BT = chunk_size` (64).  A single warmup pass with T = 64
+        All kernels including ``chunk_fwd_kernel_o`` now use a fixed
+        ``BT = chunk_size`` (64).  A single warmup pass with T = 64
         is sufficient to populate the autotuner cache.
 
-        The decode path uses `gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule`
+        The decode path uses ``gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule``
         which has fixed kernel parameters (no autotuning), so only the
         prefill (chunked) path needs warming up.
         """
         if self._prefill_kernels_warmed_up:
             return
         self._prefill_kernels_warmed_up = True
-        if self._exports_checkpoints:
-            # Size the workspace while profiling; it is locked afterwards.
-            current_workspace_manager().get_simultaneous(self._checkpoint_buffer_spec)
 
         device = qkv_or_qkvz.device
         dtype = qkv_or_qkvz.dtype
         num_k_heads = self.num_k_heads // self.tp_size
         num_v_heads = self.num_v_heads // self.tp_size
-        # get_state_dtype() is (conv, ssm[, d, k, g]); we only need the ssm dtype.
-        state_dtype = self.get_state_dtype()[1]
+        _, state_dtype = self.get_state_dtype()
 
         # All kernels use BT = chunk_size, so a single pass with T = chunk_size
         # is sufficient to populate every autotuner cache. Mirror the real
@@ -1724,7 +1178,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             head_v_dim=self.head_v_dim,
             apply_l2norm=True,
             output_g_exp=False,
-            beta_scale=self.beta_scale,
         )
         q = q.unsqueeze(0)
         k = k.unsqueeze(0)
@@ -1744,18 +1197,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # CuteDSL kernels require metadata
         chunk_indices = None
         chunk_offsets = None
-        aiter_prefill_metadata = None
         if self.gdn_prefill_backend == "cutedsl":
             from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
                 prepare_metadata_cutedsl,
             )
 
             chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, T)
-        elif self.gdn_prefill_backend == "aiter_flydsl":
-            aiter_prefill_metadata = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
-                [T],
-                cu_seqlens=cu_seqlens,
-            )
 
         try:
             self.chunk_gated_delta_rule(
@@ -1770,28 +1217,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=chunk_indices,
                 chunk_offsets=chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
-                aiter_prefill_metadata=aiter_prefill_metadata,
             )
-            if self.gdn_prefill_backend == "flashinfer":
-                self._warmup_flashinfer_prefill_variants(q, k, v, g, beta, state)
-            elif self._exports_checkpoints:
-                # Storing checkpoints is a kernel variant of its own.
-                (checkpoint_state,) = current_workspace_manager().get_simultaneous(
-                    self._checkpoint_buffer_spec
-                )
-                fla_chunk_gated_delta_rule(
-                    q=q,
-                    k=k,
-                    v=v,
-                    g=g,
-                    beta=beta,
-                    initial_state=state,
-                    output_final_state=True,
-                    cu_seqlens=cu_seqlens,
-                    use_qk_l2norm_in_kernel=False,
-                    checkpoint_state=checkpoint_state[:1],
-                    checkpoint_offsets=torch.zeros(1, device=device, dtype=torch.int32),
-                )
         except Exception:
             logger.warning(
                 "GDN prefill kernel warmup (T=%d) failed for "
@@ -1821,88 +1247,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens,
                 chunk_indices,
                 chunk_offsets,
-                aiter_prefill_metadata,
             )
 
         torch.accelerator.empty_cache()
-
-    def _warmup_flashinfer_prefill_variants(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        state: torch.Tensor,
-    ) -> None:
-        """Compile every FlashInfer GDN prefill kernel a batch can dispatch to.
-
-        FlashInfer builds separate kernels for its context-parallel route (few
-        sequences) and its regular route, each with and without checkpoint
-        output. A single sequence under `use_cp="auto"` takes the CP route
-        wherever the heuristic can pick it; `use_cp=False` forces the other.
-        """
-        # g arrives in log space (from _warmup_prefill_kernels); FlashInfer
-        # takes exp(g).
-        g = torch.exp(g.to(torch.float32))
-        # Checkpoints with and without slots compile separately.
-        checkpoint_configs: list[tuple[torch.Tensor | None, ...]] = [(None, None)]
-        if self._exports_checkpoints:
-            (state_checkpoints,) = current_workspace_manager().get_simultaneous(
-                self._checkpoint_buffer_spec
-            )
-            buffer = state_checkpoints[:1]
-            slots = torch.zeros(1, device=q.device, dtype=torch.int64)
-            checkpoint_configs += [(buffer, None), (buffer, slots)]
-        cu_seqlens = torch.tensor([0, q.shape[1]], device=q.device, dtype=torch.int32)
-        checkpoint_cu_starts = torch.tensor([0, 1], device=q.device)
-        for use_cp, (state_checkpoints, slots) in itertools.product(
-            ("auto", False), checkpoint_configs
-        ):
-            has_checkpoint = state_checkpoints is not None
-            fi_chunk_gated_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                beta=beta,
-                initial_state=state,
-                output_final_state=True,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=False,
-                use_cp=use_cp,
-                state_checkpoints=state_checkpoints,
-                checkpoint_cu_starts=checkpoint_cu_starts if has_checkpoint else None,
-                checkpoint_every_n_tokens=q.shape[1] if has_checkpoint else 0,
-                checkpoint_state_indices=slots,
-            )
 
     def _forward_core_rocm(
         self,
         qkvz: torch.Tensor,
         ba: torch.Tensor,
-        z_out: torch.Tensor | None,
+        z_out: torch.Tensor,
         core_attn_out: torch.Tensor,
     ):
         """ROCm AITER fast path: conv1d + recurrent attention from packed
         qkvz/ba layout.
 
-        For decode-only (no spec, no prefill) batches, dispatches directly to
-        `_forward_core_decode_aiter`. Otherwise unpacks the packed layout and
-        falls through to `_forward_core`.
+        For decode-only (no spec, no prefill) interleaved-GQA layouts,
+        dispatches directly to ``_forward_core_decode_aiter``. Otherwise unpacks
+        the packed layout and falls through to ``_forward_core``.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
             ba:   packed [b, a] gating vectors    (num_tokens, 2*num_heads)
             z_out: **output** buffer for z        (num_tokens, num_heads,
-                   head_dim); mutated in-place. `None` if and only if the layer
-                   uses the fused AITER kernel (`use_aiter_fused_gdn_decode`): the gated
-                   RMSNorm is then applied too and `core_attn_out` receives the
-                   normed output.
+                   head_dim); mutated in-place.
             core_attn_out: Pre-allocated output buffer for attention results.
-
         """
-        assert (z_out is None) == self.use_aiter_fused_gdn_decode
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
@@ -1916,20 +1285,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+        # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
+        # GQA layout. Qwen3.5 uses a non-interleaved q/k/v/z layout and must use
+        # the generic path below to split/rearrange inputs correctly.
         if (
-            attn_metadata.spec_sequence_masks is None
+            self.gqa_interleaved_layout
+            and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
-            and not is_conv_state_dim_first()
-            and not self.use_replayssm
         ):
-            if self.use_aiter_fused_gdn_decode:
-                return self._forward_core_decode_aiter_fused(
-                    qkvz=qkvz,
-                    ba=ba,
-                    normed_out=core_attn_out,
-                    attn_metadata=attn_metadata,
-                )
             return self._forward_core_decode_aiter(
                 qkvz=qkvz,
                 ba=ba,
@@ -1943,21 +1307,211 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
             qkvz, ba, num_tokens_all
         )
-        if z_out is not None:
-            z_out[:] = z
+        z_out[:] = z
         self._forward_core(
             mixed_qkv=mixed_qkv,
             b=b,
             a=a,
             core_attn_out=core_attn_out,
         )
-        if z_out is None:
-            num_actual_tokens = attn_metadata.num_actual_tokens
-            self._rms_norm_gated_cuda(
-                core_attn_out[:num_actual_tokens],
-                z[:num_actual_tokens],
-                core_attn_out[:num_actual_tokens],
+
+    def _forward_core_grouped_prefill(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor,
+        conv_weights: torch.Tensor,
+    ) -> None:
+        """Run grouped prefill as batched producer and consumer phases.
+
+        Producers write shared cache rows before consumers copy those rows into
+        private destinations. Each phase uses the existing varlen GDN kernels.
+        """
+        producer_ranges = attn_metadata.prefix_producer_ranges
+        producer_token_indices = attn_metadata.producer_token_indices
+        producer_query_start_loc = attn_metadata.producer_query_start_loc
+        producer_conv_metadata = attn_metadata.producer_conv_metadata
+        consumer_ranges = attn_metadata.consumer_ranges
+        consumer_token_indices = attn_metadata.consumer_token_indices
+        consumer_query_start_loc = attn_metadata.consumer_query_start_loc
+        consumer_conv_metadata = attn_metadata.consumer_conv_metadata
+        initial_sources = attn_metadata.shared_initial_state_source
+        shared_destinations = attn_metadata.shared_state_destinations
+        consumer_sources = attn_metadata.consumer_shared_state_sources
+        private_destinations = attn_metadata.private_final_state_destination
+        if any(
+            value is None
+            for value in (
+                producer_ranges,
+                producer_token_indices,
+                producer_query_start_loc,
+                consumer_ranges,
+                consumer_token_indices,
+                consumer_query_start_loc,
+                initial_sources,
+                shared_destinations,
+                consumer_sources,
+                private_destinations,
             )
+        ):
+            raise ValueError("grouped GDN requires packed phase metadata")
+        assert producer_ranges is not None
+        assert producer_token_indices is not None
+        assert producer_query_start_loc is not None
+        assert consumer_ranges is not None
+        assert consumer_token_indices is not None
+        assert consumer_query_start_loc is not None
+        assert initial_sources is not None
+        assert shared_destinations is not None
+        assert consumer_sources is not None
+        assert private_destinations is not None
+        if producer_ranges.ndim != 2 or producer_ranges.shape[1] != 2:
+            raise ValueError("prefix_producer_ranges must have shape [N, 2]")
+        if consumer_ranges.ndim != 2 or consumer_ranges.shape[1] != 2:
+            raise ValueError("consumer_ranges must have shape [N, 2]")
+        if shared_destinations.numel() != producer_ranges.shape[0]:
+            raise ValueError("one shared destination is required per producer")
+        if initial_sources.numel() not in (1, producer_ranges.shape[0]):
+            raise ValueError(
+                "shared_initial_state_source must be scalar or per producer"
+            )
+        if consumer_sources.numel() != consumer_ranges.shape[0]:
+            raise ValueError("one shared source is required per consumer")
+        if private_destinations.numel() != consumer_ranges.shape[0]:
+            raise ValueError("one private destination is required per consumer")
+
+        def run_phase(
+            token_indices: torch.Tensor,
+            query_start_loc: torch.Tensor,
+            conv_metadata: object | None,
+            sources: torch.Tensor,
+            destinations: torch.Tensor,
+            chunk_indices: torch.Tensor | None = None,
+            chunk_offsets: torch.Tensor | None = None,
+            token_slice: slice | None = None,
+        ) -> None:
+            if destinations.numel() == 0:
+                return
+            if conv_metadata is None:
+                raise ValueError("non-empty grouped phase requires conv metadata")
+            # For consumers, sources and destinations are already expanded 1:1 by
+            # GDNAttentionMetadataBuilder (mapping each consumer to its producer block).
+            # Expanding here supports broadcasting a scalar initial state (e.g.
+            # NULL_BLOCK_ID) across multiple producers during the producer phase.
+            if sources.numel() == 1 and destinations.numel() > 1:
+                sources = sources.expand_as(destinations)
+            if sources.numel() != destinations.numel():
+                raise ValueError("one initial source is required per destination")
+
+            source_indices = sources.to(torch.int32).contiguous()
+            destination_indices = destinations.to(torch.int32).contiguous()
+            phase_has_init_state = source_indices > NULL_BLOCK_ID
+
+            if token_slice is not None:
+                packed_mixed_qkv = mixed_qkv[token_slice]
+                packed_a = a[token_slice]
+                packed_b = b[token_slice]
+            else:
+                packed_mixed_qkv = mixed_qkv.index_select(0, token_indices)
+                packed_a = a.index_select(0, token_indices)
+                packed_b = b.index_select(0, token_indices)
+            conv_output = causal_conv1d_fn(
+                packed_mixed_qkv.transpose(0, 1),
+                conv_weights,
+                self.conv1d.bias,
+                activation=self.activation,
+                conv_states=conv_state,
+                has_initial_state=phase_has_init_state,
+                cache_indices=source_indices,
+                write_cache_indices=destination_indices,
+                query_start_loc=query_start_loc,
+                metadata=conv_metadata,
+            ).transpose(0, 1)
+            query, key, value, g, beta = fused_post_conv_prep(
+                conv_output=conv_output,
+                a=packed_a,
+                b=packed_b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                apply_l2norm=True,
+                output_g_exp=False,
+            )
+            chunk_fn = (
+                getattr(self, "chunk_gated_delta_rule", None)
+                if getattr(self, "gdn_prefill_backend", "triton") == "triton"
+                else None
+            )
+            if chunk_fn is not None and g is not None and beta is not None:
+                initial_state = ssm_state[source_indices]
+                initial_state[~phase_has_init_state, ...] = 0
+                phase_out_buf = (
+                    core_attn_out[token_slice] if token_slice is not None else None
+                )
+                output, last_state = chunk_fn(
+                    q=query.unsqueeze(0),
+                    k=key.unsqueeze(0),
+                    v=value.unsqueeze(0),
+                    g=g.unsqueeze(0),
+                    beta=beta.unsqueeze(0),
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=query_start_loc,
+                    chunk_indices=chunk_indices,
+                    chunk_offsets=chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                    core_attn_out=phase_out_buf,
+                )
+                ssm_state[destination_indices] = last_state.to(ssm_state.dtype)
+                if phase_out_buf is None:
+                    core_attn_out.index_copy_(0, token_indices, output.squeeze(0))
+            else:
+                output, _ = fused_sigmoid_gating_delta_rule_update(
+                    A_log=self.A_log,
+                    a=packed_a,
+                    b=packed_b,
+                    dt_bias=self.dt_bias,
+                    q=query.unsqueeze(0),
+                    k=key.unsqueeze(0),
+                    v=value.unsqueeze(0),
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=query_start_loc,
+                    ssm_state_indices=source_indices,
+                    ssm_final_state_indices=destination_indices,
+                    use_qk_l2norm_in_kernel=False,
+                )
+                if token_slice is not None:
+                    core_attn_out[token_slice] = output.squeeze(0)
+                else:
+                    core_attn_out.index_copy_(0, token_indices, output.squeeze(0))
+
+        run_phase(
+            producer_token_indices,
+            producer_query_start_loc,
+            producer_conv_metadata,
+            initial_sources,
+            shared_destinations,
+            chunk_indices=getattr(attn_metadata, "producer_chunk_indices", None),
+            chunk_offsets=getattr(attn_metadata, "producer_chunk_offsets", None),
+            token_slice=attn_metadata.producer_slice,
+        )
+        run_phase(
+            consumer_token_indices,
+            consumer_query_start_loc,
+            consumer_conv_metadata,
+            consumer_sources,
+            private_destinations,
+            chunk_indices=getattr(attn_metadata, "consumer_chunk_indices", None),
+            chunk_offsets=getattr(attn_metadata, "consumer_chunk_offsets", None),
+            token_slice=attn_metadata.consumer_slice,
+        )
 
     def _forward_core(
         self,
@@ -1973,7 +1527,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b: beta gating vector                   (num_tokens, num_heads)
             a: alpha gating vector                  (num_tokens, num_heads)
             core_attn_out: Pre-allocated output buffer for attention results.
-
         """
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1988,7 +1541,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         if (
-            (self.use_replayssm or self.enable_packed_recurrent_decode)
+            self.enable_packed_recurrent_decode
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
@@ -2030,6 +1583,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
 
+        has_real_producer = (
+            attn_metadata.prefix_producer_ranges is not None
+            and attn_metadata.prefix_producer_ranges.numel() > 0
+        )
+        if has_real_producer:
+            self._forward_core_grouped_prefill(
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                attn_metadata,
+                conv_state,
+                ssm_state,
+                conv_weights,
+            )
+            return
+
+        cow_read_state_indices = attn_metadata.consumer_shared_state_sources
+
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -2065,45 +1637,34 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
         # 1.2: Process the remaining part
-        conv_input_non_spec = mixed_qkv_non_spec
-        prefill_post_conv = None
-        if (
-            attn_metadata.num_prefills > 0
-            and attn_metadata.num_decodes == 0
-            and self.conv1d.bias is None
-            and self.activation in ("silu", "swish")
-            and gdn_prefill_conv_supported(
-                mixed_qkv, conv_weights, conv_state, self.head_k_dim, self.head_v_dim
-            )
-        ):
-            # Pure prefill: conv + post-conv prep in one kernel.
-            assert mixed_qkv_non_spec is not None
-            if spec_sequence_masks is not None:
-                a_non_spec = a.index_select(0, non_spec_token_indx)
-                b_non_spec = b.index_select(0, non_spec_token_indx)
-            else:
-                a_non_spec, b_non_spec = a, b
-            prefill_post_conv = gdn_prefill_conv(
-                mixed_qkv_non_spec,
-                conv_weights,
-                conv_state,
-                query_start_loc=non_spec_query_start_loc,
-                cache_indices=non_spec_state_indices_tensor,
-                has_initial_state=has_initial_state,
-                a=a_non_spec,
-                b=b_non_spec,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_k_heads=self.num_k_heads // self.tp_size,
-                head_dim=self.head_k_dim,
-                output_g_exp=self.gdn_prefill_backend == "flashinfer",
-                beta_scale=self.beta_scale,
-            )
-        elif attn_metadata.num_prefills > 0:
+        if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-            # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
+            assert non_spec_state_indices_tensor is not None
+            num_decodes = attn_metadata.num_decodes
+            if (
+                cow_read_state_indices is not None
+                and num_decodes + cow_read_state_indices.shape[0]
+                <= non_spec_state_indices_tensor.shape[0]
+            ):
+                if (
+                    num_decodes == 0
+                    and cow_read_state_indices.shape[0]
+                    == non_spec_state_indices_tensor.shape[0]
+                ):
+                    conv_read_indices = cow_read_state_indices
+                else:
+                    conv_read_indices = non_spec_state_indices_tensor.clone()
+                    conv_read_indices[
+                        num_decodes : num_decodes + cow_read_state_indices.shape[0]
+                    ] = cow_read_state_indices
+                conv_write_indices = non_spec_state_indices_tensor
+            else:
+                conv_read_indices = non_spec_state_indices_tensor
+                conv_write_indices = None
+            # - "cache_indices" reads the initial conv_state, and
+            #   "write_cache_indices" (when set) writes the updated state to
+            #   private destination blocks without a pre-copy.
             mixed_qkv_non_spec = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
@@ -2111,7 +1672,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
+                cache_indices=conv_read_indices,
+                write_cache_indices=conv_write_indices,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata,
             ).transpose(0, 1)
@@ -2142,46 +1704,43 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         if attn_metadata.num_prefills > 0:
-            if prefill_post_conv is None:
-                assert mixed_qkv_non_spec is not None, (
-                    "mixed_qkv_non_spec must be provided for prefill path"
-                )
-                if spec_sequence_masks is not None:
-                    a_non_spec = a.index_select(0, non_spec_token_indx)
-                    b_non_spec = b.index_select(0, non_spec_token_indx)
-                else:
-                    a_non_spec = a
-                    b_non_spec = b
+            assert mixed_qkv_non_spec is not None, (
+                "mixed_qkv_non_spec must be provided for prefill path"
+            )
+            if spec_sequence_masks is not None:
+                a_non_spec = a.index_select(0, non_spec_token_indx)
+                b_non_spec = b.index_select(0, non_spec_token_indx)
+            else:
+                a_non_spec = a
+                b_non_spec = b
 
-                if split_non_spec:
-                    conv_output_prefill = mixed_qkv_non_spec[num_decode_tokens:]
-                    a_prefill = a_non_spec[num_decode_tokens:]
-                    b_prefill = b_non_spec[num_decode_tokens:]
-                else:
-                    conv_output_prefill = mixed_qkv_non_spec
-                    a_prefill = a_non_spec
-                    b_prefill = b_non_spec
+            if split_non_spec:
+                conv_output_prefill = mixed_qkv_non_spec[num_decode_tokens:]
+                a_prefill = a_non_spec[num_decode_tokens:]
+                b_prefill = b_non_spec[num_decode_tokens:]
+            else:
+                conv_output_prefill = mixed_qkv_non_spec
+                a_prefill = a_non_spec
+                b_prefill = b_non_spec
 
-                prefill_post_conv = fused_post_conv_prep(
-                    conv_output=conv_output_prefill,
-                    a=a_prefill,
-                    b=b_prefill,
-                    A_log=self.A_log,
-                    dt_bias=self.dt_bias,
-                    num_k_heads=self.num_k_heads // self.tp_size,
-                    head_k_dim=self.head_k_dim,
-                    head_v_dim=self.head_v_dim,
-                    apply_l2norm=True,
-                    output_g_exp=self.gdn_prefill_backend == "flashinfer",
-                    beta_scale=self.beta_scale,
-                )
             (
                 query_non_spec,
                 key_non_spec,
                 value_non_spec,
                 g_non_spec,
                 beta_non_spec,
-            ) = prefill_post_conv
+            ) = fused_post_conv_prep(
+                conv_output=conv_output_prefill,
+                a=a_prefill,
+                b=b_prefill,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                apply_l2norm=True,
+                output_g_exp=False,
+            )
             query_non_spec = query_non_spec.unsqueeze(0)
             key_non_spec = key_non_spec.unsqueeze(0)
             value_non_spec = value_non_spec.unsqueeze(0)
@@ -2216,7 +1775,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
-                    beta_scale=self.beta_scale,
                 )
             )
         else:
@@ -2224,50 +1782,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part
         if split_non_spec:
-            if self.use_replayssm:
-                out_decode = torch.empty(
-                    num_decode_tokens,
-                    1,
-                    self.num_v_heads // self.tp_size,
-                    self.head_v_dim,
-                    dtype=mixed_qkv_non_spec.dtype,  # type: ignore[union-attr]
-                    device=mixed_qkv_non_spec.device,  # type: ignore[union-attr]
-                )
-                self._replayssm_decode(
-                    mixed_qkv_non_spec[:num_decode_tokens].contiguous(),  # type: ignore[index]
-                    a[:num_decode_tokens],
-                    b[:num_decode_tokens],
-                    non_spec_state_indices_tensor[: attn_metadata.num_decodes],  # type: ignore[index]
-                    out_decode,
-                    attn_metadata,
-                )
-                core_attn_out_decode = out_decode.transpose(0, 1)
-            else:
-                query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
-                    mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
-                )
-                core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
-                    A_log=self.A_log,
-                    a=a[:num_decode_tokens],
-                    b=b[:num_decode_tokens],
-                    dt_bias=self.dt_bias,
-                    q=query_decode,
-                    k=key_decode,
-                    v=value_decode,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
-                        : attn_metadata.num_decodes + 1
-                    ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
-                    use_qk_l2norm_in_kernel=True,
-                    beta_scale=self.beta_scale,
-                )
+            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+            )
+            core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
+                A_log=self.A_log,
+                a=a[:num_decode_tokens],
+                b=b[:num_decode_tokens],
+                dt_bias=self.dt_bias,
+                q=query_decode,
+                k=key_decode,
+                v=value_decode,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_decodes + 1
+                ],
+                ssm_state_indices=non_spec_state_indices_tensor,
+                use_qk_l2norm_in_kernel=True,
+            )
         else:
             core_attn_out_decode = None
 
         # 2.3: Process the remaining part (prefill chunk, or non-spec decode-only)
-        prefill_in_place = False
         if attn_metadata.num_prefills > 0:
             # State indices, initial-state mask and cu_seqlens for the chunk
             # kernel are precomputed by the metadata builder (the prefill tail
@@ -2277,80 +1814,53 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            if self.gdn_prefill_backend == "flashinfer":
-                # Without spec decodes the prefill rows follow the peeled
-                # decodes contiguously, so FlashInfer writes them straight
-                # into core_attn_out. Spec batches scatter by token index.
-                prefill_out = None
-                if spec_sequence_masks is None:
-                    prefill_out = core_attn_out[num_decode_tokens:num_actual_tokens]
-                core_attn_out_non_spec, last_recurrent_state = (
-                    self._forward_flashinfer_prefill(
-                        query_non_spec,
-                        key_non_spec,
-                        value_non_spec,
-                        g_non_spec,
-                        beta_non_spec,
-                        attn_metadata,
-                        ssm_state=ssm_state,
-                        conv_state=conv_state,
-                        conv_input=conv_input_non_spec,
-                        output=prefill_out,
-                    )
-                )
-                prefill_in_place = prefill_out is not None
-            elif attn_metadata.checkpoint is not None:
-                core_attn_out_non_spec, last_recurrent_state = (
-                    self._forward_triton_prefill_with_checkpoints(
-                        query_non_spec,
-                        key_non_spec,
-                        value_non_spec,
-                        g_non_spec,
-                        beta_non_spec,
-                        attn_metadata,
-                        ssm_state=ssm_state,
-                        conv_state=conv_state,
-                        conv_input=conv_input_non_spec,
-                    )
-                )
-            else:
-                initial_state = gather_initial_states(
-                    ssm_state, prefill_state_indices, prefill_has_initial_state
-                )
-                (
-                    core_attn_out_non_spec,
-                    last_recurrent_state,
-                ) = self.chunk_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    cu_seqlens=attn_metadata.prefill_query_start_loc,
-                    chunk_indices=attn_metadata.chunk_indices,
-                    chunk_offsets=attn_metadata.chunk_offsets,
-                    use_qk_l2norm_in_kernel=False,
-                    aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
-                )
+            assert attn_metadata.prefill_query_start_loc is not None
+            num_prefill_seqs = attn_metadata.prefill_query_start_loc.shape[0] - 1
+            prefill_state_indices = prefill_state_indices[:num_prefill_seqs]
+            prefill_has_initial_state = prefill_has_initial_state[:num_prefill_seqs]
+            prefill_read_indices = (
+                cow_read_state_indices[:num_prefill_seqs]
+                if cow_read_state_indices is not None
+                else prefill_state_indices
+            )
+            initial_state = ssm_state[prefill_read_indices]
+            initial_state[~prefill_has_initial_state, ...] = 0
+            direct_prefill_out = (
+                core_attn_out[:num_actual_tokens]
+                if not split_non_spec and spec_sequence_masks is None
+                else None
+            )
+            (
+                core_attn_out_non_spec,
+                last_recurrent_state,
+            ) = self.chunk_gated_delta_rule(
+                q=query_non_spec,
+                k=key_non_spec,
+                v=value_non_spec,
+                g=g_non_spec,
+                beta=beta_non_spec,
+                initial_state=initial_state,
+                output_final_state=True,
+                cu_seqlens=attn_metadata.prefill_query_start_loc,
+                chunk_indices=attn_metadata.chunk_indices,
+                chunk_offsets=attn_metadata.chunk_offsets,
+                use_qk_l2norm_in_kernel=False,
+                core_attn_out=direct_prefill_out,
+                aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
+            )
             # Init cache
-            scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
-            if self.use_replayssm and self._plans_replayssm_decode:
-                # Cached decode appends to the ring that prefill leaves empty.
-                self._replayssm_ring_start.index_fill_(
-                    0, prefill_state_indices.long(), 0
-                )
+            ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                ssm_state.dtype
+            )
 
-            if split_non_spec and prefill_in_place:
-                core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
-            elif split_non_spec:
+            if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
                 # outputs (decode-first order).
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec], dim=1
                 )
         elif attn_metadata.num_decodes > 0:
+            direct_prefill_out = None
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2368,162 +1878,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
-                    beta_scale=self.beta_scale,
                 )
             )
         else:
+            direct_prefill_out = None
             core_attn_out_non_spec, last_recurrent_state = None, None
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            core_attn_out.index_copy_(0, spec_token_indx, core_attn_out_spec.squeeze(0))
-            core_attn_out.index_copy_(
-                0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
+            merged_out = torch.empty(
+                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
+                dtype=core_attn_out_non_spec.dtype,
+                device=core_attn_out_non_spec.device,
             )
+            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
+            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        elif not prefill_in_place:
+        elif direct_prefill_out is None:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-
-    def _forward_flashinfer_prefill(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        attn_metadata: GDNAttentionMetadata,
-        *,
-        ssm_state: torch.Tensor,
-        conv_state: torch.Tensor,
-        conv_input: torch.Tensor | None,
-        output: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """FlashInfer chunked prefill of the batch's prefill rows.
-
-        Writes the output into `output` when given and exports the
-        batch's internal prefill checkpoints. Returns the output and the
-        rows' final states.
-        """
-        has_initial_state = attn_metadata.prefill_has_initial_state
-        state_indices = attn_metadata.prefill_state_indices
-        assert has_initial_state is not None
-        assert state_indices is not None
-        initial_state = gather_initial_states(
-            ssm_state, state_indices, has_initial_state
-        )
-        plan = attn_metadata.flashinfer_checkpoint_plan
-        if plan is None:
-            return fi_chunk_gated_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                beta=beta,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=attn_metadata.prefill_query_start_loc,
-                use_qk_l2norm_in_kernel=False,
-                output=output,
-            )
-
-        (state_checkpoints,) = current_workspace_manager().get_simultaneous(
-            self._checkpoint_buffer_spec
-        )
-        state_checkpoints = state_checkpoints[: plan.num_checkpoints]
-        core_out, final_state = fi_chunk_gated_delta_rule(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            initial_state=initial_state,
-            output_final_state=True,
-            cu_seqlens=attn_metadata.prefill_query_start_loc,
-            use_qk_l2norm_in_kernel=False,
-            output=output,
-            state_checkpoints=state_checkpoints,
-            checkpoint_cu_starts=plan.cu_starts,
-            checkpoint_every_n_tokens=plan.every_n_tokens,
-            checkpoint_state_indices=plan.slots,
-        )
-        assert attn_metadata.checkpoint is not None
-        assert attn_metadata.non_spec_query_start_loc is not None
-        assert conv_input is not None
-        self._checkpoint_exporter.export(
-            attn_metadata.checkpoint,
-            raw_qkv=conv_input,
-            conv_state=conv_state,
-            recurrent_checkpoint=state_checkpoints,
-            recurrent_state=ssm_state,
-            cu_seqlens=attn_metadata.non_spec_query_start_loc,
-            recurrent_rows=plan.rows,
-        )
-        return core_out, final_state
-
-    def _forward_triton_prefill_with_checkpoints(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        attn_metadata: GDNAttentionMetadata,
-        *,
-        ssm_state: torch.Tensor,
-        conv_state: torch.Tensor,
-        conv_input: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Triton/FLA chunked prefill that exports the batch's internal
-        prefill checkpoints.
-
-        The kernel stores each checkpoint's recurrent state in a per-sequence
-        buffer, which the exporter moves into the checkpoint block together
-        with the conv window. Returns the output and the rows' final states.
-        """
-        assert self.gdn_prefill_backend in ("triton", "aiter_flydsl")
-        checkpoint = attn_metadata.checkpoint
-        assert checkpoint is not None
-        assert attn_metadata.prefill_state_indices is not None
-        assert attn_metadata.prefill_has_initial_state is not None
-        assert attn_metadata.non_spec_query_start_loc is not None
-        assert conv_input is not None
-        initial_state = gather_initial_states(
-            ssm_state,
-            attn_metadata.prefill_state_indices,
-            attn_metadata.prefill_has_initial_state,
-        )
-        num_rows = checkpoint.checkpoint_offsets.shape[0]
-        (checkpoint_state,) = current_workspace_manager().get_simultaneous(
-            self._checkpoint_buffer_spec
-        )
-        checkpoint_state = checkpoint_state[:num_rows]
-        # The prefill kernel runs the trailing checkpoint rows.
-        first = num_rows - initial_state.shape[0]
-        core_out, final_state = fla_chunk_gated_delta_rule(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            initial_state=initial_state,
-            output_final_state=True,
-            cu_seqlens=attn_metadata.prefill_query_start_loc,
-            chunk_indices=attn_metadata.chunk_indices,
-            chunk_offsets=attn_metadata.chunk_offsets,
-            use_qk_l2norm_in_kernel=False,
-            checkpoint_state=checkpoint_state[first:],
-            checkpoint_offsets=checkpoint.checkpoint_offsets[first:],
-        )
-        self._checkpoint_exporter.export(
-            checkpoint,
-            raw_qkv=conv_input,
-            conv_state=conv_state,
-            recurrent_checkpoint=checkpoint_state,
-            recurrent_state=ssm_state,
-            cu_seqlens=attn_metadata.non_spec_query_start_loc,
-        )
-        return core_out, final_state
 
     def _forward_core_decode_aiter(
         self,
@@ -2569,7 +1943,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     : attn_metadata.num_actual_tokens
                 ],
                 validate_data=True,
-                qkvz_layout=self.qkvz_layout,
             )
         )
 
@@ -2592,50 +1965,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out.reshape(-1),
         )
 
-    def _forward_core_decode_aiter_fused(
-        self,
-        qkvz: torch.Tensor,
-        ba: torch.Tensor,
-        normed_out: torch.Tensor,
-        attn_metadata: GDNAttentionMetadata,
-    ):
-        """Decode-only batch: conv1d + recurrence + gated RMSNorm in one kernel."""
-        num_tokens = attn_metadata.num_actual_tokens
-        conv_state = (
-            self.kv_cache[0]
-            if is_conv_state_dim_first()
-            else self.kv_cache[0].transpose(-1, -2)
-        )
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
-        conv_bias = (
-            self.conv1d.bias
-            if self.conv1d.bias is not None
-            else self._aiter_fused_conv_bias
-        )
-        gdn_aiter_fused_gdn_decode_qkvz(
-            qkvz[:num_tokens],
-            ba[:num_tokens],
-            conv_state,
-            self.kv_cache[1],
-            attn_metadata.non_spec_state_indices_tensor[:num_tokens],  # type: ignore[index]
-            conv_weights,
-            conv_bias,
-            self.A_log,
-            self.dt_bias,
-            self.norm.weight,
-            scale=self.head_k_dim**-0.5,
-            norm_eps=self.norm.eps,
-            quant_dtype=None,
-            qkvz_layout=self.qkvz_layout,
-            # Empty query segments mark padded CUDA-graph rows; the kernel skips them.
-            query_start_loc=attn_metadata.non_spec_query_start_loc[  # type: ignore[index]
-                : num_tokens + 1
-            ],
-            out=normed_out[:num_tokens],
-        )
-
     def _forward_core_decode_non_spec(
         self,
         mixed_qkv: torch.Tensor,
@@ -2644,9 +1973,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
     ):
-        """Non-spec decode fast path: packed recurrent or ReplaySSM kernel."""
+        """
+        Core attention computation with a packed non-spec decode fast path.
+        """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        assert non_spec_state_indices_tensor is not None
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -2657,7 +1987,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
-        state_indices = non_spec_state_indices_tensor[:num_actual_tokens]
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
@@ -2672,15 +2001,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_weights,
             self.conv1d.bias,
             self.activation,
-            conv_state_indices=state_indices,
+            conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-        if self.use_replayssm:
-            self._replayssm_decode(
-                mixed_qkv_non_spec, a, b, state_indices, out_buf, attn_metadata
-            )
-            return
         fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv_non_spec,
             a=a,
@@ -2690,57 +2014,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             scale=self.head_k_dim**-0.5,
             initial_state=ssm_state,
             out=out_buf,
-            ssm_state_indices=state_indices,
+            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             use_qk_l2norm_in_kernel=True,
         )
         return
-
-    def _replayssm_decode(
-        self,
-        mixed_qkv: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        state_indices: torch.Tensor,
-        out: torch.Tensor,
-        attn_metadata: GDNAttentionMetadata,
-    ) -> None:
-        """One ReplaySSM decode step on post-conv `mixed_qkv` rows.
-
-        The per-step delta-rule inputs go to the `d`/`k`/`g` rings, and the
-        checkpoint state is rewritten only on flush. The group's planner layer
-        first fills this step's `write_pos`/`is_flush` rows.
-        """
-        assert attn_metadata.write_pos_d is not None
-        assert attn_metadata.is_flush_d is not None
-        if self._plans_replayssm_decode:
-            assert self.replayssm_buffer_len is not None
-            plan_replayssm_decode(
-                self._replayssm_ring_start,
-                state_indices,
-                attn_metadata.write_pos_d,
-                attn_metadata.is_flush_d,
-                buffer_len=self.replayssm_buffer_len,
-                seq_lens=attn_metadata.replayssm_seq_lens_d,
-                align_block_size=attn_metadata.replayssm_align_block_size,
-            )
-        _, ssm_state, d_cache, k_cache, g_cache = self.kv_cache
-        fused_recurrent_gated_delta_rule_replayssm(
-            mixed_qkv=mixed_qkv,
-            a=a,
-            b=b,
-            A_log=self.A_log,
-            dt_bias=self.dt_bias,
-            scale=self.head_k_dim**-0.5,
-            initial_state=ssm_state,
-            d_cache=d_cache,
-            k_cache=k_cache,
-            g_cache=g_cache,
-            out=out,
-            ssm_state_indices=state_indices,
-            write_pos=attn_metadata.write_pos_d,
-            is_flush=attn_metadata.is_flush_d,
-            use_qk_l2norm_in_kernel=True,
-        )
 
     def _forward_core_decode_spec_fused_norm(
         self,
@@ -2806,7 +2083,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert num_accepted_tokens is not None
 
         num_requests = attn_metadata.num_spec_decodes
-        fused_mtp_decode_impl()(
+        ops.fused_gdn_decode_post_conv_mtp(
             mixed_qkv=mixed_qkv,
             a=a,
             b=b,
@@ -2837,7 +2114,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if isinstance(attn_metadata_raw, dict):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is None:
-            core_attn_out.zero_()
             self._warmup_prefill_kernels(mixed_qkvz[:, :qkv_size], 0)
             return
 
@@ -2862,8 +2138,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> bool:
         state_indices = attn_metadata.spec_state_indices_tensor
         return (
-            self.beta_scale == 1.0
-            and attn_metadata.spec_sequence_masks is not None
+            attn_metadata.spec_sequence_masks is not None
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
@@ -2872,7 +2147,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.num_v_heads // self.num_k_heads in (1, 2, 3, 4, 8)
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
-            and supports_fused_mtp_decode()
+            and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
         )
 
     def _rms_norm_gated_cuda(
@@ -2885,18 +2160,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             layer_norm_fwd,
         )
 
-        num_tokens, num_heads, head_dim = x.shape
-        assert output_gate.shape == x.shape
-        assert out.shape == x.shape
-        # A row per token, a group per head: reads the strided gate in place.
+        x_shape = x.shape
+        assert output_gate.shape == x_shape
+        assert out.shape == x_shape
+        x_2d = x.reshape(-1, x_shape[-1])
+        output_gate_2d = output_gate.reshape(-1, x_shape[-1])
+        out_2d = out.reshape(-1, x_shape[-1])
+        assert x_2d.stride(-1) == 1
+        assert output_gate_2d.stride(-1) == 1
+        assert out_2d.stride(-1) == 1
         layer_norm_fwd(
-            x.view(num_tokens, num_heads * head_dim),
-            self.norm.weight.expand(num_heads, head_dim),
+            x_2d,
+            self.norm.weight.contiguous(),
             self.norm.bias,
             self.norm.eps,
-            z=output_gate.flatten(-2),
-            out=out.view(num_tokens, num_heads * head_dim),
-            group_size=head_dim,
+            z=output_gate_2d,
+            out=out_2d,
+            group_size=(
+                x_shape[-1] if self.norm.group_size is None else self.norm.group_size
+            ),
             norm_before_gate=self.norm.norm_before_gate,
             is_rms_norm=True,
             activation=self.norm.activation,
@@ -2920,8 +2202,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
-        # No zero fill in either branch: the kernels write every actual row,
-        # and padding rows only feed row-wise ops (same as forward_cuda).
         if (
             self._can_use_fused_gdn_mtp_decode(attn_metadata)
             and attn_metadata.num_prefills == 0
@@ -2937,8 +2217,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
         self._forward_core(
             mixed_qkv=mixed_qkv,
-            b=b,
-            a=a,
+            b=b.contiguous(),
+            a=a.contiguous(),
             core_attn_out=core_attn_out,
         )
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -2963,13 +2243,13 @@ def qwen_gdn_attention_core(
     Handles conv1d + recurrent attention only; input/output projections
     are performed by the caller.
 
-    When `use_aiter=False` (standard path):
+    When ``use_aiter=False`` (standard path):
         qkv_or_qkvz is [q, k, v], b_or_ba is b, a_or_z_out is a (read-only).
-    When `use_aiter=True` (AITER Triton path, ROCm only):
+    When ``use_aiter=True`` (AITER Triton path, ROCm only):
         qkv_or_qkvz is [q, k, v, z], b_or_ba is [b, a], a_or_z_out is the
         z output buffer (mutated in-place).
 
-    `core_attn_out` is always mutated in-place.
+    ``core_attn_out`` is always mutated in-place.
     """
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -2998,27 +2278,6 @@ direct_register_custom_op(
 
 
 @eager_break_during_capture
-def qwen_gdn_attention_core_fused_norm_rocm(
-    qkvz: torch.Tensor,
-    ba: torch.Tensor,
-    normed_out: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    """conv1d + recurrence + gated RMSNorm into `normed_out` (mutated in-place)."""
-    layer_name = _resolve_layer_name(layer_name)
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    self._forward_core_rocm(qkvz=qkvz, ba=ba, z_out=None, core_attn_out=normed_out)
-
-
-direct_register_custom_op(
-    op_name="qwen_gdn_attention_core_fused_norm_rocm",
-    op_func=qwen_gdn_attention_core_fused_norm_rocm,
-    mutates_args=["normed_out"],
-)
-
-
-@eager_break_during_capture
 def qwen_gdn_attention_core_fused_norm_packed(
     mixed_qkvz: torch.Tensor,
     ba: torch.Tensor,
@@ -3040,3 +2299,75 @@ direct_register_custom_op(
     op_func=qwen_gdn_attention_core_fused_norm_packed,
     mutates_args=["core_attn_out"],
 )
+
+
+@triton.jit
+def fused_gdn_gating_kernel(
+    g,
+    beta_output,
+    A_log,
+    a,
+    b,
+    dt_bias,
+    seq_len,
+    NUM_HEADS: tl.constexpr,
+    beta: tl.constexpr,
+    threshold: tl.constexpr,
+    BLK_HEADS: tl.constexpr,
+):
+    i_b, i_s, i_d = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    head_off = i_d * BLK_HEADS + tl.arange(0, BLK_HEADS)
+    off = i_b * seq_len * NUM_HEADS + i_s * NUM_HEADS + head_off
+    mask = head_off < NUM_HEADS
+    blk_A_log = tl.load(A_log + head_off, mask=mask)
+    blk_a = tl.load(a + off, mask=mask)
+    blk_b = tl.load(b + off, mask=mask)
+    blk_bias = tl.load(dt_bias + head_off, mask=mask)
+    # If the model is loaded in fp16, without the .float() here, A might be -inf
+    x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)
+    softplus_x = tl.where(
+        beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
+    )
+    blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
+    tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
+    # compute beta_output = sigmoid(b)
+    blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
+    tl.store(
+        beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask
+    )
+
+
+def fused_gdn_gating(
+    A_log: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    dt_bias: torch.Tensor,
+    beta: float = 1.0,
+    threshold: float = 20.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused computation of g and beta for Gated Delta Net.
+    g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+    beta_output = b.sigmoid()
+    TODO maybe use torch.compile to replace this triton kernel
+    """
+    batch, num_heads = a.shape
+    seq_len = 1
+    grid = (batch, seq_len, triton.cdiv(num_heads, 8))
+    g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
+    beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
+    fused_gdn_gating_kernel[grid](
+        g,
+        beta_output,
+        A_log,
+        a,
+        b,
+        dt_bias,
+        seq_len,
+        num_heads,
+        beta,
+        threshold,
+        8,
+        num_warps=1,
+    )
+    return g, beta_output

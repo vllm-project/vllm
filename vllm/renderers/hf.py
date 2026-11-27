@@ -2,15 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import asyncio
 import copy
 import inspect
 import itertools
 import weakref
 from collections import defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -21,9 +20,15 @@ import jinja2.sandbox
 import torch
 from typing_extensions import override
 
-from vllm import envs
-from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
-from vllm.inputs import EmbedsPrompt, TokensPrompt
+from vllm.entrypoints.chat_utils import (
+    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
+    ChatTemplateResolutionError,
+    load_chat_template,
+    parse_chat_messages,
+    parse_chat_messages_async,
+)
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal.hasher import MultiModalHasher
@@ -39,54 +44,35 @@ from vllm.multimodal.processing.processor import (
     apply_token_matches,
     find_mm_placeholders,
 )
-from vllm.renderers.chat_utils import (
-    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-    load_chat_template,
-    parse_chat_messages,
-    parse_chat_messages_async,
-)
-from vllm.renderers.chat_utils.content_parser import (
-    PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
-)
-from vllm.tokenizers.hf import (
-    HfTokenizer,
-    encode_with_special_tokens_mask,
-)
-from vllm.tokenizers.protocol import TokenizerLike
-from vllm.transformers_utils.chat_templates import (
-    get_chat_template_fallback_path,
-    get_chat_template_override_path,
-)
+from vllm.config.cache import DEFAULT_MAMBA_CHECKPOINT_TOKEN
+from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
+from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
-from .base import HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS, BaseRenderer
+from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Set
+    from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.inputs import (
-        MultiModalDataDict,
-        MultiModalUUIDDict,
-        TextPrompt,
-    )
-    from vllm.inputs.engine import TokensInput
-    from vllm.multimodal.processing.processor import (
-        MultiModalPromptUpdates,
-        ResolvedPromptUpdate,
-    )
-    from vllm.renderers.chat_utils import (
+    from vllm.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ChatTemplateContentFormat,
         ChatTemplateContentFormatOption,
         ConversationMessage,
     )
+    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs.engine import TokensInput
+    from vllm.multimodal.processing.processor import (
+        MultiModalPromptUpdates,
+        ResolvedPromptUpdate,
+    )
 
     from .inputs import DictPrompt
-    from .params import ChatParams, TokenizeParams
+    from .params import ChatParams
 
 logger = init_logger(__name__)
 
@@ -114,45 +100,25 @@ _TOKENIZE_OVERRIDE_WARNING: Final[str] = (
     "Overriding `tokenize=False` to `True` because `prompt_embeds` "
     "post-processing requires tokenized IDs."
 )
+_MAMBA_CHECKPOINT_TOKEN_ERROR: Final[str] = (
+    "Expected mamba_checkpoint_token {token!r} to tokenize to exactly 1 "
+    "token, got {num_ids} ({ids!r})."
+)
 
 
-def _filter_prompt_embeds_by_template(
-    conversation: list[ConversationMessage],
-    prompt_embeds_tensors: list[torch.Tensor],
-    rendered: str,
-) -> tuple[list[torch.Tensor], list[ConversationMessage]]:
-    """Drop embeddings whose placeholders are omitted by the chat template."""
-    markers = [
-        f"{PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX}{index}__"
-        for index in range(len(prompt_embeds_tensors))
-    ]
-
-    def normalize_placeholders(value: Any) -> Any:
-        if isinstance(value, str):
-            for marker in markers:
-                value = value.replace(marker, PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
-            return value
-        if isinstance(value, list):
-            return [normalize_placeholders(item) for item in value]
-        if isinstance(value, dict):
-            return {key: normalize_placeholders(item) for key, item in value.items()}
-        return value
-
-    visible_markers: list[tuple[int, torch.Tensor]] = []
-    for marker, tensor in zip(markers, prompt_embeds_tensors, strict=True):
-        occurrences = rendered.count(marker)
-        if occurrences > 1:
-            raise ValueError(
-                f"Chat template rendered prompt_embeds placeholder {marker!r} "
-                f"{occurrences} times; each placeholder must appear at most once."
+def _ensure_mamba_checkpoint_token(tokenizer: HfTokenizer, token: str) -> int:
+    """Register the configured Mamba checkpoint marker as one special token."""
+    tokenizer.add_special_tokens({"additional_special_tokens": [token]})
+    ids = tokenizer.encode(token, add_special_tokens=False)
+    if len(ids) != 1:
+        raise ValueError(
+            _MAMBA_CHECKPOINT_TOKEN_ERROR.format(
+                token=token,
+                num_ids=len(ids),
+                ids=ids,
             )
-        if occurrences == 1:
-            visible_markers.append((rendered.index(marker), tensor))
-    visible_tensors = [
-        tensor for _, tensor in sorted(visible_markers, key=lambda item: item[0])
-    ]
-    normalized_conversation = normalize_placeholders(copy.deepcopy(conversation))
-    return visible_tensors, normalized_conversation
+        )
+    return ids[0]
 
 
 def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
@@ -301,13 +267,6 @@ def _try_get_processor_chat_template(
             and hasattr(processor, "chat_template")
             and (chat_template := processor.chat_template) is not None
         ):
-            if isinstance(chat_template, dict) and "default" in chat_template:
-                chat_template = chat_template["default"]
-            if not isinstance(chat_template, str):
-                raise TypeError(
-                    "Expected a str or a dict with a 'default' entry, "
-                    f"got {type(chat_template).__name__}"
-                )
             _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
             return chat_template
     except Exception:
@@ -334,24 +293,12 @@ def resolve_chat_template(
         # so that downstream kwargs detection can parse template variables.
         return tokenizer.get_chat_template(chat_template, tools=tools)
 
-    # Predefined templates that replace the ones shipped on HF Hub
-    path = get_chat_template_override_path(
-        model_type=model_config.hf_config.model_type,
-        tokenizer_name_or_path=tokenizer.name_or_path,
-    )
-    if path is not None:
-        return load_chat_template(path)
-
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
         chat_template = _try_get_processor_chat_template(
             tokenizer,
-            revision=model_config.tokenizer_revision,
-            code_revision=(
-                model_config.code_revision
-                if model_config.tokenizer == model_config.model
-                else None
-            ),
+            revision=model_config.revision,
+            code_revision=model_config.code_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
         if chat_template is not None:
@@ -391,11 +338,6 @@ def _is_var_access(node: jinja2.nodes.Node, varname: str) -> bool:
     if isinstance(node, jinja2.nodes.Name):
         return node.ctx == "load" and node.name == varname
 
-    # `ns.rest` matches the dotted alias "ns.rest".
-    if isinstance(node, jinja2.nodes.Getattr) and "." in varname:
-        base, _, attr = varname.rpartition(".")
-        return node.attr == attr and _is_var_access(node.node, base)
-
     return False
 
 
@@ -433,26 +375,11 @@ def _is_var_or_elems_access(
     return _is_attr_access(node, varname, key) if key else _is_var_access(node, varname)
 
 
-def _attr_dotted_name(node: jinja2.nodes.Node) -> str | None:
-    """Render an attribute-assignment target like `ns.rest` as a dotted name."""
-    if isinstance(node, jinja2.nodes.NSRef):
-        return f"{node.name}.{node.attr}"
-    parts = []
-    while isinstance(node, jinja2.nodes.Getattr):
-        parts.append(node.attr)
-        node = node.node
-    if isinstance(node, jinja2.nodes.Name):
-        parts.append(node.name)
-        return ".".join(reversed(parts))
-    return None
-
-
 def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
     # Global variable that is implicitly defined at the root
     yield root, varname
 
     # Iterative BFS
-    seen = {varname}
     related_varnames = deque([varname])
     while related_varnames:
         related_varname = related_varnames.popleft()
@@ -461,40 +388,13 @@ def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
             lhs = assign_ast.target
             rhs = assign_ast.node
 
-            if isinstance(lhs, jinja2.nodes.Name) and _is_var_or_elems_access(
-                rhs, related_varname
-            ):
+            if _is_var_or_elems_access(rhs, related_varname):
+                assert isinstance(lhs, jinja2.nodes.Name)
                 yield assign_ast, lhs.name
 
                 # Avoid infinite looping for self-assignment
-                if lhs.name != related_varname and lhs.name not in seen:
-                    seen.add(lhs.name)
+                if lhs.name != related_varname:
                     related_varnames.append(lhs.name)
-
-            # Namespace aliases: `namespace(rest=messages)` or `ns.rest = messages`.
-            aliases: list[str] = []
-            if (
-                isinstance(lhs, jinja2.nodes.Name)
-                and isinstance(rhs, jinja2.nodes.Call)
-                and isinstance(rhs.node, jinja2.nodes.Name)
-                and rhs.node.name == "namespace"
-            ):
-                aliases = [
-                    f"{lhs.name}.{kwarg.key}"
-                    for kwarg in rhs.kwargs
-                    if _is_var_or_elems_access(kwarg.value, related_varname)
-                ]
-            elif isinstance(
-                lhs, (jinja2.nodes.Getattr, jinja2.nodes.NSRef)
-            ) and _is_var_or_elems_access(rhs, related_varname):
-                dotted = _attr_dotted_name(lhs)
-                aliases = [dotted] if dotted is not None else []
-
-            for alias in aliases:
-                yield assign_ast, alias
-                if alias != related_varname and alias not in seen:
-                    seen.add(alias)
-                    related_varnames.append(alias)
 
 
 # NOTE: The proper way to handle this is to build a CFG so that we can handle
@@ -878,6 +778,7 @@ def safe_apply_chat_template(
     tools: list[dict[str, Any]] | None = ...,
     chat_template: str | None = ...,
     tokenize: Literal[True] = ...,
+    return_assistant_tokens_mask: Literal[False] = ...,
     **kwargs,
 ) -> list[int]: ...
 @overload
@@ -889,8 +790,20 @@ def safe_apply_chat_template(
     tools: list[dict[str, Any]] | None = ...,
     chat_template: str | None = ...,
     tokenize: Literal[False] = ...,
+    return_assistant_tokens_mask: Literal[False] = ...,
     **kwargs,
 ) -> str: ...
+@overload
+def safe_apply_chat_template(
+    model_config: ModelConfig,
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    return_assistant_tokens_mask: Literal[True],
+    **kwargs,
+) -> tuple[list[int], list[int] | None]: ...
 def safe_apply_chat_template(
     model_config: ModelConfig,
     tokenizer: HfTokenizer,
@@ -899,8 +812,9 @@ def safe_apply_chat_template(
     tools: list[dict[str, Any]] | None = None,
     chat_template: str | None = None,
     tokenize: bool = True,
+    return_assistant_tokens_mask: bool = False,
     **kwargs,
-) -> str | list[int]:
+) -> str | list[int] | tuple[list[int], list[int] | None]:
     chat_template = resolve_chat_template(
         tokenizer,
         chat_template=chat_template,
@@ -928,6 +842,38 @@ def safe_apply_chat_template(
         chat_template_kwargs=kwargs,
     )
 
+    # assistant_tokens_mask requires tokenized output — force tokenize=True.
+    if return_assistant_tokens_mask:
+        tokenize = True
+
+    # When return_assistant_tokens_mask is requested and the template supports it,
+    # request assistant_tokens_mask via return_dict.
+    # Check for the actual Jinja tag, not just the word "generation"
+    # (which also appears in add_generation_prompt).
+    if return_assistant_tokens_mask and "{% generation %}" in chat_template:
+        resolved_kwargs["return_assistant_tokens_mask"] = True
+        resolved_kwargs["return_dict"] = True
+        resolved_kwargs.pop("tokenize", None)
+        try:
+            result = tokenizer.apply_chat_template(
+                conversation=conversation,  # type: ignore[arg-type]
+                tools=tools,  # type: ignore[arg-type]
+                chat_template=chat_template,
+                tokenize=True,
+                **resolved_kwargs,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "apply_chat_template failed for assistant_tokens_mask: %s", exc
+            )
+        else:
+            if isinstance(result, Mapping):
+                token_ids = list(result.get("input_ids", []))
+                mask_raw = result.get("assistant_masks")
+                mask = list(mask_raw) if mask_raw is not None else None
+                return token_ids, mask
+            return list(result), None
+
     # transformers v5 changed the default of `return_dict` to True, which
     # makes `apply_chat_template(tokenize=True)` return a `BatchEncoding`
     # instead of `list[int]`. Force `return_dict=False` so downstream code
@@ -953,6 +899,9 @@ def safe_apply_chat_template(
         logger.warning("Chat template rejected the request: %s", e)
         raise VLLMValidationError(_template_error_reason(e)) from e
 
+    if return_assistant_tokens_mask:
+        assert isinstance(plain, list), f"Expected list[int], got {type(plain)}"
+        return plain, None
     return plain
 
 
@@ -971,7 +920,6 @@ def rebuild_mm_uuids_from_mm_data(
 
     Returns:
         Updated UUIDs dictionary with chunk UUIDs
-
     """
     vision_chunks = mm_data.get("vision_chunk")
     if vision_chunks is None:
@@ -981,10 +929,13 @@ def rebuild_mm_uuids_from_mm_data(
         "Expected all vision_chunk items to be dicts"
     )
     vision_chunks = cast(list[dict[str, Any]], vision_chunks)
+    vision_chunk_uuids = [
+        uuid_val for item in vision_chunks if (uuid_val := item.get("uuid")) is not None
+    ]
 
-    # One entry per item; None means the item is hashed by content.
-    mm_uuids = dict(mm_uuids)
-    mm_uuids["vision_chunk"] = [item.get("uuid") for item in vision_chunks]
+    if vision_chunk_uuids:
+        mm_uuids = dict(mm_uuids)
+        mm_uuids["vision_chunk"] = vision_chunk_uuids
 
     return mm_uuids
 
@@ -1001,7 +952,6 @@ def build_video_prompts_from_mm_data(
 
     Returns:
         List of video prompts, one per video.
-
     """
     vision_chunks = mm_data.get("vision_chunk")
     if vision_chunks is None:
@@ -1053,115 +1003,37 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-class HfTokensPrompt(TokensPrompt, total=False):
-    """Tokenized HF prompt with metadata for rebuilding echoed text."""
-
-    prompt_special_tokens_mask: list[int]
-    """Encoding mask, sliced alongside prompt tokens before any padding."""
-
-
-def tokenize_prompt(
-    tokenizer: TokenizerLike,
-    prompt: TextPrompt,
-    params: TokenizeParams,
-    *,
-    want_offsets: bool = False,
-) -> HfTokensPrompt:
-    """Tokenize text, preserving an optional mask for truncated echoes."""
-    # The mask identifies truncated text inputs even when no tokens were added.
-    want_special_tokens_mask = (
-        params.needs_detokenization and params.truncate_prompt_tokens is not None
-    )
-    kwargs = params.get_encode_kwargs()
-    if want_offsets:
-        kwargs["return_offsets_mapping"] = True
-    if want_special_tokens_mask:
-        encoding = encode_with_special_tokens_mask(
-            tokenizer, prompt["prompt"], **kwargs
-        )
-    else:
-        encoding = tokenizer(prompt["prompt"], **kwargs)
-
-    tokenized = cast(
-        HfTokensPrompt,
-        BaseRenderer._build_tokens_prompt(
-            encoding["input_ids"],
-            prompt,
-            offset_mapping=encoding["offset_mapping"] if want_offsets else None,
-        ),
-    )
-    token_ids = tokenized["prompt_token_ids"]
-    if (
-        want_special_tokens_mask
-        and (mask := encoding.get("special_tokens_mask")) is not None
-        and len(mask) == len(token_ids)
-    ):
-        tokenized["prompt_special_tokens_mask"] = mask
-    return tokenized
-
-
-def _get_detokenization_tokens(prompt: TokensPrompt) -> list[int]:
-    token_ids = prompt["prompt_token_ids"]
-    special_tokens_mask = cast(HfTokensPrompt, prompt).pop(
-        "prompt_special_tokens_mask", None
-    )
-    if special_tokens_mask is None or not any(special_tokens_mask):
-        return token_ids
-    # The mask already follows truncation; TokenizeParams pads only token_ids.
-    # IDs beyond the mask are therefore padding tokens.
-    echo_mask = [
-        index >= len(special_tokens_mask) or not special_tokens_mask[index]
-        for index in range(len(token_ids))
-    ]
-    prompt["prompt_echo_mask"] = echo_mask
-    return [token_id for token_id, visible in zip(token_ids, echo_mask) if visible]
-
-
-def detokenize_prompt(tokenizer: TokenizerLike, prompt: TokensPrompt) -> TokensPrompt:
-    """Rebuild prompt text without tokenizer-added special tokens."""
-    prompt["prompt"] = tokenizer.decode(_get_detokenization_tokens(prompt))
-    return prompt
-
-
-async def detokenize_prompt_async(
-    decode: Callable[[list[int]], Awaitable[str]], prompt: TokensPrompt
-) -> TokensPrompt:
-    """Rebuild prompt text using the renderer's asynchronous decoder."""
-    prompt["prompt"] = await decode(_get_detokenization_tokens(prompt))
-    return prompt
-
-
-_T = TypeVar("_T", bound=TokenizerLike)
-
-
-class BaseHfRenderer(BaseRenderer[_T]):
-    """Shared tokenization and echo reconstruction for HF-family renderers."""
-
-    def _tokenize_prompt(
-        self, prompt: TextPrompt, params: TokenizeParams
-    ) -> TokensPrompt:
-        return tokenize_prompt(
-            self.get_tokenizer(),
-            prompt,
-            params,
-            want_offsets=self._wants_offsets(prompt, params),
-        )
-
-    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
-        return detokenize_prompt(self.get_tokenizer(), prompt)
-
-    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
-
-
-class HfRenderer(BaseHfRenderer[HfTokenizer]):
-    _server_owned_chat_template_kwargs = HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
-
+class HfRenderer(BaseRenderer[HfTokenizer]):
     def __init__(
         self,
         config: VllmConfig,
         tokenizer: HfTokenizer | None,
     ) -> None:
+        # Ensure the og tokenizer is never modified by maybe_make_thread_pool
+        tokenizer = copy.copy(tokenizer)
+        if (
+            # Skip for mock configs and tokenizers
+            getattr(config.model_config, "enable_prompt_embeds", False)
+            and isinstance(tokenizer, HfTokenizer)
+        ):
+            _ensure_prompt_embeds_placeholder_token(tokenizer)
+        cache_config = getattr(config, "cache_config", None)
+        enable_checkpoint = getattr(cache_config, "enable_mamba_checkpoint", False)
+        checkpoint_token = (
+            getattr(
+                cache_config,
+                "mamba_checkpoint_token",
+                DEFAULT_MAMBA_CHECKPOINT_TOKEN,
+            )
+            if enable_checkpoint
+            else None
+        )
+        if checkpoint_token is not None:
+            if not isinstance(tokenizer, HfTokenizer):
+                raise ValueError(
+                    "mamba_checkpoint_token requires a Hugging Face tokenizer"
+                )
+            _ensure_mamba_checkpoint_token(tokenizer, checkpoint_token)
         super().__init__(config, tokenizer)
 
         self.use_unified_vision_chunk = getattr(
@@ -1172,61 +1044,15 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
             safe_apply_chat_template, executor=self._executor
         )
 
-    def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
-        # Skip for mock configs
-        if getattr(self.model_config, "enable_prompt_embeds", False):
-            _ensure_prompt_embeds_placeholder_token(tokenizer)
-
-    def _replace_executor(self) -> None:
-        """Replace the inner render pool after a stuck worker.
-
-        Called after a render timeout so that the stuck thread (which CPython
-        cannot interrupt) does not permanently block all subsequent renders.
-        The executor *object* is kept so `make_async` wrappers bound at
-        init (tokenize, decode, pooling, derender) keep submitting work.
-        The old inner pool is abandoned with wait=False — its thread will
-        eventually finish or be reaped on process exit.
-        """
-        self._executor.replace_inner()
-        logger.warning(
-            "Chat template render timed out — executor pool replaced "
-            "(%d worker(s)). The stuck thread may continue consuming "
-            "CPU until the process exits.",
-            self.model_config.renderer_num_workers,
-        )
-
-    async def _render_with_timeout(self, coro):
-        """Run a template-rendering coroutine with a timeout.
-
-        On timeout, replaces the executor so subsequent renders are not
-        permanently blocked by the stuck thread.
-        """
-        timeout = envs.VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT
-        if timeout <= 0:
-            return await coro
-        try:
-            return await asyncio.wait_for(coro, timeout=timeout)
-        except TimeoutError:
-            self._replace_executor()
-            raise TimeoutError(
-                f"Chat template rendering timed out after "
-                f"{timeout}s. This may indicate a malicious or "
-                f"excessively complex template. Adjust "
-                f"VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT to override."
-            ) from None
+        if self.tokenizer is not None:
+            maybe_make_thread_pool(
+                self.tokenizer, config.model_config.renderer_num_workers + 1
+            )
 
     def _can_produce_offsets(self) -> bool:
-        # Only fast tokenizers expose offset_mapping.
+        # HF tokenizers may be slow (use_fast=False); only fast tokenizers
+        # expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
-
-    def _resolve_content_format(self, params: ChatParams) -> ChatTemplateContentFormat:
-        return resolve_chat_template_content_format(
-            chat_template=params.chat_template,
-            tools=params.chat_template_kwargs.get("tools"),
-            given_format=params.chat_template_content_format,
-            tokenizer=self.get_tokenizer(),
-            model_config=self.model_config,
-        )
 
     def render_messages(
         self,
@@ -1245,7 +1071,13 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             model_config,
-            content_format=self._resolve_content_format(params),
+            content_format=resolve_chat_template_content_format(
+                chat_template=params.chat_template,
+                tools=params.chat_template_kwargs.get("tools"),
+                given_format=params.chat_template_content_format,
+                tokenizer=tokenizer,
+                model_config=model_config,
+            ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
@@ -1264,33 +1096,27 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
         if prompt_embeds_tensors:
-            visibility_check_kwargs = chat_template_kwargs.copy()
-            visibility_check_kwargs["tokenize"] = False
-            rendered = safe_apply_chat_template(
-                model_config,
-                tokenizer,
-                conversation,
-                **visibility_check_kwargs,
-            )
-            assert isinstance(rendered, str)
-            prompt_embeds_tensors, conversation = _filter_prompt_embeds_by_template(
-                conversation,
-                prompt_embeds_tensors,
-                rendered,
-            )
-
-        if prompt_embeds_tensors:
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = safe_apply_chat_template(
-            model_config,
-            tokenizer,
-            conversation,
-            **chat_template_kwargs,
-        )
+        assistant_tokens_mask: list[int] | None = None
+        if params.return_assistant_tokens_mask:
+            prompt_raw, assistant_tokens_mask = safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                conversation,
+                return_assistant_tokens_mask=True,
+                **chat_template_kwargs,
+            )
+        else:
+            prompt_raw = safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                conversation,
+                **chat_template_kwargs,
+            )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
@@ -1315,6 +1141,9 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
             )
 
         prompt = parse_dec_only_prompt(prompt_raw)
+
+        if assistant_tokens_mask is not None:
+            cast(dict, prompt)["_assistant_tokens_mask"] = assistant_tokens_mask
 
         # When `prompt_embeds` is mixed with other modality data,
         # `_process_tokens` runs `_process_multimodal` first (expanding
@@ -1362,7 +1191,13 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             model_config,
-            content_format=self._resolve_content_format(params),
+            content_format=resolve_chat_template_content_format(
+                chat_template=params.chat_template,
+                tools=params.chat_template_kwargs.get("tools"),
+                given_format=params.chat_template_content_format,
+                tokenizer=tokenizer,
+                model_config=model_config,
+            ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
@@ -1378,37 +1213,35 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
         if prompt_embeds_tensors:
-            visibility_check_kwargs = chat_template_kwargs.copy()
-            visibility_check_kwargs["tokenize"] = False
-            rendered = await self._render_with_timeout(
-                self._apply_chat_template_async(
-                    model_config,
-                    tokenizer,
-                    conversation,
-                    **visibility_check_kwargs,
-                )
-            )
-            assert isinstance(rendered, str)
-            prompt_embeds_tensors, conversation = _filter_prompt_embeds_by_template(
-                conversation,
-                prompt_embeds_tensors,
-                rendered,
-            )
-
-        if prompt_embeds_tensors:
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = await self._render_with_timeout(
-            self._apply_chat_template_async(
+        assistant_tokens_mask: list[int] | None = None
+        if params.return_assistant_tokens_mask:
+            result_with_mask = cast(
+                tuple[list[int], list[int] | None],
+                await make_async(
+                    safe_apply_chat_template,
+                    executor=self._executor,
+                )(
+                    model_config,
+                    tokenizer,
+                    conversation,
+                    return_assistant_tokens_mask=True,  # type: ignore[arg-type]
+                    **chat_template_kwargs,
+                ),
+            )
+            prompt_raw: str | list[int] = result_with_mask[0]
+            assistant_tokens_mask = result_with_mask[1]
+        else:
+            prompt_raw = await self._apply_chat_template_async(
                 model_config,
                 tokenizer,
                 conversation,
                 **chat_template_kwargs,
             )
-        )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
@@ -1433,6 +1266,9 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
             )
 
         prompt = parse_dec_only_prompt(prompt_raw)
+
+        if assistant_tokens_mask is not None:
+            cast(dict, prompt)["_assistant_tokens_mask"] = assistant_tokens_mask
 
         # See `render_messages` for the rationale.
         if prompt_embeds_tensors and mm_data:
@@ -1475,22 +1311,24 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         processor records all placeholder offsets in the final (post-expansion)
         coordinate space, no offset shifting needed afterwards.
         """
+        assistant_tokens_mask = cast(dict, prompt).pop("_assistant_tokens_mask", None)
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
-        if prompt_embeds_info is None:
-            return super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
-
-        tensors, placeholder_token_id = prompt_embeds_info
-        mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
-        cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
-            list(prompt["prompt_token_ids"]), mm_updates
-        )
+        if prompt_embeds_info is not None:
+            tensors, placeholder_token_id = prompt_embeds_info
+            mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
+            cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
+                list(prompt["prompt_token_ids"]), mm_updates
+            )
         engine_input = super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
-        self._apply_prompt_embeds_to_engine_input(
-            cast(MultiModalInput, engine_input),
-            tensors,
-            mm_updates,
-        )
-
+        if prompt_embeds_info is not None:
+            tensors, _ = prompt_embeds_info
+            self._apply_prompt_embeds_to_engine_input(
+                cast(MultiModalInput, engine_input),
+                tensors,
+                mm_updates,
+            )
+        if assistant_tokens_mask is not None:
+            engine_input["assistant_tokens_mask"] = assistant_tokens_mask
         return engine_input
 
     @override
@@ -1501,26 +1339,26 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         skip_mm_cache: bool = False,
     ) -> TokensInput | MultiModalInput:
         """Async equivalent of `_process_tokens`."""
+        assistant_tokens_mask = cast(dict, prompt).pop("_assistant_tokens_mask", None)
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
-        if prompt_embeds_info is None:
-            return await super()._process_tokens_async(
-                prompt, skip_mm_cache=skip_mm_cache
+        if prompt_embeds_info is not None:
+            tensors, placeholder_token_id = prompt_embeds_info
+            mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
+            cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
+                list(prompt["prompt_token_ids"]), mm_updates
             )
-
-        tensors, placeholder_token_id = prompt_embeds_info
-        mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
-        cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
-            list(prompt["prompt_token_ids"]), mm_updates
-        )
         engine_input = await super()._process_tokens_async(
             prompt, skip_mm_cache=skip_mm_cache
         )
-        self._apply_prompt_embeds_to_engine_input(
-            cast(MultiModalInput, engine_input),
-            tensors,
-            mm_updates,
-        )
-
+        if prompt_embeds_info is not None:
+            tensors, _ = prompt_embeds_info
+            self._apply_prompt_embeds_to_engine_input(
+                cast(MultiModalInput, engine_input),
+                tensors,
+                mm_updates,
+            )
+        if assistant_tokens_mask is not None:
+            engine_input["assistant_tokens_mask"] = assistant_tokens_mask
         return engine_input
 
     @staticmethod
@@ -1594,7 +1432,6 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         for tensor, (start, length) in zip(
             prompt_embeds_tensors, positions, strict=True
         ):
-            token_ids[start : start + length] = [0] * length
             pe_kwargs_items.append(
                 MultiModalKwargsItem(
                     {
@@ -1616,7 +1453,6 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
                 PlaceholderRange(offset=start, length=length, is_embed=None)
             )
 
-        engine_input["prompt_token_ids"] = token_ids
         cast(
             MultiModalKwargsItems[MultiModalKwargsItem | None],
             engine_input["mm_kwargs"],

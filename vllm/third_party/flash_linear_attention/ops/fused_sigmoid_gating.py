@@ -18,6 +18,9 @@ from vllm.triton_utils import tl, triton
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        "HAS_FINAL_STATE_INDICES": lambda args: (
+            args["ssm_final_state_indices"] is not None
+        ),
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -36,6 +39,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     ht,
     cu_seqlens,
     ssm_state_indices,
+    ssm_final_state_indices,
     num_accepted_tokens,
     scale,
     N: tl.int64,  # num of sequences
@@ -54,10 +58,10 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    BETA_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    HAS_FINAL_STATE_INDICES: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -111,14 +115,31 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
                 tl.int64
             )
-            # Skip if state index is invalid (NULL_BLOCK_ID=0)
-            if state_idx <= 0:
-                return
-            p_h0 = h0 + state_idx * stride_init_state_token
+            if HAS_FINAL_STATE_INDICES:
+                if state_idx > 0:
+                    p_h0 = (
+                        h0
+                        + state_idx * stride_init_state_token
+                        + i_hv * V * K
+                        + o_v[:, None] * K
+                        + o_k[None, :]
+                    )
+                    b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+            else:
+                # Skip if state index is invalid (NULL_BLOCK_ID=0)
+                if state_idx <= 0:
+                    return
+                p_h0 = (
+                    h0
+                    + state_idx * stride_init_state_token
+                    + i_hv * V * K
+                    + o_v[:, None] * K
+                    + o_k[None, :]
+                )
+                b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
         else:
-            p_h0 = h0 + bos * HV * V * K
-        p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
-        b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+            p_h0 = h0 + bos * HV * V * K + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+            b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in range(0, T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
@@ -135,12 +156,10 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
 
         # compute beta_output = sigmoid(b)
         b_beta = tl.sigmoid(b_b.to(tl.float32))
-        if BETA_SCALE != 1.0:
-            b_beta *= BETA_SCALE
 
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q) + 1e-6)
-            b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
+            b_q = b_q * (tl.rsqrt(tl.sum(b_q * b_q) + 1e-6))
+            b_k = b_k * (tl.rsqrt(tl.sum(b_k * b_k) + 1e-6))
         b_q = b_q * scale
         # [BV, BK]
         if not IS_KDA:
@@ -158,15 +177,16 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            # Load state index and check for invalid entries
-            final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
-            ).to(tl.int64)
-            # Only store if state index is valid (not NULL_BLOCK_ID=0)
-            if final_state_idx > 0:
-                p_ht = ht + final_state_idx * stride_final_state_token
-                p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
-                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            if not HAS_FINAL_STATE_INDICES:
+                # Load state index and check for invalid entries
+                final_state_idx = tl.load(
+                    ssm_state_indices + i_n * stride_indices_seq + i_t
+                ).to(tl.int64)
+                # Only store if state index is valid (not NULL_BLOCK_ID=0)
+                if final_state_idx > 0:
+                    p_ht = ht + final_state_idx * stride_final_state_token
+                    p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                    tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
             p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
@@ -179,6 +199,13 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         p_v += HV * V
         p_b += HV
         p_a += HV
+
+    if INPLACE_FINAL_STATE and HAS_FINAL_STATE_INDICES:
+        final_state_idx = tl.load(ssm_final_state_indices + i_n).to(tl.int64)
+        if final_state_idx > 0:
+            p_ht = ht + final_state_idx * stride_final_state_token
+            p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
 def fused_sigmoid_gating_delta_rule_update(
@@ -196,10 +223,10 @@ def fused_sigmoid_gating_delta_rule_update(
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
+    ssm_final_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
-    beta_scale: float = 1.0,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
@@ -258,6 +285,7 @@ def fused_sigmoid_gating_delta_rule_update(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
+        ssm_final_state_indices=ssm_final_state_indices,
         num_accepted_tokens=num_accepted_tokens,
         scale=scale,
         N=N,
@@ -275,7 +303,6 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_indices_tok=stride_indices_tok,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        BETA_SCALE=beta_scale,
         IS_KDA=is_kda,
         num_warps=num_warps,
         num_stages=num_stages,

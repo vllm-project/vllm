@@ -8,24 +8,20 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
-from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -33,7 +29,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
-@dataclass(slots=True)
+@dataclass
 class StreamingUpdate:
     """Lightweight data for streaming session continuation.
 
@@ -64,7 +60,7 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: list[int] | np.ndarray | None,
+        prompt_token_ids: list[int] | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
         client_index: int = 0,
@@ -82,12 +78,14 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
-        kv_hints: KvHintsEnvelope | None = None,
-        block_hashes: list["BlockHash"] | None = None,
+        mamba_checkpoint_position: int | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
+        self.mamba_checkpoint_position = mamba_checkpoint_position
+        self.mamba_checkpoint_source_block_ids: tuple[int, ...] | None = None
+        self.mamba_prefix_producer_id: str | None = None
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
         self.lora_request = lora_request
@@ -109,9 +107,6 @@ class Request:
         self.kv_transfer_params: dict[str, Any] | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
-        # P/D: M-RoPE position delta the KV producer's worker computed for the
-        # prompt, reported to the decode instance in kv_transfer_params.
-        self.mrope_position_delta: int | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -138,10 +133,7 @@ class Request:
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
-        # An int32 ndarray from the frontends is copied, not read per token.
-        self.prompt_token_ids: list[int] | None = (
-            TokenBuffer(prompt_token_ids) if prompt_token_ids is not None else None
-        )
+        self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
         # Per-position mask used in mixed-mode (chat completion with
         # prompt_embeds). `None` except when both `prompt_token_ids` and
@@ -151,27 +143,25 @@ class Request:
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, prompt_embeds
+            prompt_token_ids, prompt_embeds
         )
         self._output_token_ids: list[int] = []
         if self.prompt_token_ids is None:
-            self._all_token_ids: list[int] = TokenBuffer([0] * self.num_prompt_tokens)
+            self._all_token_ids: list[int] = [0] * self.num_prompt_tokens
         elif self.prompt_is_token_ids is None:
-            self._all_token_ids = TokenBuffer(self.prompt_token_ids)
+            self._all_token_ids = self.prompt_token_ids.copy()
         else:
             # Mixed-mode prompt: positions covered by prompt_embeds hold a sentinel
             # special token id that may lie outside the embedding. Zero them, matching
             # the no-token-ids case above, so embedding gathers over these placeholder
             # ids stay in bounds; the actual inputs come from prompt_embeds.
-            self._all_token_ids = TokenBuffer(
+            self._all_token_ids = [
                 t if is_tok else 0
                 for t, is_tok in zip(self.prompt_token_ids, self.prompt_is_token_ids)
-            )
+            ]
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        # In-flight steps that added to num_output_placeholders.
-        self.num_output_placeholder_steps = 0
         # Tokens of output in flight when the request was preempted: delivered
         # on return, but must not mutate the reset counters.
         self.num_stale_output_tokens = 0
@@ -187,6 +177,7 @@ class Request:
         # V2+PP+async: Enforces `pp_size` cadence between same-request decode steps
         # so the worker's broadcast slot ring stays consistent.
         self.next_decode_eligible_step = 0
+        self.waiting_for_mamba_checkpoint = False
 
         # Seq of the most recent step this request was scheduled in; fences
         # deferred block freeing (see Scheduler._free_request_blocks).
@@ -204,13 +195,9 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
-        # Holds only ints and grows with the context: hide it from the cyclic GC.
-        # It is only ever mutated in place.
-        gc_untrack(self._output_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
         self.session_id = session_id
-        self.kv_hints = kv_hints
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -219,9 +206,6 @@ class Request:
         # in the (sparse) prefix cache; 0 means none. Set at admission for
         # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
         self.shared_prefix_boundary = 0
-        # DeepSeek-V4.1 only: SWA bounded replay. The request holds no
-        # sliding-window KV below this position; 0 when nothing replays.
-        self.replay_start = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
@@ -237,17 +221,14 @@ class Request:
         # add_request, then observed each verify step); stays None otherwise.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-        # Prompt block hashes precomputed by the frontend; the hasher continues
-        # from the first block they don't cover. Hidden from the cyclic GC: it
-        # only holds bytes, one per block.
-        self.block_hashes: list[BlockHash] = gc_untrack(block_hashes or [])
+        self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
         self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
         self.update_block_hashes()
 
-        self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
+        self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
         # Used for streaming
         self.resumable = resumable
@@ -263,7 +244,6 @@ class Request:
         cls,
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
-        block_hashes: list["BlockHash"] | None = None,
     ) -> "Request":
         return cls(
             request_id=request.request_id,
@@ -282,11 +262,10 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             session_id=request.session_id,
-            kv_hints=request.kv_hints,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
-            block_hashes=block_hashes,
+            mamba_checkpoint_position=request.mamba_checkpoint_position,
         )
 
     def append_output_token_ids(
@@ -307,32 +286,9 @@ class Request:
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
 
-    def truncate_block_hashes(
-        self, hash_block_size: int, num_hash_lookahead_tokens: int
-    ) -> None:
-        """Discard hashes invalidated by truncating the request's tokens."""
-        num_valid_hashes = (
-            max(0, self.num_tokens - num_hash_lookahead_tokens) // hash_block_size
-        )
-        del self.block_hashes[num_valid_hashes:]
-        self._prompt_embeds_per_block_hashes.clear()
-
     @property
     def use_structured_output(self) -> bool:
         return self.structured_output_request is not None
-
-    @property
-    def prefill_token_ids(self) -> list[int]:
-        """All token ids, as the prompt_token_ids object itself while they hold
-        the same tokens, so that pickling both sends them once."""
-        prompt = self.prompt_token_ids
-        if (
-            prompt is not None
-            and self.prompt_is_token_ids is None
-            and len(prompt) == len(self._all_token_ids)
-        ):
-            return prompt
-        return self._all_token_ids
 
     @property
     def num_tokens(self) -> int:
@@ -354,32 +310,18 @@ class Request:
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
 
-    def get_max_cache_hit_length(self, bound: int | None = None) -> int:
-        """Longest prefix cache hit allowed, optionally tightened by bound."""
-        # The last token is always recomputed to produce logits.
-        limits = (self.num_tokens - 1, self.prefix_cache_hit_limit, bound)
-        return min(limit for limit in limits if limit is not None)
-
-    @property
-    def skip_reading_external_kv(self) -> bool:
-        # KV connector hits are not bounded by prefix_cache_hit_limit, so a
-        # bounded request reuses only the local prefix cache.
-        return self.prefix_cache_hit_limit is not None
-
-    def get_prefix_cache_hit_limit(self) -> int | None:
-        """Number of leading tokens that may be read from the prefix cache:
-        0 when the request skips cache reads, the first scored prompt row for
-        prompt scoring, or None when unbounded.
-        See docs/training/prompt_token_id_logprobs.md."""
-        params = self.sampling_params or self.pooling_params
-        if params is not None and params.skip_reading_prefix_cache:
-            return 0
-        sp = self.sampling_params
-        if sp is not None and (
-            sp.prompt_logprobs is not None or sp.prompt_logprob_token_ids is not None
+    def get_skip_reading_prefix_cache(self) -> bool:
+        if (
+            self.sampling_params is not None
+            and self.sampling_params.skip_reading_prefix_cache is not None
         ):
-            return sp.prompt_logprob_start or 0
-        return None
+            return self.sampling_params.skip_reading_prefix_cache
+        elif (
+            self.pooling_params is not None
+            and self.pooling_params.skip_reading_prefix_cache is not None
+        ):
+            return self.pooling_params.skip_reading_prefix_cache
+        return False
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
@@ -412,7 +354,8 @@ class Request:
         return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
-        """Compare two requests based on priority, arrival time, and request ID.
+        """
+        Compare two requests based on priority, arrival time, and request ID.
         Used in priority scheduling.
         """
         if self.priority != other.priority:

@@ -11,20 +11,16 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.mamba2_attn import (
-    Mamba2AttentionMetadata,
-    Mamba2AttentionMetadataBuilder,
-)
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadataBuilder,
     ShortConvAttentionMetadataBuilder,
 )
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -32,11 +28,11 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
+    get_mamba_group_ids,
     get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
-from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -45,14 +41,30 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    mamba_prefix_producer_indices: torch.Tensor | None = None
+    mamba_checkpoint_positions: torch.Tensor | None = None
+    mamba_checkpoint_source_block_ids: dict[int, torch.Tensor] | None = None
 
     def get_extra_common_attn_kwargs(
-        self, kv_cache_group_id: int, num_reqs: int
+        self,
+        kv_cache_group_id: int,
+        num_reqs: int,
     ) -> dict[str, Any]:
-        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+        kwargs = {"is_prefilling": self.is_prefilling[:num_reqs]}
+        if self.mamba_prefix_producer_indices is not None:
+            kwargs["mamba_prefix_producer_indices"] = self.mamba_prefix_producer_indices
+        if self.mamba_checkpoint_positions is not None:
+            kwargs["mamba_checkpoint_positions"] = self.mamba_checkpoint_positions
+        if self.mamba_checkpoint_source_block_ids is not None:
+            group_src_blocks = self.mamba_checkpoint_source_block_ids.get(kv_cache_group_id)
+            if group_src_blocks is not None:
+                kwargs["mamba_checkpoint_source_block_ids"] = group_src_blocks
+        return kwargs
 
     def get_extra_attn_kwargs(
-        self, attn_metadata_builder: Any, num_reqs: int
+        self,
+        attn_metadata_builder: Any,
+        num_reqs: int,
     ) -> dict[str, Any]:
         if not isinstance(
             attn_metadata_builder,
@@ -89,24 +101,15 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        self._replayssm_query_start_loc: torch.Tensor | None = None
-        # Pre-copy prefix-cache state (V2). The migration of each request's
-        # mamba state across block boundaries runs as a fused GPU kernel reusing
-        # the postprocess copy machinery, so the per-step src columns and the
-        # running state_idx are kept GPU-resident.
-        self.prefix_caching = self.cache_config.enable_prefix_caching
-        self._use_replayssm_trackers = vllm_config.use_replayssm_trackers
-        if self._use_replayssm_trackers:
-            self._is_prefilling_gpu = torch.zeros(
-                self.max_num_reqs, dtype=torch.bool, device=self.device
-            )
+        # Pre-copy "align" prefix-cache state (V2). The migration of each
+        # request's mamba state across block boundaries runs as a fused GPU
+        # kernel reusing the postprocess copy machinery, so the per-step src
+        # columns and the running state_idx are kept GPU-resident.
+        self._align_mode = self.cache_config.mamba_cache_mode == "align"
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
-        if self.prefix_caching or self._use_replayssm_trackers:
-            self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
-            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
-        if self.prefix_caching:
+        if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
@@ -116,61 +119,100 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
+            self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
+            self._mamba_group_ids: list[int] = []
+            self._mamba_spec: MambaSpec | None = None
+            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+
+        self._mamba_checkpoint_positions: dict[str, int] = {}
+        self._mamba_checkpoint_source_block_ids: dict[str, tuple[int, ...]] = {}
+        self._mamba_prefix_producer_ids: dict[str, str] = {}
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
-        if self.prefix_caching:
+        if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
-            # The column is in mamba blocks. cache_config.block_size is the
-            # min over prefix-cacheable groups, so a drafter group with its own
-            # smaller block (e.g. DFlash) pulls it below mamba_block_size.
-            mamba_block_size = self.cache_config.mamba_block_size
-            assert mamba_block_size is not None
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // mamba_block_size
+                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+            )
+        if new_req_data.mamba_checkpoint_position is not None:
+            self._mamba_checkpoint_positions[new_req_data.req_id] = (
+                new_req_data.mamba_checkpoint_position
+            )
+        if new_req_data.mamba_checkpoint_source_block_ids:
+            self._mamba_checkpoint_source_block_ids[new_req_data.req_id] = (
+                new_req_data.mamba_checkpoint_source_block_ids
+            )
+        if new_req_data.mamba_prefix_producer_id:
+            self._mamba_prefix_producer_ids[new_req_data.req_id] = (
+                new_req_data.mamba_prefix_producer_id
             )
 
-    def initialize_kv_cache(
-        self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
-    ) -> None:
-        if self.cache_config.use_replayssm:
-            initialize_replayssm_ring_trackers(
-                kv_cache_config,
-                self.vllm_config.compilation_config.static_forward_context,
-            )
-        if not (self.prefix_caching or self._use_replayssm_trackers):
-            return
+    def remove_request(self, req_id: str) -> None:
+        super().remove_request(req_id)
+        self._mamba_checkpoint_positions.pop(req_id, None)
+        self._mamba_checkpoint_source_block_ids.pop(req_id, None)
+        self._mamba_prefix_producer_ids.pop(req_id, None)
+
+    def _get_mamba_group_info(
+        self, kv_cache_config: KVCacheConfig
+    ) -> tuple[list[int], MambaSpec]:
+        if self._mamba_spec is None:
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_spec = next(iter(mamba_groups))
+            assert all(
+                spec.block_size == mamba_spec.block_size
+                and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
+                and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
+                for spec in mamba_groups
+            ), "all mamba groups must share cache scheduling parameters"
+            self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
+            self._mamba_spec = mamba_spec
+        return self._mamba_group_ids, self._mamba_spec
+
+    def _ensure_align_ctx(
+        self,
+        kv_cache_config: KVCacheConfig,
+        mamba_group_ids: list[int],
+        block_tables: tuple[torch.Tensor, ...],
+    ) -> MambaSpecDecodeGPUContext:
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
             copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
             validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
             self._mamba_state_copy_funcs = copy_funcs
-        # Both SD and DS conv layouts support a >0 spec-decode shift: the
-        # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
-        # ``token_bias = num_accepted - 1`` window shift per conv layout
-        # (SD: contiguous slice; DS: per-dim-row strided slice), matching
-        # the V1 ``get_conv_copy_spec`` semantics.
-        self._mamba_ctx = MambaSpecDecodeGPUContext.create(
-            max_num_reqs=self.max_num_reqs,
-            kv_cache_config=kv_cache_config,
-            copy_funcs=self._mamba_state_copy_funcs,
-            forward_context=self.vllm_config.compilation_config.static_forward_context,
-            device=self.device,
-        )
-        mamba_group_ids = self._mamba_ctx.mamba_group_ids
-        # Under PP a step's postprocess runs after later steps re-gathered the
-        # batch-ordered input tables, so state copies read the per-request-slot
-        # tables. Aligned state indices are for the current batch only.
-        self._mamba_ctx.initialize_from_forward_context(
-            kv_cache_config,
-            self.vllm_config.compilation_config.static_forward_context,
-            self._mamba_state_copy_funcs,
-            [block_tables.block_tables[gid].gpu for gid in mamba_group_ids],
-            [block_tables.input_block_tables[gid] for gid in mamba_group_ids],
-        )
+        copy_funcs = self._mamba_state_copy_funcs
+        if self._mamba_ctx is None:
+            # Both SD and DS conv layouts support a >0 spec-decode shift: the
+            # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
+            # ``token_bias = num_accepted - 1`` window shift per conv layout
+            # (SD: contiguous slice; DS: per-dim-row strided slice), matching
+            # the V1 ``get_conv_copy_spec`` semantics.
+            self._mamba_ctx = MambaSpecDecodeGPUContext.create(
+                max_num_reqs=self.max_num_reqs,
+                kv_cache_config=kv_cache_config,
+                copy_funcs=copy_funcs,
+                device=self.device,
+                make_buffer=lambda n, dtype: CpuGpuBuffer(
+                    n, dtype=dtype, device=self.device
+                ),
+            )
+        ctx = self._mamba_ctx
+        if not ctx.is_initialized:
+            forward_context = self.vllm_config.compilation_config.static_forward_context
+            # block_tables are batch-order slices of the persistent
+            # input_block_tables (stable data_ptr), so the metadata is captured
+            # once here and reused across steps.
+            ctx.initialize_from_forward_context(
+                kv_cache_config,
+                forward_context,
+                copy_funcs,
+                [block_tables[gid] for gid in mamba_group_ids],
+            )
+        return ctx
 
     def preprocess_state(
         self,
@@ -179,23 +221,26 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         num_computed_tokens: torch.Tensor,
     ) -> None:
-        """Prepare each request's Mamba slot before the forward.
-
-        Copy from the worker's previous live column to its actual new column.
-        ReplaySSM also migrates its shared trackers. Dummy runs skip this.
+        """Migrate each request's mamba state across block boundaries before the
+        forward (V1 align semantics, done on GPU). Runs on real batches only
+        (dummy DP/profiling runs skip preprocess_state), and before
+        ``prepare_attn`` gathers ``num_accepted_tokens``, so the boundary reset
+        is visible to the forward kernels.
         """
-        if not self.prefix_caching:
+        if not self._align_mode:
             return
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
             return
-        ctx = self._mamba_ctx
-        assert ctx is not None
+        mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+        ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
 
-        replayssm = ctx.replayssm
-        # This decision kernel fast-exits per request when no block boundary is
-        # crossed. Avoiding the launch would require a CPU sync under async
-        # scheduling.
+        # The state-advance + pre-copy kernels run every step; they fast-exit per
+        # request when src_col < 0 or src_col == dst_col, so no copy happens on
+        # steps that don't cross a block boundary. (Skipping the launch entirely
+        # would need a V1-style async-D2H of the actual num_computed, since
+        # num_computed_tokens_np is an optimistic mirror under async scheduling;
+        # the launch cost is ~0.3% of TPOT, so the GPU fast-exit suffices.)
         block = 256
         grid = (triton.cdiv(num_reqs, block),)
         preprocess_mamba_align_fused_kernel[grid](
@@ -208,16 +253,8 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu,
             num_reqs,
             BLOCK_SIZE=block,
-            MAMBA_BLOCK_SIZE=ctx.block_size,
+            MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
-
-        if replayssm is not None:
-            replayssm.reset_new_slots(
-                idx_mapping=input_batch.idx_mapping,
-                src_cols=self._mamba_src_col_gpu,
-                dst_cols=self._mamba_state_idx_gpu,
-                num_reqs=num_reqs,
-            )
         ctx.run_fused_precopy(
             num_reqs,
             self._mamba_state_idx_gpu,
@@ -236,10 +273,8 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
         ubatch_idx: int = 0,
-        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         assert ubatch_idx == 0, "DBO is not supported"
-        assert model_specific_attn_metadata is None
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
@@ -247,11 +282,7 @@ class MambaHybridModelState(DefaultModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        # Prefer the promised bound: a capture dummy's measured max is its even
-        # split, not the length the graph must replay.
-        max_query_len = input_batch.max_query_len
-        if max_query_len is None:
-            max_query_len = input_batch.num_scheduled_tokens.max().item()
+        max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.
@@ -259,13 +290,10 @@ class MambaHybridModelState(DefaultModelState):
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
 
-        is_prefilling_np = input_batch.is_prefilling_np
-        if input_batch.prefill_runs_as_decode_np is not None:
-            # A prompt tail the scheduler padded with placeholder drafts must run
-            # as a spec-decode row: the prefill kernels can't roll them back.
-            is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
-        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
+        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(
+            input_batch.is_prefilling_np
+        )
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
@@ -278,48 +306,107 @@ class MambaHybridModelState(DefaultModelState):
             ]
 
             # GDN uses >= 0 to select spec-decode rows, so non-decode rows
-            # need the -1 sentinel. Decode rows without drafts stay spec rows:
-            # only that path applies the previous step's accepted offset.
+            # need the -1 sentinel rather than a raw zero draft count.
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-            if num_draft_tokens_per_req is None:
-                num_draft_tokens_per_req = np.zeros(input_batch.num_reqs, np.int32)
-            # Test request state, not num_scheduled_tokens == draft_count+1:
-            # adaptive rewrites num_scheduled_tokens to an even split, so that
-            # equality rarely holds and would demote every verify row to decode.
-            is_decode = (
-                ~is_prefilling_np
-                & (input_batch.num_scheduled_tokens > 0)
-                & (
-                    input_batch.num_scheduled_tokens
-                    <= self.vllm_config.num_speculative_tokens + 1
+            if num_draft_tokens_per_req is not None:
+                # A row is a spec-decode row only when its whole prompt is already
+                # computed, i.e. exactly one non-draft (decode) token is scheduled.
+                is_decode = (
+                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
                 )
-            )
-            num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                is_decode, num_draft_tokens_per_req, -1
-            )
+                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
+                num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
+                    spec_decode_mask, num_draft_tokens_per_req, -1
+                )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        if self.prefix_caching:
-            ctx = self._mamba_ctx
-            assert ctx is not None
+        if self._align_mode:
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             aligned_index_builders = []
-            for group_idx, group_id in enumerate(ctx.mamba_group_ids):
+            for group_idx, group_id in enumerate(mamba_group_ids):
                 for group in attn_groups[group_id]:
                     builder = group.get_metadata_builder(0)
                     if hasattr(builder, "mamba_aligned_state_indices"):
                         aligned_index_builders.append((group_idx, builder))
             if aligned_index_builders:
+                ctx = self._ensure_align_ctx(
+                    kv_cache_config, mamba_group_ids, block_tables
+                )
                 all_group_indices = ctx.compute_aligned_state_indices(
                     input_batch.seq_lens, num_reqs
                 )
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]
 
+        mamba_prefix_producer_indices = None
+        mamba_checkpoint_positions = None
+        mamba_checkpoint_source_block_ids = None
+
+        has_pending_records = bool(
+            self._mamba_checkpoint_positions
+            or self._mamba_checkpoint_source_block_ids
+            or self._mamba_prefix_producer_ids
+        )
+        if has_pending_records and not for_capture:
+            has_checkpoint_reqs = any(
+                req_id in self._mamba_checkpoint_positions
+                or req_id in self._mamba_checkpoint_source_block_ids
+                or req_id in self._mamba_prefix_producer_ids
+                for req_id in input_batch.req_ids
+            )
+            if has_checkpoint_reqs:
+                req_id_to_batch_idx = {
+                    req_id: i for i, req_id in enumerate(input_batch.req_ids)
+                }
+                producer_indices = np.full(num_reqs, -1, dtype=np.int64)
+                checkpoint_positions = np.full(num_reqs, -1, dtype=np.int64)
+
+                mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+                source_block_ids_per_group = {
+                    gid: np.full(num_reqs, -1, dtype=np.int64) for gid in mamba_group_ids
+                }
+
+                for batch_idx, req_id in enumerate(input_batch.req_ids):
+                    prod_id = self._mamba_prefix_producer_ids.get(req_id)
+                    if prod_id is not None and prod_id in req_id_to_batch_idx:
+                        producer_indices[batch_idx] = req_id_to_batch_idx[prod_id]
+                    pos = self._mamba_checkpoint_positions.get(req_id)
+                    if pos is not None:
+                        checkpoint_positions[batch_idx] = pos
+                    src_blocks = self._mamba_checkpoint_source_block_ids.get(req_id)
+                    if src_blocks:
+                        for i, gid in enumerate(mamba_group_ids):
+                            if i < len(src_blocks):
+                                source_block_ids_per_group[gid][batch_idx] = src_blocks[i]
+                        del self._mamba_checkpoint_source_block_ids[req_id]
+                        self._mamba_prefix_producer_ids.pop(req_id, None)
+
+                mamba_prefix_producer_indices = torch.from_numpy(producer_indices).to(
+                    device=self.device, non_blocking=True
+                )
+                mamba_prefix_producer_indices._cpu_list = producer_indices.tolist()  # type: ignore[attr-defined]
+                mamba_prefix_producer_indices._has_valid = bool(  # type: ignore[attr-defined]
+                    np.any(producer_indices >= 0)
+                )
+                mamba_checkpoint_positions = torch.from_numpy(checkpoint_positions).to(
+                    device=self.device, non_blocking=True
+                )
+                mamba_checkpoint_positions._cpu_list = checkpoint_positions.tolist()  # type: ignore[attr-defined]
+                mamba_checkpoint_source_block_ids = {}
+                for gid, arr in source_block_ids_per_group.items():
+                    t = torch.from_numpy(arr).to(device=self.device, non_blocking=True)
+                    t._cpu_list = arr.tolist()  # type: ignore[attr-defined]
+                    t._has_valid = bool(np.any(arr >= 0))  # type: ignore[attr-defined]
+                    mamba_checkpoint_source_block_ids[gid] = t
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            mamba_prefix_producer_indices=mamba_prefix_producer_indices,
+            mamba_checkpoint_positions=mamba_checkpoint_positions,
+            mamba_checkpoint_source_block_ids=mamba_checkpoint_source_block_ids,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
@@ -340,28 +427,11 @@ class MambaHybridModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
         )
-        if self._use_replayssm_trackers:
-            self._replayssm_query_start_loc = None
-            mamba_metadata = next(
-                (
-                    metadata
-                    for metadata in attn_metadata.values()
-                    if isinstance(metadata, Mamba2AttentionMetadata)
-                ),
-                None,
-            )
-            # Autotune dummy runs and draft capture can omit Mamba metadata.
-            if mamba_metadata is not None:
-                self._replayssm_query_start_loc = input_batch.query_start_loc
-                replayssm_prefilling = (
-                    torch.arange(num_reqs, device="cpu") >= mamba_metadata.num_decodes
-                )
-                async_tensor_h2d(
-                    replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
-                )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
-                attn_metadata, attn_groups, for_capture=for_capture
+                attn_metadata,
+                attn_groups,
+                for_capture=for_capture,
             )
         return attn_metadata
 
@@ -395,20 +465,19 @@ class MambaHybridModelState(DefaultModelState):
             self.recoverssm.commit_step(
                 num_sampled,
                 idx_mapping,
-                state_indices=(
-                    self._mamba_state_idx_gpu if self.prefix_caching else None
-                ),
+                state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
                 num_accepted_tokens=self.num_accepted_tokens_gpu,
             )
 
         if not num_reqs:
             return
 
-        # Save the running state at a crossed block boundary when spec-decode
-        # acceptance leaves the sequence non-block-aligned. num_computed_tokens
-        # already holds the post-step advanced count.
+        # Align: save the running state to the block-aligned position when
+        # spec-decode acceptance leaves the sequence non-block-aligned (mirrors
+        # the V1 align postprocess). num_computed_tokens already holds the
+        # post-step advanced count.
         if (
-            self.prefix_caching
+            self._align_mode
             and num_computed_tokens is not None
             and self._mamba_ctx is not None
         ):
@@ -419,53 +488,6 @@ class MambaHybridModelState(DefaultModelState):
                 num_computed_tokens,
                 idx_mapping,
             )
-
-        self._publish_replayssm_trackers(
-            idx_mapping,
-            num_computed_tokens,
-        )
-
-    def _publish_replayssm_trackers(
-        self,
-        idx_mapping: torch.Tensor,
-        num_computed_tokens: torch.Tensor | None,
-    ) -> None:
-        """Commit the accepted target transition to ReplaySSM trackers."""
-        num_reqs = idx_mapping.shape[0]
-        if not self._use_replayssm_trackers:
-            return
-
-        assert num_computed_tokens is not None
-        query_start_loc, self._replayssm_query_start_loc = (
-            self._replayssm_query_start_loc,
-            None,
-        )
-        assert query_start_loc is not None, (
-            "ReplaySSM postprocess requires the query_start_loc from "
-            "the forward that produced this acceptance"
-        )
-        ctx = self._mamba_ctx
-        assert ctx is not None and ctx.is_initialized
-        replayssm = ctx.replayssm
-        assert replayssm is not None
-        replayssm.postprocess(
-            idx_mapping=idx_mapping,
-            query_metadata=query_start_loc,
-            query_metadata_is_cumulative=True,
-            num_computed_tokens=num_computed_tokens,
-            num_computed_is_post_step=True,
-            # Prefix migration can reset the live buffer to one for the
-            # next step; use its snapshot in that case. Mode none never
-            # runs the migration kernel, so the acceptance buffer is exact.
-            num_accepted_tokens=(
-                ctx.num_accepted_tokens_snapshot
-                if self.prefix_caching
-                else self.num_accepted_tokens_gpu
-            ),
-            is_prefilling=self._is_prefilling_gpu[:num_reqs],
-            live_cols=(self._mamba_state_idx_gpu if self.prefix_caching else None),
-            num_reqs=num_reqs,
-        )
 
 
 @triton.jit
