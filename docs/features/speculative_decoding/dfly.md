@@ -36,15 +36,23 @@ vllm serve tencent/Hy4-flash-FP8 \
 - Matching target and draft KV cache dtype: BF16 (`auto` or `bfloat16`)
   or `fp8_ds_mla`. Omit the draft KV override to inherit the target dtype.
   Both are supported on ROCm (gfx950).
-- Matching target and draft tensor parallelism. Pipeline, prefill context,
-  and decode context parallel sizes must be one. HY4 Flash supports data
-  parallelism, with each DP replica running a TP-local draft.
+- Matching target and draft tensor parallelism. Prefill and decode context
+  parallel sizes must be one. HY4 requires a pipeline parallel size of one;
+  HY4 Flash supports pipeline parallelism when every target index and KV layer
+  the draft reads sits on the last pipeline stage (true for an even two-stage
+  split of the published checkpoints). HY4 Flash supports data parallelism,
+  with each DP replica running a TP-local draft.
 - Greedy or probabilistic draft sampling (`draft_sample_method`) with standard
   target verification. Probabilistic drafts sample at each request's
   temperature, which can improve acceptance when HY4 Flash samples at a
   nonzero temperature.
 
-DFly currently rejects LoRA, microbatching, disaggregated prefill/decode,
+DFly supports disaggregated prefill/decode with `NixlConnector` or
+`MooncakeConnector`, validated with HY4 Flash FP8. The draft layers share the
+target's KV storage, so the decode instance drafts from the transferred KV. Run
+the prefill and decode instances with the same speculative config.
+
+DFly currently rejects LoRA, microbatching, other KV connectors,
 heterogeneous vocabularies, adaptive verification, and a separate draft
 attention backend.
 
