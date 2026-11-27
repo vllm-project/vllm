@@ -38,7 +38,9 @@ from transformers.models.gemma4.image_processing_gemma4 import (
     get_aspect_ratio_preserving_size,
 )
 
+from vllm import envs
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fusion.gemma4_ple_embed import gemma4_ple_embed_gather
 from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import (
@@ -1261,15 +1263,32 @@ class Gemma4ForConditionalGeneration(
             ple_dim = config.text_config.hidden_size_per_layer_input
             if ple_dim is not None and ple_dim > 0:
                 embed = self.language_model.model.embed_tokens
+                max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+                # With split per-layer inputs only the self-decoder layers' raw embeddings
+                # are cached here for all tokens (Gemma4Model.enable_ple_split).
+                self.ple_split = (
+                    envs.VLLM_ROCM_GEMMA4_PLE_SPLIT
+                    and vllm_config.cache_config.kv_sharing_fast_prefill
+                    and self.language_model.model.enable_ple_split()
+                )
+                ple_layers = config.text_config.num_hidden_layers
+                if self.ple_split:
+                    ple_layers = self.language_model.model.num_ple_self_layers
+                    self.ple_token_ids = torch.zeros(
+                        max_tokens,
+                        dtype=torch.int32,
+                        device=next(embed.parameters()).device,
+                    )
                 self.per_layer_embeddings = torch.zeros(
-                    vllm_config.scheduler_config.max_num_batched_tokens,
-                    config.text_config.num_hidden_layers,
+                    max_tokens,
+                    ple_layers,
                     ple_dim,
                     device=next(embed.parameters()).device,
                     dtype=vllm_config.model_config.dtype,
                 )
             else:
                 self.per_layer_embeddings = None
+                self.ple_split = False
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -2407,9 +2426,28 @@ class Gemma4ForConditionalGeneration(
             else:
                 ple_input_ids = input_ids
 
-            per_layer_inputs = self.language_model.model.get_per_layer_inputs(
-                ple_input_ids
-            )
+            if self.ple_split:
+                lm = self.language_model.model
+                num_tokens = ple_input_ids.shape[0]
+                self.ple_token_ids[:num_tokens].copy_(ple_input_ids)
+                gemma4_ple_embed_gather(
+                    self.ple_token_ids,
+                    None,
+                    lm.embed_tokens_per_layer.weight,
+                    lm.embed_scale_per_layer,
+                    self.per_layer_embeddings.view(
+                        self.per_layer_embeddings.shape[0], -1
+                    ),
+                    0,
+                    self.per_layer_embeddings.shape[1]
+                    * self.per_layer_embeddings.shape[2],
+                    num_tokens,
+                )
+                per_layer_inputs = None
+            else:
+                per_layer_inputs = self.language_model.model.get_per_layer_inputs(
+                    ple_input_ids
+                )
             if per_layer_inputs is not None:
                 per_layer_inputs = per_layer_inputs.reshape(
                     -1,
@@ -2459,6 +2497,9 @@ class Gemma4ForConditionalGeneration(
         # _run_decoder_layers is inside a compiled graph where Python
         # side effects are eliminated.
         self._clear_mm_prefix_for_full_attn_layers()
+
+        if self.ple_split and inputs_embeds is not None:
+            kwargs["ple_token_ids"] = self.ple_token_ids[: inputs_embeds.shape[0]]
 
         hidden_states = self.language_model.model(
             input_ids,
