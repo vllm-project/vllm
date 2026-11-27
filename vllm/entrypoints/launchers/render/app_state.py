@@ -47,7 +47,9 @@ async def init_render_app_state(
 
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
-    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(
+        args, tokenizer_mode=vllm_config.model_config.tokenizer_mode
+    )
     state.tool_server = await init_tool_server(args)
 
     # The config-resolved reasoning parser carries both the CLI flag (merged

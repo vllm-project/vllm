@@ -118,17 +118,119 @@ def test_multimodal_features_reject_mismatched_parallel_fields():
         )
 
 
-def test_multimodal_features_reject_overlapping_placeholders():
-    with pytest.raises(ValueError, match="non-overlapping"):
-        MultiModalFeatures(
-            mm_hashes={"image": ["a", "b"]},
-            mm_placeholders={
-                "image": [
-                    PlaceholderRangeInfo(offset=1, length=2),
-                    PlaceholderRangeInfo(offset=2, length=2),
-                ]
+def _features(placeholders: dict[str, list[tuple[int, int, list[bool] | None]]]):
+    return MultiModalFeatures(
+        mm_hashes={
+            modality: [f"{modality}-{i}" for i in range(len(ranges))]
+            for modality, ranges in placeholders.items()
+        },
+        mm_placeholders={
+            modality: [
+                PlaceholderRangeInfo(offset=offset, length=length, is_embed=is_embed)
+                for offset, length, is_embed in ranges
+            ]
+            for modality, ranges in placeholders.items()
+        },
+    )
+
+
+def test_multimodal_features_accept_a_span_shared_across_modalities():
+    """Qwen2.5-Omni and Qwen3-Omni place a video and its audio track on one
+    span with `use_audio_in_video`, each embedding its own positions."""
+    _features(
+        {
+            "image": [(0, 2, None)],
+            "video": [(2, 4, [True, False, True, False])],
+            "audio": [(2, 4, [False, True, False, True])],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "placeholders",
+    [
+        pytest.param({"image": [(1, 2, None), (2, 2, None)]}, id="partial"),
+        pytest.param({"video": [(0, 4, None)], "audio": [(1, 2, None)]}, id="nested"),
+        pytest.param(
+            {
+                "video": [(0, 4, [True, False, True, False])],
+                "audio": [(0, 2, [False, True])],
             },
-            kwargs_data={"image": ["a", "b"]},
+            id="same-offset",
+        ),
+        pytest.param(
+            {"video": [(0, 2, [True, False]), (0, 2, [False, True])]},
+            id="same-modality",
+        ),
+        pytest.param(
+            {"video": [(0, 2, [True, False])], "audio": [(0, 2, [True, True])]},
+            id="intersecting-masks",
+        ),
+        pytest.param(
+            {"video": [(0, 2, None)], "audio": [(0, 2, [False, True])]},
+            id="absent-mask",
+        ),
+    ],
+)
+def test_multimodal_features_reject_overlapping_placeholders(placeholders):
+    with pytest.raises(ValueError, match="non-overlapping"):
+        _features(placeholders)
+
+
+def _s3_ref(**overrides) -> dict:
+    return {
+        "uri": "s3://tensor-bucket/tenant/request/image-0",
+        "format": "safetensors-v1",
+        "nbytes": 1024,
+        "digest": "a" * 64,
+        **overrides,
+    }
+
+
+def test_tensor_reference_with_metadata_does_not_require_ec():
+    request = GenerateRequest.model_validate(
+        {
+            **_base_payload(),
+            "features": {
+                "mm_hashes": {"image": ["a"]},
+                "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                "kwargs_refs": {"image": [_s3_ref()]},
+                "mm_metadata": {"image": ["encoded-metadata"]},
+            },
+        }
+    )
+
+    assert request.features is not None
+    assert request.features.kwargs_refs is not None
+    (reference,) = request.features.kwargs_refs["image"]
+    assert reference is not None
+    assert reference.uri == "s3://tensor-bucket/tenant/request/image-0"
+
+
+@pytest.mark.parametrize(
+    ("features", "match"),
+    [
+        ({"kwargs_refs": {"video": [_s3_ref()]}}, "same modalities"),
+        ({"kwargs_refs": {"image": [_s3_ref(), None]}}, "same length"),
+        (
+            {"kwargs_refs": {"image": [_s3_ref()]}, "kwargs_data": {"image": ["x"]}},
+            "both kwargs_data and kwargs_refs",
+        ),
+        ({"kwargs_refs": {"image": [_s3_ref(backend="s3")]}}, "backend"),
+        ({"kwargs_refs": {"image": [_s3_ref(format="pickle")]}}, "format"),
+        ({"kwargs_refs": {"image": [_s3_ref(nbytes=0)]}}, "nbytes"),
+        ({"kwargs_refs": {"image": [_s3_ref(digest="abc")]}}, "digest"),
+        ({"kwargs_refs": {"image": [_s3_ref(endpoint="http://x")]}}, "endpoint"),
+    ],
+)
+def test_multimodal_features_reject_invalid_tensor_references(features, match):
+    with pytest.raises(ValidationError, match=match):
+        MultiModalFeatures.model_validate(
+            {
+                "mm_hashes": {"image": ["a"]},
+                "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                **features,
+            }
         )
 
 
