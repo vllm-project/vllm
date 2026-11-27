@@ -192,14 +192,6 @@ def _derive_dfly_config(
     return config
 
 
-def verify_rocm_dfly_kv_cache_dtype(cache_dtype: str | None) -> None:
-    """Reject KV caches the ROCm DFly sparse MLA path cannot apply sinks to."""
-    if cache_dtype not in (None, "auto", "bfloat16"):
-        raise ValueError(
-            f"HYV4 DFly on ROCm requires a BF16 KV cache, got {cache_dtype!r}"
-        )
-
-
 class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
     """HYV4's configuration and implementation of DFly speculative decoding."""
 
@@ -335,7 +327,6 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
 
         if not on_gfx950():
             raise NotImplementedError("HYV4 DFly on ROCm requires gfx950")
-        verify_rocm_dfly_kv_cache_dtype(spec.kv_cache_dtype)
 
     @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
