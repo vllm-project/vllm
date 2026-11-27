@@ -213,12 +213,12 @@ def _token_id(token: str) -> int:
     return _SPECIAL_TOKEN_IDS.get(token, 0)
 
 
-def _make_reasoning_parser(tokenizer):
+def _make_reasoning_parser(tokenizer, chat_template_kwargs=None):
     class _NemotronParser(DelegatingParser):
         reasoning_parser_cls = NemotronV3ParserReasoningAdapter
         tool_parser_cls = None
 
-    return _NemotronParser(tokenizer)
+    return _NemotronParser(tokenizer, chat_template_kwargs=chat_template_kwargs)
 
 
 def _run_parse_delta(parser, tokenizer, text, request):
@@ -253,6 +253,21 @@ def test_nemotron_v3_streaming_promotes_reasoning_to_content(
         chat_template_kwargs={"force_nonempty_content": True},
     )
     parser = _make_reasoning_parser(tokenizer)
+
+    reasoning, content = _run_parse_delta(parser, tokenizer, "<think>4", request)
+
+    assert reasoning == "4"
+    assert content == "4"
+
+
+def test_nemotron_v3_streaming_promotes_with_server_default(
+    tokenizer: PreTrainedTokenizerBase,
+):
+    # Serving passes `--default-chat-template-kwargs` to the constructor only.
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    parser = _make_reasoning_parser(
+        tokenizer, chat_template_kwargs={"force_nonempty_content": True}
+    )
 
     reasoning, content = _run_parse_delta(parser, tokenizer, "<think>4", request)
 

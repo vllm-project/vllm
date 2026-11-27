@@ -619,6 +619,7 @@ def _build_serving_chat(
     reasoning_parser: str = "",
     tool_parser: str | None = None,
     enable_auto_tools: bool = False,
+    default_chat_template_kwargs: dict[str, Any] | None = None,
 ) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
@@ -637,6 +638,7 @@ def _build_serving_chat(
         reasoning_parser=reasoning_parser,
         tool_parser=tool_parser,
         enable_auto_tools=enable_auto_tools,
+        default_chat_template_kwargs=default_chat_template_kwargs,
     )
 
     return serving_chat
@@ -2258,6 +2260,36 @@ async def test_beam_search_preserves_data_parallel_rank(header, expected_rank):
     assert isinstance(response, ChatCompletionResponse)
     assert len(response.choices) == 2
     assert ranks == [expected_rank] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning_parser", ["nemotron_v3", "granite_thinking_parser"])
+async def test_server_default_force_nonempty_content(reasoning_parser):
+    """`force_nonempty_content` from `--default-chat-template-kwargs` moves
+    unterminated reasoning into content, like the request-level flag."""
+    engine = _build_mock_engine()
+
+    async def generate(*args, **kwargs):
+        output = _make_metrics_request_output()
+        output.outputs[0].text = "<think>The answer is 4"
+        output.outputs[0].finish_reason = "length"
+        yield output
+
+    engine.generate = generate
+    serving = _build_serving_chat(
+        engine,
+        reasoning_parser=reasoning_parser,
+        default_chat_template_kwargs={"force_nonempty_content": True},
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME, messages=[{"role": "user", "content": "Test"}]
+    )
+
+    response = await serving.create_chat_completion(request)
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert response.choices[0].message.reasoning is None
+    assert response.choices[0].message.content == "The answer is 4"
 
 
 async def _render_chat_prompt_token_ids(
