@@ -1603,15 +1603,18 @@ def unified_attention(
         tile_size = TILE_SIZE_DECODE
 
     launch_kwargs: dict[str, int] = {}
-    # SM90, batch-invariant 2D prefill with 64-key tiles: the kernel takes 186
-    # registers per thread, two CTAs per SM. Two stages and a 168-register cap
-    # keep three. Decode-only batches keep the default launch.
+    # SM90 and SM100, batch-invariant 2D prefill with 64-key tiles: the kernel
+    # takes 186-189 registers per thread, two CTAs per SM. Two stages and a
+    # 168-register cap keep three. Decode-only batches keep the default launch.
     if (
         bi_segment_tiles
         and not use_3d
         and max_seqlen_q > 1
         and TILE_SIZE_PREFILL == 64
-        and current_platform.is_device_capability(90)
+        and (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(100)
+        )
     ):
         launch_num_stages = 2
         launch_kwargs["maxnreg"] = 168
