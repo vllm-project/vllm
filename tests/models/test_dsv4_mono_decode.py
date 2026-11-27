@@ -364,14 +364,52 @@ def test_opt_in_outside_the_kernels_raises(monkeypatch, case, match):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
-def test_plain_read_linears_keep_the_checkpoint_layout(monkeypatch):
-    """The kernels read wq_b and the shared down_proj as stored, so their FP8
-    linear kernels must not preshuffle them at load."""
-    _deployment(monkeypatch)
-    layer = _decoder_layer()
-    assert md.MonoDecodeLayer.create(layer, _config()) is not None
-    assert layer.attn.wq_b.skip_weight_relayout
-    assert layer.ffn.shared_experts.down_proj.skip_weight_relayout
+@pytest.mark.parametrize("monokernel", [True, False])
+def test_plain_read_linears_keep_the_checkpoint_layout(monkeypatch, monokernel):
+    """The kernels read wq_b and the shared down_proj as stored, so under
+    --monokernel the decoder layer builds its linears with keep_weight_layout
+    and selection gives them the plain FP8 kernel."""
+    from torch import nn
+
+    from vllm.models.deepseek_v4.amd import model as rocm_model
+
+    seen = {}
+
+    def fake(name):
+        def build(*args, quant_config=None, **kwargs):
+            seen[name] = quant_config
+            return nn.Identity()
+
+        return build
+
+    monkeypatch.setitem(
+        sys.modules, "vllm.model_executor.layers.mhc", ModuleType("mhc")
+    )
+    monkeypatch.setattr(rocm_model, "DeepseekV4ROCMAiterMLAAttention", fake("attn"))
+    monkeypatch.setattr(rocm_model, "DeepseekV4MoE", fake("ffn"))
+    for op in ("RMSNorm", "MHCPreOp", "MHCPostOp", "MHCFusedPostPreOp"):
+        monkeypatch.setattr(rocm_model, op, lambda *a, **k: nn.Identity())
+    monkeypatch.setattr(rocm_model.MonoDecodeLayer, "create", lambda *a: None)
+    quant_config = SimpleNamespace(keep_weight_layout=False)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                hidden_size=256,
+                rms_norm_eps=1e-6,
+                hc_mult=4,
+                hc_sinkhorn_iters=20,
+                hc_eps=1e-6,
+            )
+        ),
+        quant_config=quant_config,
+        kernel_config=SimpleNamespace(monokernel=monokernel),
+    )
+
+    rocm_model.DeepseekV4DecoderLayer(vllm_config, "model.layers.5")
+
+    assert seen["attn"] is seen["ffn"]
+    assert seen["attn"].keep_weight_layout is monokernel
+    assert not quant_config.keep_weight_layout
 
 
 def test_hca_key_table_is_vllms_c128a_width(monkeypatch):

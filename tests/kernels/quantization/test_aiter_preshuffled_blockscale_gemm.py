@@ -22,9 +22,12 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
 from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
+    scaled_dequantize,
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -134,16 +137,15 @@ def test_preshuffled_gemm_matches_reference(m: int, n: int, k: int) -> None:
     assert _rel_diff(out, plain_out) < REL_TOL
 
 
-@pytest.mark.parametrize("tag", ["skip_weight_relayout", "is_bmm"])
 @pytest.mark.parametrize("m", [1, 256])
-def test_tagged_layer_keeps_plain_layout(m: int, tag: str) -> None:
+def test_bmm_layer_keeps_plain_layout(m: int) -> None:
     n, k = 2048, 4096
     torch.manual_seed(0)
     w, ws = _fp8_weight(n, k)
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda")
 
     kernel = AiterPreshuffledFp8BlockScaledMMKernel(_config(n, k))
-    layer = _layer(w, ws, **{tag: True})
+    layer = _layer(w, ws, is_bmm=True)
     kernel.process_weights_after_loading(layer)
 
     assert not kernel.preshuffled
@@ -154,3 +156,32 @@ def test_tagged_layer_keeps_plain_layout(m: int, tag: str) -> None:
     out = kernel.apply_weights(layer, x)
 
     assert _rel_diff(out, _reference(x, w, ws)) < REL_TOL
+
+
+def test_dequant_reads_preshuffled_weight() -> None:
+    # MLA reads kv_b_proj back through get_and_maybe_dequant_weights; for a
+    # preshuffled weight it runs the layer on an identity matrix.
+    n, k = 2048, 4096
+    torch.manual_seed(0)
+    w, ws = _fp8_weight(n, k)
+
+    kernel = AiterPreshuffledFp8BlockScaledMMKernel(_config(n, k))
+    layer = _layer(w, ws)
+    kernel.process_weights_after_loading(layer)
+    assert kernel.preshuffled
+
+    method = object.__new__(Fp8LinearMethod)
+    method.use_marlin = False
+    method.use_deep_gemm = False
+    method.block_quant = True
+    method.weight_block_size = [BLOCK, BLOCK]
+    method.fp8_linear = kernel
+    layer.quant_method = method
+    layer.weight_block_size = [BLOCK, BLOCK]
+    layer.input_size_per_partition = k
+
+    out = get_and_maybe_dequant_weights(layer, out_dtype=torch.bfloat16)
+    ref = scaled_dequantize(w, ws, group_shape=[BLOCK, BLOCK], out_dtype=torch.bfloat16)
+
+    assert out.shape == (n, k)
+    assert _rel_diff(out, ref) < REL_TOL

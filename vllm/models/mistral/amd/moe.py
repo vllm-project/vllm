@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.mistral.amd.mlp import MistralMLP
 
 
@@ -23,11 +24,13 @@ class MistralMoE(nn.Module):
         config: PreTrainedConfig,
         prefix: str,
         reduce_results: bool = True,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         assert config.scoring_func == "softmax" and config.topk_method is None
         assert (config.n_group or 1) == 1, "Grouped top-k is not supported"
-        quant_config = vllm_config.quant_config
+        if quant_config is None:
+            quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         # FP32 router logits, as in training; the low-latency ll_bf16 GEMM

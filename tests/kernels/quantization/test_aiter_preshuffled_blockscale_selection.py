@@ -31,16 +31,17 @@ pytestmark = [
 
 
 @pytest.mark.parametrize(
-    ("plain", "shuffled", "triton", "gfx950", "picks_bpreshuffle"),
+    ("plain", "shuffled", "triton", "gfx950", "keep", "picks_bpreshuffle"),
     [
-        (0, 15, False, True, True),  # plain table empty: bpreshuffle covers it
-        (6, 15, False, True, True),  # plain tuned at a few M only
-        (15, 15, False, True, False),  # tie: keep the checkpoint layout
-        (15, 6, False, True, False),
-        (15, 0, False, True, False),  # bpreshuffle untuned
-        (0, 0, False, True, False),
-        (0, 15, True, True, False),  # the plain Triton GEMM is tuned
-        (0, 15, False, False, False),  # gfx942 / gfx1250: never taken
+        (0, 15, False, True, False, True),  # plain table empty: bpreshuffle
+        (6, 15, False, True, False, True),  # plain tuned at a few M only
+        (15, 15, False, True, False, False),  # tie: keep the checkpoint layout
+        (15, 6, False, True, False, False),
+        (15, 0, False, True, False, False),  # bpreshuffle untuned
+        (0, 0, False, True, False, False),
+        (0, 15, True, True, False, False),  # the plain Triton GEMM is tuned
+        (0, 15, False, False, False, False),  # gfx942 / gfx1250: never taken
+        (0, 15, False, True, True, False),  # other code reads the weight
     ],
 )
 def test_plain_blockscale_gemm_has_priority(
@@ -49,6 +50,7 @@ def test_plain_blockscale_gemm_has_priority(
     shuffled: int,
     triton: bool,
     gfx950: bool,
+    keep: bool,
     picks_bpreshuffle: bool,
 ) -> None:
     def tuned_m_count(n: int, k: int, preshuffled: bool) -> int:
@@ -69,6 +71,7 @@ def test_plain_blockscale_gemm_has_priority(
         input_dtype=torch.bfloat16,
         out_dtype=torch.bfloat16,
         weight_shape=(2048, 4096),
+        keep_weight_layout=keep,
     )
 
     ok, reason = AiterPreshuffledFp8BlockScaledMMKernel.can_implement(config)

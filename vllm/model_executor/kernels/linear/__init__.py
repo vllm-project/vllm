@@ -859,6 +859,7 @@ def init_fp8_linear_kernel(
     weight_shape: tuple[int, int],
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
+    keep_weight_layout: bool = False,
 ) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
@@ -870,6 +871,7 @@ def init_fp8_linear_kernel(
         input_dtype=input_dtype,
         out_dtype=out_dtype,
         weight_shape=weight_shape,
+        keep_weight_layout=keep_weight_layout,
     )
 
     if activation_quant_key.scale.group_shape.is_per_group():

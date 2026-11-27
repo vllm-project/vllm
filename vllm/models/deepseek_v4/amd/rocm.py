@@ -243,8 +243,8 @@ def weight_already_preshuffled(linear: torch.nn.Module) -> bool:
 
     The hand-shuffles below (fused_wqa_wkv, wo_b, gate_up_proj) must be skipped
     for those, since shuffle_weight is a permutation rather than an involution.
-    Kernels tag the layers they shuffle; a layer they leave plain (e.g. one
-    marked skip_weight_relayout) carries no tag.
+    Kernels tag the layers they shuffle; a layer they leave plain carries no
+    tag.
     """
     return (
         bool(getattr(linear, "aiter_bpreshuffled", False)) or is_weights_pre_processed()

@@ -623,9 +623,9 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 class AiterPreshuffledFp8BlockScaledMMKernel(AiterFp8BlockScaledMMKernel):
     """AITER CK FP8 block-scaled GEMM on a (16, 16) pre-shuffled weight.
 
-    A layer whose weight something else reads directly (see
-    `_reads_weight_directly`) keeps the plain layout and runs the parent's CK
-    GEMM instead.
+    A layer whose weight other code reads directly is built with
+    `keep_weight_layout`, so selection gives it the parent kernel. A stack of
+    matrices (`is_bmm`) keeps the plain layout and runs the parent's CK GEMM.
 
     TODO: fold the parent's gfx1250 Triton preshuffle (`use_bpreshuffle`) into
     this class.
@@ -667,6 +667,9 @@ class AiterPreshuffledFp8BlockScaledMMKernel(AiterFp8BlockScaledMMKernel):
 
         if not on_gfx950():
             return False, "only enabled on gfx950."
+
+        if config.keep_weight_layout:
+            return False, "the layer's weight is read in the checkpoint layout."
 
         # bpreshuffle GEMM requires aiter fp8 linear to be enabled and an fp8
         # 2D weight. shuffle_weight(layout=(16, 16)) tiles N by 16, and the
@@ -718,25 +721,13 @@ class AiterPreshuffledFp8BlockScaledMMKernel(AiterFp8BlockScaledMMKernel):
 
         return True, None
 
-    @staticmethod
-    def _reads_weight_directly(layer: torch.nn.Module) -> bool:
-        """True when something other than apply_weights consumes layer.weight.
-
-        Such a weight must stay in the plain layout: `is_bmm` marks a stack
-        of matrices (wo_a), `skip_weight_relayout` marks MLA's kv_b_proj and
-        shared experts whose weights a fused MoE kernel copies. Both are
-        stamped after construction, so can_implement cannot see them.
-        """
-        return bool(
-            getattr(layer, "is_bmm", False)
-            or getattr(layer, "skip_weight_relayout", False)
-        )
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Block strategy and the e8m0 scale upcast.
         super().process_weights_after_loading(layer)
 
-        if self._reads_weight_directly(layer):
+        if getattr(layer, "is_bmm", False):
+            # A stack of matrices (wo_a) read as a batched GEMM, not by
+            # apply_weights.
             # The kernel instance is per layer, so this layer alone stays plain.
             self.preshuffled = False
             self.quant_fp8 = self._plain_quant_fp8

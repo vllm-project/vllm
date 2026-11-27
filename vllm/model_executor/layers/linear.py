@@ -298,10 +298,6 @@ class LinearBase(PluggableLayer):
         self.quant_config = quant_config
         self.prefix = prefix
         self.allow_fp8_block_shape_mismatch = False
-        # Set by model code before loading when something other than the
-        # quant method reads `weight` (e.g. a fused kernel copying it); the
-        # FP8 linear kernel then keeps the checkpoint layout.
-        self.skip_weight_relayout = False
         self.quant_method: QuantizeMethodBase
         if quant_config is None:
             self.quant_method = UnquantizedLinearMethod()

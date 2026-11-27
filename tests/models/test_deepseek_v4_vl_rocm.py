@@ -199,22 +199,6 @@ def test_rocm_wo_a_keeps_row_major_weights(holder: str, default_vllm_config) -> 
 
 
 @pytest.mark.parametrize("holder", ["quant_method", "scheme"])
-def test_rocm_fused_shared_expert_keeps_checkpoint_layout(
-    holder: str, default_vllm_config
-) -> None:
-    # The fused MoE copies the shared expert's weights after this step.
-    layer = _preshuffled_fp8_linear(holder)
-    layer.skip_weight_relayout = True
-    original = layer.weight.detach().clone()
-    getattr(layer, holder).fp8_linear.process_weights_after_loading(layer)
-
-    assert not getattr(layer, "aiter_bpreshuffled", False)
-    torch.testing.assert_close(
-        layer.weight.view(torch.uint8), original.view(torch.uint8)
-    )
-
-
-@pytest.mark.parametrize("holder", ["quant_method", "scheme"])
 def test_rocm_gateup_shuffles_once_and_down_proj_keeps_preshuffled_backend(
     holder: str, monkeypatch: pytest.MonkeyPatch, default_vllm_config
 ) -> None:
@@ -457,7 +441,7 @@ def test_rocm_fse_rejects_data_parallel_deployment(
 
 
 @pytest.mark.parametrize("fusion", ["none", "heterogeneous", "mega_moe"])
-def test_rocm_fused_shared_expert_linears_skip_weight_relayout(
+def test_rocm_fused_shared_expert_linears_keep_weight_layout(
     fusion: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The fused MoE copies the shared expert's weights as stored (#57132).
@@ -468,9 +452,9 @@ def test_rocm_fused_shared_expert_linears_skip_weight_relayout(
             super().__init__()
 
     class FakeMLP(nn.Module):
-        def __init__(self, **kwargs) -> None:
+        def __init__(self, *, quant_config, **kwargs) -> None:
             super().__init__()
-            self.gate_up_proj, self.down_proj = nn.Module(), nn.Module()
+            self.quant_config = quant_config
 
     class FakeMegaMoEExperts(nn.Module):
         def __init__(self, *args, fuse_shared_expert: bool, **kwargs) -> None:
@@ -507,12 +491,12 @@ def test_rocm_fused_shared_expert_linears_skip_weight_relayout(
         n_shared_experts=1,
     )
     mega_moe = fusion == "mega_moe"
+    quant_config = SimpleNamespace(
+        online_quantization_config=None, keep_weight_layout=False
+    )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=config),
-        # MegaMoE copies the quant config to drop online quantization.
-        quant_config=SimpleNamespace(online_quantization_config=None)
-        if mega_moe
-        else None,
+        quant_config=quant_config,
         parallel_config=ParallelConfig(),
         kernel_config=KernelConfig(moe_backend="aiter_mega_moe")
         if mega_moe
@@ -526,9 +510,12 @@ def test_rocm_fused_shared_expert_linears_skip_weight_relayout(
 
     if mega_moe:
         assert moe.experts.fuse_shared_expert
-    shared = moe.shared_experts
-    for linear in (shared.gate_up_proj, shared.down_proj):
-        assert getattr(linear, "skip_weight_relayout", False) == (fusion != "none")
+    # The shared expert's linears get a copy of the config, so selection
+    # gives them the plain kernel; the routed experts keep the original.
+    shared_config = moe.shared_experts.quant_config
+    assert shared_config.keep_weight_layout == (fusion != "none")
+    assert (shared_config is quant_config) == (fusion == "none")
+    assert not quant_config.keep_weight_layout
 
 
 def test_rocm_mtp_forwards_input_ids_for_vision_routing(
