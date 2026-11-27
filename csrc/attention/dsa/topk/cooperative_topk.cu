@@ -260,7 +260,8 @@ __global__ void __launch_bounds__(hist4096::kBlockSize, 1)
                             CS + spare);
     return;
   }
-  ct::cooperative_topk_body<TopK, CS, float>(params, own, own_len);
+  // Single-pass stages off the float4 visitor here (see kSinglePassVec).
+  ct::cooperative_topk_body<TopK, CS, float, false>(params, own, own_len);
 }
 
 // Dynamic shared memory of the grid kernel: the larger of the cluster path's
@@ -374,7 +375,7 @@ __global__ void __launch_bounds__(hist4096::kBlockSize, 1)
   // before the lengths are read, made the compiler spill in it): a short row;
   // a long row without a split; a long row whose split cutoff was misjudged.
   if (own_short || (own_long && (!split || s_verdict == 2))) {
-    ct::cooperative_topk_body<TopK, CS, float>(params, row, s_len[row]);
+    ct::cooperative_topk_body<TopK, CS, float, false>(params, row, s_len[row]);
   }
   if (!split) return;
   if (!own_long) {

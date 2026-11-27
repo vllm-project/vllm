@@ -86,13 +86,48 @@ __device__ __forceinline__ uint32_t extract_coarse_bin(float x) {
   return hist4096::extract_coarse_bin_N<kHistBits>(x);
 }
 
+// Coarse bins of two FP32 scores from one packed FP16 conversion; equal to
+// extract_coarse_bin_N of each (same round-to-nearest conversion).
+template <uint32_t kBits>
+__device__ __forceinline__ uint2 extract_coarse_bins_f32x2(float a, float b) {
+  const __half2 h = __floats2half2_rn(a, b);
+  const uint32_t bits = *reinterpret_cast<const uint32_t*>(&h);
+  const uint32_t sign = bits & 0x80008000u;
+  const uint32_t key = bits ^ ((sign - (sign >> 15)) | 0x80008000u);
+  return make_uint2((key & 0xFFFFu) >> (16 - kBits), key >> (32 - kBits));
+}
+
 // Visit a staged chunk's scores as (index in chunk, coarse bin, score). BF16
-// is read two scores per 32-bit load.
-template <uint32_t kBits, typename InT, typename Visit>
+// is read two scores per 32-bit load. A full FP32 stage takes a branch-free
+// path: four 16-byte loads per thread, bins from packed FP16 conversions, so
+// the per-score work of a thread is independent and overlaps.
+template <uint32_t kBits, typename InT, typename Visit, bool kVec = true>
 __device__ __forceinline__ void for_each_staged_score(const InT* buf,
                                                       uint32_t sz,
                                                       Visit visit) {
   const auto tx = threadIdx.x;
+  if constexpr (kVec && std::is_same_v<InT, float>) {
+    if (sz == kSizePerStage) {
+      constexpr uint32_t kVecs = kElemPerStage / 4;
+      const auto* b4 = reinterpret_cast<const float4*>(buf);
+      float4 v[kVecs];
+#pragma unroll
+      for (uint32_t j = 0; j < kVecs; j++) {
+        v[j] = b4[tx + j * hist4096::kBlockSize];
+      }
+#pragma unroll
+      for (uint32_t j = 0; j < kVecs; j++) {
+        const uint2 b01 = extract_coarse_bins_f32x2<kBits>(v[j].x, v[j].y);
+        const uint2 b23 = extract_coarse_bins_f32x2<kBits>(v[j].z, v[j].w);
+        const uint32_t li = 4 * (tx + j * hist4096::kBlockSize);
+        visit(li, b01.x, v[j].x);
+        visit(li + 1, b01.y, v[j].y);
+        visit(li + 2, b23.x, v[j].z);
+        visit(li + 3, b23.y, v[j].w);
+      }
+      return;
+    }
+  }
   if constexpr (std::is_same_v<InT, __nv_bfloat16>) {
     const auto* words = reinterpret_cast<const uint32_t*>(buf);
 #pragma unroll
@@ -305,7 +340,7 @@ using SmemSinglePass = SmemFused<kMaxSinglePassStages<InT>, 1, InT>;
 // from smem). kFused=false: TMA double-buffer streaming, two passes (histogram
 // then scatter).
 template <uint32_t TopK, uint32_t CS, typename SmemType, bool kFused,
-          typename InT>
+          typename InT, bool kSinglePassVec = true>
 __device__ void large_topk(const InT* __restrict__ row_input,
                            int32_t* __restrict__ row_output, uint32_t seq_len,
                            uint32_t* phases, hist4096::Tie* tie_ws) {
@@ -364,26 +399,33 @@ __device__ void large_topk(const InT* __restrict__ row_input,
       }
       phases[iter]++;
       __syncwarp();
-      if constexpr (std::is_same_v<InT, __nv_bfloat16>) {
+      if constexpr (kSinglePassVec) {
         for_each_staged_score<kHistBits>(smem->score_buffer[iter], sz,
                                          [&](uint32_t, uint32_t bin, float) {
                                            atomicAdd(&smem->histogram[bin], 1);
                                          });
       } else {
+        if constexpr (std::is_same_v<InT, __nv_bfloat16>) {
+          for_each_staged_score<kHistBits>(
+              smem->score_buffer[iter], sz, [&](uint32_t, uint32_t bin, float) {
+                atomicAdd(&smem->histogram[bin], 1);
+              });
+        } else {
 #pragma unroll
-        for (uint32_t i = 0; i < kElemPerStage; i += 2) {
-          const auto li0 = tx + i * hist4096::kBlockSize;
-          const auto li1 = tx + (i + 1) * hist4096::kBlockSize;
-          if (li0 >= sz) {
-            break;
-          }
-          const auto b0 = extract_coarse_bin(smem->score_buffer[iter][li0]);
-          if (li1 < sz) {
-            const auto b1 = extract_coarse_bin(smem->score_buffer[iter][li1]);
-            atomicAdd(&smem->histogram[b0], 1);
-            atomicAdd(&smem->histogram[b1], 1);
-          } else {
-            atomicAdd(&smem->histogram[b0], 1);
+          for (uint32_t i = 0; i < kElemPerStage; i += 2) {
+            const auto li0 = tx + i * hist4096::kBlockSize;
+            const auto li1 = tx + (i + 1) * hist4096::kBlockSize;
+            if (li0 >= sz) {
+              break;
+            }
+            const auto b0 = extract_coarse_bin(smem->score_buffer[iter][li0]);
+            if (li1 < sz) {
+              const auto b1 = extract_coarse_bin(smem->score_buffer[iter][li1]);
+              atomicAdd(&smem->histogram[b0], 1);
+              atomicAdd(&smem->histogram[b1], 1);
+            } else {
+              atomicAdd(&smem->histogram[b0], 1);
+            }
           }
         }
       }
@@ -422,20 +464,21 @@ __device__ void large_topk(const InT* __restrict__ row_input,
     for (uint32_t iter = 0; iter < num_iters; iter++) {
       const auto off = iter * kSizePerStage;
       const auto sz = min(kSizePerStage, my_len - off);
-      for_each_staged_score<kHistBits>(  // still in smem
-          smem->score_buffer[iter], sz,
-          [&](uint32_t li, uint32_t bin, float score) {
-            const auto gidx = off + li;
-            if (bin > thr) {
-              s_topk[atomicAdd(&smem->counter_gt, 1)] = gidx;  // above
-            } else if (bin == thr) {
-              const auto p = atomicAdd(&smem->counter_eq,
-                                       1);  // equal -> ties (later refinement)
-              if (p < kCoarseTieCapacity) {
-                smem->tie_buffer[p] = {gidx, score};
-              }
-            }
-          });
+      auto visit_scatter = [&](uint32_t li, uint32_t bin, float score) {
+        const auto gidx = off + li;
+        if (bin > thr) {
+          s_topk[atomicAdd(&smem->counter_gt, 1)] = gidx;  // above
+        } else if (bin == thr) {
+          const auto p = atomicAdd(&smem->counter_eq,
+                                   1);  // equal -> ties (later refinement)
+          if (p < kCoarseTieCapacity) {
+            smem->tie_buffer[p] = {gidx, score};
+          }
+        }
+      };
+      for_each_staged_score<kHistBits, InT, decltype(visit_scatter),
+                            kSinglePassVec>(smem->score_buffer[iter], sz,
+                                            visit_scatter);
     }
     __syncthreads();
   } else {
@@ -548,9 +591,12 @@ __device__ void large_topk(const InT* __restrict__ row_input,
 // (python/sglang/jit_kernel/include/sgl_kernel/deepseek_v4/topk/)
 // ============================================================================
 
-template <uint32_t TopK, uint32_t CS, typename InT>
 // row: the row this cluster selects; len: its length (params.lengths[row],
 // read once by the caller).
+// kSinglePassVec: single-pass stages take the float4 visitor; the grid
+// launches turn it off (their single-pass rows are faster on the strided
+// visit), the streaming passes always take it.
+template <uint32_t TopK, uint32_t CS, typename InT, bool kSinglePassVec = true>
 __device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params,
                                       uint32_t row, int32_t len) {
   const auto rank = cooperative_groups::this_cluster().block_rank(),
@@ -621,7 +667,8 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params,
     __syncthreads();
     uint32_t phases[kFusedStages] =
         {};  // tracks the parity for mbarrier wait/arrive protocol
-    large_topk<TopK, CS, FusedSmem, true, InT>(in, out, sl, phases, row_tie_ws);
+    large_topk<TopK, CS, FusedSmem, true, InT, kSinglePassVec>(
+        in, out, sl, phases, row_tie_ws);
   } else {
     // Streaming path for cluster sizes whose per-block input exceeds the
     // single-pass staging capacity.
