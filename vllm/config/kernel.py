@@ -340,18 +340,11 @@ class KernelConfig:
     """If True, run JIT compile warmup during kernel warmup."""
 
     monokernel: bool = False
-    """If True, run the eligible layers of decode steps on the model's
-    MonoKernel: a persistent kernel that runs most or all of one decoder layer
-    in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
-    MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
-    parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
-    requests, with bf16 MoE activations instead of the checkpoint's MXFP4;
-    MiniMax-M3 at TP4 on MI355X, including its 7-token DSpark draft). A
-    deployment that cannot run it is refused at startup.
-
-    Same switch as `--additional-config '{"decode_backend":
-    "latency_specialized"}'`, the specialized decode of RFC #60904: setting
-    either one enables the model's specialized decode, whichever it reads."""
+    """If True, run decode steps on the model's specialized decode (RFC #60904),
+    e.g. a persistent kernel covering most or all of a decoder layer. Equivalent
+    to `--additional-config '{"decode_backend": "latency_specialized"}'`. Which
+    models, hardware and parallel layouts support it is model-specific; an
+    unsupported deployment is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Out-of-tree platforms can
@@ -368,7 +361,8 @@ class KernelConfig:
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (NVFP4, and
-      MXFP8 with `--all2all-backend deepep_low_latency` or `nixl_ep`)
+      MXFP8 with `--all2all-backend deepep_low_latency` or `nixl_ep`, on
+      Blackwell; unquantized bf16/fp16 on Hopper)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
       mega-kernel with NVFP4 or MXFP4 weights on Blackwell (SM100/SM103,
       where MXFP4 checkpoints are requantized to NVFP4 at load, or SM107,

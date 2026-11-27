@@ -89,6 +89,7 @@ from vllm.v1.engine import (
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
+    EngineHealthState,
     FinishReason,
     PauseMode,
     PrefixHashConfig,
@@ -238,6 +239,13 @@ class EngineCore:
             self.batch_queue = deque(maxlen=self.batch_queue_size)
         # Step awaiting prior outputs before sampling (see step_with_batch_queue).
         self.deferred_step: tuple[SchedulerOutput, Future[Any]] | None = None
+        # Not with DP, whose busy loop runs a dummy batch on idle steps.
+        parallel_config = vllm_config.parallel_config
+        self._pp_admission = (
+            self.batch_queue_size > 1
+            and parallel_config.pipeline_parallel_size > 1
+            and parallel_config.data_parallel_size == 1
+        )
 
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
@@ -660,6 +668,7 @@ class EngineCore:
                 num_generation_tokens=details.num_generation_tokens,
                 num_encoder_inputs=details.num_encoder_inputs,
                 num_encoder_output_tokens=details.num_encoder_output_tokens,
+                scheduled_workload=details.scheduled_workload,
             )
         self._iteration_index = iteration_index + 1
         return iteration_details
@@ -730,9 +739,26 @@ class EngineCore:
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
+    def _wait_for_new_request(self, batch_queue: deque) -> bool:
+        """PP, with a free batch slot: wait on the oldest batch, but return True
+        as soon as a request is added, to schedule it into the slot."""
+        return (
+            (self._pp_admission and self.deferred_step is None)
+            and len(batch_queue) < self.batch_queue_size
+            and self._handle_inputs_while_waiting(batch_queue[-1][0], stop_on_add=True)
+        )
+
     def _wait_for_output(self, future: Future[Any]) -> Any:
-        """Block until a step's model output is ready."""
+        """Wait for a step's model output, meanwhile handling inputs if possible."""
+        self._handle_inputs_while_waiting(future)
         return future.result()
+
+    def _handle_inputs_while_waiting(
+        self, future: Future[Any], stop_on_add: bool = False
+    ) -> bool:
+        """Handle inputs until the output is ready. Returns True if `stop_on_add`
+        and a request was added first."""
+        return False
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -769,7 +795,7 @@ class EngineCore:
 
         model_executed = False
         # Workers need a deferred step's sample_tokens() before the next step.
-        if self.deferred_step is None and self.scheduler.has_requests():
+        if self.deferred_step is None and self.scheduler.should_schedule():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -808,7 +834,7 @@ class EngineCore:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
                 if len(batch_queue) < self.batch_queue_size and (
-                    model_executed or self.scheduler.has_requests()
+                    model_executed or self.scheduler.should_schedule()
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
@@ -819,6 +845,10 @@ class EngineCore:
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
             return None, False
+
+        if self._wait_for_new_request(batch_queue):
+            # Schedule the newly arrived request into the free slot.
+            return None, model_executed
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
@@ -1269,8 +1299,13 @@ class EngineCore:
                 request.mm_features
             )
 
-        watermark_config = self.vllm_config.watermark_config
+        # The sender cache has already been updated, even for rejected requests.
+        lora_config = self.vllm_config.lora_config
         params = request.sampling_params
+        if lora_config is not None and params is not None:
+            lora_config.validate_prompt_logprobs(params)
+
+        watermark_config = self.vllm_config.watermark_config
         # Greedy decoding and trace replay cannot be watermarked; leave their
         # flag as the frontend resolved it.
         if (
@@ -1323,6 +1358,8 @@ _INPUTS_HANDLED_DURING_STEP = (
 # While waiting for a step's output, how long to busy-poll for new inputs
 # before falling back to a blocking wait for the output.
 _INPUT_SPIN_DURATION_S = 1.0
+# With a free batch slot, how often to check for new requests after spinning.
+_INPUT_POLL_INTERVAL_S = 0.001
 
 
 class EngineCoreProc(EngineCore):
@@ -1785,6 +1822,21 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
+    def check_health_generate(self) -> EngineHealthState:
+        """Health check served by the busy loop between steps.
+
+        A busy engine adds no GPU work; an idle one runs the forward probe.
+        """
+        if self.is_sleeping():
+            return EngineHealthState.SLEEPING
+        if self.has_work():
+            return EngineHealthState.BUSY
+        self._probe_forward()
+        return EngineHealthState.OK
+
+    def _probe_forward(self) -> None:
+        self.model_executor.probe_forward()
+
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
         return (
@@ -1939,9 +1991,10 @@ class EngineCoreProc(EngineCore):
 
         return True
 
-    def _wait_for_output(self, future: Future[Any]) -> Any:
-        """Wait for a step's model output, meanwhile handling new requests and
-        aborts as they arrive."""
+    def _handle_inputs_while_waiting(
+        self, future: Future[Any], stop_on_add: bool = False
+    ) -> bool:
+        """Handle new requests and aborts while waiting for a step's output."""
         poll: Callable[[], bool] | None = getattr(future, "poll", None)
         wait_briefly: Callable[[Sized, float], None] | None = getattr(
             future, "wait_briefly", None
@@ -1955,18 +2008,23 @@ class EngineCoreProc(EngineCore):
                     # Some kinds of request must wait until the step completes.
                     if req[0] in _INPUTS_HANDLED_DURING_STEP:
                         self._handle_client_request(*req)
+                        if stop_on_add and req[0] == EngineCoreRequestType.ADD:
+                            return True
                     else:
                         self._deferred_inputs.append(req)
                 elif time.monotonic() < spin_deadline:
                     # Spin on something cheaper than poll(), to leave the GIL
                     # free more of the time for the input and output threads.
                     wait_briefly(pending_inputs, spin_deadline)
+                elif stop_on_add:
+                    # A new request could use the free batch slot, so keep
+                    # checking, but without holding the GIL.
+                    time.sleep(_INPUT_POLL_INTERVAL_S)
                 else:
                     # Long-running step: stop busy-looping and block until the
                     # output arrives. Later inputs are handled after the step.
                     break
-
-        return future.result()
+        return False
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
@@ -2709,6 +2767,13 @@ class DPEngineCoreProc(EngineCoreProc):
             self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled
         ):
             self.engines_running = True
+
+    def _probe_forward(self) -> None:
+        """Liveness only: the reply proves the busy loop is not wedged.
+
+        A dummy batch here would run outside the DP wave and could deadlock
+        against a peer's wave collectives.
+        """
 
     def barrier(self):
         """Blocking barrier on the DP process group (test-only utility)."""
