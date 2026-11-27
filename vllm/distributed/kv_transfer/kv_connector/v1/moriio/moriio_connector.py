@@ -3407,6 +3407,8 @@ class MoRIIOConnectorWorker:
             return
         if self.mode == MoRIIOMode.READ:
             return
+        if layer_name not in self._transfer_layer_names:
+            return
         remote_engine_id = None
 
         for req_id, meta in metadata.reqs_to_save.items():
