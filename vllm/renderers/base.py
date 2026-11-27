@@ -1331,7 +1331,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompts: Sequence[DictPrompt],
         req_media_io_kwargs: dict[str, dict[str, Any]] | None,
     ) -> None:
-        """Apply model defaults and request kwargs to completion prompts."""
+        """Apply model defaults and request kwargs to prompts."""
         default_media_io_kwargs = self._get_default_media_io_kwargs()
         if not default_media_io_kwargs and not req_media_io_kwargs:
             return
