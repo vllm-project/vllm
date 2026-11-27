@@ -159,6 +159,10 @@ When batch invariance is enabled, vLLM:
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
 
+For multimodal vision attention, `VLLM_BATCH_INVARIANT=1` disables Split-KV when
+the `FLASH_ATTN` encoder backend uses FlashAttention 3 on Hopper. On B200,
+the FlashAttention version selector uses FlashAttention 2 in this mode.
+
 !!! warning
     Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.
 

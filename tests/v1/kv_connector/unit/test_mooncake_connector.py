@@ -3275,6 +3275,11 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     assert worker._prepare_transfer_regions(meta) == prepared
     assert calls == 2
 
+    needs_draft = msgspec.structs.replace(meta, requires_draft_context_kv=True)
+    local, remote, err = worker._prepare_transfer_regions(needs_draft)
+    assert not local and not remote
+    assert err is not None and "Configure the same drafter on prefill" in err
+
     mismatch = _xfer_meta(
         [
             _region(

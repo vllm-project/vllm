@@ -1753,7 +1753,7 @@ def test_bind_kv_cache(default_vllm_config):
 def test_bind_kv_cache_non_attention(default_vllm_config):
     from vllm.model_executor.layers.attention import Attention
 
-    # example from Jamba PP=2
+    # attention layers of a hybrid model on one PP rank
     ctx = {
         "model.layers.20.attn": Attention(32, 128, 0.1, prefix="model.layers.20.attn"),
         "model.layers.28.attn": Attention(32, 128, 0.1, prefix="model.layers.28.attn"),

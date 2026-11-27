@@ -42,6 +42,7 @@ class MooncakeXferMetadata(
     remote_pp_size: int = 1
     # Zero keeps the full-layout protocol used by compression sessions.
     layout_id: int = 0
+    requires_draft_context_kv: bool = False
 
 
 class CompressionSessionOpen(  # type: ignore[call-arg]
