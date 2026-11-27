@@ -19,7 +19,6 @@ def server():
         [
             "--hf-overrides",
             '{"knowline_config": {}}',
-            "--enforce-eager",
             "--max-model-len",
             "8192",
             "--max-num-seqs",
