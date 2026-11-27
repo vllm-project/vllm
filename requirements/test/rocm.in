@@ -9,6 +9,7 @@ pytest-rerunfailures
 pytest-shard
 pytest-timeout
 pytest-cov
+py-spy==0.4.4 # 0.4.2 added Python 3.14 support, for the child stack dump in amd_ci_fast_exit.py
 
 # testing utils
 albumentations # required for Nemotron Parse in test_common.py

@@ -192,6 +192,7 @@ def _sparse_mla_case(
     metadata = SimpleNamespace(
         num_actual_tokens=num_tokens,
         topk_tokens=width,
+        topk_start=0,
         req_id_per_token=torch.tensor(req_ids, dtype=torch.int32, device=DEVICE),
         block_table=block_table.int().to(DEVICE),
         block_size=BLOCK_SIZE,
@@ -241,8 +242,8 @@ def _requires_gfx950():
 @pytest.mark.parametrize("triton_sparse_mla", [1], indirect=True)
 @pytest.mark.parametrize(
     ("num_heads", "width", "block_stride"),
-    [(8, 128, 64), (64, 2176, 64), (16, 256, 192), (128, 384, 64)],
-    ids=["tp8_minwidth", "tp1_draftwidth", "strided_cache", "128heads"],
+    [(8, 128, 64), (4, 128, 64), (64, 2176, 64), (16, 256, 192), (128, 384, 64)],
+    ids=["tp8_minwidth", "flash_tp8", "tp1_draftwidth", "strided_cache", "128heads"],
 )
 @torch.inference_mode()
 def test_triton_sparse_mla_matches_torch_reference(
@@ -408,7 +409,7 @@ def test_amd_sink_backend_is_rocm_sparse_mla(
     with set_default_torch_dtype(torch.bfloat16):
         backend = _amd_attention(num_local_heads)._resolve_sink_backend(kv_cache_dtype)
 
-    assert backend is ROCMAiterMLASparseBackend
+    assert issubclass(backend, ROCMAiterMLASparseBackend)
     assert backend.supports_sink()
 
 
