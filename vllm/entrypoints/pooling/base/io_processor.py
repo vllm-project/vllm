@@ -305,15 +305,15 @@ class PoolingIOProcessor:
         chat_template_kwargs: dict[str, Any] | None,
         trust_request_chat_template: bool,
     ):
-        if not has_request_chat_template(request_chat_template, chat_template_kwargs):
-            return
-        if not trust_request_chat_template:
-            raise VLLMValidationError(
-                "Chat template is passed with request, but "
-                "--trust-request-chat-template is not set. "
-                "Refused request with untrusted chat template."
-            )
-        self.renderer.validate_request_chat_template()
+        if has_request_chat_template(request_chat_template, chat_template_kwargs):
+            if not trust_request_chat_template:
+                raise VLLMValidationError(
+                    "Chat template is passed with request, but "
+                    "--trust-request-chat-template is not set. "
+                    "Refused request with untrusted chat template."
+                )
+            self.renderer.validate_request_chat_template()
+        self.renderer.validate_request_chat_template_kwargs(chat_template_kwargs)
 
     def _params_to_seq(
         self,
