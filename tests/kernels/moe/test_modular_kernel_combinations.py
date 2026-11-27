@@ -1678,7 +1678,7 @@ def test_aiter_moe_token_padding_garbage_rows(
             "AITER fused_moe_2stages allocates a2 with torch.empty and stage1 "
             "never writes the topk_ids=-1 slots, so the dynamic per-tensor a2 "
             "quant scale is taken over stale memory and can zero every real "
-            "row. Remove once AITER_BRANCH includes https://github.com/ROCm/aiter/pull/6568."
+            "row. Remove once AITER_VERSION includes https://github.com/ROCm/aiter/pull/6568."
         )
 
     weights = WeightTensors.make(config)

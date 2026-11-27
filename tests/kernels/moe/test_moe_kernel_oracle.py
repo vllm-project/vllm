@@ -882,3 +882,26 @@ def test_hpc_clamp_rejected_during_backend_selection():
     )
     assert not supported
     assert reason is not None and "SwiGLU clamp" in reason
+
+
+@pytest.mark.parametrize("in_dtype", [torch.bfloat16, torch.float16])
+def test_aiter_unquantized_clamp_requires_bf16(in_dtype):
+    """AITER drops (or rejects) the clamp for unquantized fp16, so selection
+    must exclude it there and leave bf16 to its other checks."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterUnquantizedExperts,
+    )
+
+    config = make_dummy_moe_config(
+        hidden_dim=128, intermediate_size=128, in_dtype=in_dtype
+    )
+    config.swiglu_limit = 10.0
+    supported, reason = AiterUnquantizedExperts.is_supported_config(
+        AiterUnquantizedExperts,
+        config,
+        None,
+        None,
+        AiterUnquantizedExperts.activation_format(),
+    )
+    clamp_rejected = not supported and "SwiGLU clamp" in (reason or "")
+    assert clamp_rejected == (in_dtype == torch.float16)

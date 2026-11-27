@@ -37,6 +37,9 @@ import flydsl.expr as fx  # noqa: E402
 from tests.models.minimax_m3.amd_specialized_decode import (  # noqa: E402
     _xcd_stress as xs,
 )
+from tests.models.minimax_m3.amd_specialized_decode._reference import (  # noqa: E402
+    reference_experts,
+)
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (  # noqa: E402
     gemma_fused_add_rmsnorm,
 )
@@ -84,17 +87,24 @@ def weights():
         )
 
     def param(t):
-        return torch.nn.Parameter(t, requires_grad=False)
+        return torch.nn.Parameter(t.clone(), requires_grad=False)
 
+    raw = SimpleNamespace(
+        w13=codes(E, 2 * INTER, H // 2),
+        w2=codes(E, H, INTER // 2),
+        s13=scales(E, 2 * INTER, H // 32),
+        s2=scales(E, H, INTER // 32),
+    )
     w13, w2, s13, s2, _, _ = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         layer=torch.nn.Module(),
-        w13_weight=param(codes(E, 2 * INTER, H // 2)),
-        w2_weight=param(codes(E, H, INTER // 2)),
-        w13_weight_scale=param(scales(E, 2 * INTER, H // 32)),
-        w2_weight_scale=param(scales(E, H, INTER // 32)),
+        w13_weight=param(raw.w13),
+        w2_weight=param(raw.w2),
+        w13_weight_scale=param(raw.s13),
+        w2_weight_scale=param(raw.s2),
     )
     return SimpleNamespace(
+        raw=raw,
         w13=w13,
         w2=w2,
         s13=s13,
@@ -102,25 +112,6 @@ def weights():
         post_norm=torch.randn(H, device=dev, generator=g).mul(0.1).bfloat16(),
         router=torch.randn(ffn.EXPERTS, H, device=dev, generator=g).mul(0.02),
         router_bias=torch.randn(ffn.EXPERTS, device=dev, generator=g).mul(0.01),
-    )
-
-
-def _native_experts(x, w, ids, wts):
-    from aiter import ActivationType, QuantType
-    from aiter.fused_moe import fused_moe
-
-    return fused_moe(
-        x,
-        w.w13,
-        w.w2,
-        wts,
-        ids,
-        activation=ActivationType.Swiglu,
-        quant_type=QuantType.per_1x32,
-        w1_scale=w.s13,
-        w2_scale=w.s2,
-        gate_mode="separated",
-        swiglu_limit=ffn.LIMIT,
     )
 
 
@@ -203,7 +194,7 @@ def _run(weights, s, seed=1, inputs=None, slots=None):
 @pytest.mark.parametrize("s", [1, 3, 16])
 def test_ffn_stages_match_native(weights, s):
     """Seam residual (exact), Gemma norm, FP32 router, top-4 and the shared +
-    routed A16W4 experts, each against its native op."""
+    routed A16W4 experts, each against its native op or an FP32 reference."""
     r = _run(weights, s)
     want_x, want_res = gemma_fused_add_rmsnorm(
         r.part, r.residual, weights.post_norm, ffn.EPS
@@ -231,7 +222,7 @@ def test_ffn_stages_match_native(weights, s):
     shared = torch.full((s, 1), ffn.SHARED, dtype=torch.int32, device=r.x.device)
     all_ids = torch.cat([r.ids, shared], 1)
     all_wts = torch.cat([r.wts, torch.ones_like(r.wts[:, :1])], 1)
-    cos, rel = _metrics(r.out, _native_experts(r.x, weights, all_ids, all_wts))
+    cos, rel = _metrics(r.out, reference_experts(r.x, weights.raw, all_ids, all_wts))
     assert cos > 0.9999 and rel < 1e-2
 
 
