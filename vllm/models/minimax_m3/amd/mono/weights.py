@@ -26,7 +26,7 @@ from aiter import dtypes
 from aiter.ops.quant import pertoken_quant
 from aiter.ops.shuffle import shuffle_weight
 
-from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import row_major_weight
+from vllm.model_executor.kernels.linear.mxfp8.aiter import row_major_weight
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )

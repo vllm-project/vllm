@@ -20,8 +20,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+from vllm.model_executor.kernels.linear.mxfp8.aiter import (
     AiterFlyDSLMxfp8LinearKernel,
+    AiterTritonMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     RocmDotScaledMxfp8LinearKernel,
@@ -134,7 +135,12 @@ def takes_rocm_mxfp8_input(linear: nn.Module) -> bool:
     return (
         get_input_quant_key(linear) == kMxfp8Dynamic
         and isinstance(
-            kernel, (RocmDotScaledMxfp8LinearKernel, AiterFlyDSLMxfp8LinearKernel)
+            kernel,
+            (
+                RocmDotScaledMxfp8LinearKernel,
+                AiterFlyDSLMxfp8LinearKernel,
+                AiterTritonMxfp8LinearKernel,
+            ),
         )
         and kernel.supports_quantized_input(linear)
     )
