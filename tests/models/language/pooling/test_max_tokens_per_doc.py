@@ -69,7 +69,7 @@ RERANK_CONFIGS = [
     ),
     # 3. bi-encoder
     TestConfig(
-        model="vllm-project/multilingual-e5-small",
+        model="vllm/multilingual-e5-small",
         args=["--enforce-eager", "--max-model-len", "512"],
         # This model has produced both prompt-token totals in CI/local cache;
         # keep truncation checks exact while tolerating the boundary delta.
