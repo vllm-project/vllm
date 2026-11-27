@@ -24,9 +24,9 @@ use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::EngineCoreRequest;
-use crate::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
+use crate::protocol::utility::{CheckpointState, EngineHealthState, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
-use crate::transport::{self, ConnectedEngine};
+use crate::transport::{self, ConnectedEngine, EngineId};
 
 pub(crate) mod imp;
 mod output_channel;
@@ -566,6 +566,19 @@ impl EngineCoreClient {
             .collect()
     }
 
+    /// Return the routing identity of each connected engine with the
+    /// data-parallel rank it reported in its ready response.
+    pub fn engine_ranks(&self) -> Vec<(EngineId, u32)> {
+        (self.engines.iter())
+            .map(|engine| {
+                (
+                    engine.engine_id.clone(),
+                    engine.ready_response.data_parallel_rank,
+                )
+            })
+            .collect()
+    }
+
     /// Return the engine identities of all engines connected to this client.
     pub fn engine_identities(&self) -> Vec<&[u8]> {
         self.engines.iter().map(|engine| &*engine.engine_id).collect()
@@ -1023,6 +1036,24 @@ impl EngineCoreClient {
     /// Return the committed weight version agreed on by every connected engine.
     pub async fn get_weight_version(&self) -> Result<String> {
         self.call_utility_consensus("get_weight_version", ()).await
+    }
+
+    /// Ask the given engine whether it can run the model now: an idle engine
+    /// runs a forward probe before it answers.
+    ///
+    /// The returned future owns what it needs, so callers can run it detached
+    /// from any one request.
+    pub fn check_health_generate(
+        &self,
+        engine_id: &EngineId,
+    ) -> impl Future<Output = Result<EngineHealthState>> + Send + 'static {
+        let inner = self.inner.clone();
+        let engine_id = engine_id.clone();
+        async move {
+            let mut states =
+                (inner.call_utility_on(&[engine_id], "check_health_generate", (), None)).await?;
+            Ok(states.pop().expect("one result per engine"))
+        }
     }
 
     /// Return whether the engine is currently sleeping at any level.

@@ -18,6 +18,7 @@ use super::body_guard::hold_until_body_dropped;
 const EXCLUDED_HANDLERS: &[&str] = &[
     "/metrics",
     "/health",
+    "/health_generate",
     "/load",
     "/ping",
     "/version",

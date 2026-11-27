@@ -290,16 +290,32 @@ impl ClientInner {
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
     {
+        self.call_utility_on(&self.engine_ids, method, args, recheck).await
+    }
+
+    /// [`Self::call_utility`] on the given engines only, returning one result
+    /// per engine in the given order.
+    pub async fn call_utility_on<T, A>(
+        self: &Arc<Self>,
+        engine_ids: &[EngineId],
+        method: &str,
+        args: A,
+        recheck: Option<RecheckGuard>,
+    ) -> Result<Vec<T>>
+    where
+        T: serde::de::DeserializeOwned,
+        A: serde::Serialize + std::fmt::Debug,
+    {
         trace!(
             method,
             client_index = self.client_index,
-            engine_count = self.engine_ids.len(),
+            engine_count = engine_ids.len(),
             "sending utility request"
         );
 
-        let mut call_ids = Vec::with_capacity(self.engine_ids.len());
-        let mut calls = Vec::with_capacity(self.engine_ids.len());
-        let prepared = self.engine_ids.iter().try_for_each(|engine_id| {
+        let mut call_ids = Vec::with_capacity(engine_ids.len());
+        let mut calls = Vec::with_capacity(engine_ids.len());
+        let prepared = engine_ids.iter().try_for_each(|engine_id| {
             let (call_id, rx) = self.allocate_and_register_utility_call()?;
             call_ids.push(call_id);
             let request = EngineCoreUtilityRequest::new(self.client_index, call_id, method, &args)?;

@@ -127,6 +127,7 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
+        .route("/health_generate", get(health::health_generate))
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
