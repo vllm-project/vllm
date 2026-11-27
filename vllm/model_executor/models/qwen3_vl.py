@@ -237,7 +237,7 @@ if HAS_TRITON:
         off01 = (hf * NUM_GRID + wc) * HIDDEN_DIM
         off10 = (hc * NUM_GRID + wf) * HIDDEN_DIM
         off11 = (hc * NUM_GRID + wc) * HIDDEN_DIM
-        out_off = pid * HIDDEN_DIM
+        out_off = pid.to(tl.int64) * HIDDEN_DIM
 
         # Cast weights to output dtype so the multiply-accumulate stays
         # in the same precision as the native PyTorch implementation.

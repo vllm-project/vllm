@@ -121,3 +121,25 @@ def test_temporal_repeat(dtype: torch.dtype) -> None:
 
     expected = out_single.repeat(t_multi, 1)
     torch.testing.assert_close(out_multi, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
+def test_output_offset_beyond_int32() -> None:
+    """Rows whose output element offset exceeds the int32 range are written."""
+    dtype = torch.bfloat16
+    h, w = NUM_GRID_PER_SIDE, NUM_GRID_PER_SIDE
+    t = 2**31 // (h * w * HIDDEN_DIM) + 1
+
+    torch.manual_seed(42)
+    embed_weight = torch.randn(
+        NUM_GRID_PER_SIDE * NUM_GRID_PER_SIDE,
+        HIDDEN_DIM,
+        device=DEVICE,
+        dtype=dtype,
+    )
+
+    out = triton_pos_embed_interpolate(
+        embed_weight, t, h, w, NUM_GRID_PER_SIDE, SPATIAL_MERGE_SIZE, dtype
+    )
+
+    torch.testing.assert_close(out[-h * w :], out[: h * w], atol=0, rtol=0)
