@@ -52,6 +52,7 @@ from vllm.exceptions import (
     GenerationError,
     PromptUpdateMismatchError,
     RetryableRequestError,
+    VLLMClientError,
     VLLMValidationError,
 )
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
@@ -413,7 +414,7 @@ class ServingTokens(GenerateBaseServing):
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
 
-        engine_input = await self.build_engine_input(request)
+        engine_input = await self.build_engine_input(request, mm_reservations)
 
         # Offsets are relative to the decoder prompt, so they are not
         # meaningful for encoder-decoder models.
@@ -537,7 +538,11 @@ class ServingTokens(GenerateBaseServing):
             derender_request=derender_request,
         )
 
-    async def build_engine_input(self, request: GenerateRequest) -> EngineInput:
+    async def build_engine_input(
+        self,
+        request: GenerateRequest,
+        mm_reservations: list[MMTensorReservation],
+    ) -> EngineInput:
         engine_input: EngineInput
         features = request.features
 
@@ -584,9 +589,50 @@ class ServingTokens(GenerateBaseServing):
 
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
-            mm_kwargs = mm_kwargs_from_features(features)
-            # These tensors were rendered on the P0 server and were not
-            # recorded in its processor cache. Keep them out of the P1 LRU too.
+            # `null` entries fall back to `kwargs_data` or the cache.
+            references = [
+                ref
+                for refs in (features.kwargs_refs or {}).values()
+                for ref in refs
+                if ref is not None
+            ]
+            if references:
+                tensor_refs = self._mm_tensor_refs
+                if tensor_refs is None:
+                    raise VLLMClientError(
+                        "kwargs_refs are disabled on this server. Start it "
+                        "with --mm-tensor-refs-config to enable them."
+                    )
+                # Reject bad references before queueing or downloading.
+                for ref in references:
+                    tensor_refs.reader.validate(ref)
+                nbytes = validate_mm_tensor_request_size(
+                    references, tensor_refs.config.max_request_bytes
+                )
+                # The downloaded bytes and the decoded tensors.
+                reservation = await tensor_refs.memory.reserve(2 * nbytes)
+
+                mm_reservations.append(reservation)
+                try:
+                    mm_kwargs = await run_in_read_slot(
+                        tensor_refs.read_slots,
+                        partial(
+                            mm_kwargs_from_features,
+                            features,
+                            reference_loader=self._load_external_mm_item,
+                        ),
+                        reservation,
+                        tensor_refs.read_executor,
+                    )
+                except (
+                    MMTensorTransportError,
+                    RetryableRequestError,
+                    ValueError,
+                ) as e:
+                    raise e
+            else:
+                mm_kwargs = mm_kwargs_from_features(features)
+
             kwargs_data = features.kwargs_data or {}
             for modality, items in mm_kwargs.items():
                 full_tensor_items = kwargs_data.get(modality)

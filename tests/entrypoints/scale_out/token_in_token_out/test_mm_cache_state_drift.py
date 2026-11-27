@@ -60,10 +60,7 @@ async def test_prerendered_features_do_not_evict_processor_cache(client):
             {
                 "role": "user",
                 "content": [
-                    *(
-                        {"type": "image_url", "image_url": {"url": url}}
-                        for url in urls
-                    ),
+                    *({"type": "image_url", "image_url": {"url": url}} for url in urls),
                     {"type": "text", "text": "Describe these images."},
                 ],
             }
@@ -123,9 +120,7 @@ async def test_prerendered_features_do_not_evict_processor_cache(client):
             "token_ids": original_rendered["token_ids"],
             "features": {
                 "mm_hashes": original_rendered["features"]["mm_hashes"],
-                "mm_placeholders": original_rendered["features"][
-                    "mm_placeholders"
-                ],
+                "mm_placeholders": original_rendered["features"]["mm_placeholders"],
             },
             "sampling_params": {"max_tokens": 1, "temperature": 0.0},
         },
