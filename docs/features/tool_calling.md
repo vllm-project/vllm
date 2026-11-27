@@ -474,6 +474,8 @@ Supported models:
 
 Flags: `--tool-call-parser cohere_command4 --reasoning-parser cohere_command4`.
 
+Both Cohere Command parsers reject malformed tool parameter schemas with HTTP 400 and identify `tools` as the invalid request parameter.
+
 Note: the Cohere parser requires the `cohere_melody` package, which is not installed by default. Before using this parser please install the [cohere_melody](https://pypi.org/project/cohere-melody/) package.
 
 ### LongCat-Flash-Chat Models (`longcat`)

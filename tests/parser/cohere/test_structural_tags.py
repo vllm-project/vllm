@@ -480,3 +480,16 @@ class TestCollectToolSchemaDefs:
             [CohereNormalizedTool(name="get_weather", parameters=params)]
         )
         assert params == NESTED_DEFS_PARAMETERS
+
+
+@pytest.mark.parametrize("property_schema", [1, "string", None])
+def test_malformed_tool_property_is_a_validation_error(property_schema):
+    """Invalid client schemas must not escape as server-side RuntimeErrors."""
+    parameters = {"type": "object", "properties": {"city": property_schema}}
+    with pytest.raises(VLLMValidationError, match="tool.*schema") as exc:
+        collect_tool_schema(
+            [CohereNormalizedTool(name="get_weather", parameters=parameters)]
+        )
+    assert exc.value.parameter == "tools"
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert parameters == {"type": "object", "properties": {"city": property_schema}}
