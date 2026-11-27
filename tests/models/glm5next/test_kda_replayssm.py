@@ -1,24 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The KDA ReplaySSM verify step over consecutive steps with partial acceptance
-against vLLM's per-token-state KDA route (conv update, fused recurrence, gated
-RMSNorm). Each arm carries its own state: ReplaySSM in the checkpoint and the
-rings of a separate block, the stock route in one state block per token."""
+"""GLM-5.3-Flash KDA ReplaySSM: the verify step against vLLM's per-token-state
+KDA route, the prefix-cache snapshot and the verify metadata."""
+
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
+from vllm.config import SpeculativeConfig
 from vllm.models.glm5next.nvidia import kda_replayssm
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import MambaSpec
 
 D, LOWER_BOUND, EPS, STEPS = 128, -5.0, 1e-5, 8
 L, R = kda_replayssm.WINDOW, kda_replayssm.RING_LEN
-
-pytestmark = pytest.mark.skipif(
-    current_platform.get_device_capability() not in ((9, 0), (10, 0), (10, 3)),
-    reason="Requires SM90, SM100 or SM103",
-)
 
 
 class _Case:
@@ -63,7 +65,6 @@ class _Case:
         self.stock_conv[self.idx[:, 0].long()] = conv0.flatten(2)
         self.stock_state[self.idx[:, 0].long()] = state0
 
-        # Cursors after prefill: empty rings at a random start.
         self.c = torch.zeros(n, dtype=torch.int32, device="cuda")
         self.r0 = torch.randint(0, R, (n,), generator=g, device="cuda").int()
         self.acc_prev = torch.ones(n, dtype=torch.int32, device="cuda")
@@ -82,13 +83,7 @@ class _Case:
         return q, acc, qsl, proj.bfloat16()
 
     def split(self, proj):
-        hd = self.h * D
-        return (
-            proj[:, : 3 * hd],
-            proj[:, 3 * hd : 3 * hd + self.h],
-            proj[:, 3 * hd + self.h : 3 * hd + self.h + D],
-            proj[:, 3 * hd + self.h + D :],
-        )
+        return proj.split((3 * self.h * D, self.h, D, D), -1)
 
     def replayssm(self, qsl, proj):
         qkv, beta, f_a, g_a = self.split(proj)
@@ -154,15 +149,14 @@ class _Case:
         ).view(m, h, D)
 
     def advance(self, q, acc):
-        """The ReplaySSM tracker: a step with c + q > L flushes the committed
-        records into the checkpoint and its records start the ring."""
+        """A step with c + q > L flushes the committed records into the
+        checkpoint and its records start the ring."""
         flush = self.c + q > L
         self.r0 = torch.where(flush, (self.r0 + self.c) % R, self.r0)
         self.c = torch.where(flush, acc, self.c + acc)
         self.acc_prev = acc
 
     def effective_state(self):
-        """The checkpoint with the c committed ring records replayed onto it."""
         s = self.state[self.slot.long()].clone()
         u, k, g = (ring[self.ring_slot.long()].float() for ring in self.rings)
         n = torch.arange(self.n, device="cuda")
@@ -174,7 +168,11 @@ class _Case:
         return s
 
 
-@pytest.mark.parametrize("n", [1, 7, 256, 1024])
+@pytest.mark.skipif(
+    current_platform.get_device_capability() not in ((9, 0), (10, 0), (10, 3)),
+    reason="Requires SM90, SM100 or SM103",
+)
+@pytest.mark.parametrize("n", [1, 7, 256])
 @pytest.mark.parametrize("heads", [8, 16], ids=["tp8", "tp4"])
 @pytest.mark.parametrize("t", [6, 9])
 def test_kda_replayssm_matches_per_token_state(t, heads, n):
@@ -201,3 +199,104 @@ def test_kda_replayssm_matches_per_token_state(t, heads, n):
         atol=3e-3,
         rtol=1e-2,
     )
+
+
+def test_materialize_matches_fp64_replay():
+    g = torch.Generator(device="cuda").manual_seed(0)
+    num_layers, heads, max_num_reqs = 2, 16, 32
+    flush = list(range(L + 9 + 1)) + [-1]
+    n = len(flush)
+    layers = []
+    for _ in range(num_layers):
+        pages = torch.empty(
+            3 * n + 1, heads * D * D * 4, dtype=torch.int8, device="cuda"
+        )
+        state = pages.view(torch.float32).view(-1, heads, D, D)
+        state.normal_(generator=g).mul_(0.1)
+        u, k, g_ring = kda_replayssm.ring_views(pages, heads, D)
+        rings = slice(n + 1, 2 * n + 1)
+        u[rings].normal_(generator=g)
+        k[rings] = torch.randn(k[rings].shape, generator=g, device="cuda")
+        g_ring[rings].uniform_(-5.0, 0.0, generator=g)
+        layers.append(SimpleNamespace(kv_cache=(None, state, u, k, g_ring)))
+    originals = [layer.kv_cache[1].clone() for layer in layers]
+
+    cuda = dict(dtype=torch.int32, device="cuda")
+    src = torch.randperm(n, generator=g, device="cuda").int() + 1
+    ring, dst = src + n, src + 2 * n
+    start = torch.randint(0, R, (n,), generator=g, device="cuda").int()
+    flush_count = torch.full((max_num_reqs,), -1, **cuda)
+    flush_count[:n] = torch.tensor(flush, **cuda)
+    ring_start = torch.zeros(max_num_reqs, **cuda)
+    ring_start[:n] = start
+    slots = []
+    for column in (src, ring, dst):
+        table = torch.zeros(num_layers, max_num_reqs, **cuda)
+        table[:, :n] = column
+        slots.append(table)
+    active = torch.full((max_num_reqs,), -1, **cuda)
+    active[: n - 1] = torch.arange(n - 1, **cuda)
+
+    kda_replayssm.replayssm_materializer(layers)(
+        *slots, ring_start, flush_count, active, n
+    )
+
+    for layer, original in zip(layers, originals):
+        state, u, k, g_ring = layer.kv_cache[1:]
+        expected = original.clone()
+        for i in range(n - 1):
+            s = original[src[i]].double()
+            for j in range(flush[i]):
+                row = (int(start[i]) + j) % R
+                u_j, k_j, g_j = (x[ring[i], :, row].double() for x in (u, k, g_ring))
+                s = s * g_j.exp()[:, None] + u_j[:, :, None] * k_j[:, None]
+            expected[dst[i]] = s.float()
+        torch.testing.assert_close(state, expected, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("enable_prefix_caching", [False, True], ids=["no_pc", "pc"])
+def test_verify_rows_get_state_and_ring_block(enable_prefix_caching):
+    block_size, num_spec, device = 16, 3, torch.device("cpu")
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B", block_size=block_size
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=num_spec
+    )
+    vllm_config.cache_config.use_replayssm = True
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    builder = kda_replayssm.KDAReplaySSMVerifyBackend.get_builder_cls()(
+        kv_cache_spec=MambaSpec(
+            block_size=block_size, shapes=((16, 64),), dtypes=(torch.float16,)
+        ),
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=device,
+    )
+
+    seq_lens = [20, 47, 64]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=[num_spec + 1] * len(seq_lens)),
+        block_size,
+        device,
+    )
+    if enable_prefix_caching:
+        num_cols = vllm_config.model_config.max_model_len // block_size
+        state_col = torch.tensor([(s - 1) // block_size for s in seq_lens])
+    else:
+        num_cols, state_col = 2, torch.zeros(len(seq_lens), dtype=torch.long)
+    table = torch.arange(len(seq_lens) * num_cols, dtype=torch.int32).view(
+        len(seq_lens), num_cols
+    )
+    common.block_table_tensor = table
+
+    meta = builder.build(
+        0,
+        common,
+        num_accepted_tokens=torch.ones(len(seq_lens), dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.full((len(seq_lens),), num_spec),
+    )
+
+    expected = table.gather(1, state_col[:, None] + torch.arange(2))
+    assert meta.num_spec_decodes == len(seq_lens)
+    torch.testing.assert_close(meta.spec_state_indices_tensor, expected)

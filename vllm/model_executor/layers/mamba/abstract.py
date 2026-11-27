@@ -32,7 +32,6 @@ class MambaBase(AttentionLayerBase):
     state_alignment: int = 1
     _replayssm_ring_start: torch.Tensor
     _replayssm_prev_num_accepted: torch.Tensor
-    # Builds the prefix-cache snapshot writer of rings kept in their own block.
     replayssm_materializer: Callable[[Sequence["MambaBase"]], Callable] | None = None
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:

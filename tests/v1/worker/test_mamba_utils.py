@@ -778,7 +778,6 @@ def test_replayssm_ring_block_folds_before_precopy_and_publishes():
     from vllm.models.glm5next.nvidia import kda_replayssm
 
     device = torch.device("cuda")
-    # The rings fit in the state's page from head_dim 80 on.
     heads, dim = 1, 128
     conv_shape = (dim, 6) if is_conv_state_dim_first() else (6, dim)
     spec = MambaSpec(
@@ -829,7 +828,6 @@ def test_replayssm_ring_block_folds_before_precopy_and_publishes():
             s = s * g[:, row].exp()[:, None] + u[:, row, :, None] * k[:, row, None]
         return s.float()
 
-    # The live state is in block 1, its committed records in block 2's rings.
     conv.normal_()
     state.normal_()
     for block in (2, 3):
@@ -868,8 +866,7 @@ def test_replayssm_ring_block_folds_before_precopy_and_publishes():
     expected = live_conv[:, 2:] if is_conv_state_dim_first() else live_conv[2:]
     torch.testing.assert_close(shifted, expected, atol=0, rtol=0)
 
-    # Two of the step's tokens accepted: 17 tokens, so block 1 gets the state
-    # at 16, the live state advanced by one record from block 3's rings.
+    # 17 tokens after acceptance: block 1 gets the state at 16.
     published = replay(2, 3, 16, 1)
     assert ctx.replayssm is not None
     ctx.replayssm.postprocess(

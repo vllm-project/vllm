@@ -1,4 +1,3 @@
-// tvm-ffi entry points of the KDA ReplaySSM step.
 #include <tvm/ffi/tvm_ffi.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include "kda_replayssm.cuh"
@@ -51,26 +50,10 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
                double lower_bound, double scale, double norm_eps,
                TensorView scratch) {
   check_ndim(x, "x", 4);
-  check_ndim(beta, "beta", 2);
-  check_ndim(f_a, "f_a", 2);
-  check_ndim(g_a, "g_a", 2);
   check_ndim(conv_weight, "conv_weight", 4);
-  check_ndim(A_log, "A_log", 1);
-  check_ndim(dt_bias, "dt_bias", 2);
-  check_ndim(f_b_weight, "f_b_weight", 3);
-  check_ndim(g_b_weight, "g_b_weight", 3);
-  check_ndim(norm_weight, "norm_weight", 1);
-  check_ndim(query_start_loc, "query_start_loc", 1);
   check_ndim(slot, "slot", 1);
-  check_ndim(ring_slot, "ring_slot", 1);
-  check_ndim(num_accepted, "num_accepted", 1);
-  check_ndim(ring_start, "ring_start", 1);
-  check_ndim(num_committed, "num_committed", 1);
   check_ndim(conv_state, "conv_state", 5);
-  check_ndim(checkpoint, "checkpoint", 4);
   check_ndim(u_ring, "u_ring", 4);
-  check_ndim(k_ring, "k_ring", 4);
-  check_ndim(g_ring, "g_ring", 4);
   check_ndim(out, "out", 3);
   const int64_t M = x.size(0);
   const int64_t P = x.size(1);
@@ -192,15 +175,7 @@ void step_impl(TensorView x, TensorView beta, TensorView f_a, TensorView g_a,
   kda_replayssm::Ctx ctx;
   ctx.stream = static_cast<cudaStream_t>(
       TVMFFIEnvGetStream(x.device().device_type, device));
-  ctx.device = device;
-  ctx.sm_count = 0;
-  TVM_FFI_CHECK(
-      cudaDeviceGetAttribute(&ctx.sm_count, cudaDevAttrMultiProcessorCount,
-                             device) == cudaSuccess,
-      RuntimeError)
-      << "cudaDeviceGetAttribute failed";
   ctx.scratch = scratch.data_ptr();
-  ctx.scratch_bytes = static_cast<size_t>(scratch.size(0));
   kda_replayssm::kernel_run(args, ctx);
   cudaError_t err = cudaGetLastError();
   TVM_FFI_CHECK(err == cudaSuccess, RuntimeError)

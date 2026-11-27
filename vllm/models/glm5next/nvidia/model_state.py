@@ -24,8 +24,7 @@ class Glm5NextModelState(MambaHybridModelState):
             model.build_specialized_decode()
 
     def prepare_attn(self, input_batch, *args, **kwargs):
-        """With KDA ReplaySSM, the runner's trackers commit the verify rows: GDN's
-        spec rows, which need not lead the batch. Every other row is a prefill."""
+        """GDN's verify rows need not lead the batch; all other rows prefill."""
         attn_metadata = super().prepare_attn(input_batch, *args, **kwargs)
         metadata = next(
             (m for m in attn_metadata.values() if isinstance(m, GDNAttentionMetadata)),

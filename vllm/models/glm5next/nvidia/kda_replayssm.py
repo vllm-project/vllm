@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash KDA ReplaySSM verify step (CUDA, sm_90a/100a/103a).
-
-One launch per layer covers the `f_b` / `g_b` projections, the short conv, the
-ring replay, the new tokens and the gated RMSNorm. See ops/kda_replayssm.cu.
-"""
+"""GLM-5.3-Flash KDA ReplaySSM verify step (CUDA, sm_90a/100a/103a)."""
 
 import functools
 import math
@@ -31,22 +27,17 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 RING_LEN = 32
 WINDOW = 16
 RING_DTYPES = (torch.float32, torch.bfloat16, torch.float32)
-# Layers per materialize program: few programs to skip, enough to publish.
 MATERIALIZE_LAYERS = 8
 _OPS = Path(__file__).parent / "ops"
-
-
-def ring_shapes(num_heads: int, head_dim: int) -> tuple[tuple[int, int, int], ...]:
-    """The u, k and g rings in their own block: `[H, R, D]` each."""
-    return ((num_heads, RING_LEN, head_dim),) * 3
 
 
 def ring_views(
     pages: torch.Tensor, num_heads: int, head_dim: int
 ) -> tuple[torch.Tensor, ...]:
-    """The u, k and g rings laid out from the start of each `[S, C]` int8 page."""
+    """The u, k and g rings `[H, R, D]` from the start of each `[S, C]` int8 page."""
+    shape = (num_heads, RING_LEN, head_dim)
     views, offset = [], 0
-    for shape, dtype in zip(ring_shapes(num_heads, head_dim), RING_DTYPES):
+    for dtype in RING_DTYPES:
         nbytes = math.prod(shape) * dtype.itemsize
         views.append(pages[:, offset : offset + nbytes].view(dtype).view(-1, *shape))
         offset += nbytes
@@ -155,13 +146,8 @@ def kda_replayssm_step(
     scale: float,
     norm_eps: float,
 ) -> None:
-    """One step of N requests with up to T tokens each (`conv_state` holds T + 2
-    rows), on the packed token rows `[M, ...]`; out rows past the batch total
-    are zeroed.
-
-    The shapes and dtypes are those of `step` in ops/kda_replayssm_binding.cu.
-    Request n's rings are at slot `ring_slot[n]`, its other state at `slot[n]`.
-    """
+    """Shapes and dtypes are those of `step` in ops/kda_replayssm_binding.cu.
+    Out rows past the batch total are zeroed."""
     module = _module()
     M, _, H, D = x.shape
     scratch_bytes = module.scratch_bytes(M, H, D)
@@ -185,8 +171,7 @@ class StepCursors(NamedTuple):
 
 
 def step_cursors(layer, metadata: GDNAttentionMetadata) -> StepCursors:
-    """The step's verify cursors, cached per metadata in the forward context.
-    The runner commits the tracker's cursors after acceptance."""
+    """The step's verify cursors, cached per metadata in the forward context."""
     held = get_forward_context().additional_kwargs.setdefault(
         "kda_replayssm_cursors", {}
     )
@@ -200,7 +185,6 @@ def step_cursors(layer, metadata: GDNAttentionMetadata) -> StepCursors:
     cursors = StepCursors(
         query_start_loc=metadata.spec_query_start_loc,
         slot=slot,
-        # The rings fill the request's speculative block.
         ring_slot=metadata.spec_state_indices_tensor[:, 1].contiguous(),
         num_accepted=metadata.num_accepted_tokens,
         ring_start=layer._replayssm_ring_start.index_select(0, slot),
@@ -267,10 +251,8 @@ def _materialize_kernel(
 
 
 def replayssm_materializer(mixers: Sequence) -> Callable[..., None]:
-    """The prefix-cache snapshot writer of these KDA layers: it stores each
-    `src` checkpoint `[H, V, K]`, advanced by the first `flush_count` records
-    of the rings at `ring_slots`, at `dst` (a `[layers, max_num_reqs]` slot
-    table each), for the requests in `active_request_indices`."""
+    """Stores each `src` checkpoint, advanced by the first `flush_count` ring
+    records, at `dst` for the requests in `active_request_indices`."""
     caches = [mixer.kv_cache[1:] for mixer in mixers]
     device = caches[0][0].device
     ptrs, strides = (
@@ -282,6 +264,7 @@ def replayssm_materializer(mixers: Sequence) -> Callable[..., None]:
         for f in (torch.Tensor.data_ptr, lambda t: t.stride(0))
     )
     num_heads, head_dim = caches[0][0].shape[1:3]
+    num_layers = len(caches)
 
     def materialize(
         src_slots: torch.Tensor,
@@ -292,7 +275,6 @@ def replayssm_materializer(mixers: Sequence) -> Callable[..., None]:
         active_request_indices: torch.Tensor,
         num_reqs: int,
     ) -> None:
-        num_layers = len(caches)
         _materialize_kernel[
             (num_reqs, num_heads * triton.cdiv(num_layers, MATERIALIZE_LAYERS))
         ](

@@ -453,7 +453,6 @@ class ReplaySSMModelContext:
     ring_slots_ptrs: torch.Tensor
     dst_slots_ptrs: torch.Tensor
     num_layers: torch.Tensor
-    # Prefix-cache snapshots only; they read Mamba2's states and A.
     materialize_tables: _ReplaySSMMaterializeTables | None
     materializer: Callable[..., None] | None
     src_slots: torch.Tensor

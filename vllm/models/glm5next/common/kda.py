@@ -616,7 +616,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
             self.replayssm_buffer_len = kda_replayssm.WINDOW
             self.replayssm_materializer = kda_replayssm.replayssm_materializer
-            # Per-slot cursors, bound by initialize_replayssm_ring_trackers().
             self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
             self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
         else:
@@ -1112,9 +1111,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g_a: torch.Tensor,
         out: torch.Tensor,
     ) -> tuple[int, torch.Tensor | None]:
-        """Returns the leading token rows written to `out` and, in a step that
-        mixes verify rows and prefills, their output `[1, tokens, H, D]` for
-        `spec_token_indx` instead."""
+        """Returns the number of leading rows written to `out`; in a step with
+        prefills, the verify rows' output for `spec_token_indx` instead."""
         if not metadata.num_spec_decodes:
             return 0, None
         cursors = kda_replayssm.step_cursors(self, metadata)

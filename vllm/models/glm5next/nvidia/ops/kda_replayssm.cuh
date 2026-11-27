@@ -1,7 +1,6 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #include <cstdint>
 namespace kda_replayssm {
 struct Dims {
@@ -46,10 +45,8 @@ struct Args {
   float norm_eps;
 };
 struct Ctx {
-  cudaStream_t stream;  // the only stream the call may use
-  int device, sm_count;
-  void* scratch;
-  size_t scratch_bytes;  // uninitialized at entry
+  cudaStream_t stream;
+  void* scratch;  // uninitialized at entry
 };
 void kernel_workspace(const Dims&, size_t* scratch_bytes);
 // enqueue on ctx.stream; no sync, no allocation

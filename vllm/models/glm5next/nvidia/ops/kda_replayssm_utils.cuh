@@ -1,7 +1,6 @@
 #pragma once
 #include <cstdint>
 #include <cuda_runtime.h>
-#include <vector_types.h>
 
 #include <utility>
 
