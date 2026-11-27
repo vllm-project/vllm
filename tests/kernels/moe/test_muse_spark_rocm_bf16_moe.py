@@ -881,7 +881,7 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
             expert_map=None if kernel_map is None else kernel_map.cuda(),
         )
         launch()
-        assert experts._route_output is not None
+        assert isinstance(experts._route_output, torch.Tensor)
         routes = experts._route_output.clone()
         out = torch.empty(num_tokens, hidden_size, device="cuda", dtype=dtype)
         reducer = experts.finalize_weight_and_reduce_impl()
