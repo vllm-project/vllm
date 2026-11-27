@@ -136,7 +136,9 @@ class SdsaFixture:
         self.builders = []
         for cache, name in zip((self.layer.indexer_cache, core), self.names):
             builder = cache.get_attn_backend().get_builder_cls()
-            spec = cache.get_kv_cache_config(config).spec  # type: ignore[union-attr]
+            kv_cache_config = cache.get_kv_cache_config(config)
+            assert kv_cache_config is not None
+            spec = kv_cache_config.spec
             width = {"block_table_width": self.table.shape[1]}
             kwargs = width if builder.requires_block_table_width else {}
             self.builders.append(
@@ -232,7 +234,9 @@ class SdsaFixture:
         output is softmax attention over them."""
         rows, top_k, core = len(self.position), self.sdsa.top_k, self.layer.core
         selected = self.selected_positions(rows)
-        current_workspace_manager()._current_workspaces[0].fill_(0xA5)  # type: ignore[union-attr]
+        workspace = current_workspace_manager()._current_workspaces[0]
+        assert workspace is not None
+        workspace.fill_(0xA5)
         counts = (self.position + 1).clamp(min=0, max=top_k)
         valid = torch.arange(top_k, device="cuda") < counts[:, None]
         assert torch.equal(selected >= 0, valid)
@@ -242,7 +246,8 @@ class SdsaFixture:
         keys_values = self.history[..., 128:].flatten(0, 1).float()
         query = inputs[2][:rows].float()
         tolerance = dict(rtol=0.02, atol=0.01)
-        if core.impl.fp8_kv:  # type: ignore[attr-defined]  # the layer rounds Q, K, V and P to E4M3
+        # The layer rounds Q, K, V and P to E4M3.
+        if core.impl.fp8_kv:  # type: ignore[attr-defined]
             kv_scale = torch.tensor([K_SCALE] * HEAD + [V_SCALE] * HEAD, device="cuda")
             keys_values = (keys_values / kv_scale).to(E4M3).float() * kv_scale
             query = (query / Q_SCALE).to(E4M3).float() * Q_SCALE
@@ -430,7 +435,9 @@ def test_decode_cudagraph_replays_changed_metadata(
         with torch.cuda.stream(stream), forward:
             if index == 0:  # captures the graph
                 graph(*inputs)
-            output = graph(*inputs).clone()  # type: ignore[union-attr]
+            output = graph(*inputs)
+            assert output is not None
+            output = output.clone()
         torch.cuda.current_stream().wait_stream(stream)
         fixture.check(inputs, output)
     graph.clear_graphs()

@@ -754,9 +754,8 @@ def _mock_config_for_cudagraph_sizes(
         if num_speculative_tokens
         else None
     )
-    props = vars(VllmConfig)
-    config.num_speculative_tokens = props["num_speculative_tokens"].fget(config)
-    config.uniform_decode_query_len = props["uniform_decode_query_len"].fget(config)
+    config.num_speculative_tokens = VllmConfig.num_speculative_tokens.fget(config)  # type: ignore[attr-defined]
+    config.uniform_decode_query_len = VllmConfig.uniform_decode_query_len.fget(config)  # type: ignore[attr-defined]
     config.get_decode_cudagraph_query_lens = lambda decode_query_len: (
         VllmConfig.get_decode_cudagraph_query_lens(config, decode_query_len)
     )

@@ -695,7 +695,8 @@ class TestWireTypes:
             ),
         )
         engine._prepare_source_plan(params, num_trainer_ranks=32)
-        engine._reshard = Mock()  # type: ignore[method-assign]
+        reshard = Mock()
+        monkeypatch.setattr(engine, "_reshard", reshard)
 
         with pytest.raises(ValueError, match=r"parameter 'invalid'.*MAX_SOURCES=16"):
             engine._prepare_destination_plan(
@@ -707,9 +708,9 @@ class TestWireTypes:
                 )
             )
 
-        engine._reshard.assert_not_called()
+        reshard.assert_not_called()
 
-    def test_update_preflights_all_names_before_reshard(self):
+    def test_update_preflights_all_names_before_reshard(self, monkeypatch):
         engine = object.__new__(M2NWeightTransferEngine)
         engine._handle = object()
         engine.model_update_group = object()
@@ -722,14 +723,15 @@ class TestWireTypes:
                 M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
             )
         ]
-        engine._reshard = Mock()  # type: ignore[method-assign]
+        reshard = Mock()
+        monkeypatch.setattr(engine, "_reshard", reshard)
 
         with pytest.raises(ValueError, match=r"parameter 'unknown'"):
             engine.receive_weights(
                 M2NWeightTransferUpdateInfo(names=["valid", "unknown"])
             )
 
-        engine._reshard.assert_not_called()
+        reshard.assert_not_called()
 
     def test_fallback_tensors_share_one_load_weights_invocation(self, monkeypatch):
         class CoupledModel:
@@ -771,7 +773,7 @@ class TestWireTypes:
             reshard_order.append(meta.name)
             buffer.fill_(len(reshard_order))
 
-        engine._reshard = reshard  # type: ignore[method-assign]
+        monkeypatch.setattr(engine, "_reshard", reshard)
         stream = Mock()
         monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
 

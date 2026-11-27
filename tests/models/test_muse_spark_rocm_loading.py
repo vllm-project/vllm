@@ -215,7 +215,12 @@ def test_router_weight_reload_refolds_and_preserves_planes(monkeypatch) -> None:
     moe = MuseSparkMoE.__new__(MuseSparkMoE)
     torch.nn.Module.__init__(moe)
     moe.router = torch.nn.Linear(4, 2, bias=False)
-    moe.router.weight_loader = ReplicatedLinear.weight_loader.__get__(moe.router)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        moe.router,
+        "weight_loader",
+        ReplicatedLinear.weight_loader.__get__(moe.router),
+        raising=False,
+    )
     moe.router.weight.weight_loader = moe._load_router_weight
     moe.router_output_multiplier = 0.25
     moe._router_multiplier_folded = False

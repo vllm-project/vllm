@@ -1053,7 +1053,7 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
     worker.close()
 
 
-def test_worker_does_not_rematerialize_emitted_rows():
+def test_worker_does_not_rematerialize_emitted_rows(monkeypatch):
     worker = _make_worker(1)
     hashes = [b"a" * 32, b"b" * 32]
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
@@ -1067,9 +1067,8 @@ def test_worker_does_not_rematerialize_emitted_rows():
     assert output is not None
 
     assert worker._store is not None
-    worker._store.get_concatenated = Mock(  # type: ignore[method-assign]
-        wraps=worker._store.get_concatenated
-    )
+    get_concatenated = Mock(wraps=worker._store.get_concatenated)
+    monkeypatch.setattr(worker._store, "get_concatenated", get_concatenated)
     second = _metadata(
         0,
         # Async scheduling may build this before the scheduler consumes first.
@@ -1080,7 +1079,7 @@ def test_worker_does_not_rematerialize_emitted_rows():
 
     assert output is not None
     np.testing.assert_array_equal(output["request"].rows, logical[4:])
-    worker._store.get_concatenated.assert_not_called()
+    get_concatenated.assert_not_called()
     worker.close()
 
 

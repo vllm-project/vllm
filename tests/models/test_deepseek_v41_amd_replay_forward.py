@@ -244,7 +244,7 @@ def _model(monkeypatch):
         saved_aux.append(list(result[5]))
         return result
 
-    model._run_layers = wrapped  # type: ignore[method-assign]
+    monkeypatch.setattr(model, "_run_layers", wrapped)
     scattered: list[tuple[torch.Tensor, ...]] = []
     replay = model.decoder_replay_layers
     assert replay is not None
@@ -255,7 +255,7 @@ def _model(monkeypatch):
         scattered.append(result)
         return result
 
-    replay._run = wrapped_run  # type: ignore[method-assign]
+    monkeypatch.setattr(replay, "_run", wrapped_run)
     return model, layers, calls, saved_aux, scattered, insert
 
 
