@@ -1178,8 +1178,10 @@ def test_convert_weights_splits_fused_gqa_qkv(dist_init, default_vllm_config):
     model.self_attn.q_proj.quant_method = SimpleNamespace(uses_meta_device=False)
     assert len(list(weights([fused_weight]))) == 3
     unquantized = (fused_weight[0], fused.bfloat16())
-    with pytest.raises(ValueError, match="split of a tensor in that dtype"):
+    with pytest.raises(ValueError, match="split of a tensor stored like its weight"):
         list(weights([unquantized]))
+    model.self_attn.q_proj.quant_method.uses_meta_device = True
+    assert len(list(weights([unquantized]))) == 3
 
     skipped = ("vision_model.query_key_value.weight", fused)
     assert list(weights([skipped])) == [("vision_tower.q_proj.weight", fused)]
@@ -1267,7 +1269,7 @@ def test_joining_into_a_quantized_module_is_rejected():
     wte += [("model.wte.new_embedding", torch.rand(1, 2))]
 
     model.embed_tokens.quant_method = SimpleNamespace(uses_meta_device=False)
-    with pytest.raises(ValueError, match="split of a tensor in that dtype"):
+    with pytest.raises(ValueError, match="split of a tensor stored like its weight"):
         list(convert(wte))
     model.embed_tokens.quant_method.uses_meta_device = True
     assert [name for name, _ in convert(wte)] == ["model.embed_tokens.weight"]

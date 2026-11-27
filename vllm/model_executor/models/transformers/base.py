@@ -1192,8 +1192,8 @@ class Base(
             ):
                 raise ValueError(
                     f"Cannot convert {name!r} ({tensor.dtype}) into "
-                    f"{converter.target_patterns}: a quantized module (weight dtype "
-                    f"{dtype}) only takes a split of a tensor in that dtype."
+                    f"{converter.target_patterns}: a quantized module only takes a "
+                    f"split of a tensor stored like its weight ({dtype or 'packed'})."
                 )
             target = pending.setdefault(renamed, deepcopy(converter))
             target.add_tensor(renamed, name, converter_pattern, tensor)
