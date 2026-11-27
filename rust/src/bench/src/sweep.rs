@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use crate::backends::build_headers;
 use crate::config::BenchConfig;
 use crate::error::{BenchError, Result};
 use crate::output::json::save_point_result;
 
 /// Reset the server's prefix cache by calling POST /reset_prefix_cache.
-/// Requires VLLM_SERVER_DEV_MODE=1 on the vLLM server.
-async fn reset_prefix_cache(base_url: &str) -> Result<()> {
-    let url = format!("{}/reset_prefix_cache", base_url.trim_end_matches('/'));
+/// Requires --enable-cache-reset on the vLLM server.
+async fn reset_prefix_cache(config: &BenchConfig) -> Result<()> {
+    let url = format!(
+        "{}/reset_prefix_cache",
+        config.base_url.trim_end_matches('/')
+    );
     let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
+    let mut request = client.post(&url);
+    for (key, value) in build_headers(None, &config.extra_headers, &None) {
+        request = request.header(key, value);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| BenchError::Backend(format!("Failed to reset prefix cache: {e}")))?;
@@ -22,7 +29,7 @@ async fn reset_prefix_cache(base_url: &str) -> Result<()> {
         let body = resp.text().await.unwrap_or_default();
         return Err(BenchError::Backend(format!(
             "Failed to reset prefix cache: HTTP {status} — {body}. \
-             Is VLLM_SERVER_DEV_MODE=1 set on the server?"
+             Was the server started with --enable-cache-reset?"
         )));
     }
     Ok(())
@@ -63,7 +70,7 @@ pub async fn run_concurrency_sweep(
         );
 
         if base_config.reset_prefix_cache {
-            reset_prefix_cache(&base_config.base_url).await?;
+            reset_prefix_cache(base_config).await?;
         }
 
         let mut config = base_config.clone();
@@ -123,7 +130,7 @@ pub async fn run_multi_turn_concurrency_sweep(
         );
 
         if base_config.reset_prefix_cache {
-            reset_prefix_cache(&base_config.base_url).await?;
+            reset_prefix_cache(base_config).await?;
         }
 
         let mut config = base_config.clone();
@@ -188,7 +195,7 @@ pub async fn run_rate_sweep(base_config: &BenchConfig, values: &[f64]) -> Result
         );
 
         if base_config.reset_prefix_cache {
-            reset_prefix_cache(&base_config.base_url).await?;
+            reset_prefix_cache(base_config).await?;
         }
 
         let mut config = base_config.clone();

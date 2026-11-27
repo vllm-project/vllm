@@ -331,7 +331,7 @@ def _bench_server(args: argparse.Namespace) -> None:
                     server = ServerProcess(cmd, [], show_stdout=True, session=session)
                     if server.is_server_ready(timeout=1.0):
                         raise RuntimeError(f"{server.server_address} already answers")
-                    server.start(log=log, dev_mode=False)
+                    server.start(log=log, enable_cache_reset=False)
                     try:
                         server.wait_until_ready(
                             timeout, poll_interval=0.05, request_timeout=1.0

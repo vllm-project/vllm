@@ -275,7 +275,7 @@ vllm-bench \
 
 # Scale work with concurrency and reset the prefix cache between points
 # (--sweep-num-prompts-factor sets num_prompts = concurrency * factor;
-#  --reset-prefix-cache requires VLLM_SERVER_DEV_MODE=1 on the server)
+#  --reset-prefix-cache requires --enable-cache-reset on the server)
 vllm-bench \
   --backend vllm --base-url http://127.0.0.1:8000 --model <model-name> \
   --sweep-max-concurrency 1,10,50,100 \
@@ -649,7 +649,7 @@ Computed only when `--max-concurrency` is set and `--request-rate` is `inf`.
 | `--sweep-max-concurrency` | — | Comma-separated concurrency values to sweep (e.g. `1,10,50,100,500`) |
 | `--sweep-request-rate` | — | Comma-separated rate values to sweep, supports `inf` (e.g. `1,10,100,inf`) |
 | `--sweep-num-prompts-factor` | — | Set `num_prompts = concurrency × factor` per concurrency sweep point |
-| `--reset-prefix-cache` | `false` | Reset the server's prefix cache before each sweep iteration (requires `VLLM_SERVER_DEV_MODE=1`) |
+| `--reset-prefix-cache` | `false` | Reset the server's prefix cache before each sweep iteration (requires `--enable-cache-reset` on the server) |
 
 Runs the benchmark once per value, then prints a summary table comparing throughput and latency across all sweep points and identifies the best-throughput configuration. Works in multi-turn mode too. `--sweep-summary-percentiles` appends extra TTFT/TPOT/E2EL columns to the summary, auto-adding any missing percentiles to the computed set so they also appear in result JSON.
 

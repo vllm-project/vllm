@@ -94,6 +94,7 @@ start_server() {
         "--max-num-batched-tokens" "$max_num_batched_tokens"
         "--tensor-parallel-size" "$TP"
         "--enable-prefix-caching"
+        "--enable-cache-reset"
         "--load-format" "dummy"
         "--download-dir" "$DOWNLOAD_DIR"
         "--max-model-len" "$MAX_MODEL_LEN"
@@ -107,12 +108,10 @@ start_server() {
     if [[ -n "$profile_dir" ]]; then
         # Start server with profiling enabled
         local profile_config_json="{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$profile_dir\"}"
-        VLLM_SERVER_DEV_MODE=1 \
-            vllm serve --profiler-config "$profile_config_json" "${common_args_array[@]}" > "$vllm_log" 2>&1 &
+        vllm serve --profiler-config "$profile_config_json" "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     else
         # Start server without profiling
-        VLLM_SERVER_DEV_MODE=1 \
-            vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
+        vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     fi
     local server_pid=$!
 

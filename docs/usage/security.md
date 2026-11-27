@@ -337,7 +337,8 @@ An attacker who can reach the vLLM HTTP server can:
 2. **Cause denial of service** by calling `/pause`, `/scale_elastic_ep`, or `/abort_requests` without a token
 3. **Access operational controls** to manipulate server state (e.g., pausing generation, updating model weights via `/update_weights`)
 4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
-5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
+5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, put the engine to sleep, and access detailed server configuration
+6. **If cache-reset endpoints are enabled without an API key:** Reset the server's shared caches and disrupt other clients
 
 ### Recommended Security Practices
 

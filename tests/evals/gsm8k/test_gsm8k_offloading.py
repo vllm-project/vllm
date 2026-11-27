@@ -105,7 +105,7 @@ def _reset_gpu_prefix_cache(base_url: str) -> None:
     the next run must reload KV data through the connector.
 
     The reset fails while asynchronous offload transfers still hold GPU
-    blocks, so retry until it succeeds.  Requires VLLM_SERVER_DEV_MODE=1.
+    blocks, so retry until it succeeds. Requires `--enable-cache-reset`.
     """
     deadline = time.monotonic() + _OFFLOAD_SYNC_TIMEOUT
     while True:
@@ -298,6 +298,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--max-model-len",
         "4096",
         "--enable-prefix-caching",
+        "--enable-cache-reset",
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
         _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib, cfg.spec_name),
@@ -308,8 +309,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
     with RemoteOpenAIServer(
         cfg.model,
         server_args,
-        # /reset_prefix_cache requires dev mode.
-        env_dict={"VLLM_SERVER_DEV_MODE": "1", **cfg.env_dict},
+        env_dict=cfg.env_dict,
         max_wait_seconds=cfg.startup_timeout,
     ) as server:
         base_url = f"http://{server.host}:{server.port}"

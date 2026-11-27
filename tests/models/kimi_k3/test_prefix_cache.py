@@ -294,10 +294,10 @@ def _serve(deployment: Deployment, mode: Mode) -> Generator[list[RemoteOpenAISer
         stack.callback(RemoteOpenAIServer.shutdown_many, servers)
         next_gpu = 0
         for instance in deployment.instances:
+            server_args = instance.args(mode)
             env = {}
             if deployment.offload:
-                # Enables /reset_prefix_cache.
-                env["VLLM_SERVER_DEV_MODE"] = "1"
+                server_args.append("--enable-cache-reset")
             if deployment.prefill is not None:
                 gpus = range(next_gpu, next_gpu + instance.num_gpus)
                 next_gpu += instance.num_gpus
@@ -307,7 +307,7 @@ def _serve(deployment: Deployment, mode: Mode) -> Generator[list[RemoteOpenAISer
             servers.append(
                 RemoteOpenAIServer(
                     MODEL,
-                    instance.args(mode),
+                    server_args,
                     env_dict=env,
                     max_wait_seconds=STARTUP_TIMEOUT,
                 )

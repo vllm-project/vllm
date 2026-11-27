@@ -639,7 +639,7 @@ pub struct BenchServeArgs {
     pub sweep_request_rate: Option<String>,
 
     /// Reset the server's prefix cache before each sweep iteration.
-    /// Requires VLLM_SERVER_DEV_MODE=1 on the vLLM server.
+    /// Requires --enable-cache-reset on the vLLM server.
     #[arg(long, default_value_t = false)]
     pub reset_prefix_cache: bool,
 

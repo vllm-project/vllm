@@ -49,24 +49,24 @@ class ServerProcess:
     ) -> None:
         self.stop()
 
-    def start(self, *, log: BinaryIO | None = None, dev_mode: bool = True) -> None:
+    def start(
+        self, *, log: BinaryIO | None = None, enable_cache_reset: bool = True
+    ) -> None:
         stdout: BinaryIO | int | None = log
         if log is None and not self.show_stdout:
             stdout = subprocess.DEVNULL
 
-        env = None
-        if dev_mode:
-            # Need `VLLM_SERVER_DEV_MODE=1` for `_reset_caches`
-            env = os.environ | {"VLLM_SERVER_DEV_MODE": "1"}
+        server_cmd = self.server_cmd
+        if enable_cache_reset and server_cmd[0].endswith("vllm"):
+            server_cmd = [*server_cmd, "--enable-cache-reset"]
 
         # Create new process for clean termination
         self.launch_time = time.monotonic()
         self._server_process = subprocess.Popen(
-            self.server_cmd,
+            server_cmd,
             start_new_session=True,
             stdout=stdout,
             stderr=subprocess.STDOUT if log is not None else None,
-            env=env,
         )
         self._stopped = False
 
@@ -161,9 +161,12 @@ class ServerProcess:
         if server_cmd[0].endswith("vllm"):
             server_address = self.server_address
             print(f"Resetting caches at {server_address}")
+            headers = {}
+            if api_key := os.environ.get("OPENAI_API_KEY"):
+                headers["Authorization"] = f"Bearer {api_key}"
 
             for endpoint in self.VLLM_RESET_CACHE_ENDPOINTS:
-                res = requests.post(server_address + endpoint)
+                res = self.http.post(server_address + endpoint, headers=headers)
                 res.raise_for_status()
         elif server_cmd[0].endswith("infinity_emb"):
             if "--vector-disk-cache" in server_cmd:
