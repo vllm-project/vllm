@@ -209,6 +209,34 @@ def test_deferred_store_waits_for_draft_forward(active_cpu_offload_connector):
     assert torch.equal(cpu[0], gpu[0].cpu())
 
 
+def test_load_orders_after_queued_compute(active_cpu_offload_connector):
+    """A load must land after compute queued earlier on its GPU blocks.
+
+    The scheduler can hand a load blocks that a step still in flight uses,
+    e.g. the drafter of a request freed once its sampled tokens arrived.
+    """
+    active, connector, gpu, cpu = active_cpu_offload_connector
+    cpu[0].fill_(7)
+    torch.cuda._sleep(SLEEP_CYCLES)
+    gpu[0].fill_(91)
+    output = _make_empty_scheduler_output()
+    output.kv_connector_metadata = SimpleCPUOffloadMetadata(
+        load_event=0,
+        load_gpu_blocks=[0],
+        load_cpu_blocks=[0],
+        load_event_to_reqs={0: ["req"]},
+    )
+    active.pre_forward(output)
+    active.finish_forward()
+    finished = active.post_forward(set(), defer_finalize=True).finished_recving
+    deadline = time.monotonic() + 5
+    while not finished and time.monotonic() < deadline:
+        finished = connector.get_finished(set())[1]
+    active.finalize_step()
+    assert finished == {"req"}
+    assert torch.equal(gpu[0].cpu(), cpu[0])
+
+
 def _launch_and_wait(
     backend: DmaCopyBackend,
     block_ids: list[int],
@@ -317,8 +345,12 @@ class _RecordingBackend:
         self.calls.append({"is_store": is_store, "wait_event": wait_event})
 
 
-def test_transfer_hooks_pass_wait_event_for_store_only():
-    """wait_for_save gates stores on a compute-done event; start_load_kv does not."""
+def test_transfer_hooks_pass_wait_event_for_load_and_store():
+    """Both start_load_kv and wait_for_save gate their copies on a compute event.
+
+    Loads overwrite GPU blocks that queued compute work may still use, so they
+    must be ordered after it, like stores.
+    """
     worker = _make_worker(
         kv_cache_config=None,
         cpu_capacity_bytes=0,
@@ -342,7 +374,7 @@ def test_transfer_hooks_pass_wait_event_for_store_only():
     assert len(store_calls) == 1
     assert len(load_calls) == 1
     assert isinstance(store_calls[0]["wait_event"], torch.Event)
-    assert load_calls[0]["wait_event"] is None
+    assert isinstance(load_calls[0]["wait_event"], torch.Event)
 
 
 def test_build_params_src_access_order():
