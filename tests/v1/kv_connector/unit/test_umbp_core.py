@@ -28,6 +28,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_scheduler_output,
 )
 from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm import SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.config.kv_events import KVEventsConfig
@@ -88,6 +89,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 
 mori_available = importlib.util.find_spec("mori") is not None
 
@@ -333,6 +335,17 @@ def test_namespace_distinguishes_draft_models():
     assert namespace(draft("drafter-a")) == namespace(draft("drafter-a"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-b"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-a", "v2"))
+
+    # Target-KV-only speculators (e.g. Gemma 4 assistants) write no draft KV
+    # and can share a target-only namespace.
+    gemma4_spec = fake_speculative_config(
+        speculator_config_cls=Gemma4MTPSpeculatorConfig,
+        method="mtp",
+        draft_model_config=SimpleNamespace(
+            model="test/gemma4-assistant", revision="main"
+        ),
+    )
+    assert namespace(gemma4_spec) == plain
 
 
 @pytest.mark.parametrize(

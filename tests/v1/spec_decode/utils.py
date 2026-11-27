@@ -44,6 +44,7 @@ def fake_speculative_config(
 # SpeculativeConfig's shortcuts to speculator config properties.
 _SPECULATOR_CONFIG_SHORTCUTS = (
     "uses_target_hidden_states",
+    "has_own_kv_cache",
     "uses_aux_hidden_states",
     "uses_separate_workspace_lane",
 )

@@ -1579,6 +1579,11 @@ class SpeculativeConfig:
         return self.speculator_config.uses_target_hidden_states
 
     @property
+    def has_own_kv_cache(self) -> bool:
+        """See `SpeculatorConfig.has_own_kv_cache`."""
+        return self.speculator_config.has_own_kv_cache
+
+    @property
     def uses_aux_hidden_states(self) -> bool:
         """See `SpeculatorConfig.uses_aux_hidden_states`."""
         return self.speculator_config.uses_aux_hidden_states

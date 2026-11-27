@@ -94,6 +94,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 
 from .utils import (
     create_model_runner_output,
@@ -1477,16 +1478,17 @@ class TestNixlHandshake:
                 worker2.add_remote_agent(bad_meta, remote_tp_size=1)
 
     @pytest.mark.parametrize(
-        "target_mla,draft_mla,has_draft,expected",
+        "target_mla,draft_mla,has_draft,has_own_kv_cache,expected",
         [
-            (True, False, True, 8),  # GQA draft under an MLA target
-            (True, True, True, None),  # MLA draft (e.g. MTP) is replicated too
-            (True, False, False, None),  # no speculative decoding
-            (False, False, True, None),  # GQA target maps the draft already
+            (True, False, True, True, 8),  # GQA draft under an MLA target
+            (True, False, True, False, None),  # target-KV-only draft has no draft KV
+            (True, True, True, True, None),  # MLA draft (e.g. MTP) is replicated too
+            (True, False, False, True, None),  # no speculative decoding
+            (False, False, True, True, None),  # GQA target maps the draft already
         ],
     )
     def test_resolve_head_sharded_draft_kv_heads(
-        self, target_mla, draft_mla, has_draft, expected
+        self, target_mla, draft_mla, has_draft, has_own_kv_cache, expected
     ):
         draft = SimpleNamespace(use_mla=draft_mla, get_total_num_kv_heads=lambda: 8)
         worker = SimpleNamespace(
@@ -1495,7 +1497,12 @@ class TestNixlHandshake:
             _is_csa_linear=False,
             vllm_config=SimpleNamespace(
                 speculative_config=(
-                    SimpleNamespace(draft_model_config=draft) if has_draft else None
+                    SimpleNamespace(
+                        draft_model_config=draft,
+                        has_own_kv_cache=has_own_kv_cache,
+                    )
+                    if has_draft
+                    else None
                 )
             ),
         )
@@ -4784,6 +4791,7 @@ def _set_test_speculative_config(
     kv_cache_dtype: str | None = None,
     attention_backend: str | None = None,
     auxiliary_layer_ids: tuple[int, ...] = (2, 16, 29),
+    speculator_config_cls=None,
 ) -> None:
     draft_model_config = SimpleNamespace(
         model=model,
@@ -4792,6 +4800,7 @@ def _set_test_speculative_config(
         hf_config=SimpleNamespace(eagle_aux_hidden_state_layer_ids=auxiliary_layer_ids),
     )
     vllm_config.speculative_config = fake_speculative_config(
+        speculator_config_cls=speculator_config_cls,
         method=method,
         draft_model_config=draft_model_config,
         num_speculative_tokens=num_speculative_tokens,
@@ -4841,6 +4850,33 @@ def test_missing_speculative_config_changes_compatibility_hash():
     speculative_hash = compute_nixl_compatibility_hash(speculative_config, "FLASH_ATTN")
 
     assert regular_hash != speculative_hash
+
+
+@pytest.mark.skip_global_cleanup
+def test_target_kv_only_speculative_config_matches_plain_compatibility_hash():
+    plain_config = create_vllm_config()
+    gemma4_mtp_config = create_vllm_config()
+    standard_mtp_config = create_vllm_config()
+    _set_test_speculative_config(
+        gemma4_mtp_config,
+        method="mtp",
+        model="test/gemma4-assistant",
+        speculator_config_cls=Gemma4MTPSpeculatorConfig,
+    )
+    _set_test_speculative_config(
+        standard_mtp_config,
+        method="mtp",
+        model="test/standard-mtp-drafter",
+    )
+
+    plain_hash = compute_nixl_compatibility_hash(plain_config, "TRITON_ATTN")
+    gemma4_hash = compute_nixl_compatibility_hash(gemma4_mtp_config, "TRITON_ATTN")
+    standard_mtp_hash = compute_nixl_compatibility_hash(
+        standard_mtp_config, "TRITON_ATTN"
+    )
+
+    assert gemma4_hash == plain_hash
+    assert standard_mtp_hash != plain_hash
 
 
 @pytest.mark.skip_global_cleanup

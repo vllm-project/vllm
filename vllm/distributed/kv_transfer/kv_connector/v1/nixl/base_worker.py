@@ -470,7 +470,9 @@ class NixlBaseConnectorWorker:
         if not self.use_mla or self._has_mamba or self._is_csa_linear:
             return None
         spec_config = self.vllm_config.speculative_config
-        draft_config = spec_config.draft_model_config if spec_config else None
+        if spec_config is None or not getattr(spec_config, "has_own_kv_cache", True):
+            return None
+        draft_config = spec_config.draft_model_config
         if draft_config is None or draft_config.use_mla:
             return None
         return draft_config.get_total_num_kv_heads()

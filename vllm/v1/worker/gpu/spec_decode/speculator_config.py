@@ -45,6 +45,9 @@ class SpeculatorConfig:
 
     # Uses the target model's hidden states (EAGLE or EAGLE3-style).
     uses_target_hidden_states: ClassVar[bool] = False
+    # Allocates its own KV cache (as opposed to reading only the target's KV
+    # cache or having no KV cache at all).
+    has_own_kv_cache: ClassVar[bool] = False
     # The drafter's own KV at a position depends on the tokens it reads ahead.
     draft_kv_depends_on_lookahead: ClassVar[bool] = False
     # Drafts in its own workspace lane.
@@ -159,7 +162,7 @@ class SpeculatorConfig:
     def num_hash_lookahead_tokens(self) -> int:
         """Next tokens the drafter's own KV at a position depends on, which
         prefix-cache block hashes must cover."""
-        if self.draft_kv_depends_on_lookahead:
+        if self.has_own_kv_cache and self.draft_kv_depends_on_lookahead:
             return self.num_prefill_lookahead_tokens
         return 0
 
@@ -190,6 +193,9 @@ class SpeculatorConfig:
 class DraftModelSpeculatorConfig(SpeculatorConfig):
     """A speculator whose draft model is loaded from the `model` checkpoint."""
 
+    # Draft models typically maintain their own KV cache alongside the target's;
+    # target-KV-only drafters (e.g. Gemma 4 assistants) override this to False.
+    has_own_kv_cache: ClassVar[bool] = True
     # The draft model takes the target's positions, so its
     # max_position_embeddings is raised to the target's max_model_len where its
     # RoPE type allows.

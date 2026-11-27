@@ -82,7 +82,8 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Attention backend (sparse-MLA indexer backends do not count, since a
   pipeline-parallel stage may start on, or hold only, layers without an indexer)
 - KV cache dtype (`cache_dtype`)
-- EAGLE/MTP-style speculative method and draft-model configuration
+- EAGLE/MTP-style speculative method and draft-model configuration (for
+  drafters that maintain their own KV cache)
 - NIXL transfer mode (push vs pull) — a push (WRITE) connector and a pull (READ)
   connector use incompatible transfer protocols and must never be paired
 
@@ -103,6 +104,9 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
   writes the context K/V the decode instance reads, so it drafts nothing,
   reserves no lookahead KV slots and, for draft models that support it, frees
   the draft weights only drafting reads
+- Target-KV-only drafters that allocate no draft KV of their own (such as
+  Gemma 4 assistants): the prefill instance can omit `--speculative-config`
+  completely while the decode instance runs speculative decoding
 
 ### KV cache layout
 

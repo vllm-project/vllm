@@ -254,12 +254,19 @@ class UMBPNamespace:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         # Draft-model KV (e.g. DSpark/EAGLE layers) is stored alongside the
-        # target's, so a different drafter must not reuse it.
+        # target's, so a different drafter must not reuse it. Speculators
+        # without their own KV cache (e.g. Gemma 4 assistants) share only the
+        # target's KV cache and can reuse a target-only namespace.
         speculative_config = getattr(vllm_config, "speculative_config", None)
+        has_own_kv_cache = (
+            getattr(speculative_config, "has_own_kv_cache", True)
+            if speculative_config is not None
+            else False
+        )
         draft_model_config = getattr(speculative_config, "draft_model_config", None)
         speculative = (
             None
-            if speculative_config is None
+            if not has_own_kv_cache
             else {
                 "method": getattr(speculative_config, "method", None),
                 "model": getattr(draft_model_config, "model", None),
