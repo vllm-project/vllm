@@ -20,6 +20,7 @@ def test_top_logprobs_alternatives_have_own_token_ids():
         token_ids=[262],
         top_logprobs=[{262: Logprob(-0.1), 257: Logprob(-1.2)}],
     )
+    assert result.content is not None
     token_ids = {e.token_id for e in result.content[0].top_logprobs}
     assert token_ids == {262, 257}, f"got {token_ids}"
 
@@ -33,6 +34,7 @@ def test_sampled_entry_carries_token_id_and_rank():
             {262: Logprob(-0.1, rank=1), 257: Logprob(-1.2, rank=2)},
         ],
     )
+    assert result.content is not None
     entry = result.content[0]
     assert entry.token_id == 262
     assert entry.logprob == -0.1
@@ -50,6 +52,7 @@ def test_sampled_token_absent_from_topk_uses_sentinel():
         token_ids=[5],
         top_logprobs=[{7: Logprob(-0.9)}],
     )
+    assert result.content is not None
     entry = result.content[0]
     assert entry.token_id == 5
     assert entry.logprob == -9999.0
@@ -64,6 +67,7 @@ def test_logprobs_zero_emits_sampled_token():
         token_ids=[7],
         top_logprobs=[{7: Logprob(-0.9)}],
     )
+    assert result.content is not None
     assert [t.token_id for t in result.content[0].top_logprobs] == [7]
 
 
@@ -73,6 +77,7 @@ def test_logprobs_minus_one_emits_all_tokens():
         token_ids=[7],
         top_logprobs=[{7: Logprob(-0.9), 8: Logprob(-1.1)}],
     )
+    assert result.content is not None
     assert len(result.content[0].top_logprobs) == 2
 
 
@@ -83,6 +88,7 @@ def test_text_logprobs_without_tokenizer_are_placeholders_without_bytes():
         token_ids=[7],
         top_logprobs=[{7: Logprob(-0.9), 8: Logprob(-1.1)}],
     )
+    assert result.content is not None
     entry = result.content[0]
     assert entry.token == "token_id:7"
     assert entry.bytes is None
@@ -99,6 +105,7 @@ def test_resolved_logprobs_use_engine_decoded_tokens_and_bytes():
         ],
         tokenizer=tokenizer,
     )
+    assert result.content is not None
     entry = result.content[0]
     assert (entry.token, entry.bytes) == ("é", [195, 169])
     assert [(t.token, t.bytes) for t in entry.top_logprobs] == [
@@ -117,6 +124,7 @@ def test_resolved_logprobs_decode_tokens_the_engine_did_not():
         top_logprobs=[{7: Logprob(-0.9)}, None],
         tokenizer=tokenizer,
     )
+    assert result.content is not None
     assert [e.token for e in result.content] == ["<7>", "<9>"]
     assert result.content[0].top_logprobs[0].token == "<7>"
     assert result.content[1].bytes == list(b"<9>")
@@ -137,6 +145,7 @@ def test_sampled_token_outside_topk_comes_first():
             }
         ],
     )
+    assert result.content is not None
     assert [t.rank for t in result.content[0].top_logprobs] == [5, 1, 2]
 
 
@@ -153,6 +162,7 @@ def test_rank_zero_from_a_nan_logprob_is_none():
         token_ids=[7],
         top_logprobs=[{7: Logprob(float("nan"), rank=0), 8: Logprob(-0.2, rank=1)}],
     )
+    assert result.content is not None
     entry = result.content[0]
     assert entry.rank is None
     assert entry.top_logprobs[0].rank is None
@@ -169,6 +179,7 @@ def test_text_logprobs_clamp_a_nan_logprob():
         top_logprobs=[{7: Logprob(float("nan"), rank=0, decoded_token="a")}],
         tokenizer=MagicMock(),
     )
+    assert result.content is not None
     entry = result.content[0]
     assert entry.logprob == -9999.0
     assert entry.top_logprobs[0].logprob == -9999.0

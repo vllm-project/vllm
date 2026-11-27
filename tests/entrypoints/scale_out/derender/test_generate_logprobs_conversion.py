@@ -187,6 +187,7 @@ def test_token_id_placeholders_preserve_sampled_and_top_logprobs():
     resolved = _resolve_logprobs(
         logprobs, _StubTokenizer(), return_tokens_as_token_ids=True
     )
+    assert resolved.content is not None
     entry = resolved.content[0]
     assert (entry.token, entry.bytes, entry.logprob) == ("token_id:11", None, -0.5)
     assert [(top.token, top.bytes, top.logprob) for top in entry.top_logprobs] == [

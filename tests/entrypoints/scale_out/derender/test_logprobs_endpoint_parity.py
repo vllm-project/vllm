@@ -184,6 +184,7 @@ def test_without_a_logprobs_request_derender_keeps_every_candidate(
     derendered = _resolve_logprobs(
         _generate(token_ids, dicts), tokenizer, top_limit=top_limit
     )
+    assert derendered.content is not None
     assert [len(e.top_logprobs) for e in derendered.content] == [len(d) for d in dicts]
 
 

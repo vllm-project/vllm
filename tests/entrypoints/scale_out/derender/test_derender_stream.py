@@ -143,7 +143,7 @@ class _FakeParser(Parser):
     - Anything else emits nothing.
     """
 
-    tool_parser_cls = _FakeToolParser  # type: ignore[assignment]
+    tool_parser_cls = _FakeToolParser
 
     TOOL_START = 9
     TOOL_ARG = 10
@@ -423,7 +423,9 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
             response = GenerateTokensResponse(
                 request_id="test", prompt_token_ids=[11, 12], choices=[choice]
             )
-            return derenderer._derender_chat(response, request)[0][0].message.content
+            content = derenderer._derender_chat(response, request)[0][0].message.content
+            assert content is not None
+            return content
 
         # Same decode window and seeding; "length" never drops a token.
         expected = batch_content(

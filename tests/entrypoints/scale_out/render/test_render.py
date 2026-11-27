@@ -19,6 +19,7 @@ from PIL import Image
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import (
@@ -79,7 +80,7 @@ def test_render_response_serializes_multimodal_data_with_orjson(monkeypatch, mul
     assert json.loads(response.body) == expected
 
 
-def _build_serving_render() -> ServingRender:
+def _build_serving_render(monkeypatch: pytest.MonkeyPatch) -> ServingRender:
     serving = ServingRender.__new__(ServingRender)
     serving.model_config = SimpleNamespace(
         max_model_len=100,
@@ -97,7 +98,7 @@ def _build_serving_render() -> ServingRender:
     )
     serving.online_renderer.trust_request_chat_template = True
     serving.online_renderer.parser = None
-    serving._check_model = AsyncMock(return_value=None)
+    monkeypatch.setattr(serving, "_check_model", AsyncMock(return_value=None))
     return serving
 
 
@@ -113,9 +114,9 @@ def _build_serving_render() -> ServingRender:
     ],
 )
 async def test_render_messages_resolves_disabled_thinking(
-    configured_effort, thinking, expected_effort
+    monkeypatch: pytest.MonkeyPatch, configured_effort, thinking, expected_effort
 ):
-    serving = _build_serving_render()
+    serving = _build_serving_render(monkeypatch)
     serving._merge_inline_system = False
     serving.online_renderer.model_config = serving.model_config
     serving._disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
@@ -127,7 +128,8 @@ async def test_render_messages_resolves_disabled_thinking(
             raise ValueError("This renderer does not support reasoning_effort=none")
         return [], [{"prompt_token_ids": [7, 8, 9]}]
 
-    serving.online_renderer.render_chat = AsyncMock(side_effect=render_chat)
+    render_chat_mock = AsyncMock(side_effect=render_chat)
+    monkeypatch.setattr(serving.online_renderer, "render_chat", render_chat_mock)
     request = AnthropicMessagesRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "Hello"}],
@@ -138,17 +140,19 @@ async def test_render_messages_resolves_disabled_thinking(
 
     response = await serving.render_messages_request(request)
 
+    assert isinstance(response, GenerateRequest)
     assert response.token_ids == [7, 8, 9]
-    rendered_request = serving.online_renderer.render_chat.await_args.args[0]
+    assert render_chat_mock.await_args is not None
+    rendered_request = render_chat_mock.await_args.args[0]
     assert rendered_request.reasoning_effort == expected_effort
-    assert serving.online_renderer.render_chat.await_count == (
-        2 if configured_effort == "auto" else 1
-    )
+    assert render_chat_mock.await_count == (2 if configured_effort == "auto" else 1)
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_scale_out_reuses_token_counting_effort_probe():
+async def test_scale_out_reuses_token_counting_effort_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from vllm.entrypoints.scale_out.factories import init_scale_out_state
 
     renderer = MagicMock()
@@ -167,7 +171,7 @@ async def test_scale_out_reuses_token_counting_effort_probe():
     messages.disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
         renderer
     )
-    messages.render_chat_request = renderer.render_chat
+    monkeypatch.setattr(messages, "render_chat_request", renderer.render_chat)
     state = SimpleNamespace(
         anthropic_serving_messages=messages,
         online_renderer=renderer,
@@ -186,6 +190,7 @@ async def test_scale_out_reuses_token_counting_effort_probe():
         thinking={"type": "disabled"},
     )
     count = await messages.count_tokens(AnthropicCountTokensRequest(**fields))
+    assert isinstance(count, AnthropicCountTokensResponse)
     assert count.input_tokens == 3
     _, (rendered,) = await state.serving_render.render_messages_request(
         AnthropicMessagesRequest(**fields, max_tokens=12)
@@ -198,11 +203,10 @@ async def test_scale_out_reuses_token_counting_effort_probe():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_completion_rejects_beam_search():
-    serving = _build_serving_render()
-    serving.online_renderer.render_completion = AsyncMock(
-        return_value=[{"prompt_token_ids": [7, 8, 9]}]
-    )
+async def test_render_completion_rejects_beam_search(monkeypatch: pytest.MonkeyPatch):
+    serving = _build_serving_render(monkeypatch)
+    render_completion = AsyncMock(return_value=[{"prompt_token_ids": [7, 8, 9]}])
+    monkeypatch.setattr(serving.online_renderer, "render_completion", render_completion)
     request = CompletionRequest(
         model=MODEL_NAME,
         prompt="Test prompt",
@@ -218,7 +222,7 @@ async def test_render_completion_rejects_beam_search():
     assert (
         response.error.message == "Beam search is not supported by the render endpoint"
     )
-    serving.online_renderer.render_completion.assert_not_awaited()
+    render_completion.assert_not_awaited()
 
 
 @pytest.mark.skip_global_cleanup
@@ -237,14 +241,17 @@ def test_responses_render_route_documents_not_implemented():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_responses_returns_generate_request_without_stored_state():
-    serving = _build_serving_render()
-    serving.online_renderer.render_responses = AsyncMock(
+async def test_render_responses_returns_generate_request_without_stored_state(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = _build_serving_render(monkeypatch)
+    render_responses = AsyncMock(
         return_value=MagicMock(
             messages=[{"role": "user", "content": "Test prompt"}],
             engine_input={"prompt_token_ids": [7, 8, 9]},
         )
     )
+    monkeypatch.setattr(serving.online_renderer, "render_responses", render_responses)
     request = ResponsesRequest(
         model=MODEL_NAME,
         input="Test prompt",
@@ -258,6 +265,7 @@ async def test_render_responses_returns_generate_request_without_stored_state():
 
     response = await serving.render_responses_request(request)
 
+    assert isinstance(response, GenerateRequest)
     assert response.token_ids == [7, 8, 9]
     assert response.request_id == request.request_id
     assert response.sampling_params.max_tokens == 12
@@ -268,7 +276,7 @@ async def test_render_responses_returns_generate_request_without_stored_state():
     assert response.kv_transfer_params == {"do_remote_prefill": True}
     assert response.ec_transfer_params == {"remote": True}
     assert response.sampling_params.extra_args is None
-    serving.online_renderer.render_responses.assert_awaited_once_with(
+    render_responses.assert_awaited_once_with(
         request,
         previous_messages=None,
         previous_response_outputs=None,
@@ -279,10 +287,14 @@ async def test_render_responses_returns_generate_request_without_stored_state():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_chat_hoists_transfer_params_out_of_extra_args():
-    serving = _build_serving_render()
-    serving.online_renderer.render_chat = AsyncMock(
-        return_value=([], [{"prompt_token_ids": [7, 8, 9]}])
+async def test_render_chat_hoists_transfer_params_out_of_extra_args(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = _build_serving_render(monkeypatch)
+    monkeypatch.setattr(
+        serving.online_renderer,
+        "render_chat",
+        AsyncMock(return_value=([], [{"prompt_token_ids": [7, 8, 9]}])),
     )
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -294,6 +306,7 @@ async def test_render_chat_hoists_transfer_params_out_of_extra_args():
 
     response = await serving.render_chat_request(request)
 
+    assert isinstance(response, GenerateRequest)
     assert response.kv_transfer_params == {"do_remote_prefill": True}
     assert response.ec_transfer_params == {"remote": True}
     assert response.sampling_params.extra_args == {"foo": 1}
@@ -301,13 +314,19 @@ async def test_render_chat_hoists_transfer_params_out_of_extra_args():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_completion_hoists_transfer_params_for_every_prompt():
-    serving = _build_serving_render()
-    serving.online_renderer.render_completion = AsyncMock(
-        return_value=[
-            {"prompt_token_ids": [7, 8, 9]},
-            {"prompt_token_ids": [4, 5]},
-        ]
+async def test_render_completion_hoists_transfer_params_for_every_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = _build_serving_render(monkeypatch)
+    monkeypatch.setattr(
+        serving.online_renderer,
+        "render_completion",
+        AsyncMock(
+            return_value=[
+                {"prompt_token_ids": [7, 8, 9]},
+                {"prompt_token_ids": [4, 5]},
+            ]
+        ),
     )
     request = CompletionRequest(
         model=MODEL_NAME,
@@ -318,6 +337,7 @@ async def test_render_completion_hoists_transfer_params_for_every_prompt():
 
     responses = await serving.render_completion_request(request)
 
+    assert not isinstance(responses, ErrorResponse)
     assert len(responses) == 2
     for response in responses:
         assert response.kv_transfer_params == {"do_remote_prefill": True}
@@ -328,15 +348,21 @@ async def test_render_completion_hoists_transfer_params_for_every_prompt():
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("return_token_ids", [None, True])
-async def test_render_forwards_return_token_ids(return_token_ids):
+async def test_render_forwards_return_token_ids(
+    monkeypatch: pytest.MonkeyPatch, return_token_ids
+):
     """The engine only returns prompt_token_ids which derender needs to
     answer `return_token_ids` when the GenerateRequest asks for them."""
-    serving = _build_serving_render()
-    serving.online_renderer.render_chat = AsyncMock(
-        return_value=([], [{"prompt_token_ids": [7, 8, 9]}])
+    serving = _build_serving_render(monkeypatch)
+    monkeypatch.setattr(
+        serving.online_renderer,
+        "render_chat",
+        AsyncMock(return_value=([], [{"prompt_token_ids": [7, 8, 9]}])),
     )
-    serving.online_renderer.render_completion = AsyncMock(
-        return_value=[{"prompt_token_ids": [7, 8, 9]}]
+    monkeypatch.setattr(
+        serving.online_renderer,
+        "render_completion",
+        AsyncMock(return_value=[{"prompt_token_ids": [7, 8, 9]}]),
     )
 
     chat = await serving.render_chat_request(
@@ -346,21 +372,27 @@ async def test_render_forwards_return_token_ids(return_token_ids):
             return_token_ids=return_token_ids,
         )
     )
-    (completion,) = await serving.render_completion_request(
+    completions = await serving.render_completion_request(
         CompletionRequest(
             model=MODEL_NAME, prompt="a", return_token_ids=return_token_ids
         )
     )
 
+    assert isinstance(chat, GenerateRequest)
+    assert not isinstance(completions, ErrorResponse)
+    (completion,) = completions
     assert chat.return_token_ids == return_token_ids
     assert completion.return_token_ids == return_token_ids
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_responses_rejects_previous_response_id():
-    serving = _build_serving_render()
-    serving.online_renderer.render_responses = AsyncMock()
+async def test_render_responses_rejects_previous_response_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = _build_serving_render(monkeypatch)
+    render_responses = AsyncMock()
+    monkeypatch.setattr(serving.online_renderer, "render_responses", render_responses)
     request = ResponsesRequest(
         model=MODEL_NAME,
         input="Test prompt",
@@ -372,18 +404,24 @@ async def test_render_responses_rejects_previous_response_id():
     assert isinstance(response, ErrorResponse)
     assert response.error.code == 400
     assert response.error.param == "previous_response_id"
-    serving.online_renderer.render_responses.assert_not_awaited()
+    render_responses.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_responses_rejects_empty_token_ids():
-    serving = _build_serving_render()
-    serving.online_renderer.render_responses = AsyncMock(
-        return_value=MagicMock(
-            messages=[],
-            engine_input={"prompt_token_ids": []},
-        )
+async def test_render_responses_rejects_empty_token_ids(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = _build_serving_render(monkeypatch)
+    monkeypatch.setattr(
+        serving.online_renderer,
+        "render_responses",
+        AsyncMock(
+            return_value=MagicMock(
+                messages=[],
+                engine_input={"prompt_token_ids": []},
+            )
+        ),
     )
 
     response = await serving.render_responses_request(
@@ -396,20 +434,28 @@ async def test_render_responses_rejects_empty_token_ids():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_responses_carries_reasoning_parser_kwargs():
+async def test_render_responses_carries_reasoning_parser_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """/v1/responses gives the engine's reasoning parser the effective template
     kwargs, so the rendered request must carry them to generate."""
-    serving = _build_serving_render()
+    serving = _build_serving_render(monkeypatch)
     online = serving.online_renderer
     online.parser = MagicMock(reasoning_parser_cls=object)
     online.chat_template = None
     online.chat_template_content_format = "auto"
     online.default_chat_template_kwargs = {"enable_thinking": True}
-    online.effective_chat_template_kwargs = (
-        OnlineRenderer.effective_chat_template_kwargs.__get__(online)
+    monkeypatch.setattr(
+        online,
+        "effective_chat_template_kwargs",
+        (OnlineRenderer.effective_chat_template_kwargs.__get__(online)),
     )
-    online.render_responses = AsyncMock(
-        return_value=MagicMock(messages=[], engine_input={"prompt_token_ids": [7]})
+    monkeypatch.setattr(
+        online,
+        "render_responses",
+        AsyncMock(
+            return_value=MagicMock(messages=[], engine_input={"prompt_token_ids": [7]})
+        ),
     )
     request = ResponsesRequest(
         model=MODEL_NAME,
