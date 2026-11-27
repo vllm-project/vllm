@@ -10,6 +10,8 @@ import torch
 from PIL import Image
 from pqdm.threads import pqdm
 
+from vllm import envs
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
@@ -249,3 +251,37 @@ def test_mm_device_do_normalize(model_id):
             rtol=1e-5,
             atol=1e-6,
         )
+
+
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
+def test_video_budget_rejects_frames_before_sampling(
+    monkeypatch: pytest.MonkeyPatch, model_id: str
+) -> None:
+    """A sampled frame count over the budget must be rejected unsampled."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+    # A 384x384 RGB frame takes 442368 uint8 or 1769472 float32 bytes, so 2 frames
+    # fit in 4 MiB and 16 do not in either format.
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 4 << 20)
+    video = np.zeros((16, 64, 64, 3), dtype=np.uint8)
+
+    def process(num_frames: int):
+        return processor(
+            hf_processor.video_token,
+            mm_items=processor.info.parse_mm_data({"video": [video]}),
+            hf_processor_mm_kwargs={"do_sample_frames": True, "num_frames": num_frames},
+        )
+
+    pixels = process(2)["mm_kwargs"].get_data()["pixel_values_videos"][0]
+    assert isinstance(pixels, torch.Tensor)
+    assert pixels.shape[0] == 2
+
+    def fail_sampling(*args: object, **kwargs: object):
+        raise AssertionError("Frames were sampled before the budget check.")
+
+    monkeypatch.setattr(
+        type(hf_processor.video_processor), "sample_frames", fail_sampling
+    )
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
+        process(16)

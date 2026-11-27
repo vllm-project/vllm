@@ -427,15 +427,17 @@ class LlavaOnevisionMultiModalProcessor(
                     metadata = make_batched_metadata(
                         [video], video_kwargs.get("video_metadata")
                     )[0]
-                    frame_count = len(
-                        video_processor.sample_frames(
-                            metadata,
-                            num_frames=video_kwargs.get(
-                                "num_frames", video_processor.num_frames
-                            ),
-                            fps=video_kwargs.get("fps", video_processor.fps),
-                        )
+                    # Length of HF's `sample_frames` output, without allocating
+                    # the indices. HF rejects invalid settings before sampling.
+                    num_frames = video_kwargs.get(
+                        "num_frames", video_processor.num_frames
                     )
+                    fps = video_kwargs.get("fps", video_processor.fps)
+                    frame_count = metadata.total_num_frames
+                    if None not in (fps, metadata.fps) and num_frames is None:
+                        num_frames = max(1, int(frame_count / metadata.fps * fps))
+                    if num_frames is not None:
+                        frame_count = min(num_frames, frame_count)
                 except (ArithmeticError, AttributeError, IndexError, TypeError) as exc:
                     raise ValueError("Invalid video sampling settings.") from exc
             height, width, channels = get_video_frame_dimensions(video)
