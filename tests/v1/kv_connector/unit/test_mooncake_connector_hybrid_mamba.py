@@ -266,6 +266,11 @@ def test_lookahead_hashes_follow_truncated_prefill(
         enable_prefix_caching=True
     )
     scheduler = scheduler_cls(config, "test-engine", kv_config)
+    if scheduler_cls is not MooncakeConnectorScheduler:
+        # No Mamba checkpoint cut: only the lookahead backoff truncates.
+        scheduler.bind_kv_cache_manager(
+            SimpleNamespace(get_state_checkpoint_tokens=lambda num_tokens: 0)
+        )
     init_none_hash(sha256)
     hasher = get_request_block_hasher(hash_block_size, sha256, num_lookahead)
     tokens = list(range(3 * hash_block_size + num_lookahead))

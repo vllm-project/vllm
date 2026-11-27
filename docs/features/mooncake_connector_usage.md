@@ -74,6 +74,28 @@ region lengths, group layout and TP ratio must describe a cache this decoder can
 address, and a pair that disagrees fails the request with the reason instead of
 transferring bytes neither side can interpret.
 
+## HiSparse decoding (experimental)
+
+Keep the prefiller's `MooncakeConnector` configuration above. On the decoder,
+set `--kv-transfer-config` to:
+
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {"kv_connector": "HiSparseConnector", "kv_role": "kv_both",
+       "kv_connector_extra_config": {"host_pool_gib": 64}},
+      {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}
+    ]
+  }
+}
+```
+
+Set `host_pool_gib` to the host-cache capacity in GiB per data-parallel replica.
+The prefiller and decoder can use different TP sizes, such as TP2 and TP4.
+
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server

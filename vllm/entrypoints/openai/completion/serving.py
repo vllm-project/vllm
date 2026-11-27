@@ -923,24 +923,31 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # logprobs, as defined in the openai API
                 # (cf. https://github.com/openai/openai-openapi/blob/
                 # 893ba52242dbd5387a97b96444ee1c742cfce9bd/openapi.yaml#L7153)
-                out_top_logprobs.append(
-                    {
-                        # Convert float("-inf") to the
-                        # JSON-serializable float that OpenAI uses
-                        self._get_decoded_token(
-                            top_lp[1],
-                            top_lp[0],
-                            tokenizer,
-                            return_as_token_id=should_return_as_token_id,
-                        ): max(top_lp[1].logprob, -9999.0)
-                        for top_lp in itertools.islice(
-                            step_top_logprobs.items(),
-                            completion_top_logprobs_limit(
-                                num_output_top_logprobs, bool(logprob_token_ids)
-                            ),
-                        )
-                    }
-                )
+                step_out_top_logprobs: dict[str, float] = {}
+                for top_token_id, top_lp in itertools.islice(
+                    step_top_logprobs.items(),
+                    completion_top_logprobs_limit(
+                        num_output_top_logprobs, bool(logprob_token_ids)
+                    ),
+                ):
+                    top_token = self._get_decoded_token(
+                        top_lp,
+                        top_token_id,
+                        tokenizer,
+                        return_as_token_id=should_return_as_token_id,
+                    )
+                    # Convert float("-inf") to the
+                    # JSON-serializable float that OpenAI uses
+                    top_logprob = max(top_lp.logprob, -9999.0)
+                    # Byte fragments all decode to "", so keep the highest
+                    # logprob per string. On a tie the earlier candidate
+                    # stays, and the token at this position is always first.
+                    if (
+                        top_token not in step_out_top_logprobs
+                        or top_logprob > step_out_top_logprobs[top_token]
+                    ):
+                        step_out_top_logprobs[top_token] = top_logprob
+                out_top_logprobs.append(step_out_top_logprobs)
 
             if len(out_text_offset) == 0:
                 out_text_offset.append(initial_text_offset)
