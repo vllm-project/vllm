@@ -31,9 +31,16 @@ pub struct WatermarkStatusLabels {
     pub status: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct AdmissionRejectionLabels {
+    pub model_name: String,
+    pub reason: &'static str,
+}
+
 pub(crate) type FinishedReasonCounterFamily = Family<FinishedReasonLabels, U64Counter>;
 pub(crate) type PromptTokenSourceCounterFamily = Family<PromptTokenSourceLabels, U64Counter>;
 pub(crate) type WatermarkStatusCounterFamily = Family<WatermarkStatusLabels, U64Counter>;
+pub(crate) type AdmissionRejectionCounterFamily = Family<AdmissionRejectionLabels, U64Counter>;
 /// Request and output-batch Prometheus families.
 pub struct RequestMetrics {
     /// Computed prompt and generated tokens per nonempty engine output batch,
@@ -41,13 +48,15 @@ pub struct RequestMetrics {
     pub iteration_tokens_total: BucketHistogramFamily,
 
     // Request-derived counters.
-    pub num_preemptions: Family<EngineLabels, U64Counter>,
     pub prompt_tokens: Family<EngineLabels, U64Counter>,
     pub prompt_tokens_by_source: PromptTokenSourceCounterFamily,
     pub prompt_tokens_cached: Family<EngineLabels, U64Counter>,
     pub generation_tokens: Family<EngineLabels, U64Counter>,
     pub corrupted_requests: Family<EngineLabels, U64Counter>,
     pub watermark_requests: WatermarkStatusCounterFamily,
+
+    // Frontend admission.
+    pub admission_rejections: AdmissionRejectionCounterFamily,
 
     // Request lifecycle counters and histograms.
     pub request_success: FinishedReasonCounterFamily,
@@ -85,13 +94,6 @@ impl RequestMetrics {
         );
 
         // Request-derived counters.
-        let num_preemptions = Family::default();
-        registry.register(
-            "vllm:num_preemptions",
-            "Cumulative number of preemption events.",
-            num_preemptions.clone(),
-        );
-
         let prompt_tokens = Family::default();
         registry.register(
             "vllm:prompt_tokens",
@@ -132,6 +134,14 @@ impl RequestMetrics {
             "vllm:watermark_requests",
             "Finished requests by watermark status (only with watermark_config).",
             watermark_requests.clone(),
+        );
+
+        // Frontend admission.
+        let admission_rejections = Family::default();
+        registry.register(
+            "vllm:admission_rejections",
+            "Number of admission attempts rejected by a queue limit, by reason.",
+            admission_rejections.clone(),
         );
 
         // Request lifecycle counters and histograms.
@@ -249,13 +259,13 @@ impl RequestMetrics {
 
         Self {
             iteration_tokens_total,
-            num_preemptions,
             prompt_tokens,
             prompt_tokens_by_source,
             prompt_tokens_cached,
             generation_tokens,
             corrupted_requests,
             watermark_requests,
+            admission_rejections,
             request_success,
             request_prompt_tokens,
             request_generation_tokens,

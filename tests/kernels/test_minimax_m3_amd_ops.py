@@ -33,6 +33,7 @@ import pytest
 import torch
 from transformers import PreTrainedConfig
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
@@ -286,8 +287,10 @@ def test_allreduce_gemma_rms_norm_mxfp8(monkeypatch, tp_size, return_normed):
 
 
 @requires_gfx950
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_shared_expert_gate_up_on_post_norm_quant(dist_init):
+def test_shared_expert_gate_up_on_post_norm_quant(default_vllm_config):
     """gate_up_proj on the post-attention norm's MXFP8 output equals the
     unfused norm -> linear (shared expert gate_up shape, TP4)."""
     from vllm.model_executor.layers.fusion.quant_activation import (
@@ -432,8 +435,10 @@ def test_swiglu_oai_quantize_mxfp8_vs_unfused(m, inter, block_m):
 @requires_gfx950
 @pytest.mark.parametrize("m", [1, 8, 16, 17, 32, 128])
 @pytest.mark.parametrize("n,k", [(6144, 768), (6144, 3072)])  # shared expert, dense
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_mlp_down_proj_on_swiglu_quant(dist_init, m, n, k):
+def test_mlp_down_proj_on_swiglu_quant(default_vllm_config, m, n, k):
     """down_proj on the fused swiglu + quant output stays within MXFP8 quant
     noise of the unfused swiglu -> linear, and the fused-quant GEMM keeps its
     own path where it already quantizes in-kernel (M <= 16, K <= 1024)."""
@@ -838,8 +843,10 @@ def _quark_mxfp8_linear(n: int, k: int, block32: bool = False):
     ],
 )
 @pytest.mark.parametrize("m", [1, 37])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_fused_input_norm_mxfp8_qkv_proj(dist_init, n, k, block32, m):
+def test_fused_input_norm_mxfp8_qkv_proj(default_vllm_config, n, k, block32, m):
     """The linear on the fused norm's MXFP8 output equals the linear on the
     unfused norm output, wherever the producer turns the fusion on."""
     layer, scheme = _quark_mxfp8_linear(n, k, block32)
@@ -894,9 +901,11 @@ def aiter_flydsl_mxfp8_linear(monkeypatch):
     [(2560, 6144), (1536, 6144), (6144, 768), (6144, 3072)],  # qkv, shared, dense
 )
 @pytest.mark.parametrize("m", [1, 16, 37])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
 def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
-    dist_init, aiter_flydsl_mxfp8_linear, n, k, m
+    default_vllm_config, aiter_flydsl_mxfp8_linear, n, k, m
 ):
     """With the AITER kernel selected, the producers still fuse the MXFP8
     quant and the linear on their output equals the unfused norm -> linear;
@@ -939,8 +948,12 @@ def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
 
 @requires_gfx950
 @pytest.mark.parametrize("n,k", [(2560, 6144), (6144, 2048), (1536, 6144), (6144, 768)])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_mono_weights_same_on_aiter_flydsl_kernel(dist_init, monkeypatch, n, k):
+def test_mono_weights_same_on_aiter_flydsl_kernel(
+    default_vllm_config, monkeypatch, n, k
+):
     """The mono kernels' weight copies are the same whether the linear runs on
     the Triton kernel (row-major weight) or the AITER FlyDSL one (preshuffled)."""
     pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
@@ -993,7 +1006,11 @@ def test_mono_weights_same_on_aiter_flydsl_kernel(dist_init, monkeypatch, n, k):
 
 
 @requires_gfx950
-def test_fused_input_norm_mxfp8_off_under_batch_invariance(dist_init, monkeypatch):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_fused_input_norm_mxfp8_off_under_batch_invariance(
+    default_vllm_config, monkeypatch
+):
     import vllm.envs as envs
 
     layer, _ = _quark_mxfp8_linear(2560, 6144)

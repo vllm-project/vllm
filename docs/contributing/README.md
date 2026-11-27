@@ -276,13 +276,19 @@ The PR needs to meet the following code quality standards:
 ### Documenting User-Visible Changes
 
 If a PR changes what users can run, configure, or observe, update the rendered
-docs in the same PR; code comments, tests, and PR descriptions alone are not
-found by users or their agents. CLI arguments, config fields, and environment
-variables are documented in their docstring, `help=` text, or
-`environment_variables` comment, which generate the reference pages. Everything
-else goes on its page under `docs/` (feature, model, hardware, deprecation),
-linked from its index. Lead with what it is, how to enable it, and the default,
-using the names users search for.
+docs in the same PR; code comments, tests and PR descriptions alone might not be found by users or their agents.
+
+For popular features, make sure to update the rendered documentation:
+
+- CLI arguments, config/model fields, and environment variables are documented in
+their docstring, `help=` text, or `environment_variables` comment, which generate the reference pages.
+- Everything else goes on its page under `docs/` (feature, model, hardware, deprecation etc.),
+linked from its index.
+
+Lead with what it is, how to enable it, and the default, using the names users search for.
+No need to include implementation details in user-facing documentation.
+
+If the change is niche, you only need to update relevant docstrings or add code comments.
 
 To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
 three times, limited in turn to web search, GitHub, and a local checkout (before
@@ -378,11 +384,14 @@ review process:
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
 - A PR targeting `main` that changes `docker/Dockerfile.rocm_base` or
-  `tools/vllm-rocm/therock_wheels.py` fails `pre-commit` until a maintainer
-  with write access comments `/ci rocm cache`, which starts a CI build that only
-  copies the ROCm stack, runtime and test-deps images the PR's CI built into
-  `rocm/vllm-ci`, so `main` reuses them after the merge, or `/ci rocm nocache`
-  to skip that. Then re-run the failed `pre-commit` check.
+  `tools/vllm-rocm/therock_wheels.py` can merge only once its new ROCm base
+  image is cached for `main`, which its `ROCm image cache` CI step checks. A
+  maintainer comments `/ci run`, or a trusted reviewer approves the commit and
+  comments `/ci run`, and when that commit's CI build finishes, the bot caches
+  the image and retries the step. If `main` changes those files after the PR's
+  merge base, the step fails until the PR merges `main`. A PR that changes how
+  `.buildkite/scripts/rocm/build.sh` keys the image is not cached: `main`
+  rebuilds it after the merge.
 - Retrying or cancelling builds does not check branch freshness.
 - Apart from that merge, these commands do not modify your branch or enforce
   merge requirements. Direct Buildkite launches are outside this workflow.

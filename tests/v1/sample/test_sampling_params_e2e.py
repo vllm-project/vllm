@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Generator
+
 import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.exceptions import VLLMValidationError
 
-MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL = "vllm/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
 
 
 @pytest.fixture(scope="module")
-def llm() -> LLM:
-    return LLM(MODEL, enforce_eager=True)
+def llm(vllm_runner) -> Generator[LLM, None, None]:
+    with vllm_runner(MODEL, enforce_eager=True, enable_chunked_prefill=None) as runner:
+        yield runner.llm
 
 
 def test_n_gt_1(llm):
