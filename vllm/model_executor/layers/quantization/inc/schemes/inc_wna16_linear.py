@@ -354,11 +354,12 @@ class INCARKLinearMethod(INCXPULinearBase):
 
         from .inc_ark_ops import get_ark_state
 
-        is_available, error_str, _, quant_linear_cls = get_ark_state()
+        is_available, error_str, ark, quant_linear_cls = get_ark_state()
         if not is_available or quant_linear_cls is None:
             reason = error_str or "unknown error"
             raise ImportError(f"Failed to import auto_round_kernel. {reason}")
 
+        self.ark = ark
         self.quant_linear_cls = quant_linear_cls
 
     def create_weights(
@@ -383,6 +384,51 @@ class INCARKLinearMethod(INCXPULinearBase):
         layer.in_features = input_size_per_partition
         layer.out_features = sum(output_partition_sizes)
         layer.params_dtype = params_dtype
+        self._reserve_packed_qweight(layer)
+
+    def _reserve_packed_qweight(self, layer: torch.nn.Module) -> None:
+        qweight = layer.qweight
+        if qweight.device.type != "xpu":
+            return
+        from auto_round_kernel.qlinear import BITS_DTYPE_MAPPING
+
+        packed_nbytes = self.ark.packed_weight_size(
+            qweight,
+            layer.out_features,
+            layer.in_features,
+            self.group_size,
+            "int8",
+            BITS_DTYPE_MAPPING[self.weight_bits],
+            "fp16",
+            not self.sym,
+        )
+        qweight_nbytes = qweight.numel() * qweight.element_size()
+        if packed_nbytes <= qweight_nbytes:
+            return
+        buffer = torch.empty(packed_nbytes, dtype=torch.int8, device=qweight.device)
+        qweight.data = buffer[:qweight_nbytes].view(qweight.dtype).view(qweight.shape)
+        layer.ark_reserved_nbytes = packed_nbytes
+
+    def _into_qweight_storage(
+        self, layer: torch.nn.Module, packed: torch.Tensor
+    ) -> torch.Tensor:
+        qweight = layer.qweight
+        storage = qweight.untyped_storage()
+        owned_nbytes = max(
+            qweight.numel() * qweight.element_size(),
+            getattr(layer, "ark_reserved_nbytes", 0),
+        )
+        if (
+            not packed.is_contiguous()
+            or not qweight.is_contiguous()
+            or packed.device != qweight.device
+            or qweight.storage_offset() != 0
+            or packed.nbytes > min(owned_nbytes, storage.nbytes())
+        ):
+            return packed
+        flat = torch.empty(0, dtype=torch.int8, device=qweight.device).set_(storage)
+        dst = flat[: packed.nbytes].view(packed.dtype).view(packed.shape)
+        return dst.copy_(packed)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(layer, "input_size_per_partition"):
@@ -428,7 +474,8 @@ class INCARKLinearMethod(INCXPULinearBase):
 
         ark_linear.post_init()
 
-        replace_parameter(layer, "qweight", ark_linear.qweight.detach())
+        packed = self._into_qweight_storage(layer, ark_linear.qweight.detach())
+        replace_parameter(layer, "qweight", packed)
         layer.ark_bias = ark_linear.bias
         layer.ark_compute_type = ark_linear.cdt
         layer.ark_weight_type = ark_linear.wdt

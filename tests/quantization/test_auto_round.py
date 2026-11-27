@@ -1809,6 +1809,111 @@ def test_inc_ark_linear_method_xpu_int2_create_weights(monkeypatch) -> None:
     assert layer.params_dtype == torch.bfloat16
 
 
+def _make_ark_method(monkeypatch, ark: Any = None) -> INCARKLinearMethod:
+    class DummyQuantLinear:
+        pass
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state",
+        lambda: (True, None, ark if ark is not None else object(), DummyQuantLinear),
+    )
+    return INCARKLinearMethod(make_layer_config())
+
+
+def test_inc_ark_packed_qweight_reuses_reserved_storage(monkeypatch) -> None:
+    method = _make_ark_method(monkeypatch)
+    layer = torch.nn.Module()
+    buffer = torch.zeros(96, dtype=torch.int8)
+    layer.qweight = torch.nn.Parameter(
+        buffer[:64].view(torch.int32).view(2, 8), requires_grad=False
+    )
+    layer.ark_reserved_nbytes = 96
+    packed = torch.arange(96, dtype=torch.int8)
+
+    out = method._into_qweight_storage(layer, packed)
+
+    assert out.data_ptr() == buffer.data_ptr()
+    torch.testing.assert_close(out, packed)
+
+
+def test_inc_ark_packed_qweight_not_written_past_unreserved_qweight(
+    monkeypatch,
+) -> None:
+    method = _make_ark_method(monkeypatch)
+    layer = torch.nn.Module()
+    buffer = torch.zeros(96, dtype=torch.int8)
+    layer.qweight = torch.nn.Parameter(
+        buffer[:64].view(torch.int32).view(2, 8), requires_grad=False
+    )
+    packed = torch.arange(96, dtype=torch.int8)
+
+    out = method._into_qweight_storage(layer, packed)
+
+    assert out.data_ptr() == packed.data_ptr()
+    assert not buffer.any()
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="ARK XPU repack only")
+def test_inc_ark_xpu_repack_stays_in_qweight_storage(monkeypatch) -> None:
+    ark = pytest.importorskip("auto_round_kernel")
+    from auto_round_kernel.qlinear import QuantLinear
+
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state",
+        lambda: (True, None, ark, QuantLinear),
+    )
+    k, n, group_size = 512, 512, 128
+    method = INCARKLinearMethod(make_layer_config(group_size=group_size))
+    layer = torch.nn.Module()
+    with torch.device("xpu"):
+        method.create_weights(
+            layer=layer,
+            input_size_per_partition=k,
+            output_partition_sizes=[n],
+            input_size=k,
+            output_size=n,
+            params_dtype=torch.float16,
+            weight_loader=lambda *args, **kwargs: None,
+        )
+    layer.input_size = k
+    layer.output_size = n
+    layer.bias = None
+    torch.manual_seed(0)
+    layer.qweight.data.random_(-(2**31), 2**31 - 1)
+    layer.scales.data.uniform_(0.001, 0.01)
+    layer.qzeros.data.fill_(0x88888888 - 2**32)
+
+    reference = QuantLinear(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        in_features=k,
+        out_features=n,
+        bias=False,
+        weight_dtype=torch.float16,
+    ).to("xpu")
+    reference.qweight = layer.qweight.detach().clone()
+    reference.qzeros = layer.qzeros.detach().clone()
+    reference.scales = layer.scales.detach().clone()
+    reference.post_init()
+
+    storage_ptr = layer.qweight.untyped_storage().data_ptr()
+    assert layer.qweight.untyped_storage().nbytes() == reference.qweight.nbytes
+
+    method.process_weights_after_loading(layer)
+
+    assert layer.qweight.untyped_storage().data_ptr() == storage_ptr
+    assert torch.equal(layer.qweight, reference.qweight)
+
+
 def test_wna16_xpu_falls_back_when_ark_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
