@@ -21,7 +21,9 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForMultimodalLM,
     PreTrainedConfig,
+    core_model_loading,
 )
+from transformers.conversion_mapping import WeightConverter, WeightRenaming
 
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (
@@ -34,12 +36,16 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.base import Base, SplitWeights
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
-from vllm.model_executor.models.utils import StageMissingLayer
+from vllm.model_executor.models.utils import (
+    StageMissingLayer,
+    WeightsMapper,
+    _model_to_pp_missing_layer_names,
+)
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
@@ -1067,3 +1073,76 @@ def test_init_parameters_keeps_declared_dtype_and_requires_grad():
     assert module.fp32.dtype == torch.float32 and module.fp32.requires_grad
     assert module.fp8.dtype == torch.float8_e4m3fn and not module.fp8.requires_grad
     assert module.int8.dtype == torch.int8 and not module.int8.requires_grad
+
+
+def test_ignored_unexpected_patterns_match_renamed_keys():
+    """Like Transformers, `_keys_to_ignore_on_load_unexpected` matches renamed keys
+    and only drops weights nothing loads (A.X-K1's `post_mlp_layernorm` is renamed
+    into `mlp` and unused only on its dense layers)."""
+    stub = nn.Module()
+    stub.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    stub.layers[0].mlp = nn.Module()
+    stub.layers[0].mlp.post_norm = nn.RMSNorm(2)
+    stub.model = SimpleNamespace(_keys_to_ignore_on_load_unexpected=[r"mlp\.post_norm"])
+    stub.hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_renaming=[WeightRenaming("post_norm", "mlp.post_norm")]
+    )
+    weights = [(f"layers.{i}.post_norm.weight", torch.ones(2)) for i in range(2)]
+
+    kept = Base._drop_ignored_unexpected(stub, iter(weights))
+
+    assert [name for name, _ in kept] == ["layers.0.post_norm.weight"]
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
+)
+def test_split_weights_splits_fused_gqa_qkv():
+    """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
+    into each projection's size, matched before and named after the renamings. Like
+    in Transformers, a longer name that only starts with the pattern is not split,
+    and a quantization scale for the fused tensor is rejected, not split. The fused
+    tensor of a skipped module is left for the loader to drop."""
+    with torch.device("meta"):
+        model = nn.Module()
+        model.config = PreTrainedConfig()
+        model.self_attn = nn.Module()
+        model.self_attn.q_proj = nn.Linear(8, 8, bias=False)
+        model.self_attn.k_proj = nn.Linear(8, 2, bias=False)
+        model.self_attn.v_proj = nn.Linear(8, 2, bias=False)
+        model.vision_tower = StageMissingLayer("vision_tower")
+    converter = WeightConverter(
+        source_patterns="query_key_value",
+        target_patterns=["q_proj", "k_proj", "v_proj"],
+        operations=[core_model_loading.Split(dim=0)],
+    )
+    mapper = WeightsMapper(
+        orig_to_new_renaming=[
+            WeightRenaming(r"^attention\.", "self_attn."),
+            WeightRenaming(r"^vision_model\.", "vision_tower."),
+        ]
+    )
+    fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
+
+    weights = SplitWeights(converter, mapper, model)
+    # Cached by `id`, which a model freed by an earlier test may have had
+    _model_to_pp_missing_layer_names.pop(id(model), None)
+    other = ("attention.query_key_value_norm.weight", torch.zeros(12))
+    pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
+
+    assert list(pieces) == [
+        "attention.q_proj.weight",
+        "attention.k_proj.weight",
+        "attention.v_proj.weight",
+        "attention.query_key_value_norm.weight",
+    ]
+    split = [pieces[f"attention.{p}_proj.weight"] for p in "qkv"]
+    torch.testing.assert_close(torch.cat(split), fused)
+    assert [p.shape[0] for p in split] == [8, 2, 2]
+
+    scale = ("attention.query_key_value.weight_scale", torch.ones(1))
+    with pytest.raises(ValueError, match="quantized tensors is not supported"):
+        list(weights([scale]))
+
+    skipped = ("vision_model.query_key_value.weight", fused)
+    assert list(weights([skipped])) == [skipped]

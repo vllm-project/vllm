@@ -49,6 +49,7 @@ def test_mixtral_lora(vllm_runner, mixtral_lora_files, tp_size):
     with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
+        enable_lora_embedding_modules=True,
         max_num_seqs=16,
         max_loras=4,
         distributed_executor_backend="ray",

@@ -11,7 +11,7 @@ from functools import partial, wraps
 
 import cutlass
 import cutlass.cute as cute
-from cutlass import Float32, Float64, Int32, Int64, Uint8, Uint16, Uint32, Uint64
+from cutlass import Float32, Int32, Int64, Uint8, Uint16, Uint32, Uint64
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.experimental import primitives as nvvm
@@ -135,14 +135,6 @@ def query_norm_rsqrt(total: Float32, eps: Float32):
     code = "{ .reg .f32 mean; div.rn.f32 mean,$1,0f44c00000; "
     code += "add.f32 mean,mean,$2; rsqrt.approx.f32 $0,mean; }"
     return code, "=f,f,f", (total, eps)
-
-
-@asm(Float64, pure=True)
-def reciprocal64(value: Float64):
-    step = "fma.rn.f64 e,n,r,0d3ff0000000000000; fma.rn.f64 {},r,e,r; "
-    code = "{ .reg .f64 r,e,n; neg.f64 n,$1; rcp.approx.ftz.f64 r,$1; "
-    code += step.format("r") * 2 + step.format("$0") + "}"
-    return code, "=d,d", (value,)
 
 
 @asm(Float32, pure=True)

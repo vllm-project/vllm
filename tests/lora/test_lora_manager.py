@@ -375,7 +375,11 @@ def test_lm_head_exempt_from_dedup(default_vllm_config, dist_init, dummy_model):
         1,
         1,
         LoRAConfig(
-            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+            max_lora_rank=8,
+            max_cpu_loras=8,
+            max_loras=8,
+            lora_dtype=DEFAULT_DTYPE,
+            enable_embedding_modules=True,
         ),
         torch.device(DEVICES[0]),
         default_vllm_config,
@@ -581,7 +585,11 @@ def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device)
         2,
         2,
         LoRAConfig(
-            max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
+            max_lora_rank=8,
+            max_cpu_loras=3,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            enable_embedding_modules=True,
         ),
         device=device,
         vllm_config=default_vllm_config,
@@ -1312,10 +1320,12 @@ def test_target_modules_multiple(default_vllm_config, dist_init, dummy_model, de
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_target_modules_none_uses_all(
+def test_target_modules_none_uses_defaults(
     default_vllm_config, dist_init, dummy_model, device
 ):
-    """Test that target_modules=None uses all supported modules."""
+    """The default wraps supported linear layers and leaves lm_head unwrapped."""
+    from vllm.lora.layers import LogitsProcessorWithLoRA
+
     _test_target_modules(
         dummy_model,
         None,
@@ -1326,7 +1336,7 @@ def test_target_modules_none_uses_all(
             ("dense2", RowParallelLinearWithLoRA),
             ("layer1.dense2", RowParallelLinearWithLoRA),
         ],
-        expected_no_lora=[],
+        expected_no_lora=[("logits_processor", LogitsProcessorWithLoRA)],
         vllm_config=default_vllm_config,
     )
 

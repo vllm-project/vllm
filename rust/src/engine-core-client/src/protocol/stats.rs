@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 pub use vllm_metrics::{
     BaseCacheStats, CachedTokensBySource, CudagraphStats, DebugPerfStats, KvCacheEvictionEvent,
     KvConnectorStats, KvFetchReqsByStage, MooncakeRecord, MooncakeStats, MooncakeTransferStats,
-    MultiConnectorStats, NixlStats, PerfStats, PrefixCacheStats, SimpleCpuOffloadData,
-    SimpleCpuOffloadStats, SpecDecodingStats, UmbpOperationCounts, UmbpStats,
+    MultiConnectorStats, NixlStats, OffloadingSample, OffloadingStats, PerfStats, PrefixCacheStats,
+    SimpleCpuOffloadData, SimpleCpuOffloadStats, SpecDecodingStats, UmbpOperationCounts, UmbpStats,
 };
 
 use super::OpaqueValue;
@@ -43,6 +43,32 @@ pub struct PrefillStats {
     pub num_cache_creation_tokens: u32,
 }
 
+/// Scheduler-side details for one engine iteration, which the frontend logs
+/// one line each.
+///
+/// `scheduled_workload` is not decoded: Python hands it only to custom stat
+/// loggers.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f9d1824a770f01e681fef8adb4b4bbe506e080aa/vllm/v1/metrics/stats.py#L198-L213>
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerIterationDetails {
+    pub iteration_index: u64,
+    pub num_ctx_requests: u64,
+    pub num_ctx_tokens: u64,
+    pub num_generation_requests: u64,
+    pub num_generation_tokens: u64,
+    /// GPU time, measured by the output worker; `None` where it does not time.
+    #[serde(default)]
+    pub elapsed_ms: Option<f64>,
+    #[serde(default)]
+    pub num_encoder_inputs: u64,
+    #[serde(default)]
+    pub num_encoder_output_tokens: u64,
+    #[serde(default)]
+    pub is_dummy: bool,
+}
+
 /// Stats associated with the scheduler.
 ///
 /// Original Python definition:
@@ -56,6 +82,9 @@ pub struct SchedulerStats {
     /// Number of waiting requests deferred by transient constraints or a blocked status.
     #[serde(default)]
     pub num_skipped_waiting_reqs: u64,
+    /// Requests preempted since the previous stats, counted at preemption time.
+    #[serde(default)]
+    pub num_preempted_reqs: u64,
     /// Waiting requests with an async KV load, by load stage.
     #[serde(default)]
     pub num_kv_fetch_reqs_by_stage: KvFetchReqsByStage,
@@ -79,10 +108,10 @@ pub struct SchedulerStats {
     /// engine's connector reports them.
     #[serde(default)]
     pub ec_connector_stats: Option<OpaqueValue>,
-    /// Scheduler-side details of the engine iteration, when iteration details
-    /// are logged (`SchedulerIterationDetails`), passed through.
+    /// Iterations to report, with `--enable-logging-iteration-details`: timed on
+    /// the GPU by the output worker, or untimed from EngineCore.
     #[serde(default)]
-    pub iteration_details: Option<OpaqueValue>,
+    pub iteration_records: Vec<SchedulerIterationDetails>,
     /// CUDA graph runtime stats when graph metrics are enabled.
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
@@ -91,7 +120,7 @@ pub struct SchedulerStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{KvFetchReqsByStage, SchedulerStats};
+    use super::{KvFetchReqsByStage, SchedulerIterationDetails, SchedulerStats};
 
     #[test]
     fn scheduler_stats_kv_fetch_reqs_by_stage_defaults_and_decodes() {
@@ -118,5 +147,59 @@ mod tests {
         let wire = rmp_serde::to_vec_named(&payload).unwrap();
         let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.num_kv_fetch_reqs_by_stage.counts(), [3, 1, 0]);
+    }
+
+    #[test]
+    fn scheduler_stats_decodes_iteration_records() {
+        let payload = serde_json::json!({
+            "num_running_reqs": 1, "num_waiting_reqs": 0,
+            "step_counter": 0, "current_wave": 0, "kv_cache_usage": 0.25,
+            "prefix_cache_stats": {
+                "reset": false, "requests": 0, "queries": 0, "hits": 0,
+                "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0
+            },
+            "kv_cache_eviction_events": [],
+            "iteration_records": [
+                {
+                    "iteration_index": 7, "num_ctx_requests": 1, "num_ctx_tokens": 8,
+                    "num_generation_requests": 2, "num_generation_tokens": 2,
+                    "elapsed_ms": 1.5, "num_encoder_inputs": 1,
+                    "num_encoder_output_tokens": 64, "is_dummy": false,
+                    "scheduled_workload": {"num_prefill_tokens": 8}
+                },
+                {
+                    "iteration_index": 8, "num_ctx_requests": 0, "num_ctx_tokens": 0,
+                    "num_generation_requests": 0, "num_generation_tokens": 0,
+                    "elapsed_ms": null, "num_encoder_inputs": 0,
+                    "num_encoder_output_tokens": 0, "is_dummy": true,
+                    "scheduled_workload": null
+                }
+            ],
+            "queued_workload": {"num_waiting_tokens": 3}
+        });
+
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(
+            stats.iteration_records,
+            [
+                SchedulerIterationDetails {
+                    iteration_index: 7,
+                    num_ctx_requests: 1,
+                    num_ctx_tokens: 8,
+                    num_generation_requests: 2,
+                    num_generation_tokens: 2,
+                    elapsed_ms: Some(1.5),
+                    num_encoder_inputs: 1,
+                    num_encoder_output_tokens: 64,
+                    is_dummy: false,
+                },
+                SchedulerIterationDetails {
+                    iteration_index: 8,
+                    is_dummy: true,
+                    ..Default::default()
+                },
+            ]
+        );
     }
 }

@@ -135,6 +135,38 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
+    ("architecture", "field", "value"),
+    [
+        ("MuseSparkDSparkModel", "draft_lm_head_quantization", "nvfp4"),
+        ("Qwen3DSparkModel", "draft_lm_head_quantization", "fp8"),
+        # Per-tensor FP8 is refused for the Muse Spark draft.
+        ("MuseSparkDSparkModel", "quantization", "fp8"),
+        ("MuseSparkDSparkModel", "quantization", "fp8_per_tensor"),
+    ],
+)
+def test_dspark_refuses_unsupported_draft_quantization(architecture, field, value):
+    """Draft quantizations no platform supports for the drafter fail at config
+    time instead of at load."""
+    hf_config = SimpleNamespace(model_type="dspark")
+    spec = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=hf_config,
+            architectures=[architecture],
+            dtype=torch.bfloat16,
+            head_dtype=torch.bfloat16,
+        ),
+        target_model_config=SimpleNamespace(hf_config=hf_config, architectures=[]),
+        dspark_draft_topk=None,
+        quantization=None,
+        draft_lm_head_quantization=None,
+        num_speculative_tokens=7,
+    )
+    setattr(spec, field, value)
+    with pytest.raises(ValueError, match=field):
+        DSparkSpeculatorConfig.apply_options(spec)
+
+
+@pytest.mark.parametrize(
     ("enable_prefix_caching", "input_dtype", "use_ubatching", "pp_size", "error"),
     [
         (True, torch.bfloat16, False, 1, None),
@@ -219,6 +251,57 @@ def test_triton_replayssm_spec_decode_validates_config(
             VllmConfig.validate_mamba_cached_kernel(config)
     else:
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+@pytest.mark.parametrize(
+    (
+        "num_speculative_tokens",
+        "backend",
+        "stochastic_rounding",
+        "buffer_len",
+        "beta_scale",
+        "error",
+    ),
+    [
+        (0, MambaBackendEnum.TRITON, False, 32, 1.0, None),
+        (2, MambaBackendEnum.TRITON, False, 16, 1.0, "speculative decoding"),
+        (0, MambaBackendEnum.FLASHINFER, False, 16, 1.0, "--mamba-backend triton"),
+        (0, MambaBackendEnum.TRITON, True, 16, 1.0, "stochastic-rounding"),
+        (0, MambaBackendEnum.TRITON, False, 64, 1.0, "--replayssm-buffer-len <= 32"),
+        (0, MambaBackendEnum.TRITON, False, 16, 2.0, "scaled beta"),
+    ],
+    ids=[
+        "stp",
+        "spec",
+        "flashinfer",
+        "stochastic-rounding",
+        "long-buffer",
+        "scaled-beta",
+    ],
+)
+def test_gdn_replayssm_validates_config(
+    num_speculative_tokens, backend, stochastic_rounding, buffer_len, beta_scale, error
+):
+    """The Gated DeltaNet layer owns these limits, so every model built on it
+    (Qwen3.5, Qwen4Exp, and their subclasses) is checked, whatever its name."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+    )
+
+    config = SimpleNamespace(
+        num_speculative_tokens=num_speculative_tokens,
+        cache_config=SimpleNamespace(replayssm_buffer_len=buffer_len),
+        mamba_config=SimpleNamespace(
+            backend=backend, enable_stochastic_rounding=stochastic_rounding
+        ),
+    )
+    reason = QwenGatedDeltaNetAttention._replayssm_unsupported_reason(
+        config, beta_scale
+    )
+    if error:
+        assert reason is not None and error in reason
+    else:
+        assert reason is None
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -1691,6 +1774,10 @@ def test_all2all_backend_has_portable_default():
 
 
 def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
+    # Import modules with import-time platform probes before faking CUDA, so
+    # they never query CUDA-only `_C` ops missing from non-CUDA builds.
+    import vllm.model_executor.layers.quantization.online.base  # noqa: F401
+
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
@@ -2511,15 +2598,23 @@ def test_engram_config_defaults_to_none():
     assert hash_config(config)
 
 
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "DeepseekV41ForCausalLM",
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+    ],
+)
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("enable_dbo,ubatch_size", [(True, 0), (False, 2)])
-def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size):
+def test_engram_rejects_microbatching(architecture, explicit, enable_dbo, ubatch_size):
     """Reject overlapping Engram staging even without an explicit EngramConfig."""
     config = cast(
         VllmConfig,
         SimpleNamespace(
             model_config=SimpleNamespace(
-                architecture="DeepseekV41ForCausalLM",
+                architecture=architecture,
                 hf_text_config=SimpleNamespace(engram_layer_ids=[1]),
             ),
             speculative_config=None,
@@ -4339,7 +4434,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
-            "state-spaces/mamba-130m-hf",
+            "vllm-project/mamba2-130m-hf",
             "attention_free",
             True,
             "Generative models support chunked prefill.",  # noqa: E501
@@ -4459,7 +4554,7 @@ def test_is_chunked_prefill_supported(
             "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
-            "state-spaces/mamba-130m-hf",
+            "vllm-project/mamba2-130m-hf",
             "attention_free",
             False,
             "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501
