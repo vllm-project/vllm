@@ -29,6 +29,10 @@ class KVConnectorStats:
         """Return the serializable connector stats payload."""
         return self.data
 
+    def requires_ordered_delivery(self) -> bool:
+        """Whether successive samples must be observed by the same frontend."""
+        return False
+
     def reset(self):
         """Reset the stats, clear the state."""
         raise NotImplementedError

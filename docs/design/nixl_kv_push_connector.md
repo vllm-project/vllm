@@ -376,6 +376,8 @@ contributes one entry regardless of its number of KV blocks.
 The engine samples the writer's backlog when it collects connector stats.
 After the writer processes a match or eviction, the next sample reflects the
 new depth. An idle engine can therefore still show its last reported value.
+With multiple API frontends, the engine sends backlog samples to frontend 0
+in order, even when another frontend receives the request output.
 To find the rank with the most registrations waiting on each engine, use
 `topk by (engine) (1, vllm:nixl_push_unmatched_registrations)`.
 Summing over ranks can count the same request more than once.

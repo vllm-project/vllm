@@ -83,6 +83,9 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.reset()
         return old
 
+    def requires_ordered_delivery(self) -> bool:
+        return bool(self.data.get("push_backlog"))
+
     def is_empty(self) -> bool:
         # Do not discard metrics update that are entirely failures related.
         return (
