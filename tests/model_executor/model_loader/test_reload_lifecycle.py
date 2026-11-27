@@ -107,6 +107,53 @@ def test_nested_module_sees_the_update(monkeypatch, mode):
     assert not weight_update_active()
 
 
+class _GatedModel(torch.nn.Module):
+    """One layer with two weights, so an update can stop between them."""
+
+    def __init__(self):
+        super().__init__()
+        self.cell = torch.nn.GRUCell(4, 4, bias=False)
+
+    def load_weights(self, weights):
+        params = dict(self.named_parameters())
+        for name, weight in weights:
+            param = params[name]
+            getattr(param, "weight_loader", default_weight_loader)(param, weight)
+        return set(params)
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"], ids=["direct", "layerwise"])
+def test_update_after_a_failed_update_installs_every_weight(monkeypatch, mode):
+    """A client retries an update that raised partway through a layer: the
+    retry starts over instead of building on what the failed one loaded."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    model = _GatedModel()
+    gen = torch.Generator().manual_seed(0)
+    shapes = {name: param.shape for name, param in model.named_parameters()}
+    cold, update = (
+        {name: torch.rand(shape, generator=gen) for name, shape in shapes.items()}
+        for _ in range(2)
+    )
+    record_metadata_for_reloading(model)
+    model.load_weights(cold.items())
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+
+    def interrupted(weights):
+        yield next(iter(weights))
+        raise ConnectionError("update stream interrupted")
+
+    start_reload(model)
+    with pytest.raises(ConnectionError):
+        model.load_weights(interrupted(update.items()))
+
+    start_reload(model)
+    model.load_weights(update.items())
+    finish_reload(model, _MODEL_CONFIG, _DEVICE)
+
+    for name, param in model.named_parameters():
+        assert torch.equal(param, update[name]), name
+
+
 class _CPUOffloadedEngram(torch.nn.Module):
     """A host table whose loader and post-load hook must keep its storage."""
 

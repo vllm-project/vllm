@@ -112,12 +112,23 @@ def initialize_layerwise_reload(
     4. Copy processed values back to original tensor storage
 
     With defer_processing=True, only finalize_layerwise_reload triggers processing.
+
+    A layer left mid-reload by a reload that raised is first restored to its live
+    tensors, so a retried update starts over.
     """
+    num_unfinished = 0
     for layer in model.modules():
         if getattr(layer, "_skip_layerwise_reload", False):
             continue
 
         info = get_layerwise_info(layer)
+
+        # A reload that raised before finishing left this layer mid-reload:
+        # put its live tensors back and drop what that reload buffered
+        if info.kernel_tensors is not None:
+            _place_kernel_tensors(layer, info)
+            info.reset()
+            num_unfinished += 1
 
         # Skip if the layer has already been initialized
         if info.can_load():
@@ -134,6 +145,13 @@ def initialize_layerwise_reload(
         # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
         info.defer_processing = defer_processing
+
+    if num_unfinished:
+        logger.warning(
+            "A previous weight reload did not finish: restored the live tensors "
+            "of %d modules and discarded the weights it had buffered",
+            num_unfinished,
+        )
 
 
 def initialize_online_processing(layer: torch.nn.Module):
