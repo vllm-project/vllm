@@ -98,7 +98,7 @@ pub(super) fn prepare_completion_request(
     )
     .map_err(|error| text_request_error("invalid prompt truncation", error))?;
 
-    let request_id = format!("cmpl-{}", ctx.request_id);
+    let request_id = ctx.request_id.clone();
     let response_model = lora_resolution.response_model();
 
     let logprobs = request.logprobs;
@@ -356,7 +356,7 @@ mod tests {
     }
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id).expect("valid headers")
+        resolve_request_context(headers, "cmpl-", request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {

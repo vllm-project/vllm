@@ -178,7 +178,8 @@ pub(crate) async fn lower_chat_render_request<S: RenderContext>(
     let lora_resolution = state.resolve_model(requested_model).await;
     let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
 
-    let request_context = resolve_request_context(headers, body.request_id.as_deref())?;
+    let request_context =
+        resolve_request_context(headers, "chatcmpl-", body.request_id.as_deref())?;
 
     let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
     validate_max_output_tokens(
@@ -248,7 +249,7 @@ pub(crate) async fn render_completion<S: RenderContext>(
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let request_context = resolve_request_context(&headers, "cmpl-", body.request_id.as_deref())?;
     let text_requests =
         lower_completion_request(body, &lora_resolution, request_context, state.as_ref())?;
     for text_request in &text_requests {

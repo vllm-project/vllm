@@ -1568,9 +1568,11 @@ async fn scale_out_abort_requests_validates_body() {
     engine_task.abort_and_join().await;
 }
 
-/// An abort by the request ID that `/inference/v1/generate` returned finishes
-/// its stream with `finish_reason: "abort"`. An empty `request_ids` list or an
-/// unknown ID aborts nothing, unlike the dev-mode `/abort_requests`.
+/// An abort by the request ID that `/inference/v1/generate` returned, the
+/// `X-Request-Id` header (which wins over the body `request_id`) with Python's
+/// `generate-tokens-` prefix, finishes its stream with `finish_reason: "abort"`.
+/// An empty `request_ids` list, an unknown ID, or the caller's unprefixed ID
+/// aborts nothing, unlike the dev-mode `/abort_requests`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn scale_out_abort_requests_finishes_generate_stream() {
@@ -1609,9 +1611,10 @@ async fn scale_out_abort_requests_finishes_generate_stream() {
                 .method("POST")
                 .uri("/inference/v1/generate")
                 .header("content-type", "application/json")
+                .header("X-Request-Id", "abort-me")
                 .body(Body::from(
                     json!({
-                        "request_id": "abort-me",
+                        "request_id": "body-id",
                         "token_ids": [11, 22],
                         "stream": true,
                         "sampling_params": {"max_tokens": 16},
@@ -1652,10 +1655,12 @@ async fn scale_out_abort_requests_finishes_generate_stream() {
     chunks.extend(sse_json_payloads(&first));
     abort(r#"{"request_ids": []}"#).await;
     abort(r#"{"request_ids": ["unknown"]}"#).await;
+    abort(r#"{"request_ids": ["abort-me"]}"#).await;
+    abort(r#"{"request_ids": ["generate-tokens-body-id"]}"#).await;
     resume_tx.send(()).expect("resume engine");
     let second = next_chunk().await.expect("second chunk");
     chunks.extend(sse_json_payloads(&second));
-    abort(r#"{"request_ids": ["abort-me"]}"#).await;
+    abort(r#"{"request_ids": ["generate-tokens-abort-me"]}"#).await;
     while let Some(rest) = next_chunk().await {
         chunks.extend(sse_json_payloads(&rest));
     }
@@ -1665,13 +1670,16 @@ async fn scale_out_abort_requests_finishes_generate_stream() {
         .iter()
         .map(|chunk| {
             let choice = &chunk["choices"][0];
-            format!("{} {}", choice["token_ids"], choice["finish_reason"])
+            format!(
+                "{} {} {}",
+                chunk["request_id"], choice["token_ids"], choice["finish_reason"]
+            )
         })
         .collect::<Vec<_>>();
     expect_test::expect![[r#"
-        [7] null
-        [8] null
-        [] "abort""#]]
+        "generate-tokens-abort-me" [7] null
+        "generate-tokens-abort-me" [8] null
+        "generate-tokens-abort-me" [] "abort""#]]
     .assert_eq(&choices.join("\n"));
 }
 
@@ -9466,9 +9474,12 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                     decode_prompt_token_ids(&request).as_deref(),
                     Some(&[11, 22][..])
                 );
-                assert_eq!(request.external_req_id.as_deref(), Some("raw-req"));
-                assert!(request.request_id.starts_with("raw-req-"));
-                assert_ne!(request.request_id, "raw-req");
+                assert_eq!(
+                    request.external_req_id.as_deref(),
+                    Some("generate-tokens-raw-req")
+                );
+                assert!(request.request_id.starts_with("generate-tokens-raw-req-"));
+                assert_ne!(request.request_id, "generate-tokens-raw-req");
 
                 send_outputs(
                     push,
@@ -9556,7 +9567,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
-    assert_eq!(json["request_id"], "raw-req");
+    assert_eq!(json["request_id"], "generate-tokens-raw-req");
     // Like Python's `model_dump()`, the envelope always carries the response
     // level, the served model name, the creation time and usage.
     assert_eq!(json["output_mode"], "tokens");
@@ -9616,7 +9627,10 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
                     decode_prompt_token_ids(&request).as_deref(),
                     Some(&[11, 22][..])
                 );
-                assert_eq!(request.external_req_id.as_deref(), Some("raw-stream"));
+                assert_eq!(
+                    request.external_req_id.as_deref(),
+                    Some("generate-tokens-raw-stream")
+                );
 
                 send_outputs(
                     push,
@@ -9712,7 +9726,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(payloads.len(), 4, "{text}");
 
     let first: serde_json::Value = serde_json::from_str(payloads[0]).expect("first chunk json");
-    assert_eq!(first["request_id"], "raw-stream");
+    assert_eq!(first["request_id"], "generate-tokens-raw-stream");
     assert_eq!(first["choices"][0]["index"], 0);
     assert_eq!(first["choices"][0]["token_ids"], json!([33]));
     assert_eq!(
@@ -10031,12 +10045,20 @@ async fn raw_generate_n_returns_one_choice_per_sample() {
     assert_eq!(
         children,
         [
-            ("0_raw-n".to_string(), Some("raw-n".to_string()), Some(7)),
-            ("1_raw-n".to_string(), Some("raw-n".to_string()), Some(8)),
+            (
+                "0_generate-tokens-raw-n".to_string(),
+                Some("generate-tokens-raw-n".to_string()),
+                Some(7)
+            ),
+            (
+                "1_generate-tokens-raw-n".to_string(),
+                Some("generate-tokens-raw-n".to_string()),
+                Some(8)
+            ),
         ]
     );
 
-    assert_eq!(json["request_id"], "raw-n");
+    assert_eq!(json["request_id"], "generate-tokens-raw-n");
     let choices = json["choices"]
         .as_array()
         .expect("choices")

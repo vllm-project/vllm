@@ -75,7 +75,8 @@ pub async fn chat_completions(
 ) -> Result<Response, ApiError> {
     let Json(body) = body?;
     let stream = body.stream;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let request_context =
+        resolve_request_context(&headers, "chatcmpl-", body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state
         .resolve_model_with_default_mm_loras(requested_model, body.media_modalities())

@@ -55,7 +55,7 @@ pub async fn create_responses(
 ) -> Result<Response, ApiError> {
     let Json(body) = body?;
     let stream_requested = body.stream.unwrap_or(false);
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let request_context = resolve_request_context(&headers, "resp_", body.request_id.as_deref())?;
     let lora_resolution = state
         .resolve_model_with_loras(body.model.as_deref().filter(|model| !model.is_empty()))
         .await;
