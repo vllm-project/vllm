@@ -70,6 +70,7 @@ StructuralTagBuilder: TypeAlias = Callable[
 XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
     {
         "llama",
+        "gemma_4",
         "kimi",
         "deepseek_r1",
         "deepseek_v3_1",
