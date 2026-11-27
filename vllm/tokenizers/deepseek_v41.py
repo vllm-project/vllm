@@ -37,6 +37,8 @@ from .protocol import TokenizerLike
 # sentinel is encoded as ordinary text afterwards.
 _ESCAPE_OPEN = "\ue000"
 _ESCAPE_CLOSE = "\ue001"
+# Message keys the encoder reads that no client may set.
+_ENCODER_KEYS = ("content_blocks", "updated_tools", "wo_eos", "_tool_references")
 
 # As in deepseek-recipe, the only special tokens that assistant content and
 # reasoning content can contain are the grounding tokens; every other added
@@ -61,7 +63,9 @@ def _make_escape(
     prefix = f"{_ESCAPE_OPEN}{nonce}:"
 
     def escape(text: Any) -> Any:
-        if added_tokens_re is None or not isinstance(text, str):
+        if text is not None and not isinstance(text, str):
+            raise ValueError(f"DeepSeek V4.1 expects text, got {type(text).__name__}")
+        if added_tokens_re is None or text is None:
             return text
         return added_tokens_re.sub(
             lambda m: f"{prefix}{m.group(0)}{_ESCAPE_CLOSE}", text
@@ -73,10 +77,12 @@ def _make_escape(
 def _escape_deep(value: Any, escape: Callable[[Any], Any]) -> Any:
     """Escape every key and string of a JSON-like value."""
     if isinstance(value, dict):
-        return {escape(k): _escape_deep(v, escape) for k, v in value.items()}
+        return {
+            _escape_deep(k, escape): _escape_deep(v, escape) for k, v in value.items()
+        }
     if isinstance(value, list):
         return [_escape_deep(v, escape) for v in value]
-    return escape(value)
+    return escape(value) if isinstance(value, str) else value
 
 
 def _normalize_messages(
@@ -96,6 +102,8 @@ def _normalize_messages(
         result.append(dict(copy.deepcopy(original_message)))
     image_idx = 0
     for message in result:
+        for key in _ENCODER_KEYS:
+            message.pop(key, None)
         image_indices = message["_image_indices"] = []
         role = message.get("role")
         if role not in ("system", "developer", "user", "assistant", "tool"):
@@ -108,9 +116,7 @@ def _normalize_messages(
         if "reasoning_content" in message:
             message["reasoning_content"] = text_escape(message["reasoning_content"])
         content = message.get("content")
-        if isinstance(content, str):
-            message["content"] = text_escape(content)
-        elif isinstance(content, list):
+        if isinstance(content, list):
             parts = []
             tool_references = []
             for block in content:
@@ -137,6 +143,8 @@ def _normalize_messages(
             message["content"] = "\n\n".join(parts)
             if tool_references:
                 message["_tool_references"] = tool_references
+        elif content is not None:
+            message["content"] = text_escape(content)
         # Tool call names and arguments are plain text for every token.
         for tool_call in message.get("tool_calls") or []:
             function = tool_call["function"]

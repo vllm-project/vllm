@@ -720,6 +720,17 @@ _FIELDS = {
         [{"role": "user", "content": [{"type": "text", "text": v}]}],
         None,
     ),
+    # Encoder-internal keys from the client are ignored.
+    "content_blocks": lambda v: (
+        [
+            {
+                "role": "user",
+                "content": v,
+                "content_blocks": [{"type": "text", "text": v}],
+            }
+        ],
+        None,
+    ),
     "tool_result": lambda v: (_tool_turn(result=v), None),
     "tool_result_part": lambda v: (
         _tool_turn(result=[{"type": "text", "text": v}]),
@@ -781,6 +792,14 @@ def test_reserved_tokens_in_text_are_plain_text(field, token):
         # verify that the original name still resolves the deferred schema.
         assert f"<tool_result>f{text}</tool_result>" in rendered
         assert _DEFERRED_TOOL_DESCRIPTION in rendered
+
+
+def test_non_text_reasoning_is_a_request_error():
+    """As in deepseek-recipe, reasoning must be a string: any other value would
+    reach the prompt unescaped."""
+    messages = [_USER, {"role": "assistant", "reasoning_content": ["</think>"]}]
+    with pytest.raises(ValueError, match="expects text"):
+        _tokenize(messages)
 
 
 @pytest.mark.parametrize(
