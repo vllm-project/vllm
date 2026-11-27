@@ -10,9 +10,9 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
-    AdmissionLimits, EngineCoreConfig, FingerprintMode, GenerationConfigMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
-    RendererSelection,
+    AdmissionLimits, DecisionsReadStrategy, EngineCoreConfig, FingerprintMode,
+    GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
+    ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -330,6 +330,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        decisions_read_strategy: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -1169,6 +1170,44 @@ fn queue_limits_reach_frontend_config() {
             max_num_queued_tokens: Some(8192),
         }
     );
+}
+
+#[test]
+fn decisions_read_strategy_reaches_frontend_config() {
+    let parse = |args_json: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])?;
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        Ok::<_, clap::Error>(args.into_config().server.decisions_read_strategy)
+    };
+    assert_eq!(
+        parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","decisions_read_strategy":"NextTokenStrategy"}"#)
+            .unwrap(),
+        Some(DecisionsReadStrategy::NextToken)
+    );
+    assert_eq!(parse(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap(), None);
+
+    // A strategy the Rust frontend does not implement fails startup, rather
+    // than leaving the endpoint to answer 501.
+    let error =
+        parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","decisions_read_strategy":"SlotLMStrategy"}"#)
+            .unwrap_err();
+    expect![[r#"
+        error: invalid JSON arguments: decisions_read_strategy: unknown variant `SlotLMStrategy`, expected `NextTokenStrategy` at line 1 column 73
+    "#]]
+    .assert_eq(&error.to_string());
 }
 
 #[test]
@@ -2485,6 +2524,7 @@ fn frontend_args_accept_json() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        decisions_read_strategy: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3652,6 +3692,7 @@ fn serve_args_accept_handshake_aliases() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        decisions_read_strategy: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3914,6 +3955,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,
@@ -4067,6 +4109,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,
@@ -4326,6 +4369,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 renderer: Auto,
                 language_model_only: false,
                 chat_template: None,
+                decisions_read_strategy: None,
                 default_chat_template_kwargs: None,
                 reasoning_effort_map: {},
                 trust_request_chat_template: false,

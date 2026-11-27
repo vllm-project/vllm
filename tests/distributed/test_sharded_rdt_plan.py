@@ -1438,7 +1438,7 @@ class TestLayerwiseGroups:
             "language_model.layers.",  # Kimi-K2.5, Nemotron-VL
             "thinker.model.layers.",  # Qwen2.5/3-Omni
             "transformer.h.",  # GPT-2, GPT-J, Bloom, Falcon
-            "transformer.blocks.",  # MPT, DBRX
+            "transformer.blocks.",  # MPT
             "transformer.encoder.layers.",  # ChatGLM
             "backbone.layers.",  # Mamba, Mamba2
             "gpt_neox.layers.",  # GPT-NeoX
