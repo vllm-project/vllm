@@ -24,7 +24,7 @@ from .engram import FlashEngram, FlashNgramHashState, loads_dummy_weights
 
 _EXPERT_WEIGHT = re.compile(
     r"(.*)\.experts\.(?:(\d+)\.)?(gate_proj|up_proj|down_proj|gate_up_proj)"
-    r"(\.weight(?:_packed|_scale(?:_inv)?)?|_scale(?:_inv)?)?"
+    r"(\.weight(?:_packed|_scale(?:_inv)?|_shape)?|_scale(?:_inv)?)?"
 )
 
 
@@ -104,6 +104,17 @@ class HYV4FlashModelMixin(nn.Module):
                     else (projection,)
                 )
                 suffix = (suffix or "").removeprefix(".weight")
+                is_shape = suffix == "_shape"
+                if is_shape and (
+                    expert_id is None
+                    or len(projections) != 1
+                    or value.shape != (2,)
+                    or value.dtype not in (torch.int32, torch.int64)
+                ):
+                    raise ValueError(
+                        f"Flash expert weight_shape requires a per-expert, "
+                        f"unfused projection with two integers: {name}"
+                    )
                 if expert_id is None:
                     if value.ndim != 3 or value.shape[0] != self.config.num_experts:
                         raise ValueError(
@@ -116,7 +127,13 @@ class HYV4FlashModelMixin(nn.Module):
                     if not 0 <= index < self.config.num_experts:
                         raise ValueError(f"Expert index out of range: {name}")
                     tensor = value[index] if expert_id is None else value
-                    pieces = tensor.chunk(len(projections), dim=-2)
+                    # Compressed-tensors stores an [N, K] vector, not a matrix
+                    # to split along its output axis.
+                    pieces = (
+                        (tensor,)
+                        if is_shape
+                        else tensor.chunk(len(projections), dim=-2)
+                    )
                     for projection, piece in zip(projections, pieces):
                         param_name, mapped_expert, shard = expert_mapping[
                             f"experts.{index}.{projection}."

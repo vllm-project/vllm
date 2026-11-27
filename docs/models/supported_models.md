@@ -683,6 +683,12 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
     `HYV4FlashForConditionalGeneration`, which vLLM maps to
     `HYV4FlashVLForConditionalGeneration`.
 
+    For custom HY4 Flash compressed-tensors INT4 W4A16 checkpoints, use
+    `pack-quantized` weights with separate `gate_proj`, `up_proj`, and
+    `down_proj` tensors per routed expert. The loader expects each projection's
+    `weight_shape` metadata as a two-element integer tensor `[N, K]`; it does
+    not accept fused or stacked `weight_shape` tensors.
+
 On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
 varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.
 Select the DASH path explicitly with
