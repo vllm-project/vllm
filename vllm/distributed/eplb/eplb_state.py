@@ -55,6 +55,7 @@ from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, EplbStats
+from .policy_process import EplbPolicyProcess
 from .rebalance_execute import (
     AsyncEplbLayerResult,
     copy_rows,
@@ -331,6 +332,7 @@ class EplbState:
         """
         Selected EPLB algorithm
         """
+        self.policy_process: EplbPolicyProcess | None = None
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
@@ -449,8 +451,8 @@ class EplbState:
     def create_policy(self) -> AbstractEplbPolicy:
         """Create the policy shared by every model in this EPLB state.
 
-        `rebalance_experts` runs on the background worker thread for asynchronous
-        planning and on the main thread for synchronous planning and profiling.
+        Async planning runs a serialized copy in a persistent CPU subprocess.
+        Synchronous planning and profiling use this instance on the main thread.
         """
         policy = self.parallel_config.eplb_config.policy
         return EPLB_POLICIES["default" if policy is None else policy]()
@@ -1177,20 +1179,26 @@ class EplbState:
                 is_profile=is_profile,
             )
 
-    def stop_async_loop(self) -> None:
-        """Drain and stop the worker before releasing its resources."""
-        if self.async_worker is None:
-            return
-        self.drain_async()
+    def stop_async_loop(self, timeout: float = 5) -> None:
+        """Cancel and stop the async worker before releasing model resources."""
+        worker = self.async_worker
         self.async_worker_stop.set()
-        self.rearrange_event.record()
-        self.async_worker.join(timeout=5)
-        if self.async_worker.is_alive():
-            logger.warning(
-                "Async EPLB worker did not stop within 5 seconds; "
-                "continuing shutdown while the worker is still running."
-            )
-        self.async_worker = None
+        if self.policy_process is not None:
+            self.policy_process.close()
+        if worker is not None:
+            worker.join(timeout=timeout)
+            if worker.is_alive():
+                logger.warning(
+                    "Async EPLB worker did not stop within %s seconds; "
+                    "continuing shutdown while the worker is still running.",
+                    timeout,
+                )
+            else:
+                for ms in self.model_states.values():
+                    ms.rebalanced = False
+                    ms.pending_result = None
+            self.async_worker = None
+        self.policy_process = None
 
     def drain_async(self) -> None:
         """Drain in-flight async EPLB by consuming all remaining layer results.

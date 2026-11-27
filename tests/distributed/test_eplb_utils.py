@@ -284,6 +284,12 @@ class _EplbTestModelConfig:
         return {"model": self.model}
 
 
+_EPLB_TEST_MODEL_CONFIGS = (
+    _EplbTestModelConfig("target"),
+    _EplbTestModelConfig("draft"),
+)
+
+
 class _TopologyEncodingPolicy(AbstractEplbPolicy):
     calls: list[tuple[int, int]] = []
 
@@ -349,10 +355,7 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(eplb_state_module, "PIN_MEMORY", False)
-    model_configs = (
-        _EplbTestModelConfig("target"),
-        _EplbTestModelConfig("draft"),
-    )
+    model_configs = _EPLB_TEST_MODEL_CONFIGS
     models = (
         _EplbTestModel(num_experts=4, num_redundant=2),
         _EplbTestModel(num_experts=6, num_redundant=2),
@@ -609,9 +612,18 @@ class _WorkerProbe:
         probe = self
 
         class _ReportingEvent(CpuGpuEvent):
-            def wait(self, stream: torch.Stream | None = None) -> None:
-                probe._reports.put(report)
-                super().wait(stream)
+            _reported = False
+
+            def wait(
+                self, stream: torch.Stream | None = None, timeout: float | None = None
+            ) -> bool:
+                # The worker polls; report once per blocking point.
+                if not self._reported:
+                    self._reported = True
+                    probe._reports.put(report)
+                recorded = super().wait(stream, timeout)
+                self._reported = not recorded
+                return recorded
 
         return _ReportingEvent()
 
@@ -620,15 +632,18 @@ class _WorkerProbe:
         assert self._reports.empty()
 
 
-def _start_ft_async_eplb(monkeypatch):
+@pytest.fixture
+def ft_async_eplb(dist_init, monkeypatch):
     """Start single-rank async EPLB under fault tolerance whose first layer
     transfer raises. On one rank the EP group stands in
-    for the EPLB group. Returns once the worker is waiting for a signal.
+    for the EPLB group. Yields once the worker is waiting for a signal.
     """
     num_layers, num_experts, window = 2, 4, 2
     device = torch.device(current_platform.device_type)
     probe = _WorkerProbe()
     monkeypatch.setattr(async_worker, "get_eplb_group", get_ep_group)
+    # run_rebalance_experts is replaced, so no policy subprocess is needed.
+    monkeypatch.setattr(async_worker, "EplbPolicyProcess", Mock())
     monkeypatch.setattr(
         async_worker,
         "run_rebalance_experts",
@@ -682,13 +697,14 @@ def _start_ft_async_eplb(monkeypatch):
     state.rearrange_event = probe.event("idle")
     state.start_async_loop()
     probe.expect("idle")
-    return SimpleNamespace(
+    yield SimpleNamespace(
         state=state,
         model_state=model_state,
         probe=probe,
         failure=failure,
         applied=applied,
     )
+    state.stop_async_loop()
 
 
 def _signal_rearrangement(state: EplbState) -> None:
@@ -698,14 +714,12 @@ def _signal_rearrangement(state: EplbState) -> None:
     assert state.model_states["m"].rebalanced
 
 
-def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
-    dist_init, monkeypatch
-):
+def test_fault_tolerance_recovers_async_eplb_after_worker_failure(ft_async_eplb):
     """Under fault tolerance a worker failure must reach step(), or EPLB stalls
     silently with every rank waiting for the failed layer. The worker thread
     survives, so after the FT reset the next rearrangement runs to completion.
     """
-    run = _start_ft_async_eplb(monkeypatch)
+    run = ft_async_eplb
     _signal_rearrangement(run.state)
     run.probe.expect("idle")
     with pytest.raises(RuntimeError) as exc_info:
@@ -730,14 +744,14 @@ def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
 
 
 def test_fault_tolerance_reset_refuses_a_running_async_eplb_cycle(
-    dist_init, monkeypatch
+    ft_async_eplb, monkeypatch
 ):
     """FT recovery must not reset EPLB state while a transfer cycle still runs.
 
     A cycle blocked on a failed peer ends late with an error. If the reset had
     already cleared the error by then, the recovered engine would fault again.
     """
-    run = _start_ft_async_eplb(monkeypatch)
+    run = ft_async_eplb
     run.state.parallel_config.cpu_distributed_timeout_seconds = 0
     blocked, release = threading.Event(), threading.Event()
     failing_transfer = async_worker.transfer_layer
@@ -763,11 +777,11 @@ def test_fault_tolerance_reset_refuses_a_running_async_eplb_cycle(
 
 
 def test_fault_tolerance_reset_succeeds_after_failed_rearrange_signal(
-    dist_init, monkeypatch
+    ft_async_eplb, monkeypatch
 ):
     """A rearrange signal that fails queues no cycle, so the FT reset must not
     wait for one."""
-    run = _start_ft_async_eplb(monkeypatch)
+    run = ft_async_eplb
     run.state.parallel_config.cpu_distributed_timeout_seconds = 0
     monkeypatch.setattr(
         run.state.rearrange_event, "record", Mock(side_effect=RuntimeError("injected"))

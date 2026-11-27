@@ -11,6 +11,7 @@ use std::sync::Arc;
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{StreamExt as _, future, pin_mut};
@@ -35,7 +36,7 @@ use super::utils::logprobs::{
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
+use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_request_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderContext;
 use crate::routes::openai::completions::types::{
@@ -47,7 +48,6 @@ use crate::routes::openai::utils::choices::{
 };
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
@@ -73,10 +73,11 @@ pub(crate) fn lower_completion_request(
 pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
+    body: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Json(body) = body?;
     let stream = body.stream;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let request_context = resolve_request_context(&headers, "cmpl-", body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
@@ -99,7 +100,7 @@ pub async fn completions(
             .return_tokens_as_token_ids
             .unwrap_or(state.api_server_options.default_return_tokens_as_token_ids)
     {
-        return Err(text_submit_error(
+        return Err(text_request_error(
             "invalid completion request",
             vllm_text::Error::TokenizerUnavailable,
         ));
@@ -123,7 +124,7 @@ pub async fn completions(
             .generate_n(text_request, prepared.n)
             .instrument(request_span.clone())
             .await
-            .map_err(|error| text_submit_error("failed to submit completion request", error))?;
+            .map_err(|error| text_request_error("failed to submit completion request", error))?;
         streams_by_prompt.push((echo, text_streams));
     }
 
@@ -254,7 +255,7 @@ async fn collect_completion(
     let collected = stream
         .collect_output()
         .await
-        .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
+        .map_err(|error| text_request_error("completion stream failed", error))?;
     let finish_reason = collected.finish_reason.clone();
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
@@ -669,7 +670,7 @@ async fn completion_chunk_stream(
                     error = %error.as_report(),
                     "completion stream failed"
                 );
-                bail_server_error!("{}", error.to_report_string());
+                return Err(text_request_error("completion stream failed", error));
             }
         }
     }
