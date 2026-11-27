@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from concurrent.futures import Executor
 from typing import Any, Final, cast
 
@@ -286,9 +286,11 @@ class PoolingIOProcessor:
             render_params = cast(EncodeCMPLRenderParams, render_params)
             prompt = render_params["prompts"]
             if isinstance(prompt, dict):
-                prompt = self._copy_prompt_for_render(prompt)
+                prompts = [self.renderer._copy_prompt_dict(prompt)]
+            else:
+                prompts = [prompt]
             engine_input = self.renderer.render_cmpl(
-                prompts=[prompt],
+                prompts=prompts,
                 tok_params=render_params["tok_params"],
                 prompt_extras=render_params["prompt_extras"],
             )
@@ -303,17 +305,6 @@ class PoolingIOProcessor:
             lora_requests=render_params["lora_requests"],
             priorities=render_params["priorities"],
         )
-
-    @staticmethod
-    def _copy_prompt_for_render(prompt: Mapping[str, Any]) -> dict[str, Any]:
-        # Copy the prompt to avoid mutating caller arguments.
-        copied = dict(prompt)
-        if "encoder_prompt" in copied:
-            copied["encoder_prompt"] = dict(copied["encoder_prompt"])
-            decoder_prompt = copied["decoder_prompt"]
-            if decoder_prompt is not None:
-                copied["decoder_prompt"] = dict(decoder_prompt)
-        return copied
 
     def _validate_chat_template(
         self,
