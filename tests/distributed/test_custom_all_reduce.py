@@ -15,6 +15,7 @@ from vllm.distributed.parallel_state import get_tp_group, graph_capture
 from vllm.platforms import current_platform
 
 from ..utils import (
+    cuda_communicator,
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
     multi_process_parallel,
@@ -198,11 +199,11 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         # Both protocols give the same bits.
         for n in (6, 16, 200):
             x = contribution(n)
-            inputs = mhc_inputs(n)
+            residual, post, comb, pre, weight = mhc_inputs(n)
             op.bt_min_rows = n + 1
-            ll = op(x, *inputs, 1e-6)
+            ll = op(x, residual, post, comb, pre, weight, 1e-6)
             op.bt_min_rows = n
-            bt = op(x, *inputs, 1e-6)
+            bt = op(x, residual, post, comb, pre, weight, 1e-6)
             assert torch.equal(ll[0], bt[0])
             assert torch.equal(ll[1], bt[1])
 
@@ -832,7 +833,7 @@ def test_mnnvl_multimem_reduce_scatter_initializes_signals(monkeypatch):
 def _vllm_custom_allreduce(device: torch.device) -> car.CustomAllreduce:
     """The TP group's vLLM CustomAllreduce. When AITER's all-reduce serves the
     group on ROCm, the group has none, so build one on it directly."""
-    comm = get_tp_group().device_communicator
+    comm = cuda_communicator(get_tp_group())
     if comm.ca_comm is None and comm.aiter_ar_comm is not None:
         fa = car.CustomAllreduce(get_tp_group().cpu_group, device)
     else:

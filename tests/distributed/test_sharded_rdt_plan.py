@@ -2706,7 +2706,9 @@ def test_settings_reach_workers_unchanged():
         client=RecordingClient(), source=None, is_sender=True, init_info=trainer
     )
     engine._groups = [["w"]]
-    engine._meta = [SimpleNamespace(name="w", dtype=torch.bfloat16, shape=(4,))]
+    engine._meta = [
+        SimpleNamespace(name="w", dtype=torch.bfloat16, shape=(4,))  # type: ignore[list-item]
+    ]
     engine._owner_sets = [[0]]
     engine._name_owner_class = [0]
 

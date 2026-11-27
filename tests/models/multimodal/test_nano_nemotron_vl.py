@@ -717,7 +717,7 @@ def test_nemotron_device_resize_profiles_a_real_video_resize(default_vllm_config
             ),
             sound_config=None,
         )
-        builder = NanoNemotronVLDummyInputsBuilder(info)  # type: ignore[arg-type]
+        builder = NanoNemotronVLDummyInputsBuilder(info)
         videos = cast(list, builder.get_dummy_mm_data(64, {"video": 1}, {})["video"])
         results[device_resize] = (
             videos[0][0].shape,

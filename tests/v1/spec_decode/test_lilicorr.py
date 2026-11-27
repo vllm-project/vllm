@@ -589,7 +589,7 @@ def test_checkpoint_rejects_wrong_heads_and_allows_partial_buckets(
 ):
     from vllm.model_executor.models.lilicorr import LiLiCorr, LiLiCorrForCausalLM
 
-    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)  # type: ignore[type-abstract]
+    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)
     nn.Module.__init__(wrapper)
     wrapper.model = LiLiCorr.__new__(LiLiCorr)
     nn.Module.__init__(wrapper.model)

@@ -36,7 +36,7 @@ def fake_speculative_config(
             draft_model_config=SimpleNamespace(architectures=[]),
             use_multi_module_mtp=lambda: False,
         )
-        speculator_config_cls = get_speculator_config_class(probe)  # type: ignore[arg-type]
+        speculator_config_cls = get_speculator_config_class(probe)
     spec.speculator_config = speculator_config_cls(spec)
     return spec
 

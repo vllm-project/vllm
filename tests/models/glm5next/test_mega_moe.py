@@ -86,7 +86,7 @@ def _experts(weight_block_size=BLOCK) -> Glm5NextMegaMoEExperts:
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     return Glm5NextMegaMoEExperts(
-        vllm_config,  # type: ignore[arg-type]
+        vllm_config,
         num_experts=NUM_EXPERTS,
         num_local_experts=2,
         experts_start_idx=2,
@@ -318,7 +318,7 @@ def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode, sm90):
     ckpt, shared_ckpt = _checkpoint(seed=0), _shared_checkpoint(seed=0)
     _load_shuffled(experts, ckpt, seed=0)
     _load_shared(experts, shared_ckpt)
-    process_weights_after_loading(model, model_config, device)  # type: ignore[arg-type]
+    process_weights_after_loading(model, model_config, device)
     # A second call leaves the kernel tensors as they are.
     experts.finalize_block_fp8_weights()
     _assert_layout(_routed(experts), _expected_routed(ckpt, sm90), sm90)
@@ -332,7 +332,7 @@ def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode, sm90):
     # Every loaded tensor is in, so the layer is not meta any more: the derived
     # kernel scales do not count as missing loads.
     assert not experts.w13_weight.is_meta
-    finish_reload(model, model_config, device)  # type: ignore[arg-type]
+    finish_reload(model, model_config, device)
 
     _assert_layout(_routed(experts), _expected_routed(ckpt, sm90), sm90)
     _assert_layout(_shared(experts), _expected_shared(shared_ckpt, sm90), sm90)

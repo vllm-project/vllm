@@ -10,6 +10,7 @@ import threading
 import time
 import weakref
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 import multiprocess as mp
@@ -133,7 +134,7 @@ def worker_fn():
     else:
         recv = [None, None]
         dist.broadcast_object_list(recv, src=0)
-        ip, port = recv  # type: ignore
+        ip, port = recv
 
     stateless_pg = StatelessProcessGroup.create(ip, port, rank, dist.get_world_size())
 
@@ -148,7 +149,7 @@ def worker_fn():
         else:
             recv = [None]
             dist.broadcast_object_list(recv, writer_rank)
-            seed = recv[0]  # type: ignore
+            seed = recv[0]
 
         if pg == dist.group.WORLD:
             dist.barrier()
@@ -811,7 +812,7 @@ def test_reader_in_reference_cycle_is_collected_without_blocking():
         max_chunks=1,
     )
     reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
-    reader.cycle = reader
+    reader.cycle = reader  # type: ignore[attr-defined]
     reader_ref = weakref.ref(reader)
     del reader
 
@@ -1017,7 +1018,10 @@ def test_remote_subscribe_addr_unique_concurrent_writers(
 def _make_arena(n_reader: int = 2, slot_bytes: int = 4 << 20, n_slots: int = 3):
     """Writer arena plus attached per-reader arenas (same process)."""
     writer = ShmTensorArena(n_reader, slot_bytes, n_slots)
-    readers = [ShmTensorArena(*writer.handle(), reader_rank=i) for i in range(n_reader)]
+    readers = [
+        ShmTensorArena(*writer.handle(), reader_rank=i)  # type: ignore[misc]
+        for i in range(n_reader)
+    ]
     return writer, readers
 
 
@@ -1383,6 +1387,7 @@ def test_tensor_arena_registry_is_weak_and_survives_shutdown():
     handle = writer_mq.export_handle()
     reader_mq = MessageQueue.create_from_handle(handle, rank=0)
 
+    assert reader_mq.tensor_arena is not None
     name = reader_mq.tensor_arena.shared_memory.name
     assert shm_tensor_arena._TENSOR_ARENAS[name] is reader_mq.tensor_arena
 
@@ -1406,6 +1411,7 @@ def test_create_from_handle_tolerates_arena_attach_failure():
     as the sibling `ShmRingBuffer` path."""
     writer_mq = MessageQueue(n_reader=1, n_local_reader=1, enable_shm_tensor_arena=True)
     handle = writer_mq.export_handle()
+    assert handle.tensor_arena_handle is not None
     n_reader, slot_bytes, n_slots, _real_name = handle.tensor_arena_handle
     bogus_handle = dataclasses.replace(
         handle,
@@ -1441,7 +1447,7 @@ def worker_fn_arena_broadcast():
             max_chunk_bytes=8 * 1024 * 1024,
             enable_shm_tensor_arena=True,
         )
-        handles = [message_queue.export_handle()]
+        handles: list[Any] = [message_queue.export_handle()]
         dist.broadcast_object_list(handles, src=writer_rank)
     else:
         handles = [None]

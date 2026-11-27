@@ -163,6 +163,7 @@ class TestLSEWeightedCombine:
         lses = torch.randn(1, 2, 4)
 
         result = _lse_weighted_combine(outputs, lses)
+        assert isinstance(result, torch.Tensor)
 
         assert result.shape == (2, 4, 8)
         torch.testing.assert_close(result, outputs.squeeze(0), rtol=1e-5, atol=1e-5)
@@ -186,6 +187,7 @@ class TestLSEWeightedCombine:
         )
 
         result = _lse_weighted_combine(outputs, lses)
+        assert isinstance(result, torch.Tensor)
 
         expected = (outputs[0] + outputs[1]) / 2
         assert result.shape == (B, H, D)
@@ -210,6 +212,7 @@ class TestLSEWeightedCombine:
         )
 
         result = _lse_weighted_combine(outputs, lses)
+        assert isinstance(result, torch.Tensor)
 
         assert result.shape == (B, H, D)
         torch.testing.assert_close(result, outputs[1], atol=1e-5, rtol=1e-5)

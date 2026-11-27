@@ -272,6 +272,7 @@ def test_kv_scale_refusal(kv_cache_dtype, k_scale, refused):
     reason = _kv_scale_refusal(bound.moe)
     assert (reason is not None) == refused
     if refused:
+        assert reason is not None
         assert "KV scales" in reason
 
 

@@ -357,6 +357,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
     )
     # The flag the model sets at load (mono_decode._keep_row_major_at_load): the
     # kernels read the shared expert row-major, not preshuffled for AITER.
+    assert moe.shared_experts is not None
     for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
         lin.keep_row_major_weight = True
     process_weights_after_loading(moe, vc.model_config, device)
@@ -396,6 +397,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
     q_norm, kv_norm = (1 + f32(Q_RANK, s=0.1)).to(bf), (1 + f32(HEAD_DIM, s=0.1)).to(bf)
     sink = f32(H, gen=gs)
     e, sh = moe.experts.routed_experts, moe.shared_experts
+    assert sh is not None
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
     runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
     # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
@@ -604,7 +606,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         def step(mw=mw, x0=x0, res0=res0, post0=post0, comb0=comb0, pre0=pre0,
                  args=args, s=s, meta=meta, whole=whole, part=part, res=res,
                  post=post, comb=comb, attn_pre=attn_pre, ffn=ffn):  # fmt: skip
-            runner.forward(
+            runner.forward(  # type: ignore[call-arg,misc]
                 mw, x0, res0, post0, comb0, pre0, *args, s["swa_lens"],
                 s["token_to_req"], **meta, outs=whole,
             )  # fmt: skip
@@ -722,6 +724,7 @@ def _replay_942(rank: int, tp: int, device) -> None:
     with set_current_vllm_config(vc), set_default_torch_dtype(bf), device:
         moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
     e, sh = moe.experts.routed_experts, moe.shared_experts
+    assert sh is not None
     # The hooks that the model sets at load (mono_decode._copy_942_at_load).
     # The routed experts are copied from the plain tensors before vLLM's MoE
     # backend converts them, and the shared expert from the bf16 weights that

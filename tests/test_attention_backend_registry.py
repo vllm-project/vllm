@@ -20,7 +20,7 @@ class CustomAttentionImpl(AttentionImpl):
     """Mock custom attention implementation for testing."""
 
     def __init__(self, *args, **kwargs):
-        super().__init__()
+        pass
 
     def forward(self, *args, **kwargs):
         """Mock forward pass."""
@@ -48,7 +48,7 @@ class CustomMambaAttentionImpl(AttentionImpl):
     """Mock custom mamba attention implementation for testing."""
 
     def __init__(self, *args, **kwargs):
-        super().__init__()
+        pass
 
     def forward(self, *args, **kwargs):
         """Mock forward pass."""

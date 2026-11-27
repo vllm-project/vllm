@@ -23,6 +23,7 @@ from vllm.platforms import current_platform
 
 from ..utils import (
     assert_rocm_custom_allreduce_backend_state,
+    cuda_communicator,
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
     multi_gpu_test,
@@ -53,7 +54,7 @@ def _configure_aiter_custom_ar_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _assert_aiter_handles_input(inp: torch.Tensor) -> None:
-    aiter_ar_comm = get_tp_group().device_communicator.aiter_ar_comm
+    aiter_ar_comm = cuda_communicator(get_tp_group()).aiter_ar_comm
     assert aiter_ar_comm is not None
     assert aiter_ar_comm.should_custom_ar(inp), (
         f"AITER CustomAllreduce does not support input shape {inp.shape}."
@@ -130,7 +131,8 @@ def eager_allreduce(
 
         # Raw FP8 bytes are reduced as int8, which AITER's kernel rejects.
         inp = torch.ones((2, 7168), dtype=torch.int8, device=device)
-        aiter_ar_comm = get_tp_group().device_communicator.aiter_ar_comm
+        aiter_ar_comm = cuda_communicator(get_tp_group()).aiter_ar_comm
+        assert aiter_ar_comm is not None
         assert not aiter_ar_comm.should_custom_ar(inp)
         out = tensor_model_parallel_all_reduce(inp)
         torch.testing.assert_close(out, inp * tp_size)
@@ -186,7 +188,9 @@ def graph_allreduce_expandable_segments(
         alloc_conf.set_alloc_conf(conf)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
-        assert get_tp_group().device_communicator.aiter_ar_comm.registers_graph_buffers
+        aiter_ar_comm = cuda_communicator(get_tp_group()).aiter_ar_comm
+        assert aiter_ar_comm is not None
+        assert aiter_ar_comm.registers_graph_buffers
 
         def capture_allreduce(capture_ctx) -> int:
             shape, dtype = (256, 8192), torch.bfloat16
@@ -235,7 +239,7 @@ def test_rocm_aiter_custom_allreduce_skips_copy_with_expandable_segments(
 
 
 def _get_aiter_ag_rs_comm():
-    device_communicator = get_dp_group().device_communicator
+    device_communicator = cuda_communicator(get_dp_group())
     assert device_communicator.use_aiter_ag_rs, (
         "AITER custom AG/RS was not enabled on the DP group."
     )

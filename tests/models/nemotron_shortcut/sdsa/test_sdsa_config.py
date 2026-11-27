@@ -71,6 +71,7 @@ def test_torch_compile_splits_at_the_indexer() -> None:
     torch.compile."""
     defaults = CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
     defaults.set_splitting_ops_for_v1(all2all_backend="naive")
+    assert defaults.splitting_ops is not None
     assert SDSA_INDEXER_OP in defaults.splitting_ops
     _split_at_indexer(SimpleNamespace(compilation_config=defaults))
     _split_at_indexer(compilation(CompilationMode.NONE, None))

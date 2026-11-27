@@ -134,7 +134,7 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
 
     # Reset envs.__getattr__ back to none-cached version to
     # avoid affecting other tests
-    envs.__getattr__ = envs.__getattr__.__wrapped__
+    envs.__getattr__ = envs.__getattr__.__wrapped__  # type: ignore[attr-defined]
 
 
 def test_getattr_with_reset(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -156,7 +156,7 @@ def test_policy_process_ignores_sigint():
 
 def test_policy_process_explains_incompatible_policy_before_starting_child():
     policy = _CountingPolicy()
-    policy.lock = threading.Lock()
+    policy.lock = threading.Lock()  # type: ignore[attr-defined]
     children = {child.pid for child in psutil.Process().children()}
     with pytest.raises(TypeError, match="__getstate__/__setstate__ or __reduce__"):
         EplbPolicyProcess(policy)

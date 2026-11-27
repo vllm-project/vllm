@@ -189,6 +189,7 @@ def test_sliding_window_matches_trainer_mask():
         layer_types=["sliding_attention"], sliding_window=sliding_window
     )
     (window,) = draft_attention_windows(config, depth)
+    assert window is not None
     for source in range(12):
         # Context K/V at positions 0..source; the block (anchor at source + 1)
         # occupies source + 1 .. source + depth.

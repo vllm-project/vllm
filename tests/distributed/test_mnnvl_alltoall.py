@@ -926,14 +926,17 @@ def _args_dispatch_combine_worker(rank, world_size):
     with _make_forward_context(rank, world_size, tokens_per_rank):
         manager = AgRsAll2AllManager(cpu_group)
         dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
 
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
             # -- dispatch_router_logits --
-            d_hidden, d_router = manager.dispatch_router_logits(
+            router_out = manager.dispatch_router_logits(
                 hidden.clone(),
                 router.clone(),
                 is_sequence_parallel=True,
             )
+            assert len(router_out) == 2
+            d_hidden, d_router = router_out
             assert d_hidden.shape == (total_tokens, hidden_size)
             assert d_router.shape == (total_tokens, num_experts)
 
@@ -950,12 +953,14 @@ def _args_dispatch_combine_worker(rank, world_size):
                 )
 
             # -- dispatch --
-            d_hidden2, d_weights, d_ids = manager.dispatch(
+            dispatch_out = manager.dispatch(
                 hidden.clone(),
                 weights.clone(),
                 ids.clone(),
                 is_sequence_parallel=True,
             )
+            assert len(dispatch_out) == 3
+            d_hidden2, d_weights, d_ids = dispatch_out
             assert d_hidden2.shape == (total_tokens, hidden_size)
             assert d_weights.shape == (total_tokens, experts_per_token)
             assert d_ids.shape == (total_tokens, experts_per_token)
@@ -1168,6 +1173,7 @@ def _two_sided_data_worker(rank, world_size, *, empty_rank):
         rank, world_size, num_tokens, num_tokens_across_dp=token_counts
     ):
         dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
 
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
             local_sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
@@ -1297,6 +1303,7 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
 
     with _make_forward_context(rank, world_size, tokens_per_rank):
         dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
 
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
             local_sizes = dp_metadata.get_chunk_sizes_across_dp_rank()

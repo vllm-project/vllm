@@ -51,7 +51,7 @@ def test_warmup_compiles_the_combine_of_split_calls(num_heads, num_kv_heads):
         head_size=head_size,
         dtype=torch.bfloat16,
     )
-    cache = _flash_attn_fwd_combine.compile_cache  # type: ignore[attr-defined]
+    cache = _flash_attn_fwd_combine.compile_cache
     saved = dict(cache.cache)
     try:
         cache.cache.clear()

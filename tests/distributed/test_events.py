@@ -19,7 +19,7 @@ DP_RANK = 0
 
 class EventSample(
     msgspec.Struct,
-    tag=True,  # type: ignore
+    tag=True,
     array_like=True,  # type: ignore
 ):
     """Test event for publisher testing."""
@@ -546,8 +546,11 @@ def test_ephemeral_publishers_report_bound_endpoints(monkeypatch, node_ip):
     )
     pubs = [EventPublisherFactory.create(config, rank) for rank in range(2)]
     try:
-        resolved = [pub.get_publisher_config() for pub in pubs]
-        endpoints = [e for c in resolved for e in (c.endpoint, c.replay_endpoint)]
+        endpoints = []
+        for pub in pubs:
+            resolved = pub.get_publisher_config()
+            assert resolved is not None
+            endpoints += [resolved.endpoint, resolved.replay_endpoint]
         hosts_ports = {split_zmq_path(e)[1:] for e in endpoints}
         assert {h for h, _ in hosts_ports} == {node_ip}
         assert len(hosts_ports) == 4 and "0" not in {p for _, p in hosts_ports}

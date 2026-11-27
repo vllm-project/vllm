@@ -28,6 +28,7 @@ from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
 
 from ..utils import (
+    cuda_communicator,
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
     multi_process_parallel,
@@ -487,7 +488,8 @@ def graph_quickreduce(
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tp_group().device_group
-        fa = get_tp_group().device_communicator.qr_comm
+        fa = cuda_communicator(get_tp_group()).qr_comm
+        assert fa is not None
 
         # A small all_reduce for warmup.
         # this is needed because device communicators might be created lazily
@@ -549,7 +551,8 @@ def eager_quickreduce(
 
         # Size over 8MB is sufficient for custom quick allreduce.
         sz = 16 * 1024 * 1024
-        fa = get_tp_group().device_communicator.qr_comm
+        fa = cuda_communicator(get_tp_group()).qr_comm
+        assert fa is not None
         inp = torch.tensor(
             [1.0 * ((i) % 23) for i in range(sz)], dtype=torch.float16, device=device
         )
@@ -584,7 +587,8 @@ def bf16_cast_quickreduce(
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
         sz = 16 * 1024 * 1024
-        fa = get_tp_group().device_communicator.qr_comm
+        fa = cuda_communicator(get_tp_group()).qr_comm
+        assert fa is not None
         inp = torch.tensor(
             [1.0 * (i % 23) for i in range(sz)], dtype=torch.bfloat16, device=device
         )

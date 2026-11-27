@@ -160,7 +160,7 @@ def test_kpool_profiling_reserves_decode_logits_workspace(
         cache_config=CacheConfig(block_size=128),
         kernel_config={"sparse_indexer_topk_backend": "torch"},
     )
-    cfg.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec)  # type: ignore[assignment]
+    cfg.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec)
 
     prefix = "model.layers.0.self_attn.indexer.k_cache"
     topk_buf = torch.empty(

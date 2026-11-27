@@ -66,7 +66,11 @@ def test_reduce_scatterv_preserves_caller_output(monkeypatch, use_aiter):
     communicator.pynccl_comm = SimpleNamespace(
         disabled=False, nccl_version=22902, reduce_scatter=reduce_scatter
     )
-    communicator._can_use_aiter_ag_rs = lambda sizes: use_aiter and sizes is None
+    monkeypatch.setattr(
+        communicator,
+        "_can_use_aiter_ag_rs",
+        lambda sizes: use_aiter and sizes is None,
+    )
     communicator.aiter_ar_comm = SimpleNamespace(
         should_custom_rs=lambda inp, dim: True,
         custom_reduce_scatter=lambda inp, out, dim: reduce_scatter(out, inp),

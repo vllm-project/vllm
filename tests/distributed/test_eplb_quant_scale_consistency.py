@@ -217,6 +217,10 @@ def test_nvfp4_eplb_rearrangement_matches_reload(backend: str) -> None:
         # the quant config aliases; anything else goes stale on rearrangement.
         quant_config = method.moe_quant_config
         assert quant_config is not None
+        assert quant_config.g1_alphas is not None
+        assert quant_config.g2_alphas is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
         params = dict(layer.named_parameters())
         assert quant_config.g1_alphas.data_ptr() == (
             params["w13_weight_scale_2"].data_ptr()
@@ -281,6 +285,8 @@ def test_fp8_per_tensor_alphas_registered_and_aliased() -> None:
     )
 
     params = dict(layer.named_parameters())
+    assert quant_config.g1_alphas is not None
+    assert quant_config.g2_alphas is not None
     assert quant_config.g1_alphas.data_ptr() == params["g1_alphas"].data_ptr()
     assert quant_config.g2_alphas.data_ptr() == params["g2_alphas"].data_ptr()
 

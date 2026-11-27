@@ -254,6 +254,7 @@ def check_logprobs_close(
             logprobs_0 = [None] * len(output_ids_0)
         if logprobs_1 is None:
             logprobs_1 = [None] * len(output_ids_1)
+        assert logprobs_0 is not None and logprobs_1 is not None
 
         # Skip specified number of initial sequence #0 tokens
         # & logprobs, leaving output text as-is for simplicity

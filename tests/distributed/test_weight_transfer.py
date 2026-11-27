@@ -17,7 +17,8 @@ import time
 from contextlib import ExitStack, nullcontext
 from functools import cached_property
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from typing import Any
+from unittest.mock import MagicMock, Mock
 
 import pybase64 as base64
 import pytest
@@ -73,6 +74,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 )
 from vllm.distributed.weight_transfer.sparse_disk_engine import (
     SparseDiskTrainerInitInfo,
+    SparseDiskTrainerWeightTransferEngine,
     SparseDiskWeightTransferEngine,
     patch_file,
     save_sparse_patches,
@@ -838,7 +840,9 @@ def inference_receive_tensor(
     # receive_weights enters, since vllm_config here is a mock.
     import vllm.config as _vllm_config_mod
 
-    _vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
+    _vllm_config_mod.set_current_vllm_config = (
+        lambda cfg: contextlib.nullcontext()  # type: ignore[misc]
+    )
 
     # Initialize the engine (joins as rank 1)
     # Trainer broadcasts a single tensor unpacked, so the worker must not
@@ -972,7 +976,9 @@ class MultiSourceInferenceWorker:
         )
         import vllm.config as vllm_config_mod
 
-        vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
+        vllm_config_mod.set_current_vllm_config = (
+            lambda cfg: contextlib.nullcontext()  # type: ignore[misc]
+        )
 
     def ready(self):
         return True
@@ -1544,6 +1550,7 @@ def _sparse_disk(tmp_path, monkeypatch):
     trainer = WeightTransferTrainerFactory.trainer_init(
         SparseDiskTrainerInitInfo(patch_dir=str(patch_dir), rank=0), client=server
     )
+    assert isinstance(trainer, SparseDiskTrainerWeightTransferEngine)
     for patches in _SPARSE_DISK_VERSIONS:
         trainer.publish(patches)
         trainer.send_weights()
@@ -1861,6 +1868,7 @@ class TestIPCEngineParsing:
 
         assert isinstance(update_info, IPCWeightTransferUpdateInfo)
         assert update_info.names == ["w1", "w2"]
+        assert isinstance(update_info.ipc_handles, list)
         assert len(update_info.ipc_handles) == 2
         assert gpu_uuid in update_info.ipc_handles[0]
         assert gpu_uuid in update_info.ipc_handles[1]
@@ -1997,7 +2005,9 @@ def inference_receive_ipc_tensor(
     # receive_weights enters, since vllm_config here is a mock.
     import vllm.config as _vllm_config_mod
 
-    _vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
+    _vllm_config_mod.set_current_vllm_config = (
+        lambda cfg: contextlib.nullcontext()  # type: ignore[misc]
+    )
 
     init_info = IPCWeightTransferInitInfo()
     engine.init_transfer_engine(init_info)
@@ -2215,7 +2225,7 @@ class _DummyTrainerEngine(TrainerWeightTransferEngine):
     """Minimal concrete trainer engine to exercise base-class + factory."""
 
     @classmethod
-    def trainer_init(cls, init_info, *, client, source):
+    def trainer_init(cls, init_info, *, client, source):  # type: ignore[override]
         return cls(client=client, source=source)
 
     def send_weights(self):
@@ -2569,6 +2579,7 @@ class TestTrainerEngineBase:
             source=ModuleSource(_module_with(("w", torch.zeros(2)))),
         )
         assert engine.is_sender is True
+        assert engine.source is not None
         assert [n for n, _ in engine.source.iter_full()] == ["w"]
 
     def test_shutdown_default_is_noop(self):
@@ -2739,7 +2750,7 @@ def test_nccl_trainer_init_dispatches_subclass_hooks_only_on_sender(rank):
 
     class Trainer(NCCLTrainerWeightTransferEngine):
         @classmethod
-        def _build_worker_init_payload(cls, init_info):
+        def _build_worker_init_payload(cls, init_info):  # type: ignore[override]
             calls.append(("payload", cls, init_info))
             payload = super()._build_worker_init_payload(init_info)
             payload["master_port"] += 1
@@ -2822,6 +2833,7 @@ def test_nccl_trainer_init_non_sender_skips_rendezvous_and_client():
     )
 
     assert engine.is_sender is False
+    assert isinstance(engine, NCCLTrainerWeightTransferEngine)
     assert engine.model_update_group is None
     assert client.order == []
 
@@ -2977,6 +2989,7 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
         for model, src in order
     ]
     group = engine.model_update_group
+    assert isinstance(group, Mock)
     assert [c.kwargs["src"] for c in group.broadcast.call_args_list] == [
         src for _, src in order
     ]
@@ -2985,6 +2998,7 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
     for model, src in seeded:
         update(model, src)
     assert len(received) == len(order)
+    assert isinstance(engine.model_update_group, Mock)
     engine.model_update_group.broadcast.assert_not_called()
 
     for bad in (-1, 2):
@@ -3275,7 +3289,7 @@ def test_trainer_init_destroys_its_group_when_the_workers_refuse(monkeypatch, ba
     )
     common = dict(master_address="127.0.0.1", master_port=29500, world_size=2, rank=0)
     if sparse:
-        kwargs = dict(init_info=SparseNCCLTrainerInitInfo(**common))
+        kwargs: dict[str, Any] = dict(init_info=SparseNCCLTrainerInitInfo(**common))
     else:
         kwargs = dict(
             init_info=NCCLTrainerInitInfo(**common, use_load_plan=True),
@@ -3386,8 +3400,8 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
     )
 
     assert engine.is_sender is False
-    assert engine.model_update_group is None
     assert isinstance(engine, SparseNCCLTrainerWeightTransferEngine)
+    assert engine.model_update_group is None
     engine.send_weights([_sparse_patch()])
     engine.send_weight_chunk([_sparse_patch()])
     assert client.order == []

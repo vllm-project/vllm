@@ -588,7 +588,7 @@ def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
 def test_ple_cache_follows_inputs_device(model_cls):
     """A model built on meta (or moved after init) gets one zeroed cache on the
     inputs' device, which later steps reuse."""
-    model = object.__new__(model_cls)  # type: ignore[type-abstract]
+    model = object.__new__(model_cls)
     torch.nn.Module.__init__(model)
     model.per_layer_embeddings = torch.zeros(8, 2, 4, device="meta")
     model._full_attn_layer_idxs = ()

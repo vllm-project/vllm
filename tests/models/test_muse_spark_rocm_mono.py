@@ -276,11 +276,14 @@ def test_kv_cache_guard_accepts_only_dense_bf16_lbhnc() -> None:
     lbhnc = torch.empty(10, 2, 16, 128, dtype=torch.bfloat16, device="meta")
     assert kv_cache_refusal(lbhnc, 2) is None
     lhbnc = torch.empty(2, 10, 16, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(lhbnc.transpose(0, 1), 2).startswith("kv:stride")
+    assert (reason := kv_cache_refusal(lhbnc.transpose(0, 1), 2)) is not None
+    assert reason.startswith("kv:stride")
     fp8 = torch.empty(10, 2, 16, 128, dtype=torch.float8_e4m3fn, device="meta")
-    assert kv_cache_refusal(fp8, 2).startswith("kv:torch.float8")
+    assert (reason := kv_cache_refusal(fp8, 2)) is not None
+    assert reason.startswith("kv:torch.float8")
     block32 = torch.empty(10, 2, 32, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(block32, 2).startswith("kv:shape")
+    assert (reason := kv_cache_refusal(block32, 2)) is not None
+    assert reason.startswith("kv:shape")
     assert kv_cache_refusal(torch.empty(0, dtype=torch.bfloat16), 2) == "kv:unbound"
 
 
@@ -566,7 +569,7 @@ class StockLaunches:
         self.model, self.dims, self.bnd = model, dims, bnd
         self.calls: list[tuple[str, dict]] = []
         self.pending: dict[int, dict] = {}
-        self.kernels = MonoKernels(
+        self.kernels = MonoKernels(  # type: ignore[call-arg]
             *(_Kernel(self, name) for name in ("k3", "k5", "k5m")), _AttnFrag()
         )
 

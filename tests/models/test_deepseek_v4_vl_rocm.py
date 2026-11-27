@@ -131,6 +131,7 @@ def test_rocm_moe_routing_and_shared_experts_match_reference(
             * expected_weights[token, slot, None]
         )
     shared = moe.shared_experts
+    assert shared is not None
     expected += expert_reference(
         hidden, shared.gate_up_proj.weight, shared.down_proj.weight
     )

@@ -12,11 +12,11 @@ from vllm.distributed.kv_events import BlockRemoved, BlockStored
 _FAKE_HASH: bytes = b"\xab" * 32
 
 
-class _LegacyBlockStored(
+class _LegacyBlockStored(  # type: ignore[call-arg]
     msgspec.Struct,
-    omit_defaults=True,  # type: ignore[call-arg]
-    gc=False,  # type: ignore[call-arg]
-    tag="BlockStored",  # type: ignore[call-arg]
+    omit_defaults=True,
+    gc=False,
+    tag="BlockStored",
 ):
     """BlockStored wire schema before locality was added."""
 
@@ -33,11 +33,11 @@ class _LegacyBlockStored(
     kv_cache_spec_sliding_window: int | None = None
 
 
-class _LegacyBlockRemoved(
+class _LegacyBlockRemoved(  # type: ignore[call-arg]
     msgspec.Struct,
-    omit_defaults=True,  # type: ignore[call-arg]
-    gc=False,  # type: ignore[call-arg]
-    tag="BlockRemoved",  # type: ignore[call-arg]
+    omit_defaults=True,
+    gc=False,
+    tag="BlockRemoved",
 ):
     """BlockRemoved wire schema before locality was added."""
 
@@ -46,11 +46,11 @@ class _LegacyBlockRemoved(
     group_idx: int | None = None
 
 
-class _PreSessionBlockStored(
+class _PreSessionBlockStored(  # type: ignore[call-arg]
     msgspec.Struct,
-    omit_defaults=True,  # type: ignore[call-arg]
-    gc=False,  # type: ignore[call-arg]
-    tag="BlockStored",  # type: ignore[call-arg]
+    omit_defaults=True,
+    gc=False,
+    tag="BlockStored",
 ):
     """BlockStored wire schema before session_id was added."""
 

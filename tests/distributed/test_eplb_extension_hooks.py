@@ -219,6 +219,7 @@ class _ModelState(EplbModelState):
 
     def _commit_eplb_maps_for_layer(self, target, layer):
         super()._commit_eplb_maps_for_layer(target, layer)
+        assert self.pending_result is not None
         assert not self.pending_result.consumed_event._recorded.is_set()
         if self.fail_commit:
             raise RuntimeError("device commit failed")

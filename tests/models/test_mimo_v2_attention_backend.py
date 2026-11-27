@@ -50,7 +50,7 @@ def restore_diffkv_head_size_v():
     saved = [backend.head_size_v for backend in backends]
     yield
     for backend, head_size_v in zip(backends, saved):
-        backend.head_size_v = head_size_v
+        backend.head_size_v = head_size_v  # type: ignore[attr-defined]
 
 
 def _build_attention(

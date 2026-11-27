@@ -57,6 +57,10 @@ from vllm.utils.torch_utils import (
 from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.cuda_communicator import (
+        CudaCommunicator,
+    )
+    from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.model_executor.kernels.linear import _KernelT
 
 logger = init_logger(__name__)
@@ -1356,6 +1360,17 @@ def _test_rendezvous_path(token: int | str) -> str:
     return f"{tempfile.gettempdir()}/vllm_dist_test_{token}"
 
 
+def cuda_communicator(group: "GroupCoordinator") -> "CudaCommunicator":
+    """Return `group.device_communicator`, checked to be a `CudaCommunicator`."""
+    from vllm.distributed.device_communicators.cuda_communicator import (
+        CudaCommunicator,
+    )
+
+    communicator = group.device_communicator
+    assert isinstance(communicator, CudaCommunicator)
+    return communicator
+
+
 def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
@@ -1505,7 +1520,7 @@ def assert_rocm_custom_allreduce_backend_state(
 ) -> None:
     from vllm.distributed.parallel_state import get_tp_group
 
-    device_communicator = get_tp_group().device_communicator
+    device_communicator = cuda_communicator(get_tp_group())
     aiter_ar_comm = device_communicator.aiter_ar_comm
     if use_aiter_custom_ar:
         assert aiter_ar_comm is not None, "AITER CustomAllreduce was not initialized."

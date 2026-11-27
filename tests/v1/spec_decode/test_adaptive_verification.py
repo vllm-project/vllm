@@ -308,7 +308,7 @@ def test_budgets_read_confidences_of_oldest_in_flight_step() -> None:
 
     def record_and_read(step: int) -> list[float]:
         probs = torch.full((2, 1), step / 10, dtype=torch.float32, device=device)
-        manager.record_confidences(probs, batch)  # type: ignore[arg-type]
+        manager.record_confidences(probs, batch)
         return manager._stale_confidences[manager._stale_idx].np[:, 0].tolist()
 
     assert record_and_read(1) == [1.0, 1.0]

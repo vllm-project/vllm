@@ -100,7 +100,7 @@ def test_mixed_precision_resolves_each_expert_group(monkeypatch):
     )
     config = _moe_config()
     for index, name, args in (
-        (0, "NemotronShortcutModelOptNvFp4MoEMethod", (quant.nvfp4_config, config)),
+        (0, "NemotronShortcutModelOptNvFp4MoEMethod", (quant.nvfp4_config, config)),  # type: ignore[attr-defined]
         (1, "NemotronShortcutModelOptMxfp8MoEMethod", (config,)),
         (2, "NemotronShortcutMoEMethod", (config,)),
     ):
@@ -127,6 +127,7 @@ def test_unquantized_experts_prefer_flashinfer(monkeypatch, flashinfer):
         if flashinfer
         else moe_experts.NemotronShortcutTritonExperts
     )
+    assert method.moe_kernel is not None
     assert type(method.moe_kernel.fused_experts) is expected
 
 

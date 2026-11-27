@@ -26,6 +26,7 @@ from vllm.distributed.device_communicators.cuda_communicator import CudaCommunic
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     TensorMetadata,
+    _RetainedHandle,
     single_pp_stage,
 )
 from vllm.platforms import current_platform
@@ -202,6 +203,7 @@ def send_recv_tensor_dict_test_worker(
         get_pp_group().send_tensor_dict(test_dict)
 
     if not get_pp_group().is_first_rank:
+        assert recv_dict is not None
         assert len(recv_dict) == len(test_dict)
         torch.testing.assert_close(recv_dict["a"], test_dict["a"])
         torch.testing.assert_close(recv_dict["b"], test_dict["b"])
@@ -289,7 +291,7 @@ def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(
         ("a", TensorMetadata("cpu", torch.int32, torch.Size([4]))),
         ("b", TensorMetadata("cpu", torch.int32, torch.Size([4]))),
     ]
-    g.recv_object = lambda src=None: metadata_list  # type: ignore[method-assign]
+    g.recv_object = lambda src=None: metadata_list  # type: ignore[method-assign,misc]
 
     ag = _DummyAllGatherGroup(world_size=2, rank_in_group=0)
     td, handles, postprocess = g.irecv_tensor_dict(all_gather_group=ag)
@@ -394,8 +396,10 @@ def test_cuda_communicator_suspend_detaches_flashinfer_workspaces(
     for workspace in workspaces:
         workspace.checkpoint_prepare.assert_called_once_with()
         workspace.checkpoint_restore.assert_called_once_with(group)
-    communicator.pynccl_comm.suspend.assert_called_once_with()
-    communicator.pynccl_comm.resume.assert_called_once_with()
+    pynccl_comm = communicator.pynccl_comm
+    assert isinstance(pynccl_comm, Mock)
+    pynccl_comm.suspend.assert_called_once_with()
+    pynccl_comm.resume.assert_called_once_with()
 
 
 def test_cuda_communicator_checkpoint_rejects_symm_mem_workspace(
@@ -827,6 +831,7 @@ def test_isend_object_posts_size_then_object_and_releases_on_wait(
     assert posted[1][0].dtype == torch.uint8
 
     # retain holds both source tensors until wait.
+    assert isinstance(handle, _RetainedHandle)
     assert handle._retained == (posted[0][0], posted[1][0])
 
     handle.wait()
@@ -870,6 +875,7 @@ def test_isend_tensor_dict_includes_metadata_handle(
 
     for handle in handles:
         handle.wait()
+    assert isinstance(handles[0], _RetainedHandle)
     assert handles[0]._retained == ()
 
 
@@ -912,6 +918,7 @@ def test_isend_tensor_dict_self_retains_for_fire_and_forget(
     g.isend_tensor_dict(td, dst=1)
     assert len(g._pending_isends) == 1
     # reaped entries had their metadata handles waited as a backstop.
+    assert isinstance(handles0[0], _RetainedHandle)
     assert handles0[0]._retained == ()
 
 

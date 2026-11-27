@@ -256,6 +256,7 @@ def test_mega_moe_routing_matches_reference(
 
     scores = torch.nn.functional.softplus(x.float() @ moe.gate.weight.t()).sqrt()
     if hash_routing:
+        assert moe.gate.tid2eid is not None
         expected_ids = moe.gate.tid2eid[input_ids].long()
     else:
         expected_ids = (scores + moe.gate.e_score_correction_bias).topk(top_k).indices

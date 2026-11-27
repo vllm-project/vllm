@@ -167,7 +167,7 @@ class MonoProbe:
             if not isinstance(md, dict):
                 return False
             swa = md.get(layer.attn.swa_cache_layer.prefix)
-            return swa is not None and swa.num_prefills == 0
+            return swa is not None and swa.num_prefills == 0  # type: ignore[attr-defined]
 
         def keys(layer_id, pos):
             for row, p in enumerate(pos.tolist()):

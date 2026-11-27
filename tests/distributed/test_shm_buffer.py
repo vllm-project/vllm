@@ -93,7 +93,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
             print(self.ring_buffer.metadata)
             freed_ids = self.ring_buffer.free_buf(lambda *args: True)
             print(f"  Freed IDs: {freed_ids}")
-            self.assertEqual(freed_ids[0], i)
+            self.assertEqual(list(freed_ids)[0], i)
 
     def test_clear_buffer(self):
         """Test clearing the buffer."""

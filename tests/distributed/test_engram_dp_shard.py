@@ -237,7 +237,9 @@ def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
         with set_current_vllm_config(vllm_config):
             initialize_model_parallel(tensor_model_parallel_size=tp_size)
         assert get_engram_dp_size() == dp_size
-        assert get_engram_dp_group().ranks == [
+        engram_dp_group = get_engram_dp_group()
+        assert engram_dp_group is not None
+        assert engram_dp_group.ranks == [
             tp_rank + replica * tp_size for replica in range(dp_size)
         ]
         assert engram_head_shard_rank() == tp_rank * dp_size + dp_rank
@@ -565,6 +567,7 @@ def _check_shared_storage_lifetime_and_failures(failure):
     import weakref
 
     group = get_engram_dp_group()
+    assert group is not None
     runtime = torch.cuda.cudart()
     make_file = engram_ops.tempfile.NamedTemporaryFile
     map_file = engram_ops.mmap.mmap
@@ -664,7 +667,7 @@ def _engram_host_table():
     if current_platform.is_rocm():
         from vllm.models.deepseek_v41.amd.ops import engram_host_table
     else:
-        from vllm.models.deepseek_v41.nvidia.ops import (
+        from vllm.models.deepseek_v41.nvidia.ops import (  # type: ignore[no-redef]
             engram_fabric_table as engram_host_table,
         )
     return engram_host_table
@@ -674,6 +677,7 @@ def _check_ple_shared_table(shm_fits):
     """Qwen4Exp's PLE table is one /dev/shm mapping per EDP group, loaded by its
     leader; without room in /dev/shm, every rank loads its own table."""
     group = get_engram_dp_group()
+    assert group is not None
     with pytest.MonkeyPatch.context() as patch:
         if not shm_fits:
             patch.setattr(engram_ops, "_shm_shortfall", lambda num_bytes: "too small")
@@ -706,6 +710,7 @@ def _check_cumem_host_table(failure, packed_fp4):
         return
 
     group = get_engram_dp_group()
+    assert group is not None
     # Three 2 MiB chunks, the last one partial.
     row_bytes = DIM // 2 if packed_fp4 else DIM
     rows = 5 * (1 << 20) // row_bytes
@@ -854,7 +859,9 @@ def _check_table(
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
                 # A dmabuf CPU mapping cannot be pinned; lookups use the GPU views.
-                if not (current_platform.is_rocm() and layer._shared_memory.huge_pages):
+                shared = layer._shared_memory
+                huge_pages = shared is not None and shared.huge_pages
+                if not (current_platform.is_rocm() and huge_pages):
                     assert layer.weight.is_pinned()
                     assert layer.weight_scale_inv.is_pinned()
             if local:
@@ -950,7 +957,9 @@ def _check_dummy_hash_model_forward(
     if current_platform.is_rocm():
         from vllm.models.deepseek_v41.amd import model as model_ops
     else:
-        from vllm.models.deepseek_v41.nvidia import model as model_ops
+        from vllm.models.deepseek_v41.nvidia import (  # type: ignore[no-redef]
+            model as model_ops,
+        )
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
     if dp_shared_memory and dp_rank != 1:
@@ -961,10 +970,10 @@ def _check_dummy_hash_model_forward(
     torch.nn.Module.__init__(state)
     state.multipliers = torch.empty(1, 2, dtype=torch.int64, device="cuda")
     state.primes = torch.empty(1, 1, len(head_sizes), dtype=torch.int64, device="cuda")
-    state.ensure_cache = lambda: True
+    state.ensure_cache = lambda: True  # type: ignore[method-assign]
     # Hash arithmetic is covered separately; keep the real model's branch and
     # NgramHashState.dummy_hashes, plus real preparation/lookup collectives.
-    state.forward = lambda *args: ids.unsqueeze(1)
+    state.forward = lambda *args: ids.unsqueeze(1)  # type: ignore[method-assign]
 
     class Decoder(SimpleNamespace):
         # Engram hashes and the mask stay the last positional arguments;
@@ -1056,7 +1065,9 @@ def _load_shared_multithread(layer, weight, scale_inv, load_config):
         "weight_scale_inv": scale_inv.view(torch.float8_e8m0fnu),
     }
     order = list(tensors)
-    if get_engram_dp_group().rank_in_group % 2:
+    engram_dp_group = get_engram_dp_group()
+    assert engram_dp_group is not None
+    if engram_dp_group.rank_in_group % 2:
         order.reverse()
     first_loaded = Event()
     original_load = weight_utils.load_file

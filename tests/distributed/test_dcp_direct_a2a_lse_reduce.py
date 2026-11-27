@@ -544,7 +544,8 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
     )
 
     manager = object.__new__(dcp.MLADCPManager)
-    manager.init_kv_gather = MagicMock()
+    init_kv_gather = MagicMock()
+    monkeypatch.setattr(manager, "init_kv_gather", init_kv_gather)
     layer = MagicMock(dcp_manager=manager, use_shardq=False)
     config = MagicMock()
     config.model_config.dtype = torch.bfloat16
@@ -558,6 +559,7 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
     config.parallel_config.cp_kv_cache_interleave_size = 1
     config.compilation_config.static_forward_context = {"layer": layer}
 
+    builder: sparse_mla.SparseMLACommonMetadataBuilder
     builder = sparse_mla.SparseMLACommonMetadataBuilder(
         MagicMock(),
         ["layer"],
@@ -566,7 +568,7 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
     )
 
     assert builder.dcp_manager is manager
-    manager.init_kv_gather.assert_called_once_with(
+    init_kv_gather.assert_called_once_with(
         builder.chunked_prefill_workspace,
         builder.chunked_prefill_workspace_size,
     )

@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.network_utils import get_open_port
 
-from ..utils import multi_gpu_test
+from ..utils import cuda_communicator, multi_gpu_test
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -360,7 +360,7 @@ def _check_tp_allreduce_uses_quick_reduce(
     from vllm.distributed.parallel_state import get_tp_group
 
     assert self.device is not None
-    qr_comm = get_tp_group().device_communicator.qr_comm
+    qr_comm = cuda_communicator(get_tp_group()).qr_comm
     assert qr_comm is not None
     assert not qr_comm.disabled
 
@@ -397,7 +397,7 @@ def _check_tp_allreduce_uses_quick_reduce(
 def _check_quick_reduce_disabled(self) -> int:
     from vllm.distributed.parallel_state import get_tp_group
 
-    qr_comm = get_tp_group().device_communicator.qr_comm
+    qr_comm = cuda_communicator(get_tp_group()).qr_comm
     assert qr_comm is not None
     assert qr_comm.disabled
     _log(f"worker confirmed quick reduce is disabled: rank={self.rank}")

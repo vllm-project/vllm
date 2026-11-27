@@ -17,7 +17,7 @@ def test_dfly_speculator_config_allows_standard_and_synthetic(method: str):
         enable_adaptive_verification=False,
         rejection_sample_method=method,
     )
-    DFlySpeculatorConfig.apply_options(spec)  # type: ignore[arg-type]
+    DFlySpeculatorConfig.apply_options(spec)
 
 
 def test_dfly_speculator_config_rejects_unknown_rejection_method():
@@ -28,7 +28,7 @@ def test_dfly_speculator_config_rejects_unknown_rejection_method():
     with pytest.raises(
         ValueError, match="DFly requires standard or synthetic target verification"
     ):
-        DFlySpeculatorConfig.apply_options(spec)  # type: ignore[arg-type]
+        DFlySpeculatorConfig.apply_options(spec)
 
 
 @pytest.mark.parametrize(

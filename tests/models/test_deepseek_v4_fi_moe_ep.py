@@ -464,15 +464,14 @@ def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
     # Generic stages: the int32 top-k ids the megakernel wants are its concern.
     assert kernel.prepare_finalize.topk_indices_dtype() is None
     assert kernel.fused_experts.expects_unquantized_inputs
-    assert isinstance(
-        kernel.fused_experts.finalize_weight_and_reduce_impl(), TopKWeightAndReduceNoOP
-    )
-    assert kernel.fused_experts.workspace_shapes(
+    reduce_impl = kernel.fused_experts.finalize_weight_and_reduce_impl()  # type: ignore[attr-defined]
+    assert isinstance(reduce_impl, TopKWeightAndReduceNoOP)
+    assert kernel.fused_experts.workspace_shapes(  # type: ignore[attr-defined]
         16, 256, 256, 2, 8, 8, None, MoEActivation.SILU
     ) == ((0,), (0,), (16, 256))
 
     tokens = torch.zeros(4, 256, dtype=torch.bfloat16)
-    prepared = kernel.prepare_finalize.prepare(
+    prepared = kernel.prepare_finalize.prepare(  # type: ignore[attr-defined]
         tokens,
         torch.ones(4, 2),
         torch.zeros(4, 2, dtype=torch.int32),
@@ -530,7 +529,7 @@ def test_nvfp4_kernel_format_passes_megakernel_weights_through():
     """The megakernel takes the canonical tensors as they are; the oracle must
     not reject or reshape them."""
     tensors = tuple(torch.arange(4.0).reshape(2, 2) + i for i in range(8))
-    converted = convert_to_nvfp4_moe_kernel_format(
+    converted = convert_to_nvfp4_moe_kernel_format(  # type: ignore[misc]
         NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
         SimpleNamespace(),
         *tensors,

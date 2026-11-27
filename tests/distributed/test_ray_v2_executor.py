@@ -152,6 +152,7 @@ def test_colocated_dist_init_stores_hold_distinct_ports(monkeypatch):
     ports = [urlsplit(w.create_dist_init_method()).port for w in workers]
     assert len(set(ports)) == len(workers)
     for worker, port in zip(workers, ports):
+        assert port is not None
         assert port == worker._dist_init_store.port
         assert port >= 1024
         _assert_port_held(port)
