@@ -11,7 +11,6 @@ from vllm import (
 )
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import DictPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
@@ -22,7 +21,11 @@ from vllm.renderers.chat_utils.item_tracker import (
     use_media_request_budgets,
 )
 from vllm.renderers.inputs import EncoderDecoderDictPrompt
-from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.inputs.preprocess import (
+    DictPrompt,
+    parse_model_prompt,
+    prompt_to_seq,
+)
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
