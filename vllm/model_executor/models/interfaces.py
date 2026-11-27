@@ -788,7 +788,7 @@ class SupportsLoRA(Protocol):
         """The modules a LoRA of `module_name` (as the model's rename mapper names
         it) splits into, with their full (unsharded) `lora_B` rows, if the model splits
         that module's weight on load (e.g. a fused checkpoint module). Rows are `None`
-        for modules not on this rank, which drops the LoRA."""
+        for modules not on this rank, where the LoRA stays unsplit."""
         return None
 
 

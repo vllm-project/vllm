@@ -252,11 +252,11 @@ class LoRAModel:
         if split_rows is not None:
             for module_name in list(loras):
                 if rows := split_rows(module_name):
-                    lora = loras.pop(module_name)
                     sizes = [n for n in rows.values() if n is not None]
-                    # `None` rows: not on this rank, so nothing here uses the LoRA
+                    # `None` rows: not on this rank, so it stays unsplit and unused
                     if len(sizes) < len(rows):
                         continue
+                    lora = loras.pop(module_name)
                     for target, lora_b in zip(rows, lora.lora_b.split(sizes)):
                         loras[target] = LoRALayerWeights(
                             target,
@@ -330,7 +330,7 @@ class LoRAModel:
                 BERT's pooler.dense. LoRA weights on them are unexpected.
             split_rows: Model hook returning the modules a LoRA of a module splits
                 into, with their rows, if the model splits that module's weight.
-                A LoRA whose pieces aren't on this rank (rows `None`) is dropped.
+                A LoRA whose pieces aren't on this rank (rows `None`) stays unsplit.
 
         Returns:
             Loaded LoRA Model.

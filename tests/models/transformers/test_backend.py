@@ -1395,7 +1395,7 @@ def test_lora_is_split_like_converted_weights(
     """A LoRA for a fused checkpoint module (Molmo2's `att_proj` and `ff_proj`) loads
     into the modules its weight is split into: `lora_B` by rows, with its `lora_A`,
     rank and scaling (here from `alpha_pattern` and `rank_pattern`). A renamed module's
-    LoRA loads as before, and a split module's on another pipeline rank is dropped."""
+    LoRA loads as before, and a split module's on another pipeline rank isn't split."""
     model = nn.Module()
     model.language_model = text = nn.Module()
     text.layers = nn.ModuleList([nn.Module(), PPMissingLayer()])
@@ -1479,18 +1479,20 @@ def test_lora_is_split_like_converted_weights(
         name.removeprefix("model.language_model.layers."): weights
         for name, weights in lora_model.loras.items()
     }
-    assert loras.keys() == {f"0.{target}" for target in expected} | {"1.o_proj"}
-    for module, targets, rank, scaling in [
-        ("att_proj", ["q_proj", "k_proj", "v_proj"], 2, 2.0),
-        ("attn_out", ["o_proj"], 2, 1.0),
-        ("ff_proj", ["up_proj", "gate_proj"], 3, 2 / 3),
+    layer_1 = {"1.att_proj", "1.o_proj", "1.ff_proj"}
+    assert loras.keys() == {f"0.{target}" for target in expected} | layer_1
+    for module, rows, rank, scaling in [
+        ("att_proj", {"q_proj": 4, "k_proj": 2, "v_proj": 2}, 2, 2.0),
+        ("attn_out", {"o_proj": 4}, 2, 1.0),
+        ("ff_proj", {"up_proj": 3, "gate_proj": 3}, 3, 2 / 3),
     ]:
         lora_a, lora_b = lora[module]
-        for target in targets:
+        for target, piece in zip(rows, lora_b.split(list(rows.values()))):
             assert loras[f"0.{target}"].rank == rank
             assert loras[f"0.{target}"].scaling == pytest.approx(scaling)
             torch.testing.assert_close(
                 loras[f"0.{target}"].lora_a, lora_a, rtol=0, atol=0
             )
-        pieces = torch.cat([loras[f"0.{target}"].lora_b for target in targets])
-        torch.testing.assert_close(pieces, lora_b, rtol=0, atol=0)
+            torch.testing.assert_close(
+                loras[f"0.{target}"].lora_b, piece, rtol=0, atol=0
+            )
