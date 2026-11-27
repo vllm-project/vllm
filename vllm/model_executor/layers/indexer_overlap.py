@@ -7,8 +7,8 @@ batch is captured: an eager segment of a breakable (piecewise) graph cannot
 wait on an event recorded inside a captured segment. The moved kernels and
 their inputs are unchanged, so the outputs are bit-identical.
 
-Deferred top-k (Kimi K3.1): the indexer op runs its scan and top-k on another
-stream and returns without joining; the index group's conversion, the first
+Deferred top-k (Kimi K3.1): the layer runs its indexer on another stream, and
+the indexer op returns without joining; the index group's conversion, the first
 reader of the kept tokens, waits for them.
 
 Deferred candidates (DeepSeek-V4.1): the candidate source layer selects its
@@ -83,17 +83,25 @@ def set_deferred_topk(stream: torch.cuda.Stream, keep: tuple) -> None:
     logger.info_once("Sparse indexer overlap: deferred top-k active.")
 
 
-def defer_stock_topk(work: Callable[[], None], keep: tuple) -> None:
-    """Run the stock scan and top-k `work` after the current stream's work, on a
-    high-priority stream, without joining: the top-k is on the critical path and
-    the work moved beside it competes for the SMs the scan leaves free."""
+def topk_stream() -> torch.cuda.Stream:
+    """The high-priority stream that runs a deferred indexer: its top-k is on
+    the critical path, and the work moved beside it competes for the SMs the
+    scan leaves free."""
     global _stock_stream
     if _stock_stream is None:
         _stock_stream = torch.cuda.Stream(priority=-1)
-    _stock_stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(_stock_stream):
+    return _stock_stream
+
+
+def defer_stock_topk(work: Callable[[], None], keep: tuple) -> None:
+    """Run the stock scan and top-k `work` after the current stream's work, on
+    `topk_stream()`, without joining."""
+    stream = topk_stream()
+    if stream != torch.cuda.current_stream():
+        stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
         work()
-    set_deferred_topk(_stock_stream, keep)
+    set_deferred_topk(stream, keep)
 
 
 def take_deferred_topk() -> tuple[torch.cuda.Stream | None, tuple | None]:
