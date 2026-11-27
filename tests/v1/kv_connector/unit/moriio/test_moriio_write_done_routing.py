@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     RemoteAllocInfo,
     ReqMeta,
     WriteTask,
+    WriteTransferState,
     get_port_offset,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -472,6 +473,7 @@ def _fanout_save_worker(remote_agents: set[str]) -> _FanoutSaveWorker:
     worker.pp_size = 1
     worker.use_mla = True
     worker._has_mamba = False
+    worker._transfer_layer_names = {"layer0"}
     worker._remote_agents = {engine_id: {"agent"} for engine_id in remote_agents}
     # Set by the handshake callback even when one of the targets failed.
     worker.write_ready_flags = {"10.0.0.1:2": True}
@@ -522,6 +524,28 @@ def test_rank_with_nothing_to_write_does_not_wait_for_a_handshake():
     assert time.monotonic() - start < 5
     assert worker.handshakes == []
     assert worker.writes == ["req"]
+
+
+def test_save_kv_layer_ignores_layers_outside_the_transfer_groups():
+    """A layer that reads another layer's KV cache (KV sharing) has no cache
+    of its own, and a write queued for it would never complete."""
+    metadata = MoRIIOConnectorMetadata()
+    # Already bound to the writer, so save_kv_layer needs no MoRIIOWriter.
+    metadata.reqs_to_save["req"] = _req_meta()
+    metadata.reqs_to_save["req"].transfer_state = WriteTransferState()
+    written_layers: list[str] = []
+    connected = _fanout_save_worker({"10.0.0.1:2_dp0"})
+    connected._write_blocks_for_req = (  # type: ignore[method-assign]
+        lambda req_id, meta, layer_name, kv_layer: written_layers.append(layer_name)
+    )
+    unconnected = _fanout_save_worker(set())
+
+    for layer_name in ("layer0", "layer1"):
+        connected.save_kv_layer(metadata, layer_name, kv_layer=None, attn_metadata=None)
+    unconnected.save_kv_layer(metadata, "layer1", kv_layer=None, attn_metadata=None)
+
+    assert written_layers == ["layer0"]
+    assert unconnected.handshakes == []
 
 
 @pytest.mark.parametrize(

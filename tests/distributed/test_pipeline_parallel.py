@@ -501,7 +501,11 @@ def test_pp_granite4_vision_deepstack(num_gpus_available):
         pytest.param("tiiuae/Falcon-H1-Tiny-90M-Instruct", {}, id="falcon_h1"),
         pytest.param("Qwen/Qwen3.5-0.8B", {}, id="qwen3_5"),
         pytest.param("google/gemma-3-1b-it", {}, id="gemma3"),
-        pytest.param("ibm-granite/granite-4.0-h-350m", {}, id="granite4_h"),
+        pytest.param(
+            "ibm-granite/granite-4.0-h-350m",
+            {"hf_overrides": {"head_dtype": "float32"}},
+            id="granite4_h",
+        ),
         # Startup check only: dummy weights give near-uniform logits.
         pytest.param(
             "baidu/ERNIE-4.5-21B-A3B-PT",
