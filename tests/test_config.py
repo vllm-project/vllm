@@ -5936,6 +5936,7 @@ def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, e
         registry=ModelRegistry,
         model_arch_config=SimpleNamespace(total_num_attention_heads=8),
         multimodal_config=None,
+        tensor_ipc="direct_rpc",
         verify_eplb_config=lambda parallel_config: None,
     )
     parallel = ParallelConfig(
@@ -6023,3 +6024,29 @@ def test_layer_range_with_prefill_context_parallel(monkeypatch):
         for rank in range(8)
     ]
     assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4
+
+
+@pytest.mark.parametrize(
+    ("enable_prompt_embeds", "expected"),
+    [(True, "torch_shm"), (False, "direct_rpc")],
+)
+def test_text_only_model_tensor_ipc(enable_prompt_embeds, expected):
+    """A text-only model has no MultiModalConfig, but keeps `--mm-tensor-ipc`
+    for `prompt_embeds` when prompt embeds are enabled."""
+    model_config = ModelConfig(
+        "facebook/opt-125m",
+        enable_prompt_embeds=enable_prompt_embeds,
+        mm_tensor_ipc="torch_shm",
+    )
+    assert model_config.multimodal_config is None
+    assert model_config.tensor_ipc == expected
+
+
+def test_prompt_embeds_torch_shm_with_tp():
+    """`prompt_embeds` over torch_shm work with TP>1, unlike multimodal tensors:
+    EngineCore broadcasts them to the workers like any other input."""
+    model_config = ModelConfig(
+        "facebook/opt-125m", enable_prompt_embeds=True, mm_tensor_ipc="torch_shm"
+    )
+    parallel = ParallelConfig(tensor_parallel_size=2, distributed_executor_backend="mp")
+    model_config.verify_with_parallel_config(parallel)

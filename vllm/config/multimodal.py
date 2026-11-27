@@ -472,9 +472,13 @@ class MultiModalConfig:
     - "vidcom2": Video Compression Commander.
     """
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
-    """IPC (inter-process communication) method for multimodal tensors.
+    """IPC (inter-process communication) method for multimodal tensors, and for
+    `prompt_embeds` when `--enable-prompt-embeds` is set (text-only models too).
     - "direct_rpc": Use msgspec serialization via RPC
-    - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
+    - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC.
+    Requires `VLLM_WORKER_MULTIPROC_METHOD=spawn` and data_parallel_size 1.
+    Multimodal models also need tensor_parallel_size and pipeline_parallel_size
+    1; `prompt_embeds` work with any.
     Defaults to "direct_rpc". """
     allow_missing_mm_embeddings: bool = False
     """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.

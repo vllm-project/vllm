@@ -1863,8 +1863,7 @@ class VllmConfig:
 
         if (
             self.model_config is not None
-            and self.model_config.multimodal_config is not None
-            and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
+            and self.model_config.tensor_ipc == "torch_shm"
             and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
         ):
             raise ValueError(

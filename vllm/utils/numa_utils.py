@@ -21,12 +21,15 @@ import psutil
 from vllm import envs
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
 
 logger = logging.getLogger(__name__)
 _NUMACTL_ARGS_ENV = "_VLLM_INTERNAL_NUMACTL_ARGS"
 _NUMACTL_PYTHON_EXECUTABLE_ENV = "_VLLM_INTERNAL_NUMACTL_PYTHON_EXECUTABLE"
+# Memory-policy modes from the kernel ABI (linux/mempolicy.h).
 _MPOL_DEFAULT = 0
+_MPOL_PREFERRED = 1
+_MPOL_PREFERRED_MANY = 5
 
 
 @cache
@@ -676,3 +679,65 @@ def _mp_set_executable(executable: str, debug_str: str):
             f"expected {executable}, got {multiprocessing.spawn.get_executable()}"
         )
         multiprocessing.spawn.set_executable(old_executable)
+
+
+_ENGINECORE_NUMA_NODES_ENV = "_VLLM_INTERNAL_ENGINECORE_NUMA_NODES"
+
+
+def enginecore_memory_nodes() -> list[int] | None:
+    """Return the NUMA nodes of the local EngineCore, or None if it is unbound."""
+    if exported := os.environ.get(_ENGINECORE_NUMA_NODES_ENV):
+        return [int(node) for node in exported.split(",")]
+    return None
+
+
+def export_enginecore_memory_nodes(parallel_config: "ParallelConfig") -> None:
+    """Record the EngineCore NUMA nodes for this process and the frontend
+    processes it starts later (API servers rebuild their config from CLI args,
+    where `numa_bind` is unresolved)."""
+    if parallel_config.numa_bind and parallel_config.numa_bind_nodes is not None:
+        nodes = _get_enginecore_numa_nodes(parallel_config)
+        os.environ[_ENGINECORE_NUMA_NODES_ENV] = ",".join(map(str, nodes))
+    else:
+        os.environ.pop(_ENGINECORE_NUMA_NODES_ENV, None)
+
+
+@contextmanager
+def preferred_memory_nodes(nodes: list[int] | None):
+    """Prefer `nodes` for pages this thread allocates inside the block.
+
+    Sets a thread-local `MPOL_PREFERRED` (or `MPOL_PREFERRED_MANY`) memory
+    policy and restores the previous one on exit. A no-op when `nodes` is
+    empty or libnuma is unavailable.
+    """
+    libnuma = get_libnuma()
+    if not nodes or libnuma is None or libnuma.numa_available() < 0:
+        yield
+        return
+
+    num_nodes = libnuma.numa_num_possible_nodes()
+    bits = 8 * ctypes.sizeof(ctypes.c_ulong)
+    words = -(-num_nodes // bits)
+    # The kernel reads maxnode - 1 bits, as in libnuma's own calls.
+    maxnode = ctypes.c_ulong(num_nodes + 1)
+    old_mode = ctypes.c_int()
+    old_mask = (ctypes.c_ulong * words)()
+    if libnuma.get_mempolicy(ctypes.byref(old_mode), old_mask, maxnode, None, 0):
+        yield
+        return
+
+    def prefer(mode: int, selected: list[int]) -> bool:
+        mask = (ctypes.c_ulong * words)()
+        for node in selected:
+            mask[node // bits] |= 1 << (node % bits)
+        return libnuma.set_mempolicy(mode, mask, maxnode) == 0
+
+    # MPOL_PREFERRED_MANY needs Linux 5.15; fall back to the first node.
+    applied = len(nodes) > 1 and prefer(_MPOL_PREFERRED_MANY, nodes)
+    if not applied:
+        applied = prefer(_MPOL_PREFERRED, nodes[:1])
+    try:
+        yield
+    finally:
+        if applied:
+            libnuma.set_mempolicy(old_mode.value, old_mask, maxnode)

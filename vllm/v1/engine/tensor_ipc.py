@@ -20,11 +20,33 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.numa_utils import enginecore_memory_nodes, preferred_memory_nodes
 from vllm.v1.serial_utils import OOBTensorConsumer
 
 logger = init_logger(__name__)
 
 TensorIpcQueue = MPQueue
+
+
+def maybe_share_tensor_memory(tensor: torch.Tensor) -> torch.Tensor:
+    """Try to move a CPU tensor into shared memory on EngineCore's NUMA nodes.
+
+    The pages are placed where they are first touched, so allocating them on
+    the EngineCore's NUMA node keeps its reads of the tensor local. If that
+    fails (e.g. /dev/shm is full), the tensor is returned unshared and
+    `TensorIpcSender` sends it with msgpack instead.
+    """
+    if tensor.is_cpu and not tensor.is_shared():
+        try:
+            with preferred_memory_nodes(enginecore_memory_nodes()):
+                tensor.share_memory_()
+        except Exception as e:
+            logger.warning_once(
+                "Could not move a tensor to shared memory (%s); "
+                "sending it with msgpack instead.",
+                str(e),
+            )
+    return tensor
 
 
 @dataclasses.dataclass(slots=True)
@@ -61,10 +83,12 @@ class TensorIpcSender(OOBTensorConsumer):
     def __call__(self, tensor: torch.Tensor) -> dict[str, Any] | None:
         """Send tensor via queue, return its handle. Returns None if failed."""
         try:
-            # Move tensor to shared memory for IPC
-            # This is required for proper inter-process communication
-            if not tensor.is_shared():
-                tensor = tensor.share_memory_()
+            # Move tensor to shared memory for IPC. Detach it first: the queue
+            # pickles in a feeder thread, where a tensor that requires grad
+            # fails without reaching the except below, and the receiver hangs.
+            tensor = maybe_share_tensor_memory(tensor.detach())
+            if tensor.is_cpu and not tensor.is_shared():
+                return None
 
             metadata = {
                 "sender_id": self._sender_id,

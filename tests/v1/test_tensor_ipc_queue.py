@@ -4,6 +4,7 @@
 """Tests for tensor IPC queue functionality."""
 
 import multiprocessing as mp
+import os
 import time
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
@@ -21,6 +22,7 @@ from vllm.v1.engine.tensor_ipc import (
     TensorIpcData,
     TensorIpcReceiver,
     TensorIpcSender,
+    maybe_share_tensor_memory,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
@@ -293,6 +295,42 @@ def test_msgpack_encoder_decoder_with_ipc():
     assert isinstance(decoded, TensorEnvelope)
     assert decoded.label == "test"
     assert torch.allclose(decoded.tensor, tensor)
+
+
+def test_tensor_requiring_grad_over_ipc():
+    """The queue pickles in a feeder thread, where a non-leaf tensor that
+    requires grad (e.g. `prompt_embeds` joined from parts that require grad)
+    fails silently; the sender must detach it, or the receiver waits forever."""
+    tensor_queue = _MP_CTX.Queue()
+    sender = TensorIpcSender(tensor_queue)
+    encoder = MsgpackEncoder(size_threshold=0, oob_tensor_consumer=sender)
+    receiver = TensorIpcReceiver(tensor_queue)
+    decoder = MsgpackDecoder(TensorEnvelope, oob_tensor_provider=receiver)
+    tensor = torch.randn(2, 3, requires_grad=True) * 2
+
+    decoded = decoder.decode(encoder.encode(TensorEnvelope(tensor, "grad")))
+
+    assert torch.equal(decoded.tensor, tensor.detach())
+
+
+def test_share_failure_falls_back_to_msgpack(monkeypatch):
+    """If the tensor cannot be moved to shared memory (e.g. /dev/shm is full),
+    the request is still served, with the tensor inline in the message."""
+
+    def fail(self):
+        raise RuntimeError("No space left on device")
+
+    monkeypatch.setattr(torch.Tensor, "share_memory_", fail)
+    tensor_queue = _MP_CTX.Queue()
+    sender = TensorIpcSender(tensor_queue)
+    encoder = MsgpackEncoder(size_threshold=0, oob_tensor_consumer=sender)
+    decoder = MsgpackDecoder(TensorEnvelope)
+    tensor = torch.randn(2, 3)
+
+    decoded = decoder.decode(encoder.encode(TensorEnvelope(tensor, "inline")))
+
+    assert torch.equal(decoded.tensor, tensor)
+    assert tensor_queue.empty()
 
 
 def test_decoder_buffer_management():
@@ -1039,3 +1077,34 @@ def test_tensor_cleanup_after_decode():
     sender = receiver._tensor_buffers[sender_id]
     tensors = sender.tensors.get(message_id, {})
     assert tensor_id not in tensors, "Tensor should be removed from buffer"
+
+
+def _page_nodes(tensor: torch.Tensor) -> set[str]:
+    """NUMA nodes holding `tensor`'s pages, from /proc/self/numa_maps."""
+    address, mapping = tensor.data_ptr(), None
+    with open("/proc/self/numa_maps") as f:
+        for line in f:
+            start = int(line.split(maxsplit=1)[0], 16)
+            if start <= address and (mapping is None or start > mapping[0]):
+                mapping = (start, line)
+    assert mapping is not None
+    return {field.split("=")[0] for field in mapping[1].split() if field[0] == "N"}
+
+
+@pytest.mark.skipif(
+    not os.path.exists("/sys/devices/system/node/node1"),
+    reason="Needs at least two NUMA nodes",
+)
+@pytest.mark.parametrize("node", [0, 1])
+def test_maybe_share_tensor_memory_on_numa_node(monkeypatch, node):
+    """Pages land on EngineCore's node, wherever this thread runs, so that
+    EngineCore reads the tensor from local memory."""
+    monkeypatch.setenv("_VLLM_INTERNAL_ENGINECORE_NUMA_NODES", str(node))
+    tensor = torch.randn(1024, 1024)
+    expected = tensor.clone()
+
+    shared = maybe_share_tensor_memory(tensor)
+
+    assert shared.is_shared()
+    assert torch.equal(shared, expected)
+    assert _page_nodes(shared) == {f"N{node}"}

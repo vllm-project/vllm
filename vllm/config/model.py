@@ -901,6 +901,10 @@ class ModelConfig:
             mm_processor_cache_gb = 0
             logger.info("Encoder-decoder model detected, disabling mm processor cache.")
 
+        # Text-only models have no MultiModalConfig; keep the tensor IPC choice
+        # so that `prompt_embeds` can use it (see `tensor_ipc`).
+        self._tensor_ipc: MMTensorIPC = mm_tensor_ipc or "direct_rpc"
+
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
             self.hf_image_processor_config = get_hf_image_processor_config(
@@ -1741,10 +1745,10 @@ class ModelConfig:
         # CoreEngine the scheduler will assign work to. TP>1 is
         # also not supported because this requires broadcasting
         # MM tensors between all TP ranks.
-        if (
-            self.multimodal_config is not None
-            and self.multimodal_config.mm_tensor_ipc == "torch_shm"
-            and parallel_config.world_size_across_dp > 1
+        if self.tensor_ipc == "torch_shm" and (
+            parallel_config.world_size_across_dp > 1
+            if self.multimodal_config is not None
+            else parallel_config.data_parallel_size > 1
         ):
             raise ValueError(
                 "mm_tensor_ipc='torch_shm' is not supported with "
@@ -2040,6 +2044,14 @@ class ModelConfig:
             raise ValueError("The model is not multimodal.")
 
         return self.multimodal_config
+
+    @property
+    def tensor_ipc(self) -> MMTensorIPC:
+        """IPC method for large request tensors sent to EngineCore: multimodal
+        inputs, and `prompt_embeds` when `enable_prompt_embeds` is set."""
+        if self.multimodal_config is not None:
+            return self.multimodal_config.mm_tensor_ipc
+        return self._tensor_ipc if self.enable_prompt_embeds else "direct_rpc"
 
     def try_get_generation_config(self) -> dict[str, Any]:
         """This method attempts to retrieve the non-default values of the

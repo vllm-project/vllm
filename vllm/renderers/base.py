@@ -54,6 +54,7 @@ from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.engine.tensor_ipc import maybe_share_tensor_memory
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .embed_utils import safe_load_prompt_embeds
@@ -69,7 +70,9 @@ from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    import torch
+
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.renderers.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,
@@ -201,7 +204,7 @@ class BaseRenderer(ABC, Generic[_T]):
             self._process_multimodal, executor=self._mm_executor
         )
         self._safe_load_prompt_embeds_async = make_async(
-            safe_load_prompt_embeds, executor=self._executor
+            self._load_and_maybe_share_prompt_embeds, executor=self._executor
         )
 
         self._mm_processor_cache: BaseMultiModalProcessorCache | None = None
@@ -611,6 +614,21 @@ class BaseRenderer(ABC, Generic[_T]):
             )
 
         return [self.render_prompt(prompt) for prompt in prompts]
+
+    @property
+    def _shm_tensor_ipc(self) -> bool:
+        return self.model_config.tensor_ipc == "torch_shm"
+
+    def _load_and_maybe_share_prompt_embeds(
+        self, model_config: "ModelConfig", embed: bytes
+    ) -> "torch.Tensor":
+        """Load `prompt_embeds` and, with `torch_shm`, try to move them to
+        shared memory here in the executor, so that sending them to EngineCore
+        does not copy them on the event loop."""
+        embeds = safe_load_prompt_embeds(model_config, embed)
+        if self._shm_tensor_ipc:
+            embeds = maybe_share_tensor_memory(embeds)
+        return embeds
 
     async def _render_prompt_async(
         self,

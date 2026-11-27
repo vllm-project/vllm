@@ -763,13 +763,15 @@ class MPClient(EngineCoreClient):
             assert output_socket is not None
             self.output_address = output_socket.getsockopt_string(zmq.LAST_ENDPOINT)
 
-            # Serialization setup with tensor queues for multimodal tensor IPC.
+            # Serialization setup with tensor queues for tensor IPC.
             tensor_ipc_sender: TensorIpcSender | None = None
             model_config = getattr(vllm_config, "model_config", None)
-            if model_config is not None and model_config.multimodal_config is not None:
-                mm_tensor_ipc = model_config.multimodal_config.mm_tensor_ipc
-                if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
-                    tensor_ipc_sender = TensorIpcSender(tensor_queue)
+            if (
+                model_config is not None
+                and model_config.tensor_ipc == "torch_shm"
+                and tensor_queue is not None
+            ):
+                tensor_ipc_sender = TensorIpcSender(tensor_queue)
 
             self.encoder = MsgpackEncoder(oob_tensor_consumer=tensor_ipc_sender)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
