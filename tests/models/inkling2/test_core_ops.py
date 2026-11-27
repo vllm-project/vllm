@@ -559,6 +559,9 @@ def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
     cache_dtype,
 ):
     """Known convolutions store normalized K/V and preserve empty slots."""
+    fp8 = cache_dtype is torch.float8_e4m3fn
+    if fp8 and not current_platform.has_device_capability(90):
+        pytest.skip("fp8 KV stores need SM90+ (SM8x serves a BF16 KV cache)")
     heads, dim, tokens = 2, 128, 3
     q = torch.zeros(tokens, 6, dim, device=DEVICE).bfloat16()
     kv_input = torch.full((tokens, heads * dim), 2.0, device=DEVICE).bfloat16()
