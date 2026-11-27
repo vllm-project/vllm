@@ -30,7 +30,7 @@ use vllm_chat::multimodal::{MmLimitPerPrompt, MmLimitSpec, MmModality};
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatRequestProcessor, ChatTextBackend,
     DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    NewChatOutputProcessorOptions, RenderedPrompt,
+    NewChatOutputProcessorOptions, ParserSelection, RenderedPrompt, ResolvedParsers,
 };
 use vllm_engine_core_client::mock_engine::{
     DEFAULT_MOCK_BLOCK_SIZE, DEFAULT_MOCK_MAX_MODEL_LEN, DEFAULT_MOCK_NUM_GPU_BLOCKS,
@@ -265,14 +265,17 @@ impl ChatBackend for FakeTextBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }
@@ -314,14 +317,17 @@ impl ChatBackend for FakeMultimodalBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }
@@ -3063,8 +3069,11 @@ const RENDER_EOS_TOKEN_ID: u32 = 0xF010;
 
 /// Qwen3-like backend, so that `auto` parser selection resolves the reasoning
 /// and tool-call parsers, rendering each message as `role: text\n`.
-#[derive(Clone, Debug)]
-struct FakeRenderBackend;
+#[derive(Clone, Debug, Default)]
+struct FakeRenderBackend {
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+}
 
 impl TextBackend for FakeRenderBackend {
     fn tokenizer(&self) -> DynTokenizer {
@@ -3089,14 +3098,17 @@ impl ChatBackend for FakeRenderBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &self.tool_call_parser,
+            &self.reasoning_parser,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }
@@ -3128,7 +3140,11 @@ impl ChatRenderer for FakeRenderBackend {
 }
 
 fn render_state() -> RenderState {
-    let backend = Arc::new(FakeRenderBackend);
+    render_state_with(FakeRenderBackend::default())
+}
+
+fn render_state_with(backend: FakeRenderBackend) -> RenderState {
+    let backend = Arc::new(backend);
     RenderState {
         model: "Qwen/Qwen3-0.6B".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
@@ -3172,7 +3188,7 @@ fn weather_chat_request() -> pb::ChatRequest {
 }
 
 fn render_token_ids(text: &str) -> Vec<u32> {
-    FakeRenderBackend.tokenizer().encode(text, false).expect("encode")
+    FakeRenderBackend::default().tokenizer().encode(text, false).expect("encode")
 }
 
 async fn render_chat(
@@ -3187,6 +3203,33 @@ async fn render_chat(
         .await
         .expect("render chat")
         .into_inner()
+}
+
+/// `parameters_json` must be a JSON object or `null`, as the HTTP tool DTO
+/// requires.
+#[tokio::test]
+async fn render_chat_rejects_non_object_tool_parameters() {
+    let service = render_service();
+    for parameters_json in [r#""schema""#, "[]", "1", "true"] {
+        let mut chat = weather_chat_request();
+        chat.tools[0].parameters_json = parameters_json.to_string();
+        let status = service
+            .render_chat(tonic::Request::new(pb::RenderChatRequest {
+                chat: Some(chat),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("non-object parameters_json should be rejected");
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "{parameters_json}"
+        );
+    }
+
+    let mut chat = weather_chat_request();
+    chat.tools[0].parameters_json = "null".to_string();
+    render_chat(&service, chat).await;
 }
 
 #[tokio::test]
@@ -3236,14 +3279,10 @@ async fn render_chat_echoes_structured_output_without_parsers() {
             r#"{"type": "object", "required": ["b", "a"]}"#.to_string(),
         )),
     };
-    let state = render_state();
-    let service = RenderServiceImpl::new(Arc::new(RenderState {
-        chat: state.chat.with_parser_selections(
-            vllm_chat::ParserSelection::None,
-            vllm_chat::ParserSelection::None,
-        ),
-        ..state
-    }));
+    let service = RenderServiceImpl::new(Arc::new(render_state_with(FakeRenderBackend {
+        tool_call_parser: ParserSelection::None,
+        reasoning_parser: ParserSelection::None,
+    })));
     let chat = pb::ChatRequest {
         tools: Vec::new(),
         structured_output: Some(structured_output.clone()),
@@ -3431,14 +3470,17 @@ impl ChatBackend for FakeMultimodalRenderBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::new(
-            request,
+        let parsers = ResolvedParsers::new(
             self.model_id(),
             self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )?;
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &parsers,
             options.tool_strict_level,
         )?))
     }
@@ -3648,14 +3690,10 @@ async fn render_chat_rejects_undecodable_media_as_invalid_argument() {
 /// HTTP chat completions.
 #[tokio::test]
 async fn render_chat_rejects_tools_when_tool_parsing_is_disabled() {
-    let state = render_state();
-    let service = RenderServiceImpl::new(Arc::new(RenderState {
-        chat: state.chat.with_parser_selections(
-            vllm_chat::ParserSelection::None,
-            vllm_chat::ParserSelection::None,
-        ),
-        ..state
-    }));
+    let service = RenderServiceImpl::new(Arc::new(render_state_with(FakeRenderBackend {
+        tool_call_parser: ParserSelection::None,
+        reasoning_parser: ParserSelection::None,
+    })));
 
     let status = service
         .render_chat(tonic::Request::new(pb::RenderChatRequest {
@@ -4073,7 +4111,7 @@ async fn render_raw_chat_rejects_unknown_model_with_engine_backed_state() {
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(
         EngineCoreLlm::new(client),
-        Arc::new(FakeRenderBackend) as Arc<dyn ChatTextBackend>,
+        Arc::new(FakeRenderBackend::default()) as Arc<dyn ChatTextBackend>,
     )
     .with_served_model_name("test-model");
     let service = RenderServiceImpl::new(Arc::new(AppState::new(vec!["test-model".into()], chat)));

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use itertools::Itertools as _;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 use serde_with::DefaultOnNull;
 use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
@@ -18,13 +18,27 @@ use crate::routes::openai::chat_completions::convert::{
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{ChatMessage, Tool, default_true};
 
-/// `POST /tokenize` body. Untagged: a JSON object with `messages` parses as the
-/// chat variant; one with `prompt` parses as the completion variant.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+/// `POST /tokenize` body: a JSON object whose `messages` is a list parses as the
+/// chat variant; any other as the completion variant.
+#[derive(Debug, Clone)]
 pub enum TokenizeRequest {
     Chat(TokenizeChatRequest),
     Completion(TokenizeCompletionRequest),
+}
+
+impl<'de> Deserialize<'de> for TokenizeRequest {
+    /// Select the variant by `messages` rather than `#[serde(untagged)]`, which
+    /// would tokenize `prompt` instead when a body carrying both has a malformed
+    /// chat part.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let request = if value.get("messages").is_some_and(Value::is_array) {
+            TokenizeChatRequest::deserialize(value).map(Self::Chat)
+        } else {
+            TokenizeCompletionRequest::deserialize(value).map(Self::Completion)
+        };
+        request.map_err(de::Error::custom)
+    }
 }
 
 #[serde_with::serde_as]

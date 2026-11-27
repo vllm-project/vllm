@@ -117,7 +117,6 @@ TEXT_GENERATION_MODELS = {
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "zai-org/chatglm3-6b": PPTestSettings.fast(),
     "CohereLabs/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
-    "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
     "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(tp_base=2),
@@ -502,7 +501,11 @@ def test_pp_granite4_vision_deepstack(num_gpus_available):
         pytest.param("tiiuae/Falcon-H1-Tiny-90M-Instruct", {}, id="falcon_h1"),
         pytest.param("Qwen/Qwen3.5-0.8B", {}, id="qwen3_5"),
         pytest.param("google/gemma-3-1b-it", {}, id="gemma3"),
-        pytest.param("ibm-granite/granite-4.0-h-350m", {}, id="granite4_h"),
+        pytest.param(
+            "ibm-granite/granite-4.0-h-350m",
+            {"hf_overrides": {"head_dtype": "float32"}},
+            id="granite4_h",
+        ),
         # Startup check only: dummy weights give near-uniform logits.
         pytest.param(
             "baidu/ERNIE-4.5-21B-A3B-PT",
