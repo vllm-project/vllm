@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sized
 from typing import cast
 
 import torch
@@ -9,11 +10,95 @@ from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsEagle3,
+    _get_decoder_holder,
     get_eagle_decoder,
     supports_eagle3,
 )
 
 logger = init_logger(__name__)
+
+
+def _get_max_aux_hidden_state_layer_id(model: nn.Module) -> int | None:
+    holder = _get_decoder_holder(model)
+    config = getattr(holder, "config", None)
+    num_visits = getattr(config, "num_layer_visits", None)
+    if isinstance(num_visits, int) and not isinstance(num_visits, bool):
+        return num_visits
+
+    layers = getattr(holder, "layers", None)
+    if layers is None:
+        decoder = getattr(holder, "decoder", None)
+        layers = getattr(decoder, "layers", None)
+    if layers is not None and isinstance(layers, Sized):
+        return len(layers)
+
+    if hasattr(holder, "_layer_names"):
+        text_config = getattr(holder, "text_config", None)
+        num_layers = getattr(text_config, "num_hidden_layers", None)
+        if isinstance(num_layers, int) and not isinstance(num_layers, bool):
+            return num_layers
+        layer_names = getattr(holder, "_layer_names", None)
+        if isinstance(layer_names, dict) and layer_names:
+            return max(layer_names) + 1
+
+    return None
+
+
+def _validate_eagle3_aux_hidden_state_layers(
+    model: nn.Module,
+    aux_layers: tuple[int, ...],
+    zero_based_source: tuple[str, tuple[int, ...]] | None = None,
+) -> None:
+    max_layer_id = _get_max_aux_hidden_state_layer_id(model)
+
+    if zero_based_source is not None:
+        field_name, raw_ids = zero_based_source
+        invalid_raw = [
+            layer_id
+            for layer_id in raw_ids
+            if not isinstance(layer_id, int)
+            or isinstance(layer_id, bool)
+            or layer_id < 0
+            or (max_layer_id is not None and layer_id >= max_layer_id)
+        ]
+        if invalid_raw:
+            if max_layer_id is None:
+                raise ValueError(
+                    f"{field_name} must contain non-negative 0-based layer "
+                    f"indices for {type(model).__name__}; got {list(raw_ids)} "
+                    f"(invalid: {invalid_raw})."
+                )
+            if max_layer_id > 0:
+                valid_range = f"0-based layer indices in [0, {max_layer_id - 1}]"
+                hint = (
+                    " Note that target_layer_ids use 0-based decoder layer "
+                    f"indices (e.g. final layer is {max_layer_id - 1}, not "
+                    f"{max_layer_id})."
+                )
+            else:
+                valid_range = "empty because model has 0 layers"
+                hint = ""
+            raise ValueError(
+                f"{type(model).__name__} has {max_layer_id} decoder layers, so "
+                f"{field_name} must contain {valid_range}; got {list(raw_ids)} "
+                f"(out of range: {invalid_raw}).{hint}"
+            )
+        return
+
+    invalid = [
+        layer_id
+        for layer_id in aux_layers
+        if not isinstance(layer_id, int)
+        or isinstance(layer_id, bool)
+        or layer_id < 0
+        or (max_layer_id is not None and layer_id > max_layer_id)
+    ]
+    if invalid:
+        upper = max_layer_id if max_layer_id is not None else "..."
+        raise ValueError(
+            f"Auxiliary hidden state layer indices {invalid} from {aux_layers} "
+            f"are out of range for {type(model).__name__} (expected [0, {upper}])."
+        )
 
 
 def set_eagle3_aux_hidden_state_layers(
@@ -25,12 +110,14 @@ def set_eagle3_aux_hidden_state_layers(
         raise RuntimeError("Expected model instance for EAGLE3 configuration")
     eagle3_model = cast(SupportsEagle3, model)
 
-    aux_layers = get_eagle3_aux_layers_from_config(spec_config)
+    aux_layers, zero_based_source = _resolve_eagle3_aux_layers_from_config(spec_config)
     if aux_layers:
         logger.info("Using Eagle3 auxiliary layers from config: %s", aux_layers)
     else:
         aux_layers = eagle3_model.get_eagle3_default_aux_hidden_state_layers()
+        zero_based_source = None
         logger.info("Using Eagle3 auxiliary layers from model: %s", aux_layers)
+    _validate_eagle3_aux_hidden_state_layers(model, aux_layers, zero_based_source)
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
     reserve_aux_intermediate_tensor_slots(model)
 
@@ -74,18 +161,22 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
     model.make_empty_intermediate_tensors = make_empty_with_aux
 
 
-def get_eagle3_aux_layers_from_config(
+def _resolve_eagle3_aux_layers_from_config(
     spec_config: SpeculativeConfig,
-) -> tuple[int, ...] | None:
+) -> tuple[tuple[int, ...] | None, tuple[str, tuple[int, ...]] | None]:
     if not (spec_config and spec_config.draft_model_config):
-        return None
+        return None, None
     hf_config = spec_config.draft_model_config.hf_config
+    zero_based_source: tuple[str, tuple[int, ...]] | None = None
     layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
     if not layer_ids:
         dflash_config = getattr(hf_config, "dflash_config", None)
         if dflash_config and isinstance(dflash_config, dict):
-            # Add 1 to convert DFlash's aux layer id semantics
-            layer_ids = [i + 1 for i in (dflash_config.get("target_layer_ids") or [])]
+            raw_ids = dflash_config.get("target_layer_ids")
+            if raw_ids:
+                # Add 1 to convert DFlash's aux layer id semantics
+                layer_ids = [i + 1 for i in raw_ids]
+                zero_based_source = ("dflash_config.target_layer_ids", tuple(raw_ids))
     if not layer_ids:
         dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
         if dspark_layer_ids:
@@ -97,11 +188,16 @@ def get_eagle3_aux_layers_from_config(
                 layer_ids = list(dspark_layer_ids)
             else:
                 layer_ids = [i + 1 for i in dspark_layer_ids]
+                zero_based_source = (
+                    "dspark_target_layer_ids",
+                    tuple(dspark_layer_ids),
+                )
     if not layer_ids:
         # Dense DSpark (e.g. Qwen3) also uses different aux layer semantics.
         target_layer_ids = getattr(hf_config, "target_layer_ids", None)
         if target_layer_ids:
             layer_ids = [i + 1 for i in target_layer_ids]
+            zero_based_source = ("target_layer_ids", tuple(target_layer_ids))
     if not layer_ids:
         for config_name in ("dflash_config", "eagle_config"):
             drafter_config = getattr(hf_config, config_name, None)
@@ -110,5 +206,12 @@ def get_eagle3_aux_layers_from_config(
                 if layer_ids:
                     break
     if layer_ids and isinstance(layer_ids, (list, tuple)):
-        return tuple(layer_ids)
-    return None
+        return tuple(layer_ids), zero_based_source
+    return None, None
+
+
+def get_eagle3_aux_layers_from_config(
+    spec_config: SpeculativeConfig,
+) -> tuple[int, ...] | None:
+    aux_layers, _ = _resolve_eagle3_aux_layers_from_config(spec_config)
+    return aux_layers
