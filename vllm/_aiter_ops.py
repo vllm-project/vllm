@@ -233,6 +233,12 @@ def _aiter_enabled() -> bool:
     """
     if envs.is_set("VLLM_ROCM_USE_AITER"):
         return envs.VLLM_ROCM_USE_AITER
+    # On gfx950, some AITER kernels are not run-to-run repeatable as of AITER
+    # v0.1.29.post1: BF16 GEMM split-K rows (ROCm/aiter#7053, ROCm/aiter#8349),
+    # FP8 block-scale GEMM split-K rows (ROCm/aiter#8541, ROCm/aiter#8609) and
+    # fused MoE from three experts per token (AITER_MOE_TRACKING_URL).
+    # VLLM_ROCM_USE_AITER_LINEAR=0 keeps the linears repeatable. Tracked by
+    # tests/kernels/test_rocm_repeatability.py.
     return is_aiter_found_and_supported()
 
 

@@ -19,6 +19,18 @@ Example: [examples/rl/batch_invariance/reproducibility_offline.py](../../example
     Even with the above settings, vLLM only provides reproducibility
     when it runs on the same hardware and the same vLLM version.
 
+!!! note
+
+    With AITER enabled on AMD Instinct MI350-series GPUs (gfx950), deterministic scheduling alone does not
+    make results reproducible yet, because some AITER kernels return different bits for identical calls:
+    BF16 and FP8 block-scaled linear layers on split-K shapes
+    ([ROCm/aiter#7053](https://github.com/ROCm/aiter/pull/7053),
+    [#8349](https://github.com/ROCm/aiter/issues/8349),
+    [#8541](https://github.com/ROCm/aiter/pull/8541),
+    [#8609](https://github.com/ROCm/aiter/pull/8609))
+    and fused MoE with three or more experts per token (AITER_MOE_TRACKING_URL).
+    Set `VLLM_ROCM_USE_AITER_LINEAR=0` to keep linear layers repeatable, or `VLLM_ROCM_USE_AITER=0` to turn AITER off.
+
 ## Setting the global seed
 
 The `seed` parameter in vLLM is used to control the random states for various random number generators.
