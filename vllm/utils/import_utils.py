@@ -707,9 +707,9 @@ def ensure_llguidance_available() -> None:
             "Install it with "
             '`pip install "llguidance>=1.3.0,<1.8.0"` '
             "(prebuilt Linux wheels for llguidance >= 1.7.0 require "
-            "glibc >= 2.31; on glibc 2.28 pass `--prefer-binary` / "
-            "`--only-binary llguidance`, pin `llguidance<1.7.0`, or build "
-            "from source)."
+            "glibc >= 2.31; on glibc 2.28 pass `--only-binary llguidance`, "
+            "pin `llguidance<1.7.0`, pass `--prefer-binary` with pip, or "
+            "build from source)."
         )
 
 

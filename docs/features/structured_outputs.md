@@ -9,10 +9,10 @@ available to generate structured outputs.
 !!! note
     Prebuilt Linux wheels for `llguidance >= 1.7.0` require `glibc >= 2.31`
     (`manylinux_2_31`). On older Linux distributions such as RHEL 8 / Rocky 8
-    (`glibc 2.28`), pass `--prefer-binary` (or `--only-binary llguidance`) or
-    pin `"llguidance<1.7.0"` when installing so `pip`/`uv` selects the
-    `llguidance 1.6.1` `manylinux_2_28` wheel instead of building the `1.7.x`
-    source distribution.
+    (`glibc 2.28`), pass `--only-binary llguidance` or pin `"llguidance<1.7.0"`
+    when installing with `pip`/`uv` (or `--prefer-binary` with `pip`) so the
+    resolver selects the `llguidance 1.6.1` `manylinux_2_28` wheel instead of
+    building the `1.7.x` source distribution.
 
 !!! warning
     If you are still using the following deprecated API fields which were removed in v0.12.0, please update your code to use `structured_outputs` as demonstrated in the rest of this document:

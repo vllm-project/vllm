@@ -1389,8 +1389,8 @@ class SamplingParams(
                     "'guidance' structured output backend, which is unavailable "
                     "because 'llguidance' is not installed or failed to import "
                     "(install with `pip install 'llguidance>=1.3.0,<1.8.0'`, or "
-                    "pass `--prefer-binary` / `--only-binary llguidance` or "
-                    "`pip install 'llguidance<1.7.0'` on systems with "
+                    "pass `--only-binary llguidance`, pin `'llguidance<1.7.0'`, "
+                    "or pass `--prefer-binary` with pip on systems with "
                     "glibc < 2.31)."
                 )
             validate_guidance_grammar(self, tokenizer=_get_llg_tokenizer(tokenizer))
@@ -1447,8 +1447,8 @@ class SamplingParams(
                             "because 'llguidance' is not installed or failed to "
                             "import (install with "
                             "`pip install 'llguidance>=1.3.0,<1.8.0'`, or pass "
-                            "`--prefer-binary` / `--only-binary llguidance` or "
-                            "`pip install 'llguidance<1.7.0'` on systems with "
+                            "`--only-binary llguidance`, pin `'llguidance<1.7.0'`, "
+                            "or pass `--prefer-binary` with pip on systems with "
                             "glibc < 2.31)."
                         ) from err
                 else:
