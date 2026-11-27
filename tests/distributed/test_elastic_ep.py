@@ -25,6 +25,8 @@ def cleanup_ray_between_tests():
 
 
 MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+# static activation scales are reduced across EP ranks when EPLB is on
+FP8_STATIC_MODEL_NAME = "RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8"
 
 NUM_GSM8K_QUESTIONS = 256
 EXPECTED_ACCURACY = 0.58
@@ -53,7 +55,7 @@ def _traffic_loop(
     is_probe: bool = False,
 ) -> list[tuple[float, float, int | None, str | None]]:
     url = server.url_for("is_scaling_elastic_ep" if is_probe else "v1/completions")
-    payload = {"model": MODEL_NAME, "prompt": "Hello", "max_tokens": 4}
+    payload = {"prompt": "Hello", "max_tokens": 4}
     headers = None if dp_rank is None else {"X-data-parallel-rank": str(dp_rank)}
     request_payload = None if is_probe else payload
     responses = []
@@ -220,23 +222,35 @@ def _base_serve_args(
 
 
 @pytest.mark.parametrize(
-    ("enforce_eager", "traffic_mode", "all2all_backend"),
+    ("model_name", "enforce_eager", "traffic_mode", "all2all_backend"),
     [
-        pytest.param(True, "none", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_none"),
-        pytest.param(True, "light", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_light"),
-        pytest.param(True, "heavy", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_heavy"),
         pytest.param(
-            False,
-            "heavy",
-            DEFAULT_ALL2ALL_BACKEND,
-            id="cuda_graphs_heavy",
+            MODEL_NAME, True, "none", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_none"
         ),
-        pytest.param(False, "heavy", "nixl_ep", id="cuda_graphs_heavy_nixl_ep"),
+        pytest.param(
+            MODEL_NAME, True, "light", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_light"
+        ),
+        pytest.param(
+            MODEL_NAME, True, "heavy", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_heavy"
+        ),
+        pytest.param(
+            MODEL_NAME, False, "heavy", DEFAULT_ALL2ALL_BACKEND, id="cuda_graphs_heavy"
+        ),
+        pytest.param(
+            MODEL_NAME, False, "heavy", "nixl_ep", id="cuda_graphs_heavy_nixl_ep"
+        ),
+        pytest.param(
+            FP8_STATIC_MODEL_NAME,
+            False,
+            "light",
+            DEFAULT_ALL2ALL_BACKEND,
+            id="fp8_static_cuda_graphs_light",
+        ),
     ],
 )
 @multi_gpu_test(num_gpus=4)
 def test_elastic_ep_scaling(
-    enforce_eager: bool, traffic_mode: str, all2all_backend: str
+    model_name: str, enforce_eager: bool, traffic_mode: str, all2all_backend: str
 ):
     from vllm.distributed.eplb.eplb_communicator import has_nixl
     from vllm.utils.import_utils import has_nixl_ep
@@ -254,9 +268,12 @@ def test_elastic_ep_scaling(
     vllm_serve_args = _base_serve_args(
         initial_dp_size, target_dp_size, enforce_eager, all2all_backend
     )
+    if model_name == FP8_STATIC_MODEL_NAME:
+        # FlashInfer autotune fails on elastic EP's stateless groups (#65307)
+        vllm_serve_args.append("--disable-flashinfer-autotune")
 
     with RemoteOpenAIServer(
-        MODEL_NAME,
+        model_name,
         vllm_serve_args,
         max_wait_seconds=1200,
     ) as server:

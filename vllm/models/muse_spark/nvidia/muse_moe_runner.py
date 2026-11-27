@@ -603,6 +603,11 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
 
     muse_post_expert_finalize: MusePostExpertFinalize
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        # process_weights_after_loading always converts from checkpoint format
+        return False
+
     def __init__(
         self,
         quant_config: ModelOptNvFp4Config,

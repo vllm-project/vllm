@@ -48,6 +48,13 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.eep_reconfigure import (
     make_eep_staged_quant_method,
 )
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    UnsupportedQuantForIPCError,
+    check_ipc_quant_support,
+)
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+from vllm.model_executor.utils import weights_already_processed, weights_from_peers
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     sync_flashinfer_autotune_cache,
 )
@@ -269,7 +276,8 @@ class ElasticEPScalingExecutor:
             self._async_executor.shutdown()
 
     def load_model(self) -> None:
-        self.worker.load_model(load_dummy_weights=True)
+        with weights_from_peers():
+            self.worker.load_model(load_dummy_weights=True)
 
     def prepare_reconfiguration(
         self, reconfig_request: ReconfigureDistributedRequest, use_all2all: bool
@@ -701,6 +709,24 @@ class ElasticEPScalingExecutor:
             expert_weights=expert_weights,
         )
         torch.accelerator.synchronize()
+        # kernel-format weights: rebuild derived state, transform nothing
+        with (
+            set_current_vllm_config(self.worker.vllm_config),
+            weights_already_processed(),
+        ):
+            try:
+                check_ipc_quant_support(model)
+            except UnsupportedQuantForIPCError as e:
+                logger.warning(
+                    "Elastic EP scale-up rebuilds only module-owned state, not "
+                    "quantization state derived from the transferred weights: %s",
+                    e,
+                )
+                finalize_model_weights(model, self.worker.device)
+            else:
+                process_weights_after_loading(
+                    model, self.worker.model_config, self.worker.device
+                )
         if not current_platform.is_rocm():
             self._warm_target_groups(get_dp_group(), get_ep_group())
         if self._can_reuse_fused_moe_kernel():

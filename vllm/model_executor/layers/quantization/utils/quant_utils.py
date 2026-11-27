@@ -14,6 +14,7 @@ from torch import fx
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.logger import init_logger
+from vllm.model_executor.utils import are_weights_from_peers
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -87,9 +88,12 @@ def amax_for_moe_activation_quant(
     folded into the per-expert dequantization alphas, we can only
     ensure that the quant/dequant scales match by having a single
     quantization scale shared across all ranks.
+
+    Under `weights_from_peers()` the reduction is skipped: the peers do not
+    join it, and the transferred weights already hold the reduced scale.
     """
     a_max = a_scale.max().to(torch.float32)
-    if enable_eplb:
+    if enable_eplb and not are_weights_from_peers():
         from vllm.distributed.parallel_state import get_ep_group
 
         torch.distributed.all_reduce(

@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
@@ -70,7 +71,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.quant_config.use_nvfp4_w4a4:
+        if self.quant_config.use_nvfp4_w4a4 and not is_weights_pre_processed():
             layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
 
