@@ -234,7 +234,12 @@ def test_output_head_lora(
             top5 = [dict(zip(i.tolist(), v.tolist())) for v, i in steps]
             hf_outputs.append((token_ids, tokenizer.decode(token_ids), top5))
     # LoRA's kernels need half precision
-    kwargs = dict(model_impl="transformers", dtype="bfloat16", enable_lora=True)
+    kwargs = dict(
+        model_impl="transformers",
+        dtype="bfloat16",
+        enable_lora=True,
+        enable_lora_embedding_modules=True,
+    )
     lora = LoRARequest("decoder", 1, str(tmp_path))
     with vllm_runner(model, tensor_parallel_size=2, **kwargs) as vllm_model:
         base_outputs = vllm_model.generate_greedy_logprobs(*args)
