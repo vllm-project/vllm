@@ -1502,10 +1502,68 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     // --args-json is parsed with serde, so clap's env support does not run for
     // the Python-supervised frontend path; Python passes the settings it
     // resolves from the environment instead.
+    let mut deserializer = serde_json::Deserializer::from_str(value);
     let args: SharedRuntimeArgs =
-        from_json_str(value).map_err(|e| format!("invalid JSON arguments: {e}"))?;
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            let path = error.path().to_string();
+            let (path, error) = if is_known_path(&path) {
+                (path, error.into_inner())
+            } else if let Some(failure) = failing_key(value) {
+                failure
+            } else {
+                return format!("invalid JSON arguments: {}", error.into_inner().as_report());
+            };
+            // Python resolves an environment variable into the argument bound
+            // to it, so name the variable too.
+            match env_bound_to::<SharedRuntimeArgs>(&path) {
+                Some(env) => {
+                    format!(
+                        "invalid JSON arguments: {path} ({env}): {}",
+                        error.as_report()
+                    )
+                }
+                None => format!("invalid JSON arguments: {path}: {}", error.as_report()),
+            }
+        })?;
+    deserializer
+        .end()
+        .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
     args.unsupported.check()?;
     Ok(args)
+}
+
+/// The top-level key of the `--args-json` object `value` that fails to
+/// deserialize, with its error, for an error serde reports without a path:
+/// inside a `#[serde(flatten)]` group of `SharedRuntimeArgs`, serde loses it.
+///
+/// Every field but `model_tag` has a default, and serde checks each field on
+/// its own, so each key is deserialized alone next to `model_tag`.
+fn failing_key(value: &str) -> Option<(String, serde_json::Error)> {
+    let object: Map<String, Value> = serde_json::from_str(value).ok()?;
+    let model_tag = object.get_key_value("model_tag")?;
+    // `model_tag` goes first, since every other key is checked next to it.
+    let others = object.iter().filter(|&(key, _)| key != "model_tag");
+    std::iter::once(model_tag).chain(others).find_map(|(key, field)| {
+        let alone = Map::from_iter([
+            (model_tag.0.clone(), model_tag.1.clone()),
+            (key.clone(), field.clone()),
+        ]);
+        let error = serde_json::from_value::<SharedRuntimeArgs>(Value::Object(alone)).err()?;
+        Some((key.clone(), error))
+    })
+}
+
+/// Whether a serde error path names a field, rather than being empty (`.`) or
+/// starting at a field serde could not track (`?`).
+fn is_known_path(path: &str) -> bool {
+    path != "." && !path.starts_with('?')
+}
+
+/// The environment variable bound to the argument `id` of `T`, if any.
+fn env_bound_to<T: Args>(id: &str) -> Option<String> {
+    let cmd = T::augment_args(clap::Command::new("vllm-rs"));
+    let env = cmd.get_arguments().find(|arg| arg.get_id() == id)?.get_env()?;
+    Some(env.to_string_lossy().into_owned())
 }
 
 /// Parser for `--args-json`. Unlike a function value parser, it reports an

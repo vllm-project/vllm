@@ -1352,8 +1352,11 @@ fn args_json_reads_env_only_settings() {
     let args = parse(r#","log_stats_interval":1.7976931348623157e308"#).unwrap();
     assert_eq!(args.log_stats_interval(), None);
 
-    expect!["invalid JSON arguments: http_max_request_body_size: invalid value: integer `-1`, expected usize at line 1 column 62"]
+    expect!["invalid JSON arguments: http_max_request_body_size (VLLM_HTTP_MAX_REQUEST_BODY_SIZE): invalid value: integer `-1`, expected usize at line 1 column 62"]
         .assert_eq(&parse(r#","http_max_request_body_size":-1"#).unwrap_err());
+    // Inside a flattened group such as `ModelArgs`, the field is named too.
+    expect!["invalid JSON arguments: hf_token: hf_token=false is not supported"]
+        .assert_eq(&parse(r#","hf_token":false"#).unwrap_err());
 }
 
 /// `--log-error-stack` falls back to `VLLM_SERVER_DEV_MODE`. Python leaves the
@@ -3398,7 +3401,7 @@ fn env_switches_accept_only_the_implemented_position() {
 
         For more information, try '--help'.
     "#]].assert_eq(&serve("--enable-cohere-api", "1").unwrap_err());
-    expect!["invalid JSON arguments: enable_cohere_api: only off is implemented in Rust frontend, not on at line 1 column 56"].assert_eq(&json("enable_cohere_api", true).unwrap_err());
+    expect!["invalid JSON arguments: enable_cohere_api (VLLM_ENABLE_COHERE_API): only off is implemented in Rust frontend, not on at line 1 column 56"].assert_eq(&json("enable_cohere_api", true).unwrap_err());
 }
 
 #[test]
