@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -8,6 +9,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoConfig, PreTrainedConfig
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     ModelConfig,
     ParallelConfig,
@@ -130,22 +132,57 @@ def test_glm_mtp_feeds_back_final_normed_hidden(
     torch.testing.assert_close(logits_hidden, final_normed)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Tests the CUDA deepseek_v32 MTP layer"
+)
+def test_glm52_mtp_eh_proj_gets_low_latency_plan(default_vllm_config):
+    from vllm.models.deepseek_v32.nvidia import mtp
+
+    # SpeculativeConfig rewrites the draft model_type; the target keeps GLM's.
+    draft_config = mock.MagicMock(
+        hidden_size=16, rms_norm_eps=1e-5, index_topk=8, model_type="deepseek_mtp"
+    )
+    vllm_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_config = draft_config
+    vllm_config.model_config.hf_config.model_type = "glm_moe_dsa"
+    vllm_config.model_config.dtype = torch.bfloat16
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+    plan = {1: ("cute", None)}
+
+    with (
+        mock.patch.object(mtp, "build_glm52_plan", return_value=plan) as build_plan,
+        mock.patch.object(mtp, "DeepseekV32DecoderLayer", return_value=nn.Identity()),
+        mock.patch.object(mtp, "SharedHead", return_value=nn.Identity()),
+        mock.patch.object(mtp, "SparseMLAIndexGroupBuilder"),
+        mock.patch.object(mtp, "get_sparse_mla_index_group_max_rows", return_value=4),
+        mock.patch.object(mtp.current_platform, "device_type", "cpu"),
+    ):
+        layer = mtp.DeepseekV32MultiTokenPredictorLayer(vllm_config, "model.layers.78")
+
+    build_plan.assert_called_once_with(layer.eh_proj.weight, torch.bfloat16)
+    assert layer._eh_plan is plan
+
+
 @pytest.mark.parametrize(
     ("method", "expected"),
     [
         (None, False),
         ("ngram", False),
         ("mtp", True),
-        ("eagle3", True),
-        ("draft_model", True),
+        ("eagle", True),
+        ("eagle3", False),
+        ("draft_model", False),
         ("dspark", False),
     ],
 )
-def test_deepseek_v4_mtp_hidden_buffer_skips_dspark(method, expected):
-    """Only drafters that read DeepSeek V4's pre-hc_head residual get the
-    buffer; DSpark drafts from the target's aux hidden states."""
+def test_deepseek_v4_mtp_hidden_buffer_skips_aux_drafters(method, expected):
+    """Only drafters of the target's final hidden states get DeepSeek V4's
+    pre-hc_head residual buffer; DSpark and EAGLE3 draft from its aux hidden
+    states, and draft models don't read target hidden states."""
     spec_config = None
     if method is not None:
-        spec_config = SpeculativeConfig.__new__(SpeculativeConfig)
-        object.__setattr__(spec_config, "method", method)
+        spec_config = fake_speculative_config(
+            method=method,
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        )
     assert needs_mtp_hidden_buffer(spec_config) is expected

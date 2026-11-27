@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--draft-model", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=None)
     parser.add_argument("--max-num-seqs", type=int, default=None)
     parser.add_argument("--allowed-local-media-path", type=str, default="")
     return parser.parse_args()
@@ -141,7 +141,6 @@ def main(args):
 
     llm = LLM(
         model=model_dir,
-        trust_remote_code=True,
         tensor_parallel_size=args.tp,
         enable_chunked_prefill=args.enable_chunked_prefill,
         enforce_eager=args.enforce_eager,

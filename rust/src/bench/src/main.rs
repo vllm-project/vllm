@@ -7,7 +7,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use vllm_tracing::LogLevel;
+use vllm_tracing::{LogFormatter, LogLevel};
 
 #[derive(Parser)]
 #[command(
@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(vllm_bench::run_mm_processor(args, timing_stats))
         }
         None => {
-            vllm_tracing::init_tracing("Bench", LogLevel::from_env());
+            vllm_tracing::init_tracing("Bench", LogLevel::from_env(), LogFormatter::Text);
             runtime.block_on(vllm_bench::run(cli.args))
         }
     }

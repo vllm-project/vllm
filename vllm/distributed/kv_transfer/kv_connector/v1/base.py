@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -85,7 +86,7 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorTransferResults:
     """Asynchronous transfer completions from one worker snapshot.
 
@@ -198,8 +199,19 @@ class KVConnectorBase_V1(ABC):
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Whether the connector supports core lookahead hashing."""
-        return False
+        """Whether the connector supports hash lookahead. If False, EAGLE/MTP
+        acceptance may drop."""
+        return True
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
+        """How the connector's workers reach the device KV cache, as
+        `KVCacheAccess` flags, which decide how the extensible KV cache
+        allocates it, or whether it can be used: e.g. `REGISTERS` if they
+        register it with a UCX or RDMA engine, which requires each segment to
+        be backed by a single physical allocation. Defaults to `IN_PROCESS`.
+        """
+        return KVCacheAccess.IN_PROCESS
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -217,6 +229,28 @@ class KVConnectorBase_V1(ABC):
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Whether the connector can follow the KV cache remap of sleep mode."""
         return True
+
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Whether every KV block it loads is a whole block that vLLM's own
+        cache writer produced for an identical KV cache layout.
+
+        Attention backends may then keep fast paths that assume no foreign
+        bytes (e.g. NaNs in unwritten slots) ever reach the KV cache.
+        """
+        return False
+
+    @classmethod
+    def requests_sliding_window_replay(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether models that support SWA bounded replay should enable it.
+
+        Such a model keeps its sliding-window state out of prefix caching and
+        rebuilds it after a hit by recomputing the hit's last window, so the
+        connector only needs to store the compressed, prefix-cacheable KV.
+        """
+        return False
 
     def __init__(
         self,
@@ -303,6 +337,18 @@ class KVConnectorBase_V1(ABC):
         Args:
             kv_caches: dictionary of layer names, kv cache
 
+        """
+        return
+
+    def on_kv_cache_ready(self) -> None:
+        """Finish deferred registration after final KV sizing.
+
+        Called on each worker before requests, after preceding device work.
+        Normally follows warmup and capture. With VLLM_ELASTIC_EP_SCALE_UP_LAUNCH,
+        it precedes deferred warmup/capture in warm_and_capture().
+        Must return in bounded time: an unbounded wait blocks engine startup.
+        No hook timeout or cancellation is provided. Exceptions fail startup;
+        background tasks are not awaited. Not called on sleep/wake.
         """
         return
 
@@ -608,7 +654,9 @@ class KVConnectorBase_V1(ABC):
         FIXME: one exception:
         synchronous READ connectors may remove attention blocks they fully
         overwrite this step from new_block_ids_to_zero. They must complete
-        those loads before the blocks are used and fail the step if a load fails.
+        those loads before the blocks are used. If a load fails, they must fail
+        the step, or add the removed blocks to new_block_ids_to_zero in the next
+        step, before the scheduler recomputes into them or reuses them.
         Calling this function will reset the state of the connector.
 
         Args:

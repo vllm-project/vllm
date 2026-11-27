@@ -5,20 +5,19 @@ pub(crate) mod convert;
 mod types;
 mod validate;
 
-use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, future, pin_mut};
+use futures::{StreamExt as _, future};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info};
 use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
@@ -26,18 +25,21 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
+use vllm_text::DecodedLogprobs;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::{ApiServerOptions, OutputLogConfig};
-use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
+use crate::error::{ApiError, bail_server_error, chat_request_error, engine_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
     ChatMessageDelta,
 };
-use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
+use crate::routes::openai::utils::choices::{
+    ChoiceChunk, ChoiceResponse, merge_choice_chunk_streams, merge_choice_responses,
+};
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
@@ -47,12 +49,14 @@ use crate::routes::openai::utils::types::{
     ToolCallDelta, Usage,
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
 use crate::utils::npy_base64;
-use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::{
+    ResolvedRequestContext, openai_sse_stream, resolve_request_context, sse_response,
+    unix_timestamp,
+};
 
 pub(crate) fn lower_chat_request(
     request: ChatCompletionRequest,
@@ -67,28 +71,24 @@ pub(crate) fn lower_chat_request(
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
-) -> Response {
+    body: Result<Json<ChatCompletionRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body?;
     let stream = body.stream;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context =
+        resolve_request_context(&headers, "chatcmpl-", body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
-    let lora_resolution = state.resolve_model_with_loras(requested_model).await;
+    let lora_resolution = state
+        .resolve_model_with_default_mm_loras(requested_model, body.media_modalities())
+        .await;
 
-    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
-        Ok(prepared) => prepared,
-        Err(error) => return error.into_response(),
-    };
-    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
-    {
-        return error.into_response();
-    }
-    if let Err(error) = validate_max_output_tokens(
+    let prepared = prepare_chat_request(body, &lora_resolution, request_context)?;
+    validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)?;
+    validate_max_output_tokens(
         "max_completion_tokens",
         prepared.chat_request.sampling_params.max_tokens,
         state.llm().info().max_model_len,
-    ) {
-        return error.into_response();
-    }
+    )?;
     let request_span = tracing::info_span!(
         "chat_completions",
         request_id = %prepared.request_id,
@@ -102,17 +102,12 @@ pub async fn chat_completions(
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
 
     let n = prepared.n;
-    let chat_streams = match state
+    let chat_streams = state
         .chat
         .chat_n(prepared.chat_request, n)
         .instrument(request_span.clone())
         .await
-    {
-        Ok(streams) => streams,
-        Err(error) => {
-            return chat_submit_error("failed to submit chat request", error).into_response();
-        }
-    };
+        .map_err(|error| chat_request_error("failed to submit chat request", error))?;
 
     if stream {
         let chunk_streams = chat_streams
@@ -132,10 +127,13 @@ pub async fn chat_completions(
                 )
             })
             .collect();
-        let sse_stream = chat_completion_sse_stream(merge_choice_chunk_streams(chunk_streams))
-            .instrument(request_span);
+        let sse_stream =
+            openai_sse_stream(merge_choice_chunk_streams(chunk_streams)).instrument(request_span);
 
-        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
+        Ok(sse_response(
+            sse_stream,
+            api_server_options.sse_keep_alive_interval,
+        ))
     } else {
         let responses = future::try_join_all(chat_streams.into_iter().map(|chat_stream| {
             collect_chat_completion(
@@ -150,32 +148,29 @@ pub async fn chat_completions(
             )
         }))
         .instrument(request_span.clone())
-        .await;
-        match responses {
-            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
-            Err(error) => error.into_response(),
-        }
+        .await?;
+        Ok(Json(merge_choice_responses(responses)).into_response())
     }
 }
 
-/// Merge the responses of a request's choices, in index order, like Python's
-/// non-streaming response for `n > 1`: the prompt-level fields come from the
-/// first choice, usage adds up per [`Usage::add_choice`], and per-request
-/// metrics, which describe a single sample, are reported only for `n = 1`.
-fn merge_choice_responses(responses: Vec<ChatCompletionResponse>) -> ChatCompletionResponse {
-    let mut responses = responses.into_iter();
-    let mut merged = responses.next().expect("a request has at least one choice");
-    for (index, response) in (1..).zip(responses) {
-        merged.metrics = None;
-        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
-            usage.add_choice(other);
-        }
-        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+impl ChoiceResponse for ChatCompletionResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
             choice.index = index;
-            choice
-        }));
+        }
     }
-    merged
+
+    fn usage_mut(&mut self) -> Option<&mut Usage> {
+        self.usage.as_mut()
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
+
+    fn append_choices(&mut self, other: Self) {
+        self.choices.extend(other.choices);
+    }
 }
 
 impl ChoiceChunk for ChatCompletionStreamResponse {
@@ -228,12 +223,10 @@ async fn collect_chat_completion(
 ) -> Result<ChatCompletionResponse, ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
-    let collected = stream.collect_message().await.map_err(|error| {
-        server_error!(
-            "failed to collect chat completion response: {}",
-            error.to_report_string()
-        )
-    })?;
+    let collected = stream
+        .collect_message()
+        .await
+        .map_err(|error| chat_request_error("failed to collect chat completion response", error))?;
     let CollectedAssistantMessage {
         message,
         prompt_token_ids,
@@ -273,10 +266,19 @@ async fn collect_chat_completion(
         })
         .collect::<Vec<_>>();
     let logprobs = if requested_logprobs && include_output_metadata {
+        let logprobs = match logprobs {
+            Some(logprobs) => logprobs,
+            // A request that generated nothing, such as one aborted during
+            // prefill, has no positions to report.
+            None if token_ids.is_empty() => DecodedLogprobs {
+                positions: Vec::new(),
+            },
+            None => {
+                bail_server_error!("chat response requested logprobs but generation returned none")
+            }
+        };
         Some(decoded_logprobs_to_openai_chat(
-            logprobs.as_ref().ok_or_else(|| {
-                server_error!("chat response requested logprobs but generation returned none")
-            })?,
+            &logprobs,
             output_top_logprobs,
             return_tokens_as_token_ids,
         )?)
@@ -284,10 +286,7 @@ async fn collect_chat_completion(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref(),
-            &prompt_token_ids,
-        )?)
+        Some(prompt_logprobs_to_maps(prompt_logprobs.as_ref()))
     } else {
         None
     };
@@ -296,6 +295,7 @@ async fn collect_chat_completion(
         timestamps,
         usage.output_token_count,
         spec_decode_metrics,
+        None,
     );
     let usage = Usage::from_token_usage(
         usage.engine,
@@ -582,6 +582,7 @@ async fn chat_completion_chunk_stream(
                 message,
                 usage: final_usage,
                 timestamps,
+                first_content_token_ts,
                 spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
@@ -659,7 +660,8 @@ async fn chat_completion_chunk_stream(
                         enable_per_request_metrics,
                         timestamps,
                         final_usage.output_token_count,
-                        spec_decode_metrics,
+                        spec_decode_metrics.map(|value| *value),
+                        first_content_token_ts,
                     );
                     y.yield_ok(usage_chunk(
                         &envelope,
@@ -681,7 +683,7 @@ async fn chat_completion_chunk_stream(
                     error = %error.as_report(),
                     "chat stream failed"
                 );
-                bail_server_error!("{}", error.to_report_string());
+                return Err(chat_request_error("chat stream failed", error));
             }
         }
     }
@@ -922,55 +924,6 @@ fn append_delta_text(slot: &mut Option<String>, delta: String) {
         Some(existing) => existing.push_str(&delta),
         None => *slot = Some(delta),
     }
-}
-
-/// Convert one chunk stream into OpenAI-style SSE events.
-///
-/// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
-/// events followed by `data: [DONE]`, so the transport stream itself stays
-/// infallible even when generation fails after the HTTP response has started.
-#[try_stream]
-async fn chat_completion_sse_stream(
-    stream: impl Stream<Item = Result<ChatCompletionStreamResponse, ApiError>>,
-    mut y: TryYielder<Event, Infallible>,
-) -> Result<(), Infallible> {
-    pin_mut!(stream);
-
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
-            Err(error) => {
-                y.yield_ok(to_error_sse_event(&error)).await;
-                break;
-            }
-        }
-    }
-
-    y.yield_ok(done_sse_event()).await;
-    Ok(())
-}
-
-/// Serialize one OpenAI chunk payload into one SSE `data:` event.
-fn to_sse_event(chunk: &ChatCompletionStreamResponse) -> Event {
-    trace!(?chunk, "chat completion emitting chunk");
-    Event::default()
-        .json_data(chunk)
-        .expect("ChatCompletionStreamResponse must serialize to JSON")
-}
-
-/// Serialize one OpenAI error payload into one SSE `data:` event.
-fn to_error_sse_event(error: &ApiError) -> Event {
-    let response = error.to_error_response();
-    trace!(?response, "chat completion emitting error");
-    Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
-}
-
-/// Build the terminal OpenAI SSE sentinel event.
-fn done_sse_event() -> Event {
-    trace!("chat completion emitting done");
-    Event::default().data("[DONE]")
 }
 
 /// Build the initial assistant-role SSE chunk required by the OpenAI streaming
@@ -1320,12 +1273,13 @@ mod tests {
                     first_token_ts: 10.5,
                     last_token_ts: 11.0,
                 },
-                spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                first_content_token_ts: Some(10.75),
+                spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                     num_spec_tokens: 3,
                     histogram: vec![0, 1, 1, 0],
                     num_draft_tokens: 6,
                     ..Default::default()
-                }),
+                })),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1378,6 +1332,7 @@ mod tests {
         );
         assert!(chunks[..3].iter().all(|chunk| chunk.metrics.is_none()));
         let metrics = chunks[3].metrics.as_ref().expect("per-request metrics");
+        assert!((metrics.time_to_first_content_token_ms.unwrap() - 550.0).abs() < 1e-9);
         assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
         assert!((metrics.tokens_per_second.unwrap() - 1.25).abs() < 1e-9);
         assert_eq!(
@@ -1424,6 +1379,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1479,6 +1435,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: None,
@@ -1547,6 +1504,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1634,6 +1592,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1773,6 +1732,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 4, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1858,6 +1818,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1926,6 +1887,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(3, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2012,6 +1974,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2090,6 +2053,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2157,6 +2121,7 @@ mod tests {
                     message: Default::default(),
                     usage: done_usage(1, 1, 0),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: None,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,

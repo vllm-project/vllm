@@ -185,6 +185,8 @@ def test_gemma3n_kv_shared_layer_mapper() -> None:
 def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        # Fork fails here when no earlier file switched the process to spawn.
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         with vllm_runner(
             model,
             load_format="dummy",

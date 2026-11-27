@@ -25,13 +25,13 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVQuantMode,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
+    MLAAttentionSpec,
 )
 
 
@@ -123,18 +123,16 @@ def init_reanchor_rotary_specs(
     place. Returns the spec of each layer."""
     position_scales = {}
     for group in kv_cache_config.kv_cache_groups:
-        for layer_name in group.layer_names:
-            spec = group.kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                # KV-sharing aliases have no spec of their own.
-                spec = spec.kv_cache_specs.get(layer_name, spec.first_spec)
-            if not isinstance(spec, SlidingWindowSpec) or isinstance(
-                spec, SlidingWindowMLASpec
+        for layer_name, spec in group.kv_cache_specs.items():
+            if (
+                group.manager_cls is not SlidingWindowManager
+                or not isinstance(spec, AttentionSpec)
+                or isinstance(spec, MLAAttentionSpec)
             ):
                 raise ValueError(
                     "--enable-unbounded-streaming-input needs every attention layer "
                     f"to use a sliding window; {layer_name!r} uses "
-                    f"{type(spec).__name__}."
+                    f"{group.manager_cls.__name__} with {type(spec).__name__}."
                 )
             layer = forward_context[layer_name]
             kv = layer.kv_cache
@@ -162,7 +160,7 @@ def init_reanchor_rotary_specs(
 def rerotate_shifted_sessions(
     scheduler_output: SchedulerOutput,
     forward_context: Mapping[str, Any],
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    kv_cache_groups: Sequence[KVCacheGroup],
     specs: Mapping[str, RotarySpec],
     device: torch.device,
 ) -> None:
@@ -186,7 +184,7 @@ def rerotate_shifted_sessions(
 
 def rerotate_cached_keys(
     forward_context: Mapping[str, Any],
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    kv_cache_groups: Sequence[KVCacheGroup],
     group_block_ids: Sequence[torch.Tensor],
     d: int,
     specs: Mapping[str, RotarySpec],

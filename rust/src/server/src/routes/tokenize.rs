@@ -12,26 +12,16 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
 
-use crate::error::{ApiError, chat_submit_error, text_submit_error};
-use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::error::{ApiError, chat_request_error, text_request_error};
 use crate::routes::tokenize::types::{
     DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
     TokenizeRequest, TokenizeResponse,
 };
 use crate::state::AppState;
-use crate::utils::resolve_base_request_id;
-
-/// Match Python `tokenize-{base}` where base is `X-Request-Id` or a new UUID.
-fn tokenize_request_id(headers: &HeaderMap) -> String {
-    let base = resolve_base_request_id(
-        headers.get("X-Request-Id").and_then(|value| value.to_str().ok()),
-        None,
-    );
-    format!("tokenize-{base}")
-}
+use crate::utils::resolve_request_id;
 
 /// Build the `token_strs` vector when requested, via the tokenizer vocab.
 fn token_strs(tokenizer: &vllm_text::tokenizer::DynTokenizer, ids: &[u32]) -> Vec<String> {
@@ -42,30 +32,26 @@ fn token_strs(tokenizer: &vllm_text::tokenizer::DynTokenizer, ids: &[u32]) -> Ve
 pub async fn tokenize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<TokenizeRequest>,
-) -> Response {
-    let request_id = tokenize_request_id(&headers);
+    body: Result<Json<TokenizeRequest>, JsonRejection>,
+) -> Result<Json<TokenizeResponse>, ApiError> {
+    let Json(body) = body?;
+    // Python names it `tokenize-<X-Request-Id or a random ID>`.
+    let request_id = resolve_request_id(&headers, "tokenize-", None)?;
     let tokenizer = state.chat.text().tokenizer();
     let max_model_len = state.llm().info().max_model_len;
 
-    let result = match body {
-        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req),
-        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await,
+    let (tokens, want_strs) = match body {
+        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req)?,
+        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await?,
     };
 
-    match result {
-        Ok((tokens, want_strs)) => {
-            let token_strs = want_strs.then(|| token_strs(&tokenizer, &tokens));
-            Json(TokenizeResponse {
-                count: tokens.len(),
-                max_model_len,
-                tokens,
-                token_strs,
-            })
-            .into_response()
-        }
-        Err(error) => error.into_response(),
-    }
+    let token_strs = want_strs.then(|| token_strs(&tokenizer, &tokens));
+    Ok(Json(TokenizeResponse {
+        count: tokens.len(),
+        max_model_len,
+        tokens,
+        token_strs,
+    }))
 }
 
 fn tokenize_completion(
@@ -80,7 +66,7 @@ fn tokenize_completion(
         .text()
         .request_processor()
         .tokenize(req.into_text_request(request_id.to_string()))
-        .map_err(|error| text_submit_error("tokenize failed", error))?;
+        .map_err(|error| text_request_error("tokenize failed", error))?;
     Ok((tokens, return_token_strs))
 }
 
@@ -102,48 +88,25 @@ async fn tokenize_chat(
         .request_processor()
         .prepare_for_tokenization(req.into_chat_request(request_id.to_string())?)
         .await
-        .map_err(|error| chat_submit_error("tokenize failed", error))?;
+        .map_err(|error| chat_request_error("tokenize failed", error))?;
     let tokens = state
         .chat
         .text()
         .request_processor()
         .tokenize(text_request)
-        .map_err(|error| text_submit_error("tokenize failed", error))?;
+        .map_err(|error| text_request_error("tokenize failed", error))?;
     Ok((tokens, return_token_strs))
 }
 
 pub async fn detokenize(
     State(state): State<Arc<AppState>>,
-    ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
-) -> Response {
-    if let Err(error) = state.base_model_names().check(body.model.as_deref()) {
-        return error.into_response();
-    }
+    body: Result<Json<DetokenizeRequest>, JsonRejection>,
+) -> Result<Json<DetokenizeResponse>, ApiError> {
+    let Json(body) = body?;
+    state.base_model_names().check(body.model.as_deref())?;
     let tokenizer = state.chat.text().tokenizer();
-    match tokenizer.decode(&body.tokens, /* skip_special_tokens = */ false) {
-        Ok(prompt) => Json(DetokenizeResponse { prompt }).into_response(),
-        Err(error) => text_submit_error("detokenize failed", error.into()).into_response(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::http::{HeaderMap, HeaderValue};
-
-    use super::tokenize_request_id;
-
-    #[test]
-    fn tokenize_request_id_prefers_x_request_id_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Request-Id", HeaderValue::from_static("client-req-1"));
-        assert_eq!(tokenize_request_id(&headers), "tokenize-client-req-1");
-    }
-
-    #[test]
-    fn tokenize_request_id_generates_uuid_when_header_missing() {
-        let headers = HeaderMap::new();
-        let id = tokenize_request_id(&headers);
-        assert!(id.starts_with("tokenize-"));
-        assert_ne!(id, "tokenize-");
-    }
+    let prompt = tokenizer
+        .decode(&body.tokens, /* skip_special_tokens = */ false)
+        .map_err(|error| text_request_error("detokenize failed", error.into()))?;
+    Ok(Json(DetokenizeResponse { prompt }))
 }

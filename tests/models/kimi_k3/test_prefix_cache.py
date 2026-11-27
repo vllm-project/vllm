@@ -10,7 +10,7 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from math import lcm
 from uuid import uuid4
@@ -95,7 +95,7 @@ NIXL_OFFLOAD = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Mode:
     # A finer prefix_match_unit enables partial hits inside a Mamba block.
     prefix_match_unit: int | None
@@ -110,7 +110,7 @@ class Mode:
 MODES = [Mode(unit, spec) for spec in (False, True) for unit in (None, 128)]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Instance:
     tp: int = 1
     dp: int = 1
@@ -140,7 +140,7 @@ class Instance:
         return args
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Deployment:
     decode: Instance
     prefill: Instance | None = None
@@ -265,7 +265,7 @@ def _reset_gpu_prefix_cache(url: str) -> None:
         time.sleep(0.1)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Turn:
     prompt_len: int
     cached: int
@@ -279,19 +279,15 @@ class Turn:
         return self.output[0] == self.recompute[0]
 
 
-def _expected_cached(prev_prompt_len: int, hit_unit: int, spec: bool) -> int:
-    """A turn must reuse the previous prompt up to its last checkpoint.
-
-    EAGLE-style drafts drop the trailing unit, so the checkpoint is one earlier.
-    """
+def _expected_cached(prev_prompt_len: int, hit_unit: int) -> int:
+    """A turn reuses the previous prompt up to its last checkpoint."""
     if not prev_prompt_len:
         return 0
-    checkpoint = (prev_prompt_len - 1) // hit_unit * hit_unit
-    return max(checkpoint - hit_unit, 0) if spec else checkpoint
+    return (prev_prompt_len - 1) // hit_unit * hit_unit
 
 
 @contextlib.contextmanager
-def _serve(deployment: Deployment, mode: Mode) -> Iterator[list[RemoteOpenAIServer]]:
+def _serve(deployment: Deployment, mode: Mode) -> Generator[list[RemoteOpenAIServer]]:
     with contextlib.ExitStack() as stack:
         # Sequential shutdown waits on memory still held by sibling servers.
         servers: list[RemoteOpenAIServer] = []
@@ -345,11 +341,15 @@ def _run_conversation(
         else:
             computed = output = _complete(decode_url, prompt, "conv")
         recompute = _complete(decode_url, prompt, f"recompute-{turn}")
+        expected_cached = _expected_cached(prev_len, hit_unit)
+        if deployment.prefill is not None:
+            # The prefiller stops at the checkpoint, so its hits end a unit lower.
+            expected_cached = max(expected_cached - hit_unit, 0)
         turns.append(
             Turn(
                 prompt_len=len(prompt),
                 cached=_cached(computed),
-                expected_cached=_expected_cached(prev_len, hit_unit, mode.spec),
+                expected_cached=expected_cached,
                 recompute_cached=_cached(recompute),
                 output=_tokens_text_logprobs(output),
                 recompute=_tokens_text_logprobs(recompute),

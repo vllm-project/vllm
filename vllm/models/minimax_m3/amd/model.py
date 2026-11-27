@@ -18,6 +18,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -37,6 +38,9 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     _FUSED_QUANT_MAX_M,
     RocmDotScaledMxfp8LinearKernel,
@@ -53,6 +57,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     RoutedExperts,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -82,10 +87,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MultiModalEmbeddings,
@@ -100,7 +101,6 @@ from vllm.model_executor.models.utils import (
     extract_layer_index,
     get_fused_shared_expert_layers,
     init_vllm_registered_model,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -108,6 +108,8 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.amd.glue import M3Glue
+from vllm.models.minimax_m3.amd.glue.carry import Mxfp8Carry
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAImpl,
     MiniMaxM3MSAIndexer,
@@ -118,7 +120,6 @@ from vllm.models.minimax_m3.amd.indexer_nvfp4 import (
     MiniMaxM3IndexerRocmNvfp4Impl,
     init_rocm_nvfp4_indexer_decode_cp,
 )
-from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
@@ -137,6 +138,7 @@ from vllm.models.minimax_m3.amd.sparse_attention_msa import (
     MiniMaxM3SparseAiterPAPrefillMetadata,
 )
 from vllm.models.minimax_m3.amd.specialized_decode.runtime import (
+    DecodeConfig,
     specialized_decode_config,
 )
 from vllm.models.minimax_m3.common.encoder_cudagraph import (
@@ -164,14 +166,16 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
 
 if TYPE_CHECKING:
+    from .mono.dispatch import MonoDecode
     from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
@@ -346,6 +350,10 @@ class MiniMaxM3MLP(nn.Module):
     def _down_proj_quantizes_in_gemm(self, num_tokens: int) -> bool:
         """Whether down_proj's kernel quantizes its input inside the GEMM at
         this token count; that is already a single launch, so keep it."""
+        if not isinstance(
+            _mxfp8_linear_kernel(self.down_proj), RocmDotScaledMxfp8LinearKernel
+        ):
+            return False
         n, k = self.down_proj.weight.shape
         return (
             0 < num_tokens <= _FUSED_QUANT_MAX_M
@@ -415,6 +423,26 @@ def _aiter_moe_fused_shared_experts_enabled(
         and is_fused_shared_expert_enabled
         and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
     )
+
+
+def _redirect_fused_shared_experts(
+    weights: Iterable[tuple[str, torch.Tensor]], model: nn.Module
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Load fused shared experts into the routed slot after the local experts."""
+    shared_id = model.config.num_local_experts
+    for name, weight in weights:
+        if (
+            ".shared_experts." in name
+            and extract_layer_index(name) in model.fused_shared_expert_layers
+        ):
+            name = name.replace(
+                ".shared_experts.gate_proj.", f".experts.{shared_id}.w1."
+            )
+            name = name.replace(".shared_experts.up_proj.", f".experts.{shared_id}.w3.")
+            name = name.replace(
+                ".shared_experts.down_proj.", f".experts.{shared_id}.w2."
+            )
+        yield name, weight
 
 
 class MiniMaxM3MoE(nn.Module):
@@ -534,7 +562,9 @@ class MiniMaxM3MoE(nn.Module):
             swiglu_alpha=config.swiglu_alpha,
             swiglu_beta=1.0,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.use_aiter_moe_fse,
+            routed_scale_mode=RoutedScaleMode.ROUTER
+            if self.use_aiter_moe_fse
+            else RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             n_shared_experts=(
@@ -543,6 +573,7 @@ class MiniMaxM3MoE(nn.Module):
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
             shared_expert_prefix=f"{prefix}.shared_experts",
             quant_config=quant_config,
+            ckpt_names=("w1", "w2", "w3"),
             prefix=f"{prefix}.experts",
         )
 
@@ -898,10 +929,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.sparse_ctx_buffer = sparse_ctx_buffer
         # Same condition the forward dispatches on, so the indexer built here
         # and the branch that calls it cannot disagree about which one this is.
+        self.indexer: MiniMaxM3Indexer | MiniMaxM3MSAIndexer | None
         if self.use_nvfp4_kv:
             self.indexer = MiniMaxM3MSAIndexer(
                 impl_cls=MiniMaxM3IndexerRocmNvfp4Impl, **indexer_kwargs
             )
+        elif self.skip_index_topk:
+            self.indexer = None
         elif msa_indexer_impl_cls is None:
             # Self-contained nn.Module: owns its side cache, selects its impl.
             self.indexer = MiniMaxM3Indexer(**indexer_kwargs)
@@ -931,7 +965,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
         # AITER sparse PA wants K and V as two separate head groups
         # (H folded into the content dim).
@@ -939,7 +973,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         kv_bytes = (
             self.num_kv_heads * self.head_dim * self.kv_cache_torch_dtype.itemsize
         )
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -949,6 +983,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             num_head_slots=2 if sparse_pa else None,
             state_content_bytes=kv_bytes if sparse_pa else None,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _ensure_aiter_sparse_pa_kv_cache(self) -> None:
         if self.kv_cache.numel() == 0:
@@ -1068,6 +1103,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
         if index_k is None or index_slot_mapping is None:
             return
+        assert self.indexer is not None
         index_cache = self.indexer.index_cache.kv_cache
         if index_cache.numel() == 0:
             return
@@ -1122,6 +1158,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if self.skip_index_topk:
             return q, None
 
+        assert self.indexer is not None
         index_q = self.index_q_norm(
             index_q_raw.view(num_tokens, self.num_idx_heads, self.idx_head_dim)
         )
@@ -1156,6 +1193,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             minimax_m3_norm_rope_nvfp4_insert,
         )
 
+        assert self.indexer is not None
         num_tokens = qkv.shape[0]
         q = qkv.new_empty((num_tokens, self.q_size))
         index_q = qkv.new_empty(
@@ -1225,6 +1263,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         if self.use_nvfp4_kv:
+            assert self.indexer is not None
             q, index_q = self._norm_rope_nvfp4_insert(
                 qkv,
                 positions,
@@ -1344,6 +1383,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                     skip_index_branch=True,
                 )
         else:
+            assert self.indexer is not None
             index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
             # index_q matches the index-K cache dtype (e4m3 for the AITER fp8
             # score path); the fused kernel emits fp8 directly when this buffer
@@ -1489,6 +1529,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         decode_sparse_table: tuple[torch.Tensor, torch.Tensor] | None = None
         if not self.skip_index_topk:
             assert index_query is not None
+            assert self.indexer is not None
             # The MSA indexer emits the attend table into its persistent
             # buffers, resolving its selection through the page-16 rebase of the
             # attend's block table. The neutral indexer can instead fuse decode
@@ -1558,25 +1599,34 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return self.impl.forward(self, query, self.kv_cache, output)
 
 
+def _mxfp8_linear_kernel(linear: nn.Module):
+    """The MXFP8 kernel of `linear`, or None."""
+    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
+    kernel = getattr(getattr(linear, "scheme", None), "ocp_mx_linear", None)
+    if kernel is None:
+        kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+    return kernel
+
+
 def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
     """Whether `input_layernorm` can hand `qkv_proj` an MXFP8 activation.
 
     The quant key does not encode the scale layout (FlashInfer wants swizzled
-    scales under the same key), so this also requires the ROCm `dot_scaled`
-    kernel, which reads the row-major scales the fused norm writes.
+    scales under the same key), so this also requires a ROCm kernel that
+    reads the row-major scales the fused norm writes.
     """
     if envs.VLLM_BATCH_INVARIANT or get_input_quant_key(qkv_proj) != kMxfp8Dynamic:
         return False
-    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
-    kernel = getattr(getattr(qkv_proj, "scheme", None), "ocp_mx_linear", None)
-    if kernel is None:
-        kernel = getattr(getattr(qkv_proj, "quant_method", None), "kernel", None)
+    kernel = _mxfp8_linear_kernel(qkv_proj)
     return isinstance(
-        kernel, RocmDotScaledMxfp8LinearKernel
+        kernel, (RocmDotScaledMxfp8LinearKernel, AiterFlyDSLMxfp8LinearKernel)
     ) and kernel.supports_quantized_input(qkv_proj)
 
 
 class MiniMaxM3DecoderLayer(nn.Module):
+    # set on the backbone's MoE layers when a glue path is on (glue/runtime.py)
+    _m3_glue: M3Glue | None = None
+
     def __init__(
         self,
         config: PreTrainedConfig,
@@ -1676,7 +1726,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         attn_input: torch.Tensor | QuantizedActivation
-        if residual is None:
+        if isinstance(hidden_states, Mxfp8Carry):
+            # the previous MoE layer already normed and quantized this layer's
+            # attention input (codes of every row); the residual it returned
+            # goes with it
+            attn_input = QuantizedActivation(
+                hidden_states.x_q,
+                hidden_states.x_s,
+                torch.bfloat16,
+                hidden_states.x_q.shape,
+                kMxfp8Dynamic,
+            )
+            residual = hidden_states.res_local
+        elif residual is None:
             residual = hidden_states
             attn_input = self.input_layernorm(hidden_states)
         elif self.fuse_input_norm_mxfp8:
@@ -1695,6 +1757,13 @@ class MiniMaxM3DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=attn_input,
         )
+
+        # the glue: the whole MoE half from the o_proj partial, when this
+        # forward's plan selected it (glue/runtime.py)
+        if self._m3_glue is not None:
+            glued = self._m3_glue.moe_half(self, hidden_states, residual)
+            if glued is not None:
+                return glued
 
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         if self.fuse_post_norm_mxfp8:
@@ -1734,7 +1803,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode_config: DecodeConfig | None = None
         self.specialized_decode: SpecializedDecode | None = None
 
         self.vocab_size = config.vocab_size
@@ -1872,13 +1941,74 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        # VLLM_ROCM_MINIMAX_M3_MONO=1: supported decode steps run one FlyDSL
-        # launch per layer (mono kernels)
-        self._mono = None
-        if mono_envs.MONO_ENABLE:
-            from vllm.models.minimax_m3.amd.mono.dispatch import MonoDecode
+        self._mono: MonoDecode | None = None
+        if vllm_config.kernel_config.monokernel:
+            self._init_monokernel(vllm_config)
 
-            self._mono = MonoDecode(self, vllm_config)
+        # MiniMax-M3.1 TP4 glue paths (glue/): None where they do not apply
+        self.m3_glue = M3Glue.create(self, vllm_config)
+
+    def _init_monokernel(self, vllm_config: VllmConfig) -> None:
+        """Run the selected MiniMax-M3 monokernels (`mono/selection.py`) that fit:
+        the decode kernels here, the DSpark drafter kernels in `common/dspark.py`.
+        A deployment that fits none of them is refused."""
+        from vllm.models.minimax_m3.amd.mono.selection import (
+            DECODE,
+            DRAFTER,
+            enabled_monokernels,
+        )
+
+        kernels = enabled_monokernels(vllm_config)
+        reasons: list[str] = []
+        if DECODE in kernels:
+            why = self._init_mono_decode(vllm_config)
+            if why is None:
+                return
+            reasons.append(why)
+        if DRAFTER in kernels:
+            from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
+                config_refusal as drafter_refusal,
+            )
+
+            drafter_why = drafter_refusal(vllm_config)
+            if drafter_why is None:
+                logger.info(
+                    "MiniMax-M3 --monokernel: DSpark drafter kernels only (%s)",
+                    "; ".join(reasons) or "decode kernels not selected",
+                )
+                return
+            reasons.append(
+                f"MiniMax-M3 DSpark drafter kernels unsupported: {drafter_why}"
+            )
+        raise ValueError("--monokernel: " + "; ".join(reasons))
+
+    def _init_mono_decode(self, vllm_config: VllmConfig) -> str | None:
+        """Set up the whole-layer mono decode if the deployment fits it, else the
+        FFN-only specialized decode. Returns why neither fits, or None."""
+        why: str | None
+        try:
+            from vllm.models.minimax_m3.amd.mono.dispatch import (
+                MonoDecode,
+                config_refusal,
+            )
+        except ImportError as err:
+            why = f"needs FlyDSL and AITER ({err})"
+        else:
+            why = config_refusal(vllm_config, self)
+            if why is None:
+                logger.info("MiniMax-M3 --monokernel: whole-layer mono decode")
+                self._mono = MonoDecode(self, vllm_config)
+                return None
+        try:
+            self.specialized_decode_config = specialized_decode_config(vllm_config)
+        except ValueError as err:
+            return f"MiniMax-M3 whole-layer mono decode unsupported: {why}; {err}"
+        logger.info(
+            "MiniMax-M3 --monokernel: FFN-only specialized decode (whole-layer "
+            "mono decode unsupported: %s)",
+            why,
+        )
+        return None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1920,27 +2050,38 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, self.start_layer, hidden_states, residual
             )
         layers = self.layers[self.start_layer : self.end_layer]
-        if decode is None:
-            for idx, layer in enumerate(layers, start=self.start_layer):
-                hidden_states, residual = layer(positions, hidden_states, residual)
-                self._maybe_add_hidden_state(
-                    aux_hidden_states, idx + 1, hidden_states, residual
-                )
-        else:
-            step = decode.plan(positions, intermediate_tensors)
-            failure: Exception | None = None
-            try:
+        # one glue plan for the whole forward (the MoE layers read it)
+        glue = self.m3_glue
+        plan = (
+            glue.begin_forward(positions, intermediate_tensors)
+            if glue is not None
+            else None
+        )
+        try:
+            if decode is None:
                 for idx, layer in enumerate(layers, start=self.start_layer):
-                    kernel = step.layer(layer.layer_id) if step else None
-                    hidden_states, residual = (kernel or layer)(
-                        positions, hidden_states, residual
-                    )
+                    hidden_states, residual = layer(positions, hidden_states, residual)
                     self._maybe_add_hidden_state(
                         aux_hidden_states, idx + 1, hidden_states, residual
                     )
-            except Exception as err:
-                failure = err
-            decode.after_step(step, failure)
+            else:
+                step = decode.plan(positions, intermediate_tensors)
+                failure: Exception | None = None
+                try:
+                    for idx, layer in enumerate(layers, start=self.start_layer):
+                        kernel = step.layer(layer.layer_id) if step else None
+                        hidden_states, residual = (kernel or layer)(
+                            positions, hidden_states, residual
+                        )
+                        self._maybe_add_hidden_state(
+                            aux_hidden_states, idx + 1, hidden_states, residual
+                        )
+                except Exception as err:
+                    failure = err
+                decode.after_step(step, failure)
+        finally:
+            if glue is not None:
+                glue.end_forward(plan)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1972,119 +2113,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             num_experts=num_experts,
         )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # q/k/v_proj -> fused qkv_proj; gate_proj/up_proj -> fused gate_up_proj
-        # (dense MLP and shared expert). On sparse layers the indexer
-        # index_q/index_k_proj fold into the same fused qkv_proj
-        # (MinimaxM3QKVParallelLinearWithIndexer); these entries simply never match on
-        # dense layers, whose checkpoints have no index_*_proj weights. Leading
-        # dots keep `q_proj`/`k_proj` from matching `index_q_proj`/`index_k_proj`
-        # (preceded by `_`, not `.`).
-        stacked_params_mapping: list[tuple[str, str, int | str]] = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".qkv_proj", ".index_q_proj", "index_q"),
-            (".qkv_proj", ".index_k_proj", "index_k"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = self.get_expert_mapping()
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            # The MTP module is not modeled yet.
-            if "mtp." in name:
-                continue
-
-            # The checkpoint stores block scales as ``weight_scale_inv``; the
-            # ModelOpt MXFP8 layers expose them as ``weight_scale``.
-            if "weight_scale_inv" in name:
-                name = name.replace("weight_scale_inv", "weight_scale")
-
-            # Shared-expert fusion: redirect the checkpoint shared expert into
-            # routed-expert slot ``num_local_experts`` (gate->w1, up->w3,
-            # down->w2) so it loads via the routed expert loader. Runs before the
-            # stacked/dense mappings so shared_experts.gate_proj/up_proj are not
-            # captured by the dense gate_up_proj mapping.
-            # Only parse the layer index when FSE is enabled.
-            if (
-                ".shared_experts." in name
-                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-                and extract_layer_index(name) in self.fused_shared_expert_layers
-            ):
-                sid = self.config.num_local_experts
-                name = name.replace(".shared_experts.gate_proj.", f".experts.{sid}.w1.")
-                name = name.replace(".shared_experts.up_proj.", f".experts.{sid}.w3.")
-                name = name.replace(".shared_experts.down_proj.", f".experts.{sid}.w2.")
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                # Routed experts (w1/w2/w3) are handled below; don't let the
-                # stacked mapping rewrite them.
-                if ("block_sparse_moe.experts." in name) and name not in params_dict:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=expert_shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    remapped = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped is None:
-                        continue
-                    name = remapped
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Modules not modeled yet (e.g. attention) are skipped until
-                    # they are ported.
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
@@ -2093,6 +2121,23 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "mtp.": None,
+            # ModelOpt MXFP8 layers name the checkpoint's block scales this way.
+            "weight_scale_inv": "weight_scale",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".index_q_proj": (".qkv_proj", "index_q"),
+            ".index_k_proj": (".qkv_proj", "index_k"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -2112,6 +2157,13 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             )
         else:
             self.lm_head = PPMissingLayer()
+        if (
+            self.model.fused_shared_expert_layers
+            and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        ):
+            redirect = partial(_redirect_fused_shared_experts, model=self.model)
+            transforms = WeightsMapper(weights_transforms=[redirect])
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
@@ -2144,7 +2196,10 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.model.m3_glue is not None:
+            self.model.m3_glue.after_load_weights()
+        return loaded
 
 
 # TODO(refactor): this VL wrapper is platform-agnostic and byte-identical to the

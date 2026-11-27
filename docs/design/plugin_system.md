@@ -106,12 +106,20 @@ Every plugin has three parts:
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
+    Optionally, implement `get_moe_backends` to return the platform's MoE backends as a dict from name to `FusedMoEExperts` subclass. Names are lowercase with underscores and must not reuse an in-tree backend's; each is accepted by `--moe-backend`. With `--moe-backend auto`, the first backend in the dict whose `is_supported_config` accepts the layer is used ahead of the in-tree ones; if all are rejected, a warning lists the reasons. Override `convert_fp8_weights` on the class to change the weight layout. Currently only FP8 MoE layers use these backends.
+
+    For out-of-tree EPLB, implement `supports_eplb()` and `check_and_update_eplb_config(parallel_config)` to select and validate policy and communicator names. An unset policy is `None` until this hook selects the platform default; preserve explicitly configured names. When EPLB is enabled, this hook selects the default communicator and validates names and configuration combinations; `EPLBConfig` enforces field types and numeric bounds. Built-in names retain their existing defaults and async communicator restrictions; a platform override owns validation of its custom names and combinations.
+
+    To use an `EplbState` subclass, construct it in the plugin's worker or controller. The platform configuration hooks do not select the state class; the upstream `EPLBController` constructs the base `EplbState`.
+
+    An `EplbState` subclass can implement `create_policy()` and `create_model_communicator()`. `create_policy()` returns one `AbstractEplbPolicy` instance shared by the models in that state. Device-specific expert mapping and load recording belong to a registered router subclass overriding `_apply_eplb_mapping()`; the router retains ownership of its layer state. Synchronous planning and profiling call `policy.rebalance_experts(stats, old_global_expert_indices)` directly on the main thread; asynchronous planning runs a serialized copy of the policy in one persistent CPU subprocess per worker, so subsequent async policy state belongs to that child rather than the original instance. `EplbStats` holds one load/topology snapshot; downstream policies can accept dataclass subclasses carrying additional planning inputs. Before calling the policy, the worker replaces the snapshot's load field with its CPU copy on the worker stream, preserving the stats subclass and additional fields across async serialization. Async policies and their CPU snapshots must be serializable: keep process groups, model weights, and device contexts out of the policy, and initialize any process-local resources lazily in `rebalance_experts()` or recreate them via `__getstate__()`/`__setstate__()` or `__reduce__()`. The default policy consumes aggregate CPU loads of shape `[layers, experts]` and returns a CPU integer placement tensor. Keep policy configuration on the policy instance and per-model, per-round inputs in the snapshot. Set `EplbState.model_state_cls` to an `EplbModelState` subclass to customize model-local commits. `_commit_eplb_maps()` installs a full-model placement and `_commit_eplb_maps_for_layer()` installs one layer. `_move_to_workspace()` consumes that model's pending transfer result; commit overrides must submit device-specific updates before returning so buffer acknowledgement remains after weight installation and map updates.
+
 4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
 
     - `init_device`: This function is called to set up the device for the worker.
     - `initialize_cache`: This function is called to set cache config for the worker.
     - `load_model`: This function is called to load the model weights to device.
-    - `get_kv_cache_spec`: This function is called to generate the kv cache spec for the model.
+    - `get_kv_cache_layer_configs`: This function is called to collect each layer's KV cache manager, allocation policy, and cache layout.
     - `determine_available_memory`: This function is called to profiles the peak memory usage of the model to determine how much memory can be used for KV cache without OOMs.
     - `initialize_from_config`: This function is called to allocate device KV cache with the specified kv_cache_config
     - `execute_model`: This function is called every step to inference the model.
@@ -123,6 +131,7 @@ Every plugin has three parts:
     - If the plugin wants to support speculative decoding feature, please implement the `take_draft_token_ids` function.
     - If the plugin wants to support lora feature, please implement the `add_lora`,`remove_lora`,`list_loras` and `pin_lora` functions.
     - If the plugin wants to support data parallelism feature, please implement the `execute_dummy_batch` functions.
+    - If the plugin implements a custom `shutdown` path with EPLB enabled, call `EplbState.stop_async_loop()` before releasing model and communication resources.
 
     Please look at the worker base class [WorkerBase][vllm.v1.worker.worker_base.WorkerBase] for more functions that can be implemented.
 
@@ -150,6 +159,32 @@ Every plugin has three parts:
     Replacements must subclass the class they replace and preserve its constructor arguments, routing semantics, model-specific weight loading, and EPLB state. Routers are PyTorch modules, so a shared correction-bias `Parameter` also appears under the router in `state_dict()`. Preserve the shared parameter object and the model's canonical checkpoint names; models that load the bias through the gate should register the gate before constructing the MoE layer.
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
+
+#### CUDA graph capture defaults and grids
+
+Platforms using the common GPU graph manager can customize capture sizes without changing shape calculation, capture, or replay. Inherit the default methods to preserve the traditional shared grid. Override `get_cudagraph_capture_defaults(vllm_config)` to choose defaults for particular device architectures; return a `CUDAGraphCaptureDefaults` from `vllm.config.compilation` without modifying the config.
+
+- `legacy_max_tokens` defaults to 512 and bounds the initial shared grid. Its existing spacing stays in the common resolver.
+- Leave both `max_prefill_tokens` and `max_decode_requests` unset to derive prefill and decode sizes from the shared grid. Set both to select independent default grids.
+- `max_decode_tokens` optionally limits each decode graph's total tokens, including speculative tokens. The scheduler's limits still apply.
+
+Explicit deprecated `cudagraph_capture_sizes` or `max_cudagraph_capture_size` settings retain their shared-grid interpretation. Explicit prefill/decode settings take precedence over the corresponding defaults. Changing the request grid does not override the separate token budget: set `max_decode_cudagraph_capture_tokens` to override that default. Scheduler limits still apply. The common resolver retains the validation of conflicting settings and records the largest required graph for backend buffer allocation.
+
+For different spacing, override the relevant `Platform` method. The implementations inherited from `Platform` call the shared grid functions in `vllm.config.compilation`.
+
+| Method | Input and output units |
+| --- | --- |
+| `get_prefill_cudagraph_capture_grid(max_tokens, dense_head=False)` | Prefill token counts |
+| `get_decode_cudagraph_capture_grid(max_requests)` | Uniform decode request counts; also used by single-token draft decodes |
+| `get_varlen_decode_cudagraph_capture_grid(max_tokens, dense_head=False)` | Adaptive verification token counts |
+
+Grid methods receive a resolved upper bound and return positive integer sizes no larger than that bound; a zero bound requires an empty list. The common resolver sorts and deduplicates the result and rejects out-of-range sizes. Keep the methods deterministic. `dense_head=True` requests the interactivity-mode coverage of every size from 1 through `min(bound, 32)`. Explicit user-provided grids bypass the generators for that grid. Request/query-length conversion, dynamic speculation, and target/drafter semantics remain in common code.
+
+This interface changes size selection only. A platform must still supply a compatible runner, attention backend, and graph implementation. CUDA keeps its existing SM100 defaults; ROCm and XPU inherit the traditional defaults.
+
+ROCm gfx10xx previously matched the shared capability-10 check intended for NVIDIA SM100. Its defaults now use the traditional shared grid (initial ceiling 512 tokens), instead of independent grids (prefill up to 8192 tokens, decode up to `max_num_seqs` requests, and an 8192-token decode budget). To retain that wider coverage explicitly, set `max_prefill_cudagraph_capture_tokens=8192`, `max_decode_cudagraph_capture_requests` to your `max_num_seqs`, and `max_decode_cudagraph_capture_tokens=8192`. These are the former values, not tuned recommendations for gfx10xx. Scheduler limits still apply.
+
+If you already set explicit prefill/decode grids, an unset `max_decode_cudagraph_capture_tokens` no longer supplies the former 8192-token budget on gfx10xx; set it to `8192` to preserve that bound.
 
 ## Compatibility Guarantee
 

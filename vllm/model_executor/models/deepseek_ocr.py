@@ -150,9 +150,11 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
         return global_views_tokens + local_views_tokens + 1
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        if IMAGE_SIZE == 1024 and BASE_SIZE == 1280:
-            return ImageSize(width=1024 * 2, height=1024 * 2)
-        return ImageSize(width=640 * 2, height=640 * 2)
+        processor = self.get_hf_processor()
+        return ImageSize(
+            width=processor.image_size,
+            height=processor.image_size * max(processor.max_crops, 1),
+        )
 
 
 class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessingInfo]):
@@ -208,6 +210,7 @@ class DeepseekOCRMultiModalProcessor(
         patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
+            num_image_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             images_spatial_crop=MultiModalFieldConfig.batched(
                 "image", keep_on_cpu=True
             ),
@@ -235,14 +238,9 @@ class DeepseekOCRMultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
-                assert isinstance(images, ImageProcessorItems)
-                size = images.get_image_size(item_idx)
-
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=size.width,
-                    image_height=size.height,
-                    cropping=CROP_MODE,
-                )
+                token_count = out_mm_kwargs["image"][item_idx]["num_image_tokens"].data
+                assert isinstance(token_count, torch.Tensor)
+                num_image_tokens = int(token_count.item())
             return [image_token_id] * num_image_tokens
 
         return [

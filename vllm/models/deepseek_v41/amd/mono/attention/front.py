@@ -105,14 +105,14 @@ XQ_ITEMS = XH // 8  # an xq unit's 16 B items (one a thread)
 FRONT_POINTS = 6  # start, kt done, wqkv done, qkv done, wq_b done, (spare)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrontBuild:
     tokens: int
     tp: int
     ratio: int  # the layer's compress ratio (0: no top-k keys)
     timeline: bool = False
     swa_width: int = WINDOW  # the SWA index rows' width (the DSpark draft's: wider)
-    tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
+    tuned: bool = False
 
 
 def plus(t0, v):

@@ -5,6 +5,8 @@ mod abort_requests;
 mod cache;
 mod checkpoint;
 mod collective_rpc;
+pub(crate) mod decisions;
+mod generative_scoring;
 mod health;
 mod inference;
 mod kv_event_sources;
@@ -29,7 +31,7 @@ use std::sync::Arc;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::{get, post};
+use axum::routing::{MethodRouter, get, post};
 use axum::{Json, Router};
 use tower::ServiceExt as _;
 use tower_http::trace::TraceLayer;
@@ -45,9 +47,6 @@ const SCALE_OUT_DISABLED_MESSAGE: &str =
 /// Scale-out routes that Python registers together with
 /// `/inference/v1/generate` but the Rust frontend does not implement yet.
 const UNIMPLEMENTED_SCALE_OUT_ROUTES: &[&str] = &[
-    "/inference/v1/abort_requests",
-    "/v1/chat/completions/render",
-    "/v1/completions/render",
     "/v1/messages/render",
     "/v1/responses/render",
     "/v1/chat/completions/derender",
@@ -89,19 +88,6 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
     )
 }
 
-fn runtime_lora_updating_enabled() -> bool {
-    std::env::var("VLLM_ALLOW_RUNTIME_LORA_UPDATING")
-        .ok()
-        .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
-}
-
-fn cohere_api_enabled() -> bool {
-    std::env::var("VLLM_ENABLE_COHERE_API")
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .is_some_and(|value| value != 0)
-}
-
 /// Optional route families, each enabled by a CLI flag or an environment
 /// variable as in the Python frontend.
 #[derive(Debug, Clone, Copy, Default)]
@@ -112,17 +98,14 @@ struct RouteGates {
     runtime_lora_updating: bool,
     /// `--enable-scale-out`: scale-out routes, which answer 403 when disabled.
     scale_out: bool,
-    /// `VLLM_ENABLE_COHERE_API`: Cohere v2 chat routes.
-    cohere_api: bool,
 }
 
 impl RouteGates {
     fn resolve(state: &AppState) -> Self {
         Self {
             dev_mode: state.api_server_options.server_dev_mode,
-            runtime_lora_updating: runtime_lora_updating_enabled(),
+            runtime_lora_updating: state.api_server_options.allow_runtime_lora_updating,
             scale_out: state.api_server_options.enable_scale_out,
-            cohere_api: cohere_api_enabled(),
         }
     }
 }
@@ -133,14 +116,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     build_router_with_gates(state, gates)
 }
 
-fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
+fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Router {
+    // Admin, LoRA lifecycle, checkpoint, and KV event routes drive the
+    // engine-core client directly, so they are only served over an
+    // `EngineCoreLlm`.
+    let has_engine_core = state.has_engine_core_client();
+    gates.dev_mode &= has_engine_core;
+    gates.runtime_lora_updating &= has_engine_core;
+
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
-        .route("/kv_event_sources", get(kv_event_sources::kv_event_sources))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
@@ -150,8 +139,7 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         .route("/v1/messages/count_tokens", post(not_supported))
         // TODO: implement batched chat completions.
         .route("/v1/chat/completions/batch", post(not_supported))
-        // TODO: implement the decisions APIs.
-        .route("/v1/decisions", post(not_supported))
+        // TODO: implement the structured decisions API.
         .route("/v1/systemone", post(not_supported))
         // TODO: implement elastic EP scaling.
         .route("/scale_elastic_ep", post(not_supported))
@@ -165,45 +153,60 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
             "/v1/responses/{response_id}/cancel",
             post(openai::cancel_response),
         )
-        // TODO: implement generative scoring.
-        .route("/generative_scoring", post(not_supported))
+        .route(
+            "/generative_scoring",
+            post(generative_scoring::generative_scoring),
+        )
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
 
+    router = router.route(
+        "/v1/decisions",
+        if state.decisions().is_some() {
+            post(decisions::decisions)
+        } else {
+            post(not_supported)
+        },
+    );
+
+    let scale_out_routes: [(&str, MethodRouter<Arc<AppState>>); 4] = [
+        ("/inference/v1/generate", post(inference::generate)),
+        (
+            "/inference/v1/abort_requests",
+            post(inference::abort_requests),
+        ),
+        (
+            "/v1/chat/completions/render",
+            post(render::render_chat::<AppState>),
+        ),
+        (
+            "/v1/completions/render",
+            post(render::render_completion::<AppState>),
+        ),
+    ];
     if gates.scale_out {
-        router = router.route("/inference/v1/generate", post(inference::generate));
+        for (path, handler) in scale_out_routes {
+            router = router.route(path, handler);
+        }
         // TODO: implement the remaining scale-out routes.
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(not_supported));
         }
     } else {
         info!("{SCALE_OUT_DISABLED_MESSAGE}");
-        router = router.route("/inference/v1/generate", post(disabled_scale_out));
+        for (path, _) in scale_out_routes {
+            router = router.route(path, post(disabled_scale_out));
+        }
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(disabled_scale_out));
         }
     }
 
-    if gates.cohere_api {
-        // TODO: implement the Cohere v2 chat API.
-        router = router.route("/cohere/v2/chat", post(not_supported));
-        if gates.scale_out {
-            router = router.route("/cohere/v2/chat/render", post(not_supported));
-        }
-    }
-
-    if state.api_server_options.enable_tokenizer_info_endpoint {
-        // TODO: implement `/tokenizer_info`.
-        router = router.route("/tokenizer_info", get(not_supported));
-    }
-
     // Process checkpoint lifecycle, which requires sleep mode.
-    if state
-        .engine_core_client()
-        .ready_responses()
-        .iter()
-        .all(|ready| ready.enable_sleep_mode)
+    if has_engine_core
+        && (state.engine_core_client().ready_responses().iter())
+            .all(|ready| ready.enable_sleep_mode)
     {
         router = router
             .route("/checkpoint/prepare", post(checkpoint::prepare))
@@ -264,6 +267,10 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
             .route("/is_paused", get(pause::is_paused))
             .route("/server_info", get(server_info::server_info))
             .route("/get_world_size", get(world_size::get_world_size))
+    }
+
+    if has_engine_core {
+        router = router.route("/kv_event_sources", get(kv_event_sources::kv_event_sources));
     }
 
     if let Some(profiler) = &state.profiler {

@@ -45,6 +45,10 @@ _LOOKUP_TIMEOUT_S = 1.0
 _STORE_RETRIES = 2
 _STORE_RETRY_BACKOFF_S = 0.01
 
+# MORI v1.2.3 defaults to 0.9/0.7, which frees a fifth of the pool each time it
+# fills and keeps a KV cache about 80% full.
+_DEFAULT_DRAM_WATERMARKS = {"dram_high_watermark": 0.99, "dram_low_watermark": 0.97}
+
 _RANK_KEY_PATTERN = re.compile(r":tp(\d+):pcp(\d+):dcp(\d+):pp(\d+):g\d+:")
 
 
@@ -208,7 +212,7 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
                 response += chunk
             return msgspec.json.decode(response or b"[]")
 
-    def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
+    def lookup(self, keys: Sequence[str]) -> Sequence[bool | None]:
         unavailable: list[tuple[int, int, int, int]]
         if len(self._paths) == 1:
             rank, path = next(iter(self._paths.items()))
@@ -227,8 +231,8 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
                     )
                     else []
                 )
-                return self._lookup_result(keys, [False] * len(keys), unavailable)
-        result = [False] * len(keys)
+                return self._lookup_result(keys, [None] * len(keys), unavailable)
+        result: list[bool | None] = [False] * len(keys)
         keys_by_rank: dict[tuple[int, int, int, int], list[tuple[int, str]]] = {}
         unrouted: list[tuple[int, str]] = []
         for index, key in enumerate(keys):
@@ -248,6 +252,8 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
                     result[index] = bool(value)
             except (OSError, ValueError, IndexError):
                 unavailable.append(rank)
+                for index, _ in indexed_keys:
+                    result[index] = None
         for path in self._paths.values():
             if not unrouted:
                 break
@@ -262,11 +268,11 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
     def _lookup_result(
         self,
         keys: Sequence[str],
-        result: list[bool],
+        result: list[bool | None],
         unavailable: list[tuple[int, int, int, int]],
-    ) -> list[bool]:
+    ) -> list[bool | None]:
         missing = tuple(
-            key for key, exists in zip(keys, result, strict=True) if not exists
+            key for key, exists in zip(keys, result, strict=True) if exists is False
         )
         self.last_lookup_diagnostics = {
             "unavailable_ranks": tuple(unavailable),
@@ -765,6 +771,8 @@ def _configure_dram(client_config: Any, options: dict[str, Any]) -> None:
     """Apply embedded-only host-DRAM options to MORI's client config."""
     dram = client_config.dram
     dram.capacity_bytes = options.get("capacity_bytes", 64 * 1024**3)
+    if not _DEFAULT_DRAM_WATERMARKS.keys() & options.keys():
+        options = {**_DEFAULT_DRAM_WATERMARKS, **options}
     option_fields = {
         "dram_use_shared_memory": "use_shared_memory",
         "dram_shm_name": "shm_name",

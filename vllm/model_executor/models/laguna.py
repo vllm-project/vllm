@@ -21,6 +21,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -205,10 +206,10 @@ class LagunaMoE(nn.Module):
         )
         # MoERunner with SIGMOID routing. Passing `shared_experts=` lets the
         # layer overlap the shared-expert compute with the all2all dispatch.
-        # `apply_routed_scale_to_output=True` makes MoERunner handle the
+        # `routed_scale_mode=RoutedScaleMode.OUTPUT` makes MoERunner handle the
         # FusedMoEFactory with SIGMOID routing. Passing `shared_experts=` lets the
         # layer overlap the shared-expert compute with the all2all dispatch.
-        # `apply_routed_scale_to_output=True` makes FusedMoEFactory handle the
+        # `routed_scale_mode=RoutedScaleMode.OUTPUT` makes FusedMoEFactory handle the
         # routed_scaling_factor, shared+routed combine, and TP all-reduce
         # internally, so forward() just returns the final hidden states.
         self.experts = FusedMoEFactory(
@@ -227,7 +228,7 @@ class LagunaMoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

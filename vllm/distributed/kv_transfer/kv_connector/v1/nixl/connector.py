@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -68,7 +69,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         NixlBaseConnectorWorker,
     )
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -81,10 +82,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
     @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        return True
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # With a CPU kv_buffer_device, NIXL registers host staging buffers.
+        if kv_transfer_config.kv_buffer_device == "cpu":
+            return KVCacheAccess.IN_PROCESS
+        # Peers within a host map it through UCX cuda_ipc.
+        return KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -135,6 +138,21 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             raise NotImplementedError(
                 "NixlConnector PCP producers do not support bidirectional KV transfer."
             )
+
+        if parallel_config.pipeline_parallel_size > 1:
+            if kv_role != "kv_producer":
+                raise NotImplementedError(
+                    "NIXL connectors support pipeline_parallel_size > 1 only for "
+                    "kv_producer. Use pipeline_parallel_size=1 for kv_consumer "
+                    "or kv_both."
+                )
+            if vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            ):
+                raise NotImplementedError(
+                    "NIXL connectors do not support bidirectional KV transfer with PP. "
+                    "Set pipeline_parallel_size=1 or disable bidirectional_kv_xfer."
+                )
 
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
@@ -203,6 +221,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        super().bind_kv_cache_manager(kv_cache_manager)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
 
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None

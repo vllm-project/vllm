@@ -33,6 +33,7 @@ import pytest
 import torch
 from transformers import PreTrainedConfig
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
@@ -286,8 +287,10 @@ def test_allreduce_gemma_rms_norm_mxfp8(monkeypatch, tp_size, return_normed):
 
 
 @requires_gfx950
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_shared_expert_gate_up_on_post_norm_quant(dist_init):
+def test_shared_expert_gate_up_on_post_norm_quant(default_vllm_config):
     """gate_up_proj on the post-attention norm's MXFP8 output equals the
     unfused norm -> linear (shared expert gate_up shape, TP4)."""
     from vllm.model_executor.layers.fusion.quant_activation import (
@@ -432,8 +435,10 @@ def test_swiglu_oai_quantize_mxfp8_vs_unfused(m, inter, block_m):
 @requires_gfx950
 @pytest.mark.parametrize("m", [1, 8, 16, 17, 32, 128])
 @pytest.mark.parametrize("n,k", [(6144, 768), (6144, 3072)])  # shared expert, dense
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_mlp_down_proj_on_swiglu_quant(dist_init, m, n, k):
+def test_mlp_down_proj_on_swiglu_quant(default_vllm_config, m, n, k):
     """down_proj on the fused swiglu + quant output stays within MXFP8 quant
     noise of the unfused swiglu -> linear, and the fused-quant GEMM keeps its
     own path where it already quantizes in-kernel (M <= 16, K <= 1024)."""
@@ -450,8 +455,13 @@ def test_mlp_down_proj_on_swiglu_quant(dist_init, m, n, k):
     mlp = object.__new__(MiniMaxM3MLP)
     torch.nn.Module.__init__(mlp)
     mlp.down_proj = layer
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+
     in_gemm = mlp._down_proj_quantizes_in_gemm(m)
-    assert in_gemm == (m <= 16 and k <= 1024)
+    triton = isinstance(scheme.ocp_mx_linear, RocmDotScaledMxfp8LinearKernel)
+    assert in_gemm == (triton and m <= 16 and k <= 1024)
 
     gate_up = (torch.randn(m, 2 * k, device=DEVICE) * 4).to(torch.bfloat16)
     act = swiglu_oai_split(gate_up, 1.702, 1.0, 7.0)
@@ -833,8 +843,10 @@ def _quark_mxfp8_linear(n: int, k: int, block32: bool = False):
     ],
 )
 @pytest.mark.parametrize("m", [1, 37])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_fused_input_norm_mxfp8_qkv_proj(dist_init, n, k, block32, m):
+def test_fused_input_norm_mxfp8_qkv_proj(default_vllm_config, n, k, block32, m):
     """The linear on the fused norm's MXFP8 output equals the linear on the
     unfused norm output, wherever the producer turns the fusion on."""
     layer, scheme = _quark_mxfp8_linear(n, k, block32)
@@ -866,8 +878,139 @@ def test_fused_input_norm_mxfp8_qkv_proj(dist_init, n, k, block32, m):
         assert _relerr(got, ref) < 5e-2
 
 
+@pytest.fixture
+def aiter_flydsl_mxfp8_linear(monkeypatch):
+    """MXFP8 linears select `AiterFlyDSLMxfp8LinearKernel`: AITER linear on and
+    every shape treated as tuned (an untuned one runs AITER's heuristic)."""
+    pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: True
+    )
+    yield
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
 @requires_gfx950
-def test_fused_input_norm_mxfp8_off_under_batch_invariance(dist_init, monkeypatch):
+@pytest.mark.parametrize(
+    "n,k",
+    [(2560, 6144), (1536, 6144), (6144, 768), (6144, 3072)],  # qkv, shared, dense
+)
+@pytest.mark.parametrize("m", [1, 16, 37])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+@torch.inference_mode()
+def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
+    default_vllm_config, aiter_flydsl_mxfp8_linear, n, k, m
+):
+    """With the AITER kernel selected, the producers still fuse the MXFP8
+    quant and the linear on their output equals the unfused norm -> linear;
+    swiglu fuses at every M, since AITER does not quantize in the GEMM."""
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        AiterFlyDSLMxfp8LinearKernel,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    try:
+        layer, scheme = _quark_mxfp8_linear(n, k)
+    finally:
+        torch.set_default_dtype(prev_dtype)
+    assert isinstance(scheme.ocp_mx_linear, AiterFlyDSLMxfp8LinearKernel)
+    assert _can_fuse_input_norm_mxfp8(layer)
+    scheme.process_weights_after_loading(layer)
+    mlp = object.__new__(MiniMaxM3MLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.down_proj = layer
+    assert not mlp._down_proj_quantizes_in_gemm(m)
+
+    x = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    res = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    norm_w = torch.randn(k, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    normed, _ = gemma_fused_add_rmsnorm(x, res, norm_w, EPS)
+    x_q, x_scale, _ = gemma_fused_add_rmsnorm_mxfp8(x, res, norm_w, EPS)
+    qa = QuantizedActivation(x_q, x_scale, x.dtype, x.shape, kMxfp8Dynamic)
+    got = scheme.apply_weights(layer, qa)
+    ref = scheme.apply_weights(layer, normed)
+    assert got.shape == ref.shape == (m, n)
+    assert torch.equal(got, ref)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("n,k", [(2560, 6144), (6144, 2048), (1536, 6144), (6144, 768)])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+@torch.inference_mode()
+def test_mono_weights_same_on_aiter_flydsl_kernel(
+    default_vllm_config, monkeypatch, n, k
+):
+    """The mono kernels' weight copies are the same whether the linear runs on
+    the Triton kernel (row-major weight) or the AITER FlyDSL one (preshuffled)."""
+    pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        AiterFlyDSLMxfp8LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+    from vllm.models.minimax_m3.amd.mono.weights import (
+        _ptpc_fp8_from_mxfp8,
+        mxfp8_a_tiles,
+    )
+
+    def _processed(aiter: bool):
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if aiter else "0")
+        rocm_aiter_ops.refresh_env_variables()
+        monkeypatch.setattr(
+            rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: aiter
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            layer, scheme = _quark_mxfp8_linear(n, k)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+        scheme.process_weights_after_loading(layer)
+        return layer, scheme.ocp_mx_linear
+
+    try:
+        aiter_layer, aiter_kernel = _processed(True)
+        triton_layer, triton_kernel = _processed(False)
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+    assert isinstance(aiter_kernel, AiterFlyDSLMxfp8LinearKernel)
+    assert isinstance(triton_kernel, RocmDotScaledMxfp8LinearKernel)
+
+    def _bytes(ts):
+        return [t.contiguous().view(torch.uint8) for t in ts]
+
+    got = _ptpc_fp8_from_mxfp8(aiter_layer, n, k, "aiter")
+    ref = _ptpc_fp8_from_mxfp8(triton_layer, n, k, "triton")
+    assert all(torch.equal(a, b) for a, b in zip(_bytes(got), _bytes(ref)))
+    if k % 256 == 0:
+        got = mxfp8_a_tiles(aiter_layer, n, k, "aiter")
+        ref = mxfp8_a_tiles(triton_layer, n, k, "triton")
+        assert all(torch.equal(a, b) for a, b in zip(_bytes(got), _bytes(ref)))
+
+
+@requires_gfx950
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_fused_input_norm_mxfp8_off_under_batch_invariance(
+    default_vllm_config, monkeypatch
+):
     import vllm.envs as envs
 
     layer, _ = _quark_mxfp8_linear(2560, 6144)

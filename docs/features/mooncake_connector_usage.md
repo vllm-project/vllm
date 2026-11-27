@@ -41,6 +41,28 @@ Now you can send requests to the proxy server through port 8000.
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
+## HiSparse decoding (experimental)
+
+Keep the prefiller's `MooncakeConnector` configuration above. On the decoder,
+set `--kv-transfer-config` to:
+
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {"kv_connector": "HiSparseConnector", "kv_role": "kv_both",
+       "kv_connector_extra_config": {"host_pool_gib": 64}},
+      {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}
+    ]
+  }
+}
+```
+
+Set `host_pool_gib` to the host-cache capacity in GiB per data-parallel replica.
+The prefiller and decoder can use different TP sizes, such as TP2 and TP4.
+
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server
@@ -67,6 +89,7 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - Default: 480
     - If a request is aborted and the decoder has not yet notified the prefiller, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
     - When `kv_lease_duration` is set, the lease decides when those blocks are released instead. This timeout still bounds how long a pull waits for a prefill that has not finished.
+    - A decoder does not wait out this timeout for a prefill worker that is gone. A pull fails as soon as its connection to the worker closes or is refused, as when the prefill process exits, or after the worker leaves ZMQ heartbeats unanswered for 10 seconds, as when it hangs or its host drops off the network. The failure is handled per `kv_load_failure_policy`.
 
 ## KV Transfer Config
 

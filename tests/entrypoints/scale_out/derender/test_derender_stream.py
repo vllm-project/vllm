@@ -481,7 +481,7 @@ def test_derender_text_choices_builds_request_from_parse_context(
     )
     output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
-    ((message, finish_reason),) = derenderer._derender_text_choices(
+    ((message, finish_reason),), _ = derenderer._derender_text_choices(
         [output], parse_context.to_chat_request(), 3, [11]
     )
 
@@ -513,7 +513,7 @@ def test_derender_text_choices_drops_tool_calls_without_tool_choice(
     )
     output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
-    ((message, finish_reason),) = derenderer._derender_text_choices(
+    ((message, finish_reason),), _ = derenderer._derender_text_choices(
         [output], parse_context.to_chat_request(), 0, None
     )
 
@@ -1330,6 +1330,7 @@ class TestDerenderChatStream:
                 num_accepted_draft_tokens=1,
                 num_draft_tokens=2,
                 num_spec_tokens=1,
+                num_verified_draft_tokens=2,
             )
         )
         chunk, _ = await derenderer.derender_chat_stream(
@@ -1385,6 +1386,53 @@ def _chat_request(**kwargs):
     kwargs.setdefault("messages", [{"role": "user", "content": "hi"}])
     kwargs.setdefault("model", MODEL_NAME)
     return ChatCompletionRequest(**kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("derenderer_fixture", ["derenderer", "parsed_derenderer"])
+@pytest.mark.parametrize(
+    ("add_generation_prompt", "role", "echoed"),
+    [(True, "bot", ""), (False, "assistant", "1, 2,")],
+)
+async def test_stream_role_and_echo_match_chat_completion(
+    request, monkeypatch, derenderer_fixture, add_generation_prompt, role, echoed
+):
+    """Streaming derender sends the role `/v1/chat/completions` would and
+    the `echo` text once, at the start of the first chunk's content."""
+    dr = request.getfixturevalue(derenderer_fixture)
+    monkeypatch.setattr(dr, "response_role", "bot")
+    chat_request = _chat_request(
+        messages=[
+            {"role": "user", "content": "Count to five."},
+            {"role": "assistant", "content": "1, 2,"},
+        ],
+        add_generation_prompt=add_generation_prompt,
+        continue_final_message=not add_generation_prompt,
+        echo=True,
+    )
+
+    async def stream(chat_request: ChatCompletionRequest) -> list[DeltaMessage]:
+        deltas = []
+        state = None
+        for _ in range(2):
+            chunk, state = await dr.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk([_FakeParser.CONTENT]),
+                state=state,
+                chat_request=chat_request,
+                prompt_token_ids=[1],
+            )
+            deltas.append(chunk.choices[0].delta)
+        return deltas
+
+    first, second = await stream(chat_request)
+    plain_first, plain_second = await stream(
+        chat_request.model_copy(update={"echo": False})
+    )
+
+    assert (first.role, second.role) == (role, None)
+    assert first.content == echoed + (plain_first.content or "") or None
+    assert second.content == plain_second.content
 
 
 class TestDerenderChatStreamParsed:
@@ -1829,7 +1877,7 @@ def harmony_encode():
 @pytest.fixture(scope="module")
 def harmony_tokenizer():
     pytest.importorskip("openai_harmony")
-    return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
+    return get_tokenizer(HARMONY_MODEL)
 
 
 @pytest.fixture(scope="module")

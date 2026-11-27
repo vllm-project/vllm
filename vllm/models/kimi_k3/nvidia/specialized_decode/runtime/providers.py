@@ -7,10 +7,6 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
-    SkinnyGemmConfig,
-    shape_dynamic_skinny_gemm,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     trtllm_gen_query_heads,
@@ -26,8 +22,8 @@ from ..cutedsl.mla.dcp import DcpBox, resolve_partials
 from ..cutedsl.mla.prepared import PreparedMla
 from ..cutedsl.oproj.prepared import PreparedOproj
 
-# Decode batches (tokens) served by the prepared providers: every batch up to 8, the
-# padded CUDA-graph batches and each further captured size; others run stock.
+# Decode batches (tokens) prepared when the CUDA-graph capture sizes are unknown;
+# otherwise the captured sizes up to PREPARED_MAX are (`runtime.decode`).
 BATCHES = (*range(1, 9), 16, 32, 64)
 PREPARED_MAX = BATCHES[-1]
 # Rows the attention cores (MLA, DSA, their DCP mailboxes and scratch) can prepare:
@@ -119,24 +115,6 @@ def projection_policies(tp, rows, batches):
             tactic = (64, n, 4 if n == 8 else 2, stages)
         policies[batch] = tactic
     return policies
-
-
-class SkinnyProjection:
-    """B1/B2 skinny GEMM; static K loads two weight tiles before the PDL wait (the
-    projections now run `DecodeProjection`; kept for the layer benchmarks)."""
-
-    def __init__(self, weight, fallback):
-        self.weight, self.fallback, k = weight, fallback, weight.shape[1]
-        tactics = {1: (128, 4, 1), 2: (64, 4, 2)}
-        self.configs = {m: SkinnyGemmConfig(m, *t, 8, k) for m, t in tactics.items()}
-        for m, cfg in self.configs.items():  # compile before capture
-            shape_dynamic_skinny_gemm(weight.new_zeros(m, k), weight, cfg, None)
-
-    def run(self, x, out):
-        cfg = self.configs.get(x.shape[0])
-        if cfg is None:
-            return self.fallback.run(x, out)
-        return shape_dynamic_skinny_gemm(x, self.weight, cfg, None)
 
 
 def scratch(runtime, name, shape, dtype=torch.bfloat16):

@@ -533,7 +533,6 @@ def test_runtime_state_survives_sleep():
             speculative_config=None,
         ),
         device=torch.device(DEVICE_TYPE, torch.accelerator.current_device_index()),
-        use_v2_model_runner=True,
         rank=1,
         _make_model_runner=make_runner,
     )

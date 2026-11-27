@@ -35,8 +35,9 @@ class SessionReanchor:
         windows = []
         for mgr in kv_cache_manager.coordinator.single_type_managers:
             # The worker has already checked every KV cache group.
-            assert isinstance(mgr, SlidingWindowManager)
-            windows.append(mgr.sliding_window + mgr.extra_retained_tokens)
+            params = mgr.manager_config.params
+            assert isinstance(params, SlidingWindowManager.Params)
+            windows.append(params.sliding_window + params.extra_retained_tokens)
         self.window = max(windows)
 
         margin = scheduler_config.unbounded_streaming_input_margin_tokens
@@ -56,20 +57,25 @@ class SessionReanchor:
             )
         self.trigger = max_model_len - margin
 
+    def shift_size(self, num_computed_tokens: int, num_tokens: int) -> int:
+        """Tokens a shift of a session in this state drops, 0 for none."""
+        processed = num_computed_tokens
+        if processed == 0:
+            # Preempted: only the re-prefill from position 0 has to fit.
+            if num_tokens < self.max_model_len:
+                return 0
+            processed = num_tokens - 1
+        # A multiple of the scheduler block size (the LCM of the group block
+        # sizes), so every group drops whole blocks.
+        return max(round_down(processed - self.window, self.block_size), 0)
+
     def shift(self, request: Request) -> bool:
         """Shift a session's positions down by d, dropping its d oldest tokens,
         which are out of the sliding window. Returns False if nothing is dropped."""
         processed = request.num_computed_tokens
         has_keys = processed > 0
-        if not has_keys:
-            # Preempted: only the re-prefill from position 0 has to fit.
-            if request.num_tokens < self.max_model_len:
-                return False
-            processed = request.num_tokens - 1
-        # A multiple of the scheduler block size (the LCM of the group block
-        # sizes), so every group drops whole blocks.
-        d = round_down(processed - self.window, self.block_size)
-        if d <= 0:
+        d = self.shift_size(processed, request.num_tokens)
+        if d == 0:
             return False
 
         if has_keys:

@@ -13,16 +13,19 @@ import pytest
 import torch
 from torch import nn
 
+from tests.v1.core.utils import (
+    full_layer,
+    new_kv_cache_group,
+    new_mla_spec,
+    sliding_window_layer,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVQuantMode,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.worker.reanchor_rotary import (
     RotarySpec,
@@ -107,14 +110,11 @@ def test_rerotate_cached_keys_uses_each_layer_spec(default_vllm_config):
     _bind_kv_cache(enc)
     layers = {"dec": dec, "enc": enc}
     specs = {"dec": _spec(128, 1e4, True), "enc": _spec(64, 1e6, False, scale=4)}
-    window = SlidingWindowSpec(
-        sliding_window=64,
-        block_size=4,
-        num_kv_heads=2,
-        head_size=128,
-        dtype=torch.float32,
+    window = sliding_window_layer(
+        AttentionSpec(block_size=4, num_kv_heads=2, head_size=128, dtype=torch.float32),
+        64,
     )
-    groups = [KVCacheGroupSpec(["dec"], window), KVCacheGroupSpec(["enc"], window)]
+    groups = [new_kv_cache_group(["dec"], window), new_kv_cache_group(["enc"], window)]
     before = {name: layer.kv_cache.clone() for name, layer in layers.items()}
     rows = [torch.tensor([1, 3]), torch.tensor([2])]
     d = 2048
@@ -147,12 +147,9 @@ def test_rerotate_shifted_sessions_skips_null_blocks_and_other_sessions(
     attn = _attention("dec")
     _bind_kv_cache(attn)
     spec = _spec(128, 1e4, True)
-    window = SlidingWindowSpec(
-        sliding_window=64,
-        block_size=4,
-        num_kv_heads=2,
-        head_size=128,
-        dtype=torch.float32,
+    window = sliding_window_layer(
+        AttentionSpec(block_size=4, num_kv_heads=2, head_size=128, dtype=torch.float32),
+        64,
     )
     before = attn.kv_cache.clone()
     scheduler_output = SimpleNamespace(
@@ -166,7 +163,7 @@ def test_rerotate_shifted_sessions_skips_null_blocks_and_other_sessions(
     rerotate_shifted_sessions(
         scheduler_output,
         default_vllm_config.compilation_config.static_forward_context,
-        [KVCacheGroupSpec(["dec"], window)],
+        [new_kv_cache_group(["dec"], window)],
         {"dec": spec},
         torch.device("cpu"),
     )
@@ -276,11 +273,15 @@ def test_collect_rotary_specs_rejects_rope_of_another_head_size():
 _SPEC_ARGS = dict(block_size=4, num_kv_heads=2, head_size=128, dtype=torch.float32)
 
 
-def _kv_cache_config(spec, layer_names=("layers.0.attn",)) -> KVCacheConfig:
+def _window(**spec_args):
+    return sliding_window_layer(AttentionSpec(**_SPEC_ARGS, **spec_args), 64)
+
+
+def _kv_cache_config(layer, layer_names=("layers.0.attn",)) -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(list(layer_names), spec)],
+        kv_cache_groups=[new_kv_cache_group(list(layer_names), layer)],
     )
 
 
@@ -289,7 +290,7 @@ def test_init_reanchor_rotary_specs_returns_each_layer(default_vllm_config):
     _bind_kv_cache(model.layers[0].attn)
     specs = init_reanchor_rotary_specs(
         model,
-        _kv_cache_config(SlidingWindowSpec(sliding_window=64, **_SPEC_ARGS)),
+        _kv_cache_config(_window()),
         default_vllm_config.compilation_config.static_forward_context,
     )
     assert set(specs) == {"layers.0.attn"}
@@ -302,11 +303,7 @@ def test_init_reanchor_rotary_specs_reads_position_scale(default_vllm_config):
     _bind_kv_cache(model.layers[0].attn)
     specs = init_reanchor_rotary_specs(
         model,
-        _kv_cache_config(
-            SlidingWindowSpec(
-                sliding_window=64, tokens_per_state=Fraction(1, 4), **_SPEC_ARGS
-            )
-        ),
+        _kv_cache_config(_window(tokens_per_state=Fraction(1, 4))),
         default_vllm_config.compilation_config.static_forward_context,
     )
     assert specs["layers.0.attn"].position_scale == 4
@@ -318,30 +315,27 @@ def test_init_reanchor_rotary_specs_rejects_compressed_states(default_vllm_confi
     with pytest.raises(ValueError, match="tokens_per_state 2"):
         init_reanchor_rotary_specs(
             model,
-            _kv_cache_config(
-                SlidingWindowSpec(sliding_window=64, tokens_per_state=2, **_SPEC_ARGS)
-            ),
+            _kv_cache_config(_window(tokens_per_state=2)),
             default_vllm_config.compilation_config.static_forward_context,
         )
 
 
 @pytest.mark.parametrize(
-    "spec",
+    "layer",
     [
-        FullAttentionSpec(**_SPEC_ARGS),
         # With the hybrid KV cache manager off, a sliding window layer is
         # allocated as full attention.
-        FullAttentionSpec(sliding_window=64, **_SPEC_ARGS),
-        SlidingWindowMLASpec(sliding_window=64, **_SPEC_ARGS),
+        full_layer(AttentionSpec(**_SPEC_ARGS)),
+        sliding_window_layer(new_mla_spec(block_size=4), 64),
     ],
-    ids=["full", "full-with-window", "mla"],
+    ids=["full", "mla"],
 )
-def test_init_reanchor_rotary_specs_requires_sliding_window(default_vllm_config, spec):
+def test_init_reanchor_rotary_specs_requires_sliding_window(default_vllm_config, layer):
     model = _model(_SelfAttention("layers.0", get_rope(128, max_position=4096)))
     with pytest.raises(ValueError, match="sliding window"):
         init_reanchor_rotary_specs(
             model,
-            _kv_cache_config(spec),
+            _kv_cache_config(layer),
             default_vllm_config.compilation_config.static_forward_context,
         )
 
@@ -361,11 +355,11 @@ def test_init_reanchor_rotary_specs_rejects_kv_layout(
 ):
     model = _model(_SelfAttention("layers.0", get_rope(128, max_position=4096)))
     _bind_kv_cache(model.layers[0].attn, num_blocks)
-    spec = SlidingWindowSpec(sliding_window=64, **_SPEC_ARGS, **spec_args)
+    layer = _window(**spec_args)
     with pytest.raises(ValueError, match="KV cache of"):
         init_reanchor_rotary_specs(
             model,
-            _kv_cache_config(spec),
+            _kv_cache_config(layer),
             default_vllm_config.compilation_config.static_forward_context,
         )
 
@@ -377,10 +371,10 @@ def test_init_reanchor_rotary_specs_rejects_kv_sharing(default_vllm_config):
     _bind_kv_cache(model.layers[0].attn)
     shared = _attention("layers.1.attn", kv_sharing_target_layer_name="layers.0.attn")
     _bind_kv_cache(shared)
-    spec = SlidingWindowSpec(sliding_window=64, **_SPEC_ARGS)
+    layer = _window()
     with pytest.raises(ValueError, match="unshared"):
         init_reanchor_rotary_specs(
             model,
-            _kv_cache_config(spec, ("layers.0.attn", "layers.1.attn")),
+            _kv_cache_config(layer, ("layers.0.attn", "layers.1.attn")),
             default_vllm_config.compilation_config.static_forward_context,
         )
