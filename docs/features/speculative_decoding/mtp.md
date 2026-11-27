@@ -86,9 +86,12 @@ vllm serve <mtp-model> \
 
 - The target verifies with its full lm_head, so only the acceptance length can
   change.
-- Requires Model Runner V2, an MTP drafter sharing an unquantized fp16/bf16
-  lm_head (Qwen3.5, Qwen4Exp, NemotronH) and tensor parallel size 1. Dynamic
-  rows also need a bf16 lm_head, an SM12x GPU and FlashInfer.
+- Requires Model Runner V2 and an MTP drafter sharing an unquantized fp16/bf16
+  lm_head (Qwen3.5, Qwen4Exp, NemotronH). Dynamic rows also need a bf16
+  lm_head, an SM12x GPU and FlashInfer.
+- With tensor parallelism, the static rows and the rows picked from are split
+  evenly over the ranks, and the ranks gather the draft logits. Loading the
+  drafter briefly gathers the full lm_head on every rank.
 - The gain shrinks with batch size: measure decode speed and acceptance length
   at your concurrency.
 

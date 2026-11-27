@@ -4,9 +4,16 @@
 from types import SimpleNamespace
 
 import pytest
+import ray
 import torch
 import torch.nn as nn
 
+from tests.utils import (
+    init_test_distributed_environment,
+    multi_gpu_test,
+    multi_process_parallel,
+)
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.draft_vocab import (
     DraftVocab,
     draft_ids_to_target,
@@ -78,16 +85,23 @@ requires_dynamic_rows = pytest.mark.skipif(
 TM_VOCAB, TM_HIDDEN, TM_STATIC = 4000, 512, 1333
 
 
-def _token_map_drafter(monkeypatch, dynamic_rows: int):
-    """An MTP-like drafter sharing a tied BF16 lm_head, as in Qwen3.5."""
+def _token_map_drafter(
+    monkeypatch, dynamic_rows: int, weight=None, *, disable_tp: bool = True
+):
+    """An MTP-like drafter sharing a tied BF16 lm_head, as in Qwen3.5, with
+    random rows or this rank's rows of `weight`."""
     # Online methods read the model dtype from the current config.
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
         lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
     )
     drafter = nn.Module()
-    drafter.lm_head = VocabParallelEmbedding(TM_VOCAB, TM_HIDDEN, disable_tp=True)
-    drafter.lm_head.to("cuda", torch.bfloat16).weight.data.normal_(std=0.02)
+    drafter.lm_head = VocabParallelEmbedding(TM_VOCAB, TM_HIDDEN, disable_tp=disable_tp)
+    drafter.lm_head.to("cuda", torch.bfloat16)
+    if weight is None:
+        drafter.lm_head.weight.data.normal_(std=0.02)
+    else:
+        _load_rows(drafter.lm_head, weight)
     drafter.draft_vocab = DraftVocab(LogitsProcessor(TM_VOCAB), TM_VOCAB)
     spec = SimpleNamespace(
         draft_token_map_static_rows=TM_STATIC,
@@ -155,6 +169,65 @@ def test_token_map_follows_target_head(default_vllm_config, dist_init, monkeypat
     refresh_quantized_lm_heads(drafter)
     assert all(map(torch.equal, state(draft_vocab), state(fresh)))
     assert [t.data_ptr() for t in (*draft_vocab.nvfp4, draft_vocab.basis)] == ptrs
+
+
+def _load_rows(head: VocabParallelEmbedding, weight: torch.Tensor) -> None:
+    shard = head.shard_indices
+    rows = weight[shard.org_vocab_start_index : shard.org_vocab_end_index]
+    head.weight.data.zero_()
+    head.weight.data[: rows.shape[0]] = rows
+
+
+def _compare_tp_with_single_rank(dynamic_rows: int):
+    @ray.remote(num_gpus=1, max_calls=1)
+    def run(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+        torch.accelerator.set_device_index(rank)
+        init_test_distributed_environment(
+            tp_size, pp_size, rank, distributed_init_port, local_rank=rank
+        )
+        torch.manual_seed(0)
+        with set_current_vllm_config(VllmConfig()):
+            weight = 0.02 * torch.randn(
+                TM_VOCAB, TM_HIDDEN, device="cuda", dtype=torch.bfloat16
+            )
+            single, sharded = (
+                _token_map_drafter(
+                    monkeypatch, dynamic_rows, weight, disable_tp=disable_tp
+                )
+                for disable_tp in (True, False)
+            )
+            assert sharded.lm_head.tp_size == tp_size
+            hidden = torch.randn(64, TM_HIDDEN, device="cuda", dtype=torch.bfloat16)
+
+            def check() -> None:
+                expected, out = (
+                    d.draft_vocab.compute_logits(d.lm_head, hidden)
+                    for d in (single, sharded)
+                )
+                torch.testing.assert_close(out, expected, rtol=0, atol=0)
+                top = sharded.draft_vocab.get_top_tokens(sharded.lm_head, hidden)
+                assert torch.equal(top, expected.argmax(-1))
+
+            check()
+            # A weight update of the lm_head reaches the rows each rank holds.
+            weight = weight.flip(0)
+            for drafter in (single, sharded):
+                _load_rows(drafter.lm_head, weight)
+                refresh_quantized_lm_heads(drafter)
+            check()
+
+    return run
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "dynamic_rows", [0, pytest.param(16, marks=requires_dynamic_rows)]
+)
+def test_token_map_tp_matches_single_rank(monkeypatch, dynamic_rows):
+    """Split over TP ranks, the token map drafts the logits of one rank."""
+    multi_process_parallel(
+        monkeypatch, 2, 1, _compare_tp_with_single_rank(dynamic_rows)
+    )
 
 
 @pytest.mark.cpu_test

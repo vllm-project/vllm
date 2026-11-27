@@ -5,6 +5,7 @@ lm_head, selected by a `quantization_config.targets` pattern naming it, and
 private quantized copies of an already-loaded lm_head for speculative-decoding
 drafters (`draft_lm_head_quantization`)."""
 
+import math
 from abc import abstractmethod
 from collections.abc import Callable
 from itertools import chain
@@ -15,6 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn import Module, Parameter
 
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearKernel,
@@ -220,6 +222,17 @@ _LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
 }
 
 
+def gather_org_rows(lm_head: VocabParallelEmbedding) -> torch.Tensor:
+    """The `org_vocab_size` rows of an unquantized `lm_head`, gathered from the
+    TP ranks that shard it."""
+    weight = lm_head.weight.data
+    if lm_head.tp_size > 1:
+        weight = tensor_model_parallel_all_gather(
+            weight[: lm_head.shard_indices.num_org_elements_padded], dim=0
+        )
+    return weight[: lm_head.org_vocab_size]
+
+
 def _quantize_copy(
     lm_head: VocabParallelEmbedding, quantization: str, num_rows: int | None = None
 ) -> ParallelLMHead:
@@ -234,10 +247,12 @@ def _quantize_copy(
             "Quantizing an lm_head copy needs an unquantized fp16/bf16 lm_head "
             "without bias."
         )
-    assert num_rows is None or lm_head.tp_size == 1
     rows, org_rows = lm_head.num_embeddings, lm_head.org_vocab_size
+    padding_size = lm_head.padding_size
     if num_rows is not None:
         rows = org_rows = num_rows
+        # The first rows are split over the TP ranks anew, so they must divide.
+        padding_size = math.lcm(padding_size, lm_head.tp_size)
     # Online methods take their output dtype from the default dtype, which is
     # only the model dtype while the model itself is being built.
     dtype = lm_head.weight.dtype
@@ -247,14 +262,20 @@ def _quantize_copy(
             lm_head.embedding_dim,
             params_dtype=dtype,
             org_num_embeddings=org_rows,
-            padding_size=lm_head.padding_size,
+            padding_size=padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
             quant_method=_LM_HEAD_METHODS[quantization](),
         )
     # Never loaded: a new param sharing the source storage (its first rows,
-    # with num_rows), never a copy of it.
-    weight = lm_head.weight.data[: head.weight.shape[0]]
+    # with num_rows), never a copy of it. With num_rows and TP, this rank's
+    # shard of those rows is gathered from the ranks that hold them.
+    if num_rows is None:
+        weight = lm_head.weight.data
+    else:
+        start = head.shard_indices.padded_org_vocab_start_index
+        weight = gather_org_rows(lm_head)[start:]
+    weight = weight[: head.weight.shape[0]]
     if weight.shape[0] < head.weight.shape[0]:
         weight = F.pad(weight, (0, 0, 0, head.weight.shape[0] - weight.shape[0]))
     head.weight = torch.nn.Parameter(weight, requires_grad=False)
@@ -288,8 +309,9 @@ def quantized_lm_head_copy(
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
 
-    With `num_rows` (tensor parallel size 1 only), the copy holds just the
-    first `num_rows` rows of `lm_head`, padded like any lm_head.
+    With `num_rows`, the copy is a head over just the first `num_rows` rows of
+    `lm_head`, padded and split over TP ranks like any lm_head. Building or
+    refreshing it is then a collective over the TP group.
     """
     head = _quantize_copy(lm_head, quantization, num_rows)
     # Keep it out of layerwise reload, which would re-run

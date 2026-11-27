@@ -558,7 +558,7 @@ class SpeculativeConfig:
     instead of the full vocabulary. BPE tokenizers give the frequent tokens
     the low ids. The target verifies with its full head, so only the
     acceptance length can change. MTP drafters with an unquantized fp16/bf16
-    lm_head and tensor parallel size 1."""
+    lm_head. Under tensor parallelism the rows are split over the ranks."""
     draft_token_map_dynamic_rows: int | None = Field(default=None, ge=1)
     """Rows outside `draft_token_map_static_rows` picked per draft token by a
     rank-256 projection of the lm_head, which recovers acceptance on traffic

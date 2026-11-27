@@ -10,8 +10,12 @@ ids, which BPE tokenizers give to the most frequent tokens) and
 projection of the lm_head). Either way `DraftVocab.compute_logits` returns
 target-vocabulary logits that are `-inf` elsewhere, so speculators need no
 special handling.
+
+Under tensor parallelism the token map's rows are split evenly over the ranks:
+each rank computes the logits of its share, and the ranks gather them.
 """
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -19,6 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -137,6 +142,10 @@ class DraftVocab:
     nvfp4: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     basis: torch.Tensor
     scorer: _Fp8Rows
+    # Of the rows outside the static ones: how many each TP rank takes (the last
+    # may get fewer), and the first of this rank's.
+    rank_rows: int
+    first_row: int
 
     def __init__(self, logits_processor: LogitsProcessor, vocab_size: int):
         self.logits_processor = logits_processor
@@ -198,8 +207,6 @@ class DraftVocab:
                 "lm_head without bias, logit scaling or soft capping, run in its "
                 "weight dtype."
             )
-        if head.tp_size > 1:
-            raise ValueError("draft_token_map does not support tensor parallelism.")
         if dynamic_rows and not (
             head.weight.dtype == torch.bfloat16
             and current_platform.is_device_capability_family(120)
@@ -225,6 +232,8 @@ class DraftVocab:
         self.num_dynamic_rows = dynamic_rows
         self.static_head = quantized_lm_head_copy(head, "nvfp4", static_rows)
         if dynamic_rows:
+            self.rank_rows = math.ceil((vocab_size - static_rows) / head.tp_size)
+            self.first_row = head.tp_rank * self.rank_rows
             self._build_dynamic()
         logger.info(
             "Draft vocabulary: first %d of %d tokens plus %d dynamic rows per "
@@ -238,14 +247,21 @@ class DraftVocab:
         """NVFP4 rows outside the static ones, and their FP8 scorer: the rows
         projected on the top right singular vectors of the lm_head (the top
         eigenvectors of `W^T W`), so `(x @ basis) @ scorer[i]` approximates the
-        logit of row `i`."""
+        logit of row `i`.
+
+        Each TP rank keeps its share of the rows. The global scale and the basis
+        come from the whole lm_head, so they match tensor parallel size 1."""
+        from vllm.model_executor.layers.quantization.online.lm_head import (
+            gather_org_rows,
+        )
         from vllm.model_executor.layers.quantization.online.nvfp4 import (
             _quantize_nvfp4,
         )
 
-        weight = self.head.weight[: self.head.org_vocab_size]
+        weight = gather_org_rows(self.head)
         rows = weight[self.num_static_rows :]
-        packed, scales, global_scale = _quantize_nvfp4(rows, weight_amax(rows))
+        mine = slice(self.first_row, self.first_row + self.rank_rows)
+        packed, scales, global_scale = _quantize_nvfp4(rows[mine], weight_amax(rows))
         self.nvfp4 = (packed, scales, global_scale.reshape(1))
         gram = weight.new_zeros(weight.shape[1], weight.shape[1], dtype=torch.float32)
         for block in weight.split(_CHUNK):
@@ -257,7 +273,7 @@ class DraftVocab:
         scores = torch.cat(
             [(block.float() @ basis).to(weight.dtype) for block in rows.split(_CHUNK)]
         )
-        self.scorer = _Fp8Rows(scores)
+        self.scorer = _Fp8Rows(scores[mine])
 
     def _dynamic_state(self) -> list[torch.Tensor]:
         return [*self.nvfp4, self.basis, *self.scorer.parameters()]
@@ -283,18 +299,48 @@ class DraftVocab:
         """Target-vocabulary logits of the static and the picked rows."""
         n = self.num_static_rows
         static = self.static_head.quant_method.apply(self.static_head, hidden_states)
+        if self.head.tp_size > 1:
+            static = tensor_model_parallel_all_gather(static, dim=-1)
         out = static.new_full((static.shape[0], self.vocab_size), float("-inf"))
         out[:, :n] = static[:, :n]
-        if not self.num_dynamic_rows:
-            return out
+        if self.num_dynamic_rows:
+            self._add_dynamic_logits(hidden_states, out)
+        return out
+
+    def _add_dynamic_logits(
+        self, hidden_states: torch.Tensor, out: torch.Tensor
+    ) -> None:
+        """Write the logits of the rows picked per draft token into `out`."""
         import flashinfer
 
+        n = self.num_static_rows
+        tp_size = self.head.tp_size
         scores = self.scorer(hidden_states @ self.basis)
+        if tp_size > 1:
+            # Equal widths for the gather; the padding ends up past the vocab.
+            scores = F.pad(scores, (0, self.rank_rows - scores.shape[-1]))
+            scores = tensor_model_parallel_all_gather(scores, dim=-1)
+            scores = scores[:, : self.head.org_vocab_size - n]
         picks = scores.topk(self.num_dynamic_rows, dim=-1, sorted=False).indices
+        row_ids = picks
+        if tp_size > 1:
+            # Every rank picks the same rows and computes the ones it holds:
+            # the kernel skips negative ids.
+            row_ids = picks - self.first_row
+            held = (row_ids >= 0) & (row_ids < self.nvfp4[0].shape[0])
+            row_ids = torch.where(held, row_ids, -1)
         flashinfer.gemv_bf16_fp4_gather(
-            hidden_states, *self.nvfp4, picks, out, out_col_offset=n
+            hidden_states,
+            *self.nvfp4,
+            row_ids,
+            out,
+            out_col_offset=n + self.first_row,
         )
-        return out
+        if tp_size > 1:
+            columns = n + picks
+            # A rank without a picked row left -inf in its column.
+            logits = tensor_model_parallel_all_gather(out.gather(1, columns), dim=-1)
+            out.scatter_(1, columns, logits.unflatten(-1, (tp_size, -1)).amax(dim=1))
 
 
 def load_draft_token_map(model: nn.Module, spec: "SpeculativeConfig") -> None:
