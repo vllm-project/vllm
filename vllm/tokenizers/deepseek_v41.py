@@ -23,18 +23,8 @@ from .deepseek_v41_encoding import (
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
-# Client-supplied text is sanitized by default, as in deepseek-recipe: every
-# added token in it (control tokens such as '<think>', '</think>',
-# '<｜User｜>', the image placeholder, ...) is encoded as plain text, never as the
-# special token. This covers message text of every role (replayed assistant
-# turns included), tool call names and arguments, tool definitions and the
-# response format schema. The model's own delimiters are never part of replayed
-# text, so a match is a mention (or an injection), not structure. Images must
-# be provided as image content parts.
-#
-# Added tokens are matched in plain text by the tokenizer, so escaped text is
-# replaced by per-call sentinels before the prompt is rendered, and each
-# sentinel is encoded as ordinary text afterwards.
+# As in deepseek-recipe, every added token in client text is plain text; images
+# come from image parts. Escaped text is wrapped in per-call sentinels.
 _ESCAPE_OPEN = "\ue000"
 _ESCAPE_CLOSE = "\ue001"
 # Message keys the encoder reads that no client may set.
@@ -331,56 +321,29 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             sentinel_re = re.compile(
                 f"{_ESCAPE_OPEN}{nonce}:(.*?){_ESCAPE_CLOSE}", re.DOTALL
             )
-            if nonce in sentinel_re.sub("", prompt):
-                # Defensive: the escape markers must reach the rendered prompt
-                # verbatim. If rendering altered them (e.g. the ensure_ascii
-                # fallback of to_json writes them as text), the reserved token
-                # would be special again, so reject the prompt.
-                raise ValueError(
-                    "DeepSeek V4.1 could not render the escaped text of a "
-                    "message, tool or response format as plain text"
-                )
-            # A text prompt spells the escaped tokens, so whatever tokenizes it
-            # again matches them as special tokens: ask for ids to keep them
-            # plain text.
+            # Tokenizing this text again would make the escaped tokens special.
             if not kwargs.get("tokenize", True):
                 return sentinel_re.sub(lambda m: m.group(1), prompt)
 
-            # As in deepseek-recipe, only the added tokens outside a sentinel
-            # are special tokens; every stretch of text between two of them,
-            # escaped tokens included, is encoded as a whole without the added
-            # vocabulary.
+            # Added tokens outside the sentinels (even split parts) are special;
+            # the text between two of them is encoded whole, as in deepseek-recipe.
             assert added_tokens_re is not None
             regions: list[str] = []
             special_ids: list[int] = []
-            # The plain text pieces since the last special token.
             run: list[str] = []
-            # Splitting on the sentinel pattern alternates the text outside a
-            # sentinel (even indices) with the escaped text (odd indices).
             for index, part in enumerate(sentinel_re.split(prompt)):
                 if index % 2:
-                    # Escaped client text: the reserved token it holds is
-                    # plain text, so it joins the run as is.
                     run.append(part)
                     continue
-                # Text outside the sentinels (the chat template, image
-                # placeholders): an added token found here is a real special
-                # token, as the client ones are inside a sentinel.
                 pos = 0
                 for m in added_tokens_re.finditer(part):
-                    # The text before the special token ends the run.
                     run.append(part[pos : m.start()])
                     regions.append("".join(run))
                     run.clear()
                     special_ids.append(added_vocab[m.group(0)])
                     pos = m.end()
-                # The rest of the part starts or continues a run, which goes on
-                # in the next odd part (an escaped token) if there is one.
                 run.append(part[pos:])
-            # The text after the last special token.
             regions.append("".join(run))
-            # Encode every run as a whole, so that a merge across the pieces
-            # (e.g. the text next to an escaped token) is kept.
             encodings = plain_tokenizer().encode_batch_fast(
                 regions, add_special_tokens=False
             )

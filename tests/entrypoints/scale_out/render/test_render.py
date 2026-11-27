@@ -1189,6 +1189,33 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("token", ["<think>", "<｜deepseek_image｜>"])
+async def test_chat_render_keeps_reserved_tokens_as_text_for_deepseek_v41(
+    deepseek_v41_server, token
+):
+    """As in deepseek-recipe, a reserved token in client text is plain text."""
+    async with httpx.AsyncClient(
+        base_url=deepseek_v41_server.url_for(""), timeout=30.0
+    ) as client:
+        tokenize = await client.post("/tokenize", json={"prompt": token})
+        assert tokenize.status_code == 200, tokenize.text
+        token_id = tokenize.json()["tokens"][-1]
+
+        async def count(text):
+            render = await client.post(
+                "/v1/chat/completions/render",
+                json={
+                    "model": DEEPSEEK_V41_MODEL_NAME,
+                    "messages": [{"role": "user", "content": text}],
+                },
+            )
+            assert render.status_code == 200, render.text
+            return render.json()["token_ids"].count(token_id)
+
+        assert await count(f"a {token} b") == await count("a b")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("override", ["omitted", None, False, True])
 async def test_render_omits_null_token_id_override(client, override):
     """Default requests must not send a new field to older generate nodes."""
