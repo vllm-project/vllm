@@ -2494,6 +2494,13 @@ class CustomDataset(BenchmarkDataset):
     ```
     Note that 'output_tokens' column is optional and has to be provided only if
     'custom-output-len' argument is None or -1.
+
+    An entry may also carry an 'extra_body' object of request fields to send
+    with that entry only, e.g. tools or response_format for chat, or state and
+    questions for decisions. It is merged over --extra-body, and its keys win:
+    ```
+    {"prompt": "Weather in Paris?", "extra_body": {"tools": [...]}}
+    ```
     """
 
     def __init__(self, **kwargs) -> None:
@@ -2526,8 +2533,21 @@ class CustomDataset(BenchmarkDataset):
             # This will convert the DataFrame to a list of dictionaries
             # where each dictionary corresponds to a row in the DataFrame.
             # This is the standardized format we want for self.data
-            for _, row in jsonl_data.iterrows():
-                self.data.append(row.to_dict())
+            for line, (_, row) in enumerate(jsonl_data.iterrows(), start=1):
+                item = row.to_dict()
+                if "extra_body" in item:
+                    extra_body = item["extra_body"]
+                    # pandas fills the column with NaN on lines that omit it
+                    if isinstance(extra_body, float) and math.isnan(extra_body):
+                        extra_body = None
+                    if extra_body is not None and not isinstance(extra_body, dict):
+                        raise ValueError(
+                            f"Line {line} of {self.dataset_path}: 'extra_body' "
+                            "must be a JSON object, got "
+                            f"{type(extra_body).__name__}."
+                        )
+                    item["extra_body"] = extra_body
+                self.data.append(item)
         else:
             raise NotImplementedError(
                 "Only JSONL format is supported for CustomDataset."
@@ -2606,6 +2626,7 @@ class CustomDataset(BenchmarkDataset):
                     prompt_len=prompt_len,
                     expected_output_len=new_output_len,
                     request_id=request_id_prefix + str(i),
+                    request_overrides=item.get("extra_body"),
                 )
             )
         self.maybe_oversample_requests(

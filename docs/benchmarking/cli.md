@@ -351,6 +351,14 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 
 You can skip applying chat template if your data already has it by using `--skip-chat-template`.
 
+To replay requests that differ in more than their prompt, give an entry an `extra_body` object. Its fields are sent with that entry only, merged over `--extra-body`, with the entry's fields winning:
+
+```json
+{"prompt": "What is the weather in Paris?", "extra_body": {"tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]}}
+{"prompt": "List three French cities as JSON.", "extra_body": {"response_format": {"type": "json_object"}, "temperature": 0}}
+{"prompt": "What is the capital of China?"}
+```
+
 #### Custom Audio Dataset
 
 If the audio dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomAudioDataset`. At inference time, use the option `--dataset-name custom_audio`. Your data needs to be in the `.jsonl` format and needs to have "prompt" and "audio" fields per entry, e.g., `audio_data.jsonl`:
@@ -1617,10 +1625,17 @@ Client-side templating is skipped automatically; `--skip-chat-template` is not r
 
 Each prompt is sent as the state with one choice, one yes/no and one score
 question; pass `--extra-body '{"questions": ...}'` to override these questions
-for every request. Results report latency, throughput and input-token usage,
-with each question counted as one input, as for embeddings. This benchmark
-does not evaluate decision accuracy or load per-item questions and labels from
-decision datasets.
+for every request. To send each request its own state and questions, use a
+`custom` JSONL whose entries carry them in `extra_body`. A `state` there
+replaces the prompt text and may be JSON; `prompt` is still required:
+
+```json
+{"prompt": "unused", "extra_body": {"state": {"request": "do you sell oat milk", "page": "search"}, "questions": {"intent": {"type": "choice", "criteria": {"shop": "Buy something", "track": "Track an order"}}}}}
+```
+
+Results report latency, throughput and input-token usage, with each question
+counted as one input, as for embeddings. This benchmark does not evaluate
+decision accuracy or load labels from decision datasets.
 
 ### Reranker Benchmark
 
