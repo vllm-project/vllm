@@ -5,6 +5,7 @@ from collections.abc import Awaitable
 from http import HTTPStatus
 from typing import TypeVar
 
+import msgspec
 from fastapi import Request
 
 from vllm import RequestOutput
@@ -29,6 +30,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -267,6 +269,31 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                         )
                     return value
         return request.priority
+
+    @staticmethod
+    def _get_kv_hints(
+        request: ChatCompletionRequest | CompletionRequest,
+    ) -> KvHintsEnvelope | None:
+        """Validate the request's KV hint envelope for the engine.
+
+        Args:
+            request: The incoming generate request.
+
+        Returns:
+            The parsed envelope, or None when the request carries no hints.
+
+        Raises:
+            VLLMValidationError: If the envelope does not match the schema.
+
+        """
+        if not request.kv_hints:
+            return None
+        try:
+            return msgspec.convert(request.kv_hints, type=KvHintsEnvelope)
+        except msgspec.ValidationError as exc:
+            raise VLLMValidationError(
+                f"Invalid kv_hints envelope: {exc}", parameter="kv_hints"
+            ) from exc
 
     async def _with_kv_transfer_rejection_cleanup(
         self,
