@@ -1568,9 +1568,11 @@ async fn scale_out_abort_requests_validates_body() {
     engine_task.abort_and_join().await;
 }
 
-/// An abort by the request ID that `/inference/v1/generate` returned finishes
-/// its stream with `finish_reason: "abort"`. An empty `request_ids` list or an
-/// unknown ID aborts nothing, unlike the dev-mode `/abort_requests`.
+/// An abort by the request ID that `/inference/v1/generate` returned, the
+/// `X-Request-Id` header (which wins over the body `request_id`) with Python's
+/// `generate-tokens-` prefix, finishes its stream with `finish_reason: "abort"`.
+/// An empty `request_ids` list, an unknown ID, or the caller's unprefixed ID
+/// aborts nothing, unlike the dev-mode `/abort_requests`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn scale_out_abort_requests_finishes_generate_stream() {
@@ -1609,9 +1611,10 @@ async fn scale_out_abort_requests_finishes_generate_stream() {
                 .method("POST")
                 .uri("/inference/v1/generate")
                 .header("content-type", "application/json")
+                .header("X-Request-Id", "abort-me")
                 .body(Body::from(
                     json!({
-                        "request_id": "abort-me",
+                        "request_id": "body-id",
                         "token_ids": [11, 22],
                         "stream": true,
                         "sampling_params": {"max_tokens": 16},
@@ -1652,10 +1655,12 @@ async fn scale_out_abort_requests_finishes_generate_stream() {
     chunks.extend(sse_json_payloads(&first));
     abort(r#"{"request_ids": []}"#).await;
     abort(r#"{"request_ids": ["unknown"]}"#).await;
+    abort(r#"{"request_ids": ["abort-me"]}"#).await;
+    abort(r#"{"request_ids": ["generate-tokens-body-id"]}"#).await;
     resume_tx.send(()).expect("resume engine");
     let second = next_chunk().await.expect("second chunk");
     chunks.extend(sse_json_payloads(&second));
-    abort(r#"{"request_ids": ["abort-me"]}"#).await;
+    abort(r#"{"request_ids": ["generate-tokens-abort-me"]}"#).await;
     while let Some(rest) = next_chunk().await {
         chunks.extend(sse_json_payloads(&rest));
     }
@@ -1665,13 +1670,16 @@ async fn scale_out_abort_requests_finishes_generate_stream() {
         .iter()
         .map(|chunk| {
             let choice = &chunk["choices"][0];
-            format!("{} {}", choice["token_ids"], choice["finish_reason"])
+            format!(
+                "{} {} {}",
+                chunk["request_id"], choice["token_ids"], choice["finish_reason"]
+            )
         })
         .collect::<Vec<_>>();
     expect_test::expect![[r#"
-        [7] null
-        [8] null
-        [] "abort""#]]
+        "generate-tokens-abort-me" [7] null
+        "generate-tokens-abort-me" [8] null
+        "generate-tokens-abort-me" [] "abort""#]]
     .assert_eq(&choices.join("\n"));
 }
 
@@ -9466,9 +9474,12 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                     decode_prompt_token_ids(&request).as_deref(),
                     Some(&[11, 22][..])
                 );
-                assert_eq!(request.external_req_id.as_deref(), Some("raw-req"));
-                assert!(request.request_id.starts_with("raw-req-"));
-                assert_ne!(request.request_id, "raw-req");
+                assert_eq!(
+                    request.external_req_id.as_deref(),
+                    Some("generate-tokens-raw-req")
+                );
+                assert!(request.request_id.starts_with("generate-tokens-raw-req-"));
+                assert_ne!(request.request_id, "generate-tokens-raw-req");
 
                 send_outputs(
                     push,
@@ -9556,7 +9567,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
-    assert_eq!(json["request_id"], "raw-req");
+    assert_eq!(json["request_id"], "generate-tokens-raw-req");
     // Like Python's `model_dump()`, the envelope always carries the response
     // level, the served model name, the creation time and usage.
     assert_eq!(json["output_mode"], "tokens");
@@ -9616,7 +9627,10 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
                     decode_prompt_token_ids(&request).as_deref(),
                     Some(&[11, 22][..])
                 );
-                assert_eq!(request.external_req_id.as_deref(), Some("raw-stream"));
+                assert_eq!(
+                    request.external_req_id.as_deref(),
+                    Some("generate-tokens-raw-stream")
+                );
 
                 send_outputs(
                     push,
@@ -9712,7 +9726,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(payloads.len(), 4, "{text}");
 
     let first: serde_json::Value = serde_json::from_str(payloads[0]).expect("first chunk json");
-    assert_eq!(first["request_id"], "raw-stream");
+    assert_eq!(first["request_id"], "generate-tokens-raw-stream");
     assert_eq!(first["choices"][0]["index"], 0);
     assert_eq!(first["choices"][0]["token_ids"], json!([33]));
     assert_eq!(
@@ -10031,12 +10045,20 @@ async fn raw_generate_n_returns_one_choice_per_sample() {
     assert_eq!(
         children,
         [
-            ("0_raw-n".to_string(), Some("raw-n".to_string()), Some(7)),
-            ("1_raw-n".to_string(), Some("raw-n".to_string()), Some(8)),
+            (
+                "0_generate-tokens-raw-n".to_string(),
+                Some("generate-tokens-raw-n".to_string()),
+                Some(7)
+            ),
+            (
+                "1_generate-tokens-raw-n".to_string(),
+                Some("generate-tokens-raw-n".to_string()),
+                Some(8)
+            ),
         ]
     );
 
-    assert_eq!(json["request_id"], "raw-n");
+    assert_eq!(json["request_id"], "generate-tokens-raw-n");
     let choices = json["choices"]
         .as_array()
         .expect("choices")
@@ -12620,21 +12642,7 @@ struct UnavailableLlm {
 impl UnavailableLlm {
     fn new() -> Self {
         Self {
-            info: LlmInfo {
-                max_model_len: 4096,
-                model_dtype: None,
-                supports_lora: true,
-                allow_missing_mm_embeddings: false,
-                vllm_version: "test".to_string(),
-                fingerprint: LlmFingerprint {
-                    vllm_version: "test".to_string(),
-                    config_hash: None,
-                    tensor_parallel_size: 1,
-                    pipeline_parallel_size: 1,
-                    data_parallel_size: 1,
-                    enable_expert_parallel: false,
-                },
-            },
+            info: test_llm_info(),
             health: Arc::new(tokio::sync::watch::channel(true).0),
             readiness: tokio::sync::watch::channel(false).0,
         }
@@ -12677,6 +12685,190 @@ impl Llm for UnavailableLlm {
     async fn shutdown(self: Box<Self>) -> vllm_llm::Result<()> {
         Ok(())
     }
+}
+
+/// The facts of a test `Llm` without an engine-core client.
+fn test_llm_info() -> LlmInfo {
+    LlmInfo {
+        max_model_len: 4096,
+        model_dtype: None,
+        supports_lora: true,
+        allow_missing_mm_embeddings: false,
+        vllm_version: "test".to_string(),
+        fingerprint: LlmFingerprint {
+            vllm_version: "test".to_string(),
+            config_hash: None,
+            tensor_parallel_size: 1,
+            pipeline_parallel_size: 1,
+            data_parallel_size: 1,
+            enable_expert_parallel: false,
+        },
+    }
+}
+
+/// Builds the error a [`StreamErrorLlm`] fails each output stream with.
+type MakeLlmError = fn() -> vllm_llm::Error;
+
+/// An `Llm` that takes every request and then fails its output stream with
+/// `error`, standing in for a remote engine lost or rejecting mid-request.
+struct StreamErrorLlm {
+    info: LlmInfo,
+    health: tokio::sync::watch::Sender<bool>,
+    error: MakeLlmError,
+}
+
+impl StreamErrorLlm {
+    fn new(error: MakeLlmError) -> Self {
+        Self {
+            info: test_llm_info(),
+            health: tokio::sync::watch::channel(true).0,
+            error,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Llm for StreamErrorLlm {
+    fn info(&self) -> &LlmInfo {
+        &self.info
+    }
+
+    fn subscribe_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.health.subscribe()
+    }
+
+    fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.health.subscribe()
+    }
+
+    async fn generate_n(
+        &self,
+        _request: GenerateRequest,
+        n: NonZeroU32,
+    ) -> vllm_llm::Result<Vec<BoxGenerateOutputStream>> {
+        Ok((0..n.get())
+            .map(|_| {
+                futures::StreamExt::boxed(futures::stream::once(std::future::ready(Err((self
+                    .error)(
+                )))))
+            })
+            .collect())
+    }
+
+    async fn abort(&self, _external_ids: &[String]) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(self: Box<Self>) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+}
+
+/// An output stream that fails after submission is classified like a failed
+/// submission, on every generation route: a lost remote engine is a
+/// retryable 503, a late rejection of the request a 400, anything else a 500.
+/// Streaming responses already sent their 200, so the error object carries
+/// the classification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn output_stream_errors_are_classified_like_submit_errors() {
+    let errors: [(&str, MakeLlmError); 3] = [
+        ("unavailable", || vllm_llm::Error::Unavailable {
+            message: "the remote engine went away".to_string(),
+        }),
+        ("remote invalid request", || {
+            vllm_llm::Error::RemoteInvalidRequest {
+                message: "the remote engine rejected the request".to_string(),
+            }
+        }),
+        ("remote", || vllm_llm::Error::Remote {
+            message: "the remote engine failed".to_string(),
+        }),
+    ];
+    let routes = [
+        (
+            "/v1/completions",
+            json!({ "model": "test-model", "prompt": "hello" }),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({ "model": "test-model", "messages": [{ "role": "user", "content": "hello" }] }),
+        ),
+        (
+            "/v1/responses",
+            json!({ "model": "test-model", "input": "hello" }),
+        ),
+        (
+            "/inference/v1/generate",
+            json!({ "token_ids": [11, 22], "output_mode": "text", "sampling_params": {} }),
+        ),
+        (
+            "/generative_scoring",
+            json!({ "model": "test-model", "query": [1, 2], "items": [[3]], "label_token_ids": [1] }),
+        ),
+    ];
+    let mut lines = Vec::new();
+    for (name, error) in errors {
+        let chat = ChatLlm::from_shared_backend(
+            StreamErrorLlm::new(error),
+            Arc::new(FakeChatBackend::new()),
+        );
+        let mut app = build_router_with_gates(
+            Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        );
+        for (uri, body) in &routes {
+            let (status, response) = post_json(&mut app, uri, body.clone()).await;
+            lines.push(format!(
+                "{name} {uri}: {status} {} {}",
+                response["error"]["type"], response["error"]["message"]
+            ));
+        }
+        for (uri, body) in [&routes[0], &routes[1], &routes[3]] {
+            let mut body = body.clone();
+            body["stream"] = json!(true);
+            let (status, response) = post_json(&mut app, uri, body).await;
+            let raw = response["raw"].as_str().expect("SSE body");
+            let error = (raw.lines())
+                .filter_map(|line| line.strip_prefix("data: "))
+                .find_map(|data| {
+                    serde_json::from_str::<serde_json::Value>(data).ok()?.get("error").cloned()
+                })
+                .expect("an error event");
+            lines.push(format!(
+                "{name} {uri} (stream): {status} {} {}",
+                error["type"], error["message"]
+            ));
+        }
+    }
+    expect_test::expect![[r#"
+        unavailable /v1/completions: 503 Service Unavailable "ServiceUnavailableError" "unavailable: the remote engine went away"
+        unavailable /v1/chat/completions: 503 Service Unavailable "ServiceUnavailableError" "unavailable: the remote engine went away"
+        unavailable /v1/responses: 503 Service Unavailable "ServiceUnavailableError" "unavailable: the remote engine went away"
+        unavailable /inference/v1/generate: 503 Service Unavailable "ServiceUnavailableError" "unavailable: the remote engine went away"
+        unavailable /generative_scoring: 503 Service Unavailable "ServiceUnavailableError" "unavailable: the remote engine went away"
+        unavailable /v1/completions (stream): 200 OK "ServiceUnavailableError" "unavailable: the remote engine went away"
+        unavailable /v1/chat/completions (stream): 200 OK "ServiceUnavailableError" "unavailable: the remote engine went away"
+        unavailable /inference/v1/generate (stream): 200 OK "ServiceUnavailableError" "unavailable: the remote engine went away"
+        remote invalid request /v1/completions: 400 Bad Request "BadRequestError" "the remote engine rejected the request"
+        remote invalid request /v1/chat/completions: 400 Bad Request "BadRequestError" "the remote engine rejected the request"
+        remote invalid request /v1/responses: 400 Bad Request "BadRequestError" "the remote engine rejected the request"
+        remote invalid request /inference/v1/generate: 400 Bad Request "BadRequestError" "the remote engine rejected the request"
+        remote invalid request /generative_scoring: 400 Bad Request "BadRequestError" "the remote engine rejected the request"
+        remote invalid request /v1/completions (stream): 200 OK "BadRequestError" "the remote engine rejected the request"
+        remote invalid request /v1/chat/completions (stream): 200 OK "BadRequestError" "the remote engine rejected the request"
+        remote invalid request /inference/v1/generate (stream): 200 OK "BadRequestError" "the remote engine rejected the request"
+        remote /v1/completions: 500 Internal Server Error "InternalServerError" "completion stream failed: remote error: the remote engine failed"
+        remote /v1/chat/completions: 500 Internal Server Error "InternalServerError" "failed to collect chat completion response: remote error: the remote engine failed"
+        remote /v1/responses: 500 Internal Server Error "InternalServerError" "failed to collect responses result: remote error: the remote engine failed"
+        remote /inference/v1/generate: 500 Internal Server Error "InternalServerError" "failed to collect raw generate response: remote error: the remote engine failed"
+        remote /generative_scoring: 500 Internal Server Error "InternalServerError" "failed to collect generative scoring response: remote error: the remote engine failed"
+        remote /v1/completions (stream): 200 OK "InternalServerError" "completion stream failed: remote error: the remote engine failed"
+        remote /v1/chat/completions (stream): 200 OK "InternalServerError" "chat stream failed: remote error: the remote engine failed"
+        remote /inference/v1/generate (stream): 200 OK "InternalServerError" "raw generate stream failed: remote error: the remote engine failed""#]].assert_eq(&lines.join("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

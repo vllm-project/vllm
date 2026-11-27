@@ -796,7 +796,7 @@ class OnlineRenderer:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "media_io_kwargs", "cache_salt")
                 if (v := getattr(request, k, None)) is not None
             },
             skip_mm_cache=skip_mm_cache,
@@ -825,8 +825,6 @@ class OnlineRenderer:
             media_io_kwargs=getattr(request, "media_io_kwargs", None),
             trust_request_mm_kwargs=self.trust_request_mm_kwargs,
         )
-        mm_config = self.model_config.multimodal_config
-
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
             dict(
@@ -849,7 +847,6 @@ class OnlineRenderer:
             default_template, default_template_content_format, **build_kwargs
         ).with_defaults(
             default_template_kwargs,
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
