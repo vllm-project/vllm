@@ -798,8 +798,8 @@ class MoRIIOConnectorScheduler:
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         # Requests whose block freeing is deferred. READ mode uses the deadline
-        # as a missing-ACK watchdog; WRITE mode waits for the worker ACK because
-        # only the worker can mark the transfer terminal before blocks are freed.
+        # to warn about a missing release ACK; WRITE mode leaves timeout
+        # handling to the worker, which ACKs after the transfer is terminal.
         # Value: (deadline, transfer_id) for unmapping after completion.
         self._deferred_send_deadlines: dict[ReqId, tuple[float, TransferId | None]] = {}
         self._defer_timeout = float(
@@ -807,6 +807,12 @@ class MoRIIOConnectorScheduler:
                 "defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT
             )
         )
+        # Expired deferred sends already logged; still waiting for an ACK.
+        # Lost ACKs keep these entries (and transfer-id maps) until a real
+        # ACK arrives: dropping them would prevent a late free, and
+        # surfacing them as finished_sending would reuse the blocks.
+        self._stale_deferred_sends: set[ReqId] = set()
+        self._stale_deferred_log_at: float = 0.0
         # Buffer for early ACKs that arrive before request_finished.
         self._pending_sent_acks: dict[ReqId, float] = {}
         self.paths: dict[str, zmq.Socket] = {}
@@ -1930,12 +1936,13 @@ class MoRIIOConnectorScheduler:
         * An ACK that arrives BEFORE its request finished is parked in
           `_pending_sent_acks` and released on a later step once the
           request enters `_deferred_send_deadlines`.
-        * In READ mode, a deferred send whose ACK never arrives is reaped
-          after `_defer_timeout`. WRITE-mode timeouts are owned by the worker,
-          which marks the transfer terminal before ACKing the block release.
+        * A READ whose release ACK never arrives remains held past
+          `_defer_timeout`, along with its transfer-id mapping. A timeout
+          does not establish that the decoder stopped accessing the blocks.
+          WRITE-mode timeouts are owned by the worker, which ACKs after
+          marking the transfer terminal.
         * A parked ACK that never matches a deferral before its own
-          deadline is a stale duplicate (e.g. a real ACK landing after the
-          send was already reaped) and is dropped.
+          deadline is a stale duplicate and is dropped.
 
         Consumers never populate finished_sending (they report
         finished_recving). They unmap in request_finished, except for a WRITE
@@ -1971,21 +1978,27 @@ class MoRIIOConnectorScheduler:
             if req_id in self._deferred_send_deadlines:
                 safe.add(req_id)
 
-        # Reap deferred sends whose ACK never arrived (avoid leaking blocks).
-        expired = [
-            req_id
-            for req_id, (deadline, _) in self._deferred_send_deadlines.items()
-            if self.mode == MoRIIOMode.READ and now >= deadline
-        ]
-        if expired:
-            safe.update(expired)
-            logger.warning(
-                "Reaped %d deferred sends with no finished_sending "
-                "notification after %.0fs. This indicates lost async KV "
-                "completion notifications from the KV connector.",
-                len(expired),
-                self._defer_timeout,
-            )
+        if self.mode == MoRIIOMode.READ:
+            # Leave expired READs pinned until the decoder releases them.
+            self._stale_deferred_sends.difference_update(safe)
+            newly_stale = {
+                req_id
+                for req_id, (deadline, _) in self._deferred_send_deadlines.items()
+                if now >= deadline
+                and req_id not in safe
+                and req_id not in self._stale_deferred_sends
+            }
+            self._stale_deferred_sends.update(newly_stale)
+            n_stale = len(self._stale_deferred_sends)
+            if n_stale and (newly_stale or now >= self._stale_deferred_log_at):
+                logger.warning(
+                    "Holding %d deferred sends with no finished_sending ACK "
+                    "(%d transfer-id mappings). Blocks stay allocated until "
+                    "an ACK arrives.",
+                    n_stale,
+                    len(self.request_id_to_transfer_id),
+                )
+                self._stale_deferred_log_at = now + self._defer_timeout
 
         # Finalize the requests we are surfacing: drop their deferral/park
         # bookkeeping and unmap their transfer ids.
