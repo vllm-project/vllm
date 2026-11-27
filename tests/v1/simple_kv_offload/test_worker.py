@@ -209,6 +209,34 @@ def test_deferred_store_waits_for_draft_forward(active_cpu_offload_connector):
     assert torch.equal(cpu[0], gpu[0].cpu())
 
 
+def test_load_orders_after_queued_compute(active_cpu_offload_connector):
+    """A load must land after compute queued earlier on its GPU blocks.
+
+    The scheduler can hand a load blocks that a step still in flight uses,
+    e.g. the drafter of a request freed once its sampled tokens arrived.
+    """
+    active, connector, gpu, cpu = active_cpu_offload_connector
+    cpu[0].fill_(7)
+    torch.cuda._sleep(SLEEP_CYCLES)
+    gpu[0].fill_(91)
+    output = _make_empty_scheduler_output()
+    output.kv_connector_metadata = SimpleCPUOffloadMetadata(
+        load_event=0,
+        load_gpu_blocks=[0],
+        load_cpu_blocks=[0],
+        load_event_to_reqs={0: ["req"]},
+    )
+    active.pre_forward(output)
+    active.finish_forward()
+    finished = active.post_forward(set(), defer_finalize=True).finished_recving
+    deadline = time.monotonic() + 5
+    while not finished and time.monotonic() < deadline:
+        finished = connector.get_finished(set())[1]
+    active.finalize_step()
+    assert finished == {"req"}
+    assert torch.equal(gpu[0].cpu(), cpu[0])
+
+
 def _launch_and_wait(
     backend: DmaCopyBackend,
     block_ids: list[int],
