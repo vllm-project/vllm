@@ -3,6 +3,7 @@
 """Request-time validation of structured output requests."""
 
 import json
+from dataclasses import replace
 
 import pytest
 from transformers import MistralCommonBackend, TokenizersBackend
@@ -20,7 +21,10 @@ from vllm.v1.structured_output import backend_guidance
 from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines,
 )
-from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+from vllm.v1.structured_output.backend_xgrammar import (
+    UnsatisfiableGrammarError,
+    validate_xgrammar_grammar,
+)
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -275,6 +279,89 @@ def test_supported_spec_is_not_rejected(backend, structured_outputs):
         StructuredOutputsConfig(backend=backend),
         tokenizer=object(),
     )
+
+
+UNSATISFIABLE_SPECS = [
+    pytest.param(
+        StructuredOutputsParams(grammar='root ::= root "a"'), id="ebnf-self-ref"
+    ),
+    pytest.param(
+        StructuredOutputsParams(grammar='start: start "a"'), id="lark-self-ref"
+    ),
+    pytest.param(
+        StructuredOutputsParams(regex="[^\\x00-\\U0010FFFF]"), id="regex-no-char"
+    ),
+]
+
+
+@pytest.mark.parametrize("backend", ["auto", "xgrammar"])
+@pytest.mark.parametrize("structured_outputs", UNSATISFIABLE_SPECS)
+def test_unsatisfiable_grammar_rejected(backend, structured_outputs):
+    """XGrammar builds these without error, but they match no output: served as
+    is, the first sampled token is rejected and the request fails with a 500.
+    They must be a 400, and `auto` must not fall back to another backend."""
+    params = SamplingParams(structured_outputs=replace(structured_outputs))
+    # trick to create tokenizer that guidance backend accepts
+    tokenizer = object.__new__(TokenizersBackend)
+    with pytest.raises(UnsatisfiableGrammarError, match="unsatisfiable"):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend=backend),
+            tokenizer=tokenizer,
+        )
+
+
+def test_satisfiability_check_failure_falls_back_to_backend(monkeypatch):
+    """If the byte-level check itself cannot compile a grammar, the request is
+    validated as before instead of failing with an internal error."""
+    from vllm.v1.structured_output import backend_xgrammar
+
+    class _Broken:
+        def compile_grammar(self, grammar):
+            raise RuntimeError("cannot compile")
+
+    monkeypatch.setattr(backend_xgrammar, "_byte_level_compiler", lambda: _Broken())
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(grammar='root ::= root "a"')
+    )
+    validate_xgrammar_grammar(params)
+
+
+def test_unsatisfiable_json_schema_is_a_client_error():
+    """A `$ref` that only refers back to itself matches no JSON value."""
+    schema = {"$defs": {"n": {"$ref": "#/$defs/n"}}, "$ref": "#/$defs/n"}
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
+    with pytest.raises(VLLMClientError):
+        validate_xgrammar_grammar(params)
+
+
+@pytest.mark.parametrize(
+    "structured_outputs",
+    [
+        StructuredOutputsParams(grammar='root ::= ""'),
+        StructuredOutputsParams(grammar='root ::= "a" root | "b"'),
+        StructuredOutputsParams(grammar='root ::= "\u00e9"'),
+        StructuredOutputsParams(grammar='start: "x"+'),
+        StructuredOutputsParams(regex="[0-9]{3}"),
+        StructuredOutputsParams(
+            json={
+                "$defs": {
+                    "n": {
+                        "type": "object",
+                        "properties": {
+                            "c": {"type": "array", "items": {"$ref": "#/$defs/n"}}
+                        },
+                    }
+                },
+                "$ref": "#/$defs/n",
+            }
+        ),
+    ],
+    ids=["empty-string", "recursive-ebnf", "non-ascii", "lark", "regex", "json-tree"],
+)
+def test_satisfiable_grammar_not_rejected(structured_outputs):
+    params = SamplingParams(structured_outputs=structured_outputs)
+    validate_xgrammar_grammar(params)
 
 
 @pytest.mark.parametrize(
