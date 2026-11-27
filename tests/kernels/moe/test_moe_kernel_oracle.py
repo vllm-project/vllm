@@ -96,6 +96,11 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
     map_w4a8_int8_backend,
     select_w4a8_int8_moe_backend,
 )
+from vllm.model_executor.layers.quantization import modelopt
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
+    ModelOptFp8MoEMethod,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
@@ -882,3 +887,38 @@ def test_hpc_clamp_rejected_during_backend_selection():
     )
     assert not supported
     assert reason is not None and "SwiGLU clamp" in reason
+
+
+@pytest.mark.usefixtures("default_vllm_config", "dist_init")
+def test_fp8_weight_conversion_uses_selected_experts(monkeypatch):
+    """Quant methods convert weights with the experts class they selected."""
+
+    class TransposingExperts(TritonExperts):
+        @staticmethod
+        def convert_fp8_weights(layer, w13, w2, w13_scale, w2_scale, a13, a2):
+            return w13, w2.transpose(1, 2).contiguous(), w13_scale, w2_scale
+
+    monkeypatch.setattr(
+        modelopt,
+        "select_fp8_moe_backend",
+        lambda **kwargs: (Fp8MoeBackend.TRITON, TransposingExperts),
+    )
+    method = ModelOptFp8MoEMethod(
+        ModelOptFp8Config("FP8", True, None, []), make_dummy_moe_config()
+    )
+    layer = torch.nn.Module()
+    layer._expert_routing_tables = lambda: None
+    method.create_weights(
+        layer, 1, 4, 8, torch.bfloat16, weight_loader=lambda *args, **kwargs: None
+    )
+    # Not `process_weights_after_loading`: its requantization needs a CUDA op.
+    method._setup_kernel(
+        layer,
+        layer.w13_weight,
+        layer.w2_weight,
+        layer.w13_weight_scale.max(dim=1).values,
+        layer.w2_weight_scale,
+        layer.w13_input_scale,
+        layer.w2_input_scale,
+    )
+    assert layer.w2_weight.shape == (1, 8, 4)

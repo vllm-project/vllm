@@ -34,6 +34,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 if TYPE_CHECKING:
     from aiter import ActivationType
 
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
 
 class AiterQuantType(IntEnum):
     """Mirror of `aiter.QuantType`, usable without importing AITER."""
@@ -489,6 +491,21 @@ def rocm_aiter_fused_experts(
 
 class AiterExperts(mk.FusedMoEExpertsModular):
     consumes_expert_mask = True
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+        w13.is_shuffled = True
+        w2.is_shuffled = True
+        return w13, w2, w13_scale, w2_scale
 
     _AITER_QUANT_TYPE: AiterQuantType
     _SUPPORTS_ROUTER_WEIGHT_ON_INPUT = True

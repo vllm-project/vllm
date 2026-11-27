@@ -4,7 +4,7 @@
 
 import math
 import sys
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -50,6 +50,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.math_utils import round_up
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 logger = init_logger(__name__)
 
@@ -462,6 +465,19 @@ def prepare_fp8_moe_layer_for_cpu(
 
 class CPUExpertsFp8(mk.FusedMoEExpertsModular):
     """CPU FP8 W8A16 block-quantized modular MoE experts."""
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        w13, w2 = prepare_fp8_moe_layer_for_cpu(w13, w2)
+        return w13, w2, w13_scale, w2_scale
 
     def __init__(
         self,
@@ -1711,6 +1727,21 @@ def prepare_fp8_w8a8_moe_layer_for_cpu(
 
 class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
     """CPU FP8 W8A8 block-quantized modular MoE experts."""
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        w13, w13_scale, w2, w2_scale = prepare_fp8_w8a8_moe_layer_for_cpu(
+            w13, w2, w13_scale, w2_scale
+        )
+        return w13, w2, w13_scale, w2_scale
 
     def __init__(
         self,

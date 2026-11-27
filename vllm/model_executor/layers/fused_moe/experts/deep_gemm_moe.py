@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -46,6 +48,9 @@ from vllm.utils.deep_gemm import (
     mk_alignment_scope,
 )
 from vllm.utils.import_utils import has_deep_gemm
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 logger = init_logger(__name__)
 
@@ -138,6 +143,25 @@ def _valid_deep_gemm(
 
 class DeepGemmExperts(mk.FusedMoEExpertsModular):
     """DeepGemm-based fused MoE expert implementation."""
+
+    @staticmethod
+    def convert_fp8_weights(
+        layer: "RoutedExperts",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            prepare_fp8_moe_layer_for_deepgemm,
+        )
+
+        assert hasattr(layer, "weight_block_size")
+        return prepare_fp8_moe_layer_for_deepgemm(
+            w13, w2, w13_scale, w2_scale, tuple(layer.weight_block_size)
+        )
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)

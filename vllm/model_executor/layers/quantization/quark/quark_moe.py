@@ -969,7 +969,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=layer.w13_weight,
             w2=layer.w2_weight,
@@ -2098,7 +2098,7 @@ class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         layer.weight_block_size = self.weight_block_size
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.mxfp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=layer.w13_weight,
             w2=layer.w2_weight,

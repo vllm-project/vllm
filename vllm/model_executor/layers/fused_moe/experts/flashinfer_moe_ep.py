@@ -45,6 +45,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
     pass
 
 
@@ -56,6 +58,24 @@ _supported_activations: frozenset[MoEActivation] = frozenset((MoEActivation.SILU
 
 
 class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
+    @staticmethod
+    def convert_fp8_weights(
+        layer: RoutedExperts,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+            sm90_fp8_block_moe_ep_weights,
+        )
+
+        assert hasattr(layer, "weight_block_size")
+        w13, w13_scale = sm90_fp8_block_moe_ep_weights(w13, w13_scale)
+        return w13, w2, w13_scale, w2_scale
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,

@@ -897,7 +897,6 @@ def _maybe_convert_weights_for_experts(
         AiterFp8TensorExperts,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-        Fp8MoeBackend,
         convert_to_fp8_moe_kernel_format,
     )
 
@@ -971,13 +970,10 @@ def _maybe_convert_weights_for_experts(
     ):
         return _shuffle_weights_for_aiter(rank_weights)
 
-    backend: Fp8MoeBackend | None = None
-    if fe_name == "TrtLlmFp8ExpertsModular":
-        backend = Fp8MoeBackend.FLASHINFER_TRTLLM
-    elif fe_name == "FlashInferExperts":
-        backend = Fp8MoeBackend.FLASHINFER_CUTLASS
-
-    if backend is None or not rank_weights.is_quantized():
+    if (
+        fe_name not in ("TrtLlmFp8ExpertsModular", "FlashInferExperts")
+        or not rank_weights.is_quantized()
+    ):
         return rank_weights
 
     mock_layer = SimpleNamespace(
@@ -990,7 +986,7 @@ def _maybe_convert_weights_for_experts(
     )
 
     w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-        fp8_backend=backend,
+        experts_cls=fe_type,
         layer=mock_layer,
         w13=rank_weights.w1,
         w2=rank_weights.w2,

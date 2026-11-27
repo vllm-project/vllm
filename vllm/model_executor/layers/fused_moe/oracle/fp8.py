@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from enum import Enum
-from typing import Any
 
 import torch
 
@@ -23,16 +22,7 @@ from vllm.model_executor.layers.fused_moe.oracle.base import (
     make_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    prepare_fp8_moe_layer_for_fi,
-)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    prepare_fp8_moe_layer_for_deepgemm,
-)
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    prepare_fp8_moe_layer_for_marlin,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -41,10 +31,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.model_executor.utils import (
-    move_parameter,
     refill_derived,
     replace_parameter,
-    set_kernel_parameter,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
@@ -549,44 +537,8 @@ def select_fp8_moe_backend(
     return Fp8MoeBackend.NONE, None
 
 
-def _humming_fp8_weight_schema(
-    layer: RoutedExperts, weight: torch.Tensor, weight_scale: torch.Tensor
-) -> dict[str, Any]:
-    """Build the humming weight schema from the canonical on-device fp8/mxfp8
-    tensors (scale dtype/shape, block size), not the producing quant method."""
-    # mxfp8: e8m0 group-32 scales (stored as uint8 bytes or e8m0). humming has
-    # no compressed-tensors mxfp8 loader; its modelopt schema fits both sources.
-    if weight_scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
-        return {"quant_method": "modelopt", "quant_algo": "mxfp8"}
-
-    if hasattr(layer, "w13_weight_scale_inv"):
-        assert hasattr(layer, "weight_block_size")
-        return {"quant_method": "fp8", "weight_block_size": layer.weight_block_size}
-
-    # fp8 (e4m3): recover the strategy from the scale layout (block from
-    # weight_block_size, else channel vs tensor by per-expert scale count).
-    config: dict[str, Any] = {
-        "quant_method": "compressed-tensors",
-        "format": "float-quantized",
-        "type": "float",
-        "num_bits": 8,
-        "symmetric": True,
-    }
-    weight_block_size = getattr(layer, "weight_block_size", None)
-    num_experts, num_output = weight.shape[0], weight.shape[-2]
-    if weight_block_size is not None:
-        config["strategy"] = "block"
-        config["block_structure"] = list(weight_block_size)
-    elif weight_scale.numel() >= num_experts * num_output:
-        config["strategy"] = "channel"
-    else:
-        config["strategy"] = "tensor"
-    return config
-
-
 def convert_to_fp8_moe_kernel_format(
-    fp8_backend: Fp8MoeBackend,
-    # TODO(bnell): replace layer with weight_block_size
+    experts_cls: type[mk.FusedMoEExperts] | None,
     layer: RoutedExperts,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -595,138 +547,12 @@ def convert_to_fp8_moe_kernel_format(
     w13_input_scale: torch.Tensor | None,
     w2_input_scale: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    block_quant = hasattr(layer, "weight_block_size")
-    if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
-        assert block_quant
-        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_deepgemm(
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            tuple(layer.weight_block_size),
-        )
-    elif fp8_backend == Fp8MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
-        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
-            sm90_fp8_block_moe_ep_weights,
-        )
-
-        assert block_quant
-        w13, w13_scale = sm90_fp8_block_moe_ep_weights(w13, w13_scale)
-    elif fp8_backend == Fp8MoeBackend.AITER:
-        w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
-        w13.is_shuffled = True
-        w2.is_shuffled = True
-    elif fp8_backend == Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8:
-        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
-            prepare_mxfp8_moe_weights_for_aiter_triton,
-        )
-
-        w13, w13_scale = prepare_mxfp8_moe_weights_for_aiter_triton(w13, w13_scale)
-        w2, w2_scale = prepare_mxfp8_moe_weights_for_aiter_triton(w2, w2_scale)
-    elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
-        w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
-            w13, w2, w13_scale, w2_scale
-        )
-        w13.is_shuffled = True
-        w2.is_shuffled = True
-    elif fp8_backend == Fp8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming import (
-            convert_to_humming_moe_kernel_format,
-            stage_moe_weights_for_humming,
-        )
-
-        scale_name = stage_moe_weights_for_humming(
-            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
-        )
-
-        convert_to_humming_moe_kernel_format(
-            layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)
-        )
-        if scale_name == "weight_scale_inv":
-            # One param under both names: the loaded `_inv` holds the runtime scale.
-            for prefix in ("w13", "w2"):
-                scale = layer._parameters.pop(f"{prefix}_weight_scale").data
-                move_parameter(
-                    layer, f"{prefix}_{scale_name}", f"{prefix}_weight_scale"
-                )
-                set_kernel_parameter(layer, f"{prefix}_weight_scale", scale)
-        w13 = layer.w13_weight
-        w2 = layer.w2_weight
-        w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
-    elif fp8_backend == Fp8MoeBackend.MARLIN:
-        weight_block_size = getattr(layer, "weight_block_size", None)
-        if weight_block_size == [1, 32]:
-            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-                prepare_mxfp8_moe_layer_for_marlin,
-            )
-
-            w13, w2, w13_scale, w2_scale = prepare_mxfp8_moe_layer_for_marlin(
-                layer,
-                w13,
-                w2,
-                w13_scale,
-                w2_scale,
-            )
-        else:
-            w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_marlin(
-                layer,
-                w13,
-                w2,
-                w13_scale,
-                w2_scale,
-            )
-    elif fp8_backend in [
-        Fp8MoeBackend.FLASHINFER_CUTLASS,
-        Fp8MoeBackend.FLASHINFER_TRTLLM,
-    ]:
-        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_fi(
-            layer=layer,
-            w13=w13,
-            w2=w2,
-            w13_scale=w13_scale,
-            w13_input_scale=w13_input_scale,
-            w2_scale=w2_scale,
-            w2_input_scale=w2_input_scale,
-            is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
-        )
-    elif fp8_backend == Fp8MoeBackend.CPU:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            prepare_fp8_moe_layer_for_cpu,
-        )
-
-        w13, w2 = prepare_fp8_moe_layer_for_cpu(w13, w2)
-    elif fp8_backend == Fp8MoeBackend.CPU_W8A8:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            prepare_fp8_w8a8_moe_layer_for_cpu,
-        )
-
-        w13, w13_scale, w2, w2_scale = prepare_fp8_w8a8_moe_layer_for_cpu(
-            w13, w2, w13_scale, w2_scale
-        )
-    elif fp8_backend == Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
-        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
-            swizzle_mxfp8_moe_weight_scales,
-        )
-
-        w13_scale = swizzle_mxfp8_moe_weight_scales(w13_scale)
-        w2_scale = swizzle_mxfp8_moe_weight_scales(w2_scale)
-    else:
-        if fp8_backend not in [
-            Fp8MoeBackend.TRITON,
-            Fp8MoeBackend.BATCHED_TRITON,
-            Fp8MoeBackend.VLLM_CUTLASS,
-            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
-            Fp8MoeBackend.XPU,
-            Fp8MoeBackend.HPC,
-            # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
-            # the MXFP8 weights as-is — neither needs a load-time layout change.
-            Fp8MoeBackend.EMULATION,
-            Fp8MoeBackend.TRITON_MXFP8,
-        ]:
-            raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
-
-    return w13, w2, w13_scale, w2_scale
+    """Convert loaded FP8 MoE weights to the selected experts' layout."""
+    if experts_cls is None:
+        raise ValueError("No FP8 MoE experts were selected for weight conversion.")
+    return experts_cls.convert_fp8_weights(
+        layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+    )
 
 
 def make_fp8_moe_quant_config(
