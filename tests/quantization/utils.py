@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 import regex as re
@@ -33,6 +34,22 @@ def quant_spec(**kwargs: Any) -> QuantSpec:
 def quant_config_args(**kwargs: Any) -> QuantizationConfigArgs:
     """Build `QuantizationConfigArgs` from user-facing shorthand values."""
     return TypeAdapter(QuantizationConfigArgs).validate_python(kwargs)
+
+
+def named_expert_checkpoint_entries(
+    tensors: Mapping[str, torch.Tensor], expert_ids: Sequence[int], gated: bool = True
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Convert fused w13/w2 tensors to named entries relative to an experts layer."""
+    gate_up = ("gate_proj", "up_proj") if gated else ("gate_proj",)
+    for name, tensor in tensors.items():
+        projection, suffix = name.split("_", 1)
+        assert projection in ("w13", "w2")
+        projection_names = gate_up if projection == "w13" else ("down_proj",)
+        for expert_id in expert_ids:
+            entry = tensor[expert_id]
+            parts = entry.chunk(2) if len(projection_names) == 2 else (entry,)
+            for projection_name, part in zip(projection_names, parts, strict=True):
+                yield f"{expert_id}.{projection_name}.{suffix}", part
 
 
 def _limit_num_hidden_layers(

@@ -78,9 +78,11 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
 from vllm.model_executor.layers.quantization.quark.utils import (
     QuarkQTensorHint,
     canonicalize_quark_packed_int4,
+    quark_quantize_weight_to_mxfp4,
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    downcast_to_mxfp,
     quant_dequant_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -1232,6 +1234,27 @@ def test_quark_w8a8_mxfp8_moe_weight_shapes(monkeypatch):
         )
 
 
+def test_quark_ocp_mx_dense_rejects_unaligned_input_partition():
+    scheme = object.__new__(QuarkOCP_MX)
+    layer = torch.nn.Module()
+    layer.prefix = "model.layers.0.mlp.shared_expert.down_proj"
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "input size per partition of 80, which must be divisible by "
+            "the OCP MX group size 32"
+        ),
+    ):
+        scheme.create_weights(
+            layer=layer,
+            output_partition_sizes=[2560],
+            input_size_per_partition=80,
+            params_dtype=torch.bfloat16,
+            weight_loader=lambda *_: None,
+        )
+
+
 def test_quark_mxfp4_non_gpt_oss_uses_standard_weight_layout():
     method = QuarkOCP_MX_MoEMethod.__new__(QuarkOCP_MX_MoEMethod)
     method.model_type = "pixtral"
@@ -2321,6 +2344,80 @@ def test_quark_online_rotation_wikitext():
     # MXFP4 perplexity moves by a few tenths with batch size, attention backend
     # and eager mode. A skipped rotation is far outside this bound.
     assert measured_value == pytest.approx(config.excepted_value, abs=0.5)
+
+
+def _skip_reason_if_unavailable(backend: str, dtype: torch.dtype) -> str | None:
+    """Return a skip reason if `backend` cannot run on the current host."""
+    if backend == "triton":
+        if not (current_platform.is_cuda() or current_platform.is_rocm()):
+            return "Triton MXFP4 kernel requires a CUDA or ROCm GPU."
+        return None
+    if backend == "aiter":
+        from vllm._aiter_ops import is_aiter_found_and_supported
+
+        if not is_aiter_found_and_supported():
+            return "aiter is not available/supported on this platform."
+        if dtype != torch.bfloat16:
+            return "aiter's dynamic_mxfp4_quant only supports bfloat16 input."
+        return None
+    if backend == "xpu":
+        if not current_platform.is_xpu():
+            return "not on XPU platform."
+        return None
+    if backend == "quark":
+        try:
+            import quark.torch.kernel.mx  # noqa: F401
+        except ImportError:
+            return "amd-quark is not installed."
+        return None
+    raise ValueError(f"Unknown backend {backend}")
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("backend", ["triton", "aiter", "xpu", "quark"])
+def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
+    """Tests that the different implementations of mxfp4_quantize
+    in mxfp4_utils.py all match.
+    """
+    skip_reason = _skip_reason_if_unavailable(backend, dtype)
+    if skip_reason is not None:
+        pytest.skip(skip_reason)
+
+    torch.manual_seed(3)
+
+    num_rows = 64
+    hidden_size = 32 * 32  # multiple 32-element MXFP4 blocks
+    device = current_platform.device_type
+
+    x = (torch.rand(num_rows, hidden_size, dtype=dtype, device=device) - 0.5) * 2
+    # Vary the magnitude block-to-block so several scale exponents are
+    # exercised, rather than a single one for the whole tensor.
+    scalings = [2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]
+    for i in range(hidden_size // 32):
+        x[:, i * 32 : (i + 1) * 32] *= scalings[i % len(scalings)]
+
+    if backend == "triton":
+        x_fp4, x_scale, _ = downcast_to_mxfp(x, axis=-1)
+    elif backend == "aiter":
+        x_fp4, x_scale = quark_quantize_weight_to_mxfp4(x)
+    elif backend == "xpu":
+        # TODO: enable this test on XPU
+        pytest.skip("xpu mxfp4 quantization match to reference is untested")
+        # from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        #     xpu_mxfp4_quantize,
+        # )
+
+        # x_fp4, x_scale = xpu_mxfp4_quantize(x)
+    elif backend == "quark":
+        result = quant_dequant_mxfp4(x, scale_calculation_mode="even")
+    else:
+        raise ValueError(f"Unknown backend {backend}")
+
+    if backend != "quark":
+        result = dq_mxfp4_torch(x_fp4, x_scale, x.dtype)
+    reference = qdq_mxfp4_torch(x, scale_calculation_mode="even")
+
+    assert torch.equal(result, reference)
 
 
 @pytest.mark.skipif(

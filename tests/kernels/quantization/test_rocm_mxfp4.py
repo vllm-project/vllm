@@ -21,6 +21,7 @@ import torch
 
 from tests.kernels.utils import _assert_accurate, _assert_deterministic
 from tests.quantization.reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 
@@ -221,6 +222,26 @@ def test_vllm_quant_dequant_mxfp4_is_deterministic():
     x = torch.randn(64, 128, dtype=torch.bfloat16)
 
     _assert_deterministic(quant_dequant_mxfp4, x, n_runs=4)
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="rocm_aiter_mxfp4_gemm_dynamic_quant is registered only with AITER.",
+)
+def test_mxfp4_gemm_dynamic_quant_fake_dtype():
+    """torch.compile sizes the op's output from its fake; a fake that reports
+    another dtype than the real op makes the compiled graph read past it."""
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode(), torch.device(current_platform.device_type):
+        x = torch.empty(16, 64, dtype=torch.bfloat16)
+        weight = torch.empty(32, 32, dtype=torch.uint8)
+        weight_scale = torch.empty(32, 2, dtype=torch.uint8)
+        y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
+            x, weight, weight_scale, True, torch.bfloat16, hadamard_rotate=True
+        )
+    assert y.dtype == torch.bfloat16
+    assert y.shape == (16, 32)
 
 
 # Triton MXFP4 quant tests ------------------------------------------------
