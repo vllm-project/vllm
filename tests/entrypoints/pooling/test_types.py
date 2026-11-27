@@ -67,14 +67,6 @@ def _make_model_config(
     return mc
 
 
-def _make_mm_config(
-    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
-) -> MagicMock:
-    mm_cfg = MagicMock(name="MultiModalConfig")
-    mm_cfg.media_io_kwargs = media_io_kwargs
-    return mm_cfg
-
-
 def _make_offline_context(**overrides: Any) -> OfflineInputsContext:
     kwargs: dict[str, Any] = {"pooling_task": "embed"}
     kwargs.update(overrides)
@@ -89,17 +81,14 @@ def _call_offline_build_prompt_extras(
     ctx: OfflineInputsContext,
     *,
     params: Any = None,
-    mm_config: Any = None,
 ) -> dict[str, Any]:
-    return ctx.build_prompt_extras(params, mm_config)
+    return ctx.build_prompt_extras(params)
 
 
 def _call_online_build_prompt_extras(
     req: PoolingBasicRequestMixin,
-    *,
-    mm_config: Any = None,
 ) -> dict[str, Any]:
-    return req.build_prompt_extras(mm_config)
+    return req.build_prompt_extras()
 
 
 # =============================================================================
@@ -251,35 +240,25 @@ class TestOfflineBuildTokParams:
 
 
 class TestOnlineBuildPromptExtras:
-    """Online (`PoolingBasicRequestMixin.build_prompt_extras`) contract tests."""
+    """Request media options are carried to the renderer."""
 
-    def test_defaults_with_no_mm_config_returns_empty_without_key_error(self):
+    def test_empty_request_returns_empty(self):
         req = _make_online_request()
-        result = _call_online_build_prompt_extras(req, mm_config=None)
+        result = _call_online_build_prompt_extras(req)
         assert result == {}
 
-    def test_explicit_mm_and_caching_fields_merges_media_io_kwargs(self):
+    def test_explicit_fields_preserve_request_media_io_kwargs(self):
         req = _make_online_request(
             cache_salt="salt-abc-123",
             media_io_kwargs={"image": {"resize": [224, 224]}},
             mm_processor_kwargs={"do_rescale": False},
         )
-        mm_cfg = _make_mm_config(media_io_kwargs={"image": {"fps": 2}})
 
-        with patch(
-            "vllm.entrypoints.pooling.base.protocol.merge_media_io_kwargs",
-            return_value={"image": {"fps": 2, "resize": [224, 224]}},
-        ) as mock_merge:
-            result = _call_online_build_prompt_extras(req, mm_config=mm_cfg)
-
-        mock_merge.assert_called_once_with(
-            {"image": {"fps": 2}},
-            {"image": {"resize": [224, 224]}},
-        )
+        result = _call_online_build_prompt_extras(req)
         assert result == {
             "cache_salt": "salt-abc-123",
             "mm_processor_kwargs": {"do_rescale": False},
-            "media_io_kwargs": {"image": {"fps": 2, "resize": [224, 224]}},
+            "media_io_kwargs": {"image": {"resize": [224, 224]}},
         }
 
 
@@ -288,7 +267,7 @@ class TestOfflineBuildPromptExtras:
 
     def test_empty_inputs_returns_empty_without_key_error(self):
         ctx = _make_offline_context()
-        result = _call_offline_build_prompt_extras(ctx, params=None, mm_config=None)
+        result = _call_offline_build_prompt_extras(ctx, params=None)
 
         assert result == {}
 
@@ -300,30 +279,19 @@ class TestOfflineBuildPromptExtras:
                 "media_io_kwargs": {"image": {"source": "params"}},
             }
         )
-        mm_cfg = _make_mm_config(media_io_kwargs={"image": {"source": "mm_config"}})
         ctx = _make_offline_context(
             cache_salt="from-context",
             mm_processor_kwargs={"from_context": True},
             media_io_kwargs={"image": {"source": "context"}},
         )
 
-        with patch(
-            "vllm.entrypoints.pooling.types.merge_media_io_kwargs",
-            return_value={"image": {"source": "merged-context"}},
-        ) as mock_merge:
-            result = _call_offline_build_prompt_extras(
-                ctx, params=params, mm_config=mm_cfg
-            )
+        result = _call_offline_build_prompt_extras(ctx, params=params)
 
         # Context `media_io_kwargs` takes precedence over `params.extra_kwargs`.
-        mock_merge.assert_called_once_with(
-            {"image": {"source": "mm_config"}},
-            {"image": {"source": "context"}},
-        )
         assert result == {
             "cache_salt": "from-context",
             "mm_processor_kwargs": {"from_context": True},
-            "media_io_kwargs": {"image": {"source": "merged-context"}},
+            "media_io_kwargs": {"image": {"source": "context"}},
         }
 
     def test_none_context_fields_fall_back_to_extra_kwargs(self):
@@ -340,18 +308,8 @@ class TestOfflineBuildPromptExtras:
             media_io_kwargs=None,
         )
 
-        with patch(
-            "vllm.entrypoints.pooling.types.merge_media_io_kwargs",
-            return_value={"image": {"from_params": "yes"}},
-        ) as mock_merge:
-            result = _call_offline_build_prompt_extras(
-                ctx, params=params, mm_config=None
-            )
+        result = _call_offline_build_prompt_extras(ctx, params=params)
 
-        mock_merge.assert_called_once_with(
-            None,
-            {"image": {"from_params": "yes"}},
-        )
         assert result == {
             "cache_salt": "from-params",
             "mm_processor_kwargs": {"from_params": 1},

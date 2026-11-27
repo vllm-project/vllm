@@ -35,6 +35,7 @@ from ..base.protocol import (
     CompletionRequestMixin,
     EmbeddingTokenizeParamsMixin,
     EmbedRequestMixin,
+    MultimodalRequestMixin,
     PoolingBasicRequestMixin,
     reject_removed_pooling_parameters,
 )
@@ -258,7 +259,28 @@ class CohereEmbedInput(BaseModel):
     content: list[CohereEmbedContent]
 
 
-class CohereEmbedRequest(PoolingBasicRequestMixin):
+class CohereEmbedRequest(MultimodalRequestMixin):
+    model: str | None = None
+    user: str | None = None
+    request_id: str = Field(
+        default_factory=random_uuid,
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    priority: int = Field(
+        default=0,
+        ge=-(2**63),
+        le=2**63 - 1,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."
+        ),
+    )
+
     input_type: str | None = None
     texts: list[str] | None = None
     images: list[str] | None = None

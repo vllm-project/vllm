@@ -249,9 +249,15 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
 
-        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
+        media_io_kwargs = merge_media_io_kwargs(
+            getattr(self.model_config.multimodal_config, "media_io_kwargs", None),
+            (ctx.prompt_extras or {}).get("media_io_kwargs"),
+        )
+        data_1 = score_data_to_prompts(
+            scoring_data.data_1, "query", self.model_config, media_io_kwargs
+        )
         data_2 = score_data_to_prompts(
-            scoring_data.data_2, "document", self.model_config
+            scoring_data.data_2, "document", self.model_config, media_io_kwargs
         )
         prompts = data_1 + data_2
         ctx.n_queries = len(data_1)
@@ -311,9 +317,16 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
 
-        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
+        prompt_extras = ctx.build_prompt_extras(ctx.pooling_params)
+        media_io_kwargs = merge_media_io_kwargs(
+            getattr(self.model_config.multimodal_config, "media_io_kwargs", None),
+            prompt_extras.get("media_io_kwargs"),
+        )
+        data_1 = score_data_to_prompts(
+            scoring_data.data_1, "query", self.model_config, media_io_kwargs
+        )
         data_2 = score_data_to_prompts(
-            scoring_data.data_2, "document", self.model_config
+            scoring_data.data_2, "document", self.model_config, media_io_kwargs
         )
         prompts = data_1 + data_2
 
@@ -621,11 +634,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         # Priority for `chat_template_kwargs`:
         # explicit `prompt_extras` > `pooling_params.extra_kwargs` fallback.
-        prompt_extras = dict(
-            ctx.build_prompt_extras(
-                ctx.pooling_params, self.model_config.multimodal_config
-            )
-        )
+        prompt_extras = dict(ctx.build_prompt_extras(ctx.pooling_params))
         fallback_chat_template_kwargs = (
             ctx.pooling_params.extra_kwargs.get("chat_template_kwargs")
             if ctx.pooling_params.extra_kwargs

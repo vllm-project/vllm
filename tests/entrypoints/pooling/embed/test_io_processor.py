@@ -6,6 +6,7 @@ from typing import cast, get_args
 
 import pytest
 import torch
+from PIL import Image
 from pydantic import TypeAdapter, ValidationError
 
 from vllm import PoolingParams
@@ -26,7 +27,33 @@ from vllm.entrypoints.pooling.types import (
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import mm_input, tokens_input
 from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
+
+
+class TestChatMediaIOOptions:
+    """Pooling chat requests must preserve media IO options."""
+
+    def test_chat_embedding_preserves_media_io_kwargs(self):
+        rgba = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+        request = EmbeddingChatRequest(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": encode_image_url(rgba)},
+                        }
+                    ],
+                }
+            ],
+            media_io_kwargs={"image": {"image_mode": None}},
+        )
+
+        assert request.build_prompt_extras()["media_io_kwargs"] == {
+            "image": {"image_mode": None}
+        }
 
 
 class TestEmbeddingRequestParsing:
@@ -660,7 +687,7 @@ class TestEmbedRequestCacheSaltValidation:
         "bad_salt", ["", "s" * 129, "a@b", "a/b", "a\\b", "a\x00b"]
     )
     def test_invalid_cache_salt_rejected(self, bad_salt: str):
-        with pytest.raises(ValidationError, VLLMValidationError):
+        with pytest.raises(VLLMValidationError):
             TypeAdapter(EmbeddingRequest).validate_python(
                 {"model": "test", "input": "hello", "cache_salt": bad_salt}
             )

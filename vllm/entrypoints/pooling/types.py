@@ -9,10 +9,8 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
-from vllm.config import MultiModalConfig
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import (
@@ -169,7 +167,6 @@ class OfflineInputsContext:
     def build_prompt_extras(
         self,
         params: PoolingParams | None,
-        mm_config: MultiModalConfig | None = None,
     ) -> dict[str, Any]:
         prompt_extras: dict[str, Any] = dict(
             params.extra_kwargs if params and params.extra_kwargs else {}
@@ -180,20 +177,17 @@ class OfflineInputsContext:
             if (v := prompt_extras.get(k)) is not None
         }
 
-        default_media_io_kwargs = mm_config.media_io_kwargs if mm_config else None
         req_media_io_kwargs = (
             self.media_io_kwargs
             if self.media_io_kwargs is not None
             else prompt_extras.get("media_io_kwargs")
         )
-        merged_media_io_kwargs = merge_media_io_kwargs(
-            default_media_io_kwargs, req_media_io_kwargs
-        )
-        if merged_media_io_kwargs is not None:
-            merged["media_io_kwargs"] = merged_media_io_kwargs
 
         if self.cache_salt is not None:
             merged["cache_salt"] = self.cache_salt
+
+        if req_media_io_kwargs is not None:
+            merged["media_io_kwargs"] = req_media_io_kwargs
 
         if self.mm_processor_kwargs is not None:
             merged["mm_processor_kwargs"] = self.mm_processor_kwargs

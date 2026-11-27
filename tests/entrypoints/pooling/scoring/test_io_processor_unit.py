@@ -30,8 +30,11 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
     LateInteractionIOProcessor,
     _apply_post_tokenization_to_token_type_ids,
 )
-from vllm.entrypoints.pooling.scoring.types import ScoringData
-from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
+from vllm.entrypoints.pooling.scoring.types import ScoreData, ScoringData
+from vllm.entrypoints.pooling.scoring.utils import (
+    compress_token_type_ids,
+    score_data_to_prompts,
+)
 from vllm.entrypoints.pooling.types import (
     EncodeCMPLRenderParams,
     OfflineScoringInputsContext,
@@ -39,6 +42,7 @@ from vllm.entrypoints.pooling.types import (
     ScoringRenderParams,
 )
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
@@ -721,3 +725,79 @@ class TestOfflineScoreContextForwarding:
         assert ctx.cache_salt == "score-salt"
         assert ctx.media_io_kwargs == media_kwargs
         assert ctx.mm_processor_kwargs == mm_kwargs
+
+
+# =============================================================================
+# score data media IO kwargs
+# =============================================================================
+
+
+def _make_rgba_score_data():
+    image = Image.new("RGBA", (2, 2), (255, 0, 0, 128))
+    return [
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_url(image)},
+        }
+    ]
+
+
+def _call_score_data_to_prompts(
+    processor: CrossEncoderIOProcessor,
+    data: ScoreData,
+    role: str,
+    media_io_kwargs: dict[str, dict[str, object]] | None = None,
+    default_media_io_kwargs: dict[str, dict[str, object]] | None = None,
+):
+    merged_media_io_kwargs = merge_media_io_kwargs(
+        default_media_io_kwargs, media_io_kwargs
+    )
+    return score_data_to_prompts(
+        [data],
+        role,
+        processor.model_config,
+        media_io_kwargs=merged_media_io_kwargs,
+    )
+
+
+@pytest.mark.parametrize("multimodal_reranker_processor", ["qwen3_vl"], indirect=True)
+class TestScoreDataMediaIoKwargs:
+    """Request media options override model defaults before image loading."""
+
+    def test_default_image_mode_converts_rgba_to_rgb(
+        self, multimodal_reranker_processor
+    ):
+        (prompt,) = _call_score_data_to_prompts(
+            multimodal_reranker_processor,
+            _make_rgba_score_data(),
+            "document",
+        )
+
+        (loaded_image,) = prompt["multi_modal_data"]["image"]
+        assert loaded_image.mode == "RGB"
+
+    @pytest.mark.parametrize("role", ["query", "document"])
+    def test_request_none_overrides_default_rgb_for_both_roles(
+        self, multimodal_reranker_processor, role
+    ):
+        (prompt,) = _call_score_data_to_prompts(
+            multimodal_reranker_processor,
+            _make_rgba_score_data(),
+            role,
+            media_io_kwargs={"image": {"image_mode": None}},
+            default_media_io_kwargs={"image": {"image_mode": "RGB"}},
+        )
+
+        (loaded_image,) = prompt["multi_modal_data"]["image"]
+        assert loaded_image.mode == "RGBA"
+
+    def test_image_mode_false_raises_instead_of_disabling_conversion(
+        self, multimodal_reranker_processor
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            _call_score_data_to_prompts(
+                multimodal_reranker_processor,
+                _make_rgba_score_data(),
+                "document",
+                media_io_kwargs={"image": {"image_mode": False}},
+            )

@@ -28,6 +28,7 @@ def llm(vllm_runner):
         runner="pooling",
         max_model_len=8192,
         limit_mm_per_prompt={"image": 1},
+        media_io_kwargs={"image": {"image_mode": "RGB"}},
         enforce_eager=True,
         seed=0,
     ) as runner:
@@ -57,7 +58,8 @@ def _prompt(
     parts: list[str] = []
     if text is not None:
         parts.append(text)
-    formatted = _format_chatml_prompt("".join(parts))
+    body = IMAGE_PLACEHOLDER + "".join(parts) if img is not None else "".join(parts)
+    formatted = _format_chatml_prompt(body)
 
     if img is None:
         return formatted
