@@ -1461,9 +1461,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         prefill_runs_as_decode_np = None
         decode_graph_eligible = not has_prefill
-        if has_prefill and self.pcp_manager is None:
+        if has_prefill:
             # One new prompt token over existing context (possibly padded with
-            # placeholder drafts) runs as a decode. PCP partitions prefill rows.
+            # placeholder drafts) runs as a decode.
             num_new_tokens = num_scheduled_tokens
             if num_draft_tokens_np is not None:
                 num_new_tokens = num_new_tokens - num_draft_tokens_np
@@ -1564,8 +1564,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Get query_start_loc.
-        # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
-        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        # num_reqs_padded is None for PIECEWISE graphs (no request padding needed);
+        # under PCP decode sharding, batch_desc.num_reqs is the rank-local padded
+        # request count applied by partition_batch(), so the global batch here must
+        # not shrink below num_reqs.
+        num_reqs_padded = max(batch_desc.num_reqs or num_reqs, num_reqs)
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
@@ -1900,6 +1903,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
+        num_reqs_for_dispatch = num_reqs
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len: int | None = max(scheduler_output.num_scheduled_tokens.values())
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
@@ -1914,6 +1918,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
                     batch_req_state.num_scheduled_tokens,
                     batch_req_state.is_prefilling_np,
+                    batch_req_state.prefill_runs_as_decode_np,
+                )
+                num_reqs_for_dispatch = self.pcp_manager.get_num_reqs_for_dispatch(
+                    num_reqs,
+                    batch_req_state.decode_graph_eligible,
                 )
 
         num_active_loras = 0
@@ -1946,6 +1955,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,
+            num_reqs_for_dispatch=num_reqs_for_dispatch,
         )
 
         if batch_desc.num_tokens == 0:

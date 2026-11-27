@@ -259,11 +259,14 @@ class MambaHybridModelState(DefaultModelState):
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
 
-        is_prefilling_np = input_batch.is_prefilling_np
+        is_prefilling_np = input_batch.is_prefilling_np[: input_batch.num_reqs]
         if input_batch.prefill_runs_as_decode_np is not None:
             # A prompt tail the scheduler padded with placeholder drafts must run
             # as a spec-decode row: the prefill kernels can't roll them back.
-            is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
+            is_prefilling_np = (
+                is_prefilling_np
+                & ~input_batch.prefill_runs_as_decode_np[: input_batch.num_reqs]
+            )
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens

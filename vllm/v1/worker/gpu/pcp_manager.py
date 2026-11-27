@@ -10,6 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -50,6 +51,33 @@ class RankSegment:
         return self.global_batch_slice.stop - self.global_batch_slice.start
 
 
+def apply_prefill_as_decode_mask(
+    is_prefilling: np.ndarray,
+    prefill_runs_as_decode: np.ndarray | None,
+) -> np.ndarray:
+    """Return effective prefill flags after clearing rows that run as decode."""
+    flags = np.asarray(is_prefilling, dtype=np.bool_)
+    if prefill_runs_as_decode is None:
+        return flags
+    override = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
+    if override.shape != flags.shape:
+        raise ValueError(
+            "prefill_runs_as_decode shape does not match is_prefilling: "
+            f"{override.shape} != {flags.shape}."
+        )
+    return flags & ~override
+
+
+def has_requests_to_run_as_prefill(batch: InputBatch) -> bool:
+    """Return True if any request in `batch` executes on the prefill path."""
+    return bool(
+        apply_prefill_as_decode_mask(
+            batch.is_prefilling_np,
+            batch.prefill_runs_as_decode_np,
+        ).any()
+    )
+
+
 class PCPManager:
     """MRV2 PC batch manager.
 
@@ -84,6 +112,7 @@ class PCPManager:
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
         self._local_gather_idx: torch.Tensor | None = None
+        self._per_rank_num_tokens: list[int] | None = None
         self.draft_prefill_batch: InputBatch | None = None
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
@@ -409,23 +438,38 @@ class PCPManager:
         self._gathered_kv_write_mask = async_tensor_h2d(
             gathered_kv_write_mask, device=self.device
         )
+        self._per_rank_num_tokens = per_rank_num_tokens
         return segments_by_rank, per_rank_num_tokens
 
     def get_num_tokens_for_dispatch(
         self,
         num_scheduled_tokens: np.ndarray,
         is_prefilling: np.ndarray,
+        prefill_runs_as_decode: np.ndarray | None = None,
     ) -> int:
         """Return the largest real rank-local batch before graph padding."""
+        effective_is_prefilling = apply_prefill_as_decode_mask(
+            is_prefilling, prefill_runs_as_decode
+        )
         return max(
             sum(
                 chunk_len
                 for _, _, chunk_len in self._iter_rank_chunks(
-                    rank, num_scheduled_tokens, is_prefilling
+                    rank, num_scheduled_tokens, effective_is_prefilling
                 )
             )
             for rank in range(self.pcp_world_size)
         )
+
+    def get_num_reqs_for_dispatch(
+        self,
+        num_reqs: int,
+        decode_graph_eligible: bool,
+    ) -> int:
+        """Return the largest real rank-local request count before graph padding."""
+        if decode_graph_eligible and self.shard_decode_requests:
+            return cdiv(num_reqs, self.pcp_world_size)
+        return num_reqs
 
     @staticmethod
     def _resolve_num_reqs_after_padding(
@@ -435,7 +479,7 @@ class PCPManager:
     ) -> int:
         if padded_num_reqs is None:
             return num_local_reqs
-        if input_batch.has_prefill:
+        if has_requests_to_run_as_prefill(input_batch):
             raise RuntimeError("PCP FULL graphs require a decode-only batch.")
         assert padded_num_reqs >= num_local_reqs, (
             "PCP graph request capacity must cover the rank-local batch: "
@@ -464,7 +508,10 @@ class PCPManager:
 
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
-        is_prefilling = global_batch.is_prefilling_np
+        is_prefilling = apply_prefill_as_decode_mask(
+            global_batch.is_prefilling_np,
+            global_batch.prefill_runs_as_decode_np,
+        )
 
         padded_num_tokens = None
         padded_num_reqs = None
@@ -643,9 +690,9 @@ class PCPManager:
         local_num_computed_prefill_tokens_np = np.minimum(
             local_start_pos_np, local_prefill_len_np
         )
-        real_local_is_prefilling_np = (
-            local_num_computed_prefill_tokens_np < local_prefill_len_np
-        )
+        real_local_is_prefilling_np = is_prefilling[
+            local_to_global_batch_req_idx_np
+        ] & (local_num_scheduled_tokens > 0)
         local_is_prefilling_np = np.zeros(num_reqs_after_padding, dtype=np.bool_)
         local_is_prefilling_np[:num_local_reqs] = real_local_is_prefilling_np
         local_has_prefill = bool(local_is_prefilling_np.any())
@@ -709,6 +756,11 @@ class PCPManager:
             max_seq_len_np=None,
             has_prefill=local_has_prefill,
             decode_graph_eligible=not local_has_prefill,
+            max_query_len=(
+                batch_desc.max_query_len or batch_desc.uniform_token_count
+                if batch_desc.cg_mode == CUDAGraphMode.FULL
+                else input_batch.max_query_len
+            ),
             prefill_runs_as_decode_np=None,
             input_ids=input_buffers.input_ids[:num_local_tokens_padded],
             positions=input_buffers.positions[:num_local_tokens_padded],
@@ -818,11 +870,22 @@ class PCPManager:
         )
         return gathered_kv_slot_mappings
 
-    def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def restore_hidden_states(
+        self, hidden_states: torch.Tensor, padded_num_tokens: int | None = None
+    ) -> torch.Tensor:
         if self._hidden_restore_idx is None:
             return hidden_states
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
-        return gathered[self._hidden_restore_idx]
+        restore_idx = self._hidden_restore_idx
+        if (
+            padded_num_tokens is not None
+            and self._local_gather_idx is not None
+            and padded_num_tokens != (orig_padded := self._local_gather_idx.shape[0])
+        ):
+            rank_idx = torch.div(restore_idx, orig_padded, rounding_mode="floor")
+            local_offset = torch.remainder(restore_idx, orig_padded)
+            restore_idx = rank_idx * padded_num_tokens + local_offset
+        return gathered[restore_idx]
 
     def get_draft_input_buffers(
         self, input_buffers: InputBuffers, num_tokens: int
@@ -830,6 +893,31 @@ class PCPManager:
         """Return draft inputs and their MoE routing padding mask."""
         batch = self.draft_prefill_batch
         if batch is not None:
+            if num_tokens > batch.num_tokens_after_padding:
+                assert self._input_buffers is not None
+                assert self._per_rank_num_tokens is not None
+                self._input_buffers.input_ids[
+                    batch.num_tokens_after_padding : num_tokens
+                ].zero_()
+                self._input_buffers.positions[
+                    batch.num_tokens_after_padding : num_tokens
+                ].zero_()
+                is_padding = self._input_buffers.is_padding[:num_tokens]
+                is_padding[batch.num_tokens_after_padding :].fill_(True)
+                if self._moe_is_padding is not None:
+                    rows = np.arange(num_tokens)
+                    gathered = rows >= np.array(self._per_rank_num_tokens)[:, None]
+                    is_padding = async_tensor_h2d(
+                        gathered.ravel(), out=self._moe_is_padding[: gathered.size]
+                    )
+                batch = replace(
+                    batch,
+                    num_tokens_after_padding=num_tokens,
+                    input_ids=self._input_buffers.input_ids[:num_tokens],
+                    positions=self._input_buffers.positions[:num_tokens],
+                    is_padding=is_padding,
+                )
+                self.draft_prefill_batch = batch
             return batch, batch.is_padding
         return input_buffers, self.moe_is_padding(input_buffers.is_padding[:num_tokens])
 
@@ -848,6 +936,8 @@ class PCPManager:
             self._local_gather_idx,
             out=local_batch.input_ids[:num_local_tokens],
         )
+        if num_local_tokens > local_batch.num_tokens:
+            local_batch.input_ids[local_batch.num_tokens : num_local_tokens].zero_()
         self.draft_prefill_batch = local_batch
 
     def restore_draft_prefill(
@@ -857,12 +947,15 @@ class PCPManager:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.draft_prefill_batch is None:
             return last_hidden_states, hidden_states
+        padded_num_tokens = self.draft_prefill_batch.num_tokens_after_padding
         local_last_hidden_states = last_hidden_states
-        last_hidden_states = self.restore_hidden_states(local_last_hidden_states)
+        last_hidden_states = self.restore_hidden_states(
+            local_last_hidden_states, padded_num_tokens
+        )
         hidden_states = (
             last_hidden_states
             if local_last_hidden_states is hidden_states
-            else self.restore_hidden_states(hidden_states)
+            else self.restore_hidden_states(hidden_states, padded_num_tokens)
         )
         self.draft_prefill_batch = None
         return last_hidden_states, hidden_states

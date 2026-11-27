@@ -17,7 +17,12 @@ from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.pcp_manager import (
+    PCPManager,
+    apply_prefill_as_decode_mask,
+    has_requests_to_run_as_prefill,
+)
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
@@ -841,3 +846,455 @@ def test_parallel_config_manages_decode_sharding(
     )
 
     assert parallel_config.pcp_shard_decode_requests is expected
+
+
+def test_apply_prefill_as_decode_mask_validates_shape():
+    flags = np.array([True, False, True], dtype=np.bool_)
+    assert np.array_equal(
+        apply_prefill_as_decode_mask(flags, None),
+        flags,
+    )
+    assert np.array_equal(
+        apply_prefill_as_decode_mask(
+            flags, np.array([True, False, False], dtype=np.bool_)
+        ),
+        np.array([False, False, True], dtype=np.bool_),
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        apply_prefill_as_decode_mask(flags, np.array([True, False], dtype=np.bool_))
+
+
+def test_num_tokens_for_dispatch_accounts_for_prefill_running_as_decode():
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+    )
+    num_scheduled_tokens = np.array([4, 4], dtype=np.int32)
+    is_prefilling = np.array([False, True], dtype=np.bool_)
+    # Without override: decode (4 tokens on rank 0) + split prefill
+    # (2 tokens per rank) -> max 6.
+    assert manager.get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling) == 6
+    # With override: 2 sharded decodes (rank 0 gets req 0, rank 1 gets req 1) -> max 4.
+    prefill_runs_as_decode = np.array([False, True], dtype=np.bool_)
+    assert (
+        manager.get_num_tokens_for_dispatch(
+            num_scheduled_tokens, is_prefilling, prefill_runs_as_decode
+        )
+        == 4
+    )
+
+
+def test_partition_batch_runs_cached_single_token_prefill_as_sharded_decode(
+    monkeypatch,
+):
+    device = torch.device("cpu")
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+
+    # Global batch:
+    # req 0: ordinary decode (computed=16, prefill_len=16, scheduled=1)
+    # req 1: cached 1-token prompt tail running as decode
+    #        (computed=127, prefill_len=128, scheduled=1)
+    # req 2: multi-token prefill (computed=0, prefill_len=8, scheduled=8)
+    global_buffers = InputBuffers(4, 16, device)
+    base = InputBatch.make_dummy(3, 10, global_buffers)
+    query_start_loc_np = np.array([0, 1, 2, 10], dtype=np.int32)
+    global_buffers.query_start_loc[:4] = torch.from_numpy(query_start_loc_np)
+    global_buffers.input_ids[:10] = torch.arange(100, 110, dtype=torch.int32)
+    positions_np = np.array([16, 127, 0, 1, 2, 3, 4, 5, 6, 7], dtype=np.int64)
+    global_buffers.positions[:10] = torch.from_numpy(positions_np)
+    seq_lens_np = np.array([17, 128, 8], dtype=np.int32)
+    global_buffers.seq_lens[:3] = torch.from_numpy(seq_lens_np)
+
+    global_batch = replace(
+        base,
+        req_ids=["d0", "tail1", "p2"],
+        num_reqs=3,
+        num_reqs_after_padding=3,
+        idx_mapping=torch.arange(3, dtype=torch.int64, device=device),
+        idx_mapping_np=np.arange(3, dtype=np.int64),
+        num_scheduled_tokens=np.array([1, 1, 8], dtype=np.int32),
+        num_tokens=10,
+        num_tokens_after_padding=10,
+        query_start_loc=global_buffers.query_start_loc[:4],
+        query_start_loc_np=query_start_loc_np,
+        seq_lens=global_buffers.seq_lens[:3],
+        seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_np),
+        num_computed_tokens_np=np.array([16, 127, 0], dtype=np.int32),
+        prefill_len_np=np.array([16, 128, 8], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([16, 127, 0], dtype=np.int32),
+        is_prefilling_np=np.array([False, True, True], dtype=np.bool_),
+        has_prefill=True,
+        prefill_runs_as_decode_np=np.array([False, True, False], dtype=np.bool_),
+        decode_graph_eligible=False,
+        input_ids=global_buffers.input_ids[:10],
+        positions=global_buffers.positions[:10],
+        is_padding=global_buffers.is_padding[:10],
+    )
+
+    local_batches = []
+    for pcp_rank in range(2):
+        manager = PCPManager(
+            pcp_world_size=2,
+            pcp_rank=pcp_rank,
+            device=device,
+            shard_decode_requests=True,
+            max_num_reqs=4,
+            max_num_tokens=16,
+        )
+        local_batch = manager.partition_batch(
+            global_batch,
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=5, num_reqs=None
+            ),
+        )
+        local_batches.append((manager, local_batch))
+
+    # Rank 0 owns decode d0 + two chunks of p2 (offsets 0..2 and 6..8).
+    # Rank 1 owns converted decode tail1 + two chunks of p2 (offsets 2..4 and 4..6).
+    _, batch_r0 = local_batches[0]
+    _, batch_r1 = local_batches[1]
+    assert batch_r0.req_ids == ["d0", "p2", "p2"]
+    assert batch_r1.req_ids == ["tail1", "p2", "p2"]
+    assert batch_r0.is_prefilling_np.tolist() == [False, True, True]
+    assert batch_r0.prefill_runs_as_decode_np is None
+    assert batch_r1.is_prefilling_np.tolist() == [False, True, True]
+    assert batch_r1.prefill_runs_as_decode_np is None
+    # Global batch lifecycle flags remain untouched for sampling / prompt logprobs.
+    assert global_batch.is_prefilling_np.tolist() == [False, True, True]
+    assert global_batch.has_prefill is True
+
+
+def test_pcp_full_decode_graph_allows_short_prefill_running_as_decode(monkeypatch):
+    device = torch.device("cpu")
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+
+    # Single request in global batch: cached 1-token prompt tail running as decode.
+    # Rank 0 owns it; Rank 1 gets a 0-token placeholder pointing to req 0.
+    global_buffers = InputBuffers(4, 8, device)
+    global_batch = _make_global_decode_batch([127], global_buffers, device)
+    global_batch = replace(
+        global_batch,
+        prefill_len_np=np.array([128], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([127], dtype=np.int32),
+        is_prefilling_np=np.array([True], dtype=np.bool_),
+        has_prefill=True,
+        prefill_runs_as_decode_np=np.array([True], dtype=np.bool_),
+        decode_graph_eligible=True,
+    )
+    assert not has_requests_to_run_as_prefill(global_batch)
+
+    seen_is_prefilling: list[torch.Tensor] = []
+    seen_max_query_len: list[int] = []
+
+    def _fake_build_attn_metadata(**kwargs):
+        seen_is_prefilling.append(kwargs["is_prefilling"])
+        seen_max_query_len.append(kwargs["max_query_len"])
+        return {}
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.default.build_attn_metadata",
+        _fake_build_attn_metadata,
+    )
+    model_state = object.__new__(DefaultModelState)
+    model_state.model_config = SimpleNamespace(max_model_len=2048)
+    model_state.mm_prefix_ranges = None
+
+    for pcp_rank in range(2):
+        manager = PCPManager(
+            pcp_world_size=2,
+            pcp_rank=pcp_rank,
+            device=device,
+            shard_decode_requests=True,
+            max_num_reqs=4,
+            max_num_tokens=8,
+        )
+        local_batch = manager.partition_batch(
+            global_batch,
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=2,
+                num_reqs=2,
+                uniform_token_count=1,
+            ),
+        )
+        assert local_batch.num_reqs_after_padding == 2
+        assert local_batch.num_tokens_after_padding == 2
+        assert local_batch.has_prefill is False
+        assert local_batch.decode_graph_eligible is True
+        assert local_batch.max_query_len == 1
+        assert not has_requests_to_run_as_prefill(local_batch)
+        assert local_batch.prefill_runs_as_decode_np is None
+        assert local_batch.is_prefilling_np.tolist() == [False, False]
+        if pcp_rank == 0:
+            # Rank 0 owns the converted request (padded to 2 reqs).
+            assert local_batch.num_tokens == 1
+        else:
+            # Rank 1 is empty (0 tokens): placeholder must not appear as prefilling.
+            assert local_batch.num_tokens == 0
+
+        model_state.prepare_attn(
+            local_batch,
+            CUDAGraphMode.FULL,
+            block_tables=(),
+            slot_mappings=torch.zeros((1, 4), dtype=torch.int64),
+            attn_groups=[],
+            kv_cache_config=SimpleNamespace(),
+        )
+
+    assert [t.tolist() for t in seen_is_prefilling] == [
+        [False, False],
+        [False, False],
+    ]
+    assert seen_max_query_len == [1, 1]
+
+
+def test_pcp_sharded_decode_keeps_global_padded_reqs_at_least_num_reqs(monkeypatch):
+    """When PCP shards a 4-request uniform decode batch across 2 ranks,
+    batch_desc.num_reqs is the rank-local request count (2). Global input
+    preparation before partition_batch must still allocate for all 4 global
+    requests before partition_batch slices each rank's 2 local requests.
+    """
+    device = torch.device("cpu")
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+
+    global_buffers = InputBuffers(4, 8, device)
+    global_batch = _make_global_decode_batch([64, 64, 127, 127], global_buffers, device)
+    global_batch = replace(
+        global_batch,
+        prefill_len_np=np.array([64, 64, 128, 128], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([64, 64, 127, 127], dtype=np.int32),
+        is_prefilling_np=np.array([False, False, True, True], dtype=np.bool_),
+        has_prefill=True,
+        prefill_runs_as_decode_np=np.array([False, False, True, True], dtype=np.bool_),
+        decode_graph_eligible=True,
+    )
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.NONE,
+        num_tokens=2,
+        num_reqs=2,
+        uniform_token_count=1,
+    )
+    num_reqs_padded = max(
+        batch_desc.num_reqs or global_batch.num_reqs, global_batch.num_reqs
+    )
+    assert num_reqs_padded == 4
+
+    for pcp_rank in range(2):
+        manager = PCPManager(
+            pcp_world_size=2,
+            pcp_rank=pcp_rank,
+            device=device,
+            shard_decode_requests=True,
+            max_num_reqs=4,
+            max_num_tokens=8,
+        )
+        local_batch = manager.partition_batch(global_batch, batch_desc)
+        assert local_batch.num_reqs == 2
+        assert local_batch.num_reqs_after_padding == 2
+        assert local_batch.decode_graph_eligible is True
+
+
+def test_pcp_full_decode_graph_mamba_hybrid_handles_padded_local_is_prefilling(
+    monkeypatch,
+):
+    """When 3 global decode/short-prefill requests are sharded across 2 PCP ranks
+    and replay a 2-request FULL decode graph, rank 1 has num_local_reqs=1 and
+    num_reqs_after_padding=2. MambaHybridModelState.prepare_attn must slice
+    local_batch.is_prefilling_np to local_batch.num_reqs before copying into its
+    padded is_prefilling buffer.
+    """
+    from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+
+    device = torch.device("cpu")
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+
+    global_buffers = InputBuffers(4, 8, device)
+    global_batch = _make_global_decode_batch([64, 127, 64], global_buffers, device)
+    global_batch = replace(
+        global_batch,
+        prefill_len_np=np.array([64, 128, 64], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([64, 127, 64], dtype=np.int32),
+        is_prefilling_np=np.array([False, True, False], dtype=np.bool_),
+        has_prefill=True,
+        prefill_runs_as_decode_np=np.array([False, True, False], dtype=np.bool_),
+        decode_graph_eligible=True,
+    )
+
+    seen_mamba_is_prefilling: list[torch.Tensor] = []
+
+    def _fake_build_attn_metadata(**kwargs):
+        seen_mamba_is_prefilling.append(
+            kwargs["model_specific_attn_metadata"].is_prefilling
+        )
+        return {}
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid.build_attn_metadata",
+        _fake_build_attn_metadata,
+    )
+    model_state = object.__new__(MambaHybridModelState)
+    model_state.model_config = SimpleNamespace(max_model_len=2048)
+    model_state.vllm_config = SimpleNamespace(num_speculative_tokens=1)
+    model_state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
+    model_state.prefix_caching = False
+    model_state._use_replayssm_trackers = False
+    model_state.recoverssm = None
+
+    for pcp_rank in range(2):
+        manager = PCPManager(
+            pcp_world_size=2,
+            pcp_rank=pcp_rank,
+            device=device,
+            shard_decode_requests=True,
+            max_num_reqs=4,
+            max_num_tokens=8,
+        )
+        local_batch = manager.partition_batch(
+            global_batch,
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=2,
+                num_reqs=2,
+                uniform_token_count=1,
+            ),
+        )
+        model_state.prepare_attn(
+            local_batch,
+            CUDAGraphMode.FULL,
+            block_tables=(),
+            slot_mappings=torch.zeros((1, 4), dtype=torch.int64),
+            attn_groups=[],
+            kv_cache_config=SimpleNamespace(),
+        )
+
+    assert [t.tolist() for t in seen_mamba_is_prefilling] == [
+        [False, False],
+        [False, False],
+    ]
+
+
+def test_pcp_sharded_decode_execute_model_scales_reqs_for_dispatch(
+    monkeypatch,
+):
+    """Under PCP decode sharding, execute_model dispatches target CUDA graphs
+    with the sharded per-rank request count via get_num_reqs_for_dispatch.
+    """
+    from unittest.mock import Mock
+
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu import model_runner as model_runner_module
+    from vllm.v1.worker.gpu.dp_utils import DPSyncState
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+    )
+    assert manager.get_num_reqs_for_dispatch(4, decode_graph_eligible=True) == 2
+    assert manager.get_num_reqs_for_dispatch(3, decode_graph_eligible=True) == 2
+    assert manager.get_num_reqs_for_dispatch(4, decode_graph_eligible=False) == 4
+    runner = Mock(
+        lora_config=None,
+        aux_output_connector=None,
+        encoder_cache=None,
+        pcp_manager=manager,
+        is_encoder_decoder=False,
+        max_num_reqs=8,
+        decode_query_len=1,
+        dp_size=2,
+        dp_rank=0,
+        parallel_config=SimpleNamespace(),
+        ubatch_runner=None,
+        cudagraph_manager=object(),
+        observability_config=SimpleNamespace(cudagraph_metrics=False),
+    )
+    runner.gather_batch_req_state.return_value = (
+        SimpleNamespace(
+            num_tokens=4,
+            num_scheduled_tokens=np.array([1, 1, 1, 1], dtype=np.int32),
+            is_prefilling_np=np.array([False, False, True, True], dtype=np.bool_),
+            prefill_runs_as_decode_np=np.array(
+                [False, False, True, True], dtype=np.bool_
+            ),
+            has_prefill=True,
+            decode_graph_eligible=True,
+        ),
+        1,
+    )
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.num_scheduled_tokens = {f"r{i}": 1 for i in range(4)}
+    scheduler_output.total_num_scheduled_tokens = 4
+
+    seen_dispatch_args = {}
+
+    def _fake_dispatch(
+        cudagraph_manager, num_reqs, num_toks, uniform_tok_count, *a, **kw
+    ):
+        seen_dispatch_args["num_reqs"] = num_reqs
+        seen_dispatch_args["num_reqs_for_dispatch"] = kw.get("num_reqs_for_dispatch")
+        seen_dispatch_args["num_toks"] = num_toks
+        seen_dispatch_args["uniform_tok_count"] = uniform_tok_count
+        return (
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=2,
+                num_reqs=kw.get("num_reqs_for_dispatch", num_reqs),
+                uniform_token_count=1,
+            ),
+            DPSyncState(
+                num_tokens_across_dp=torch.tensor([2, 2], dtype=torch.int32),
+                uniform_token_count=1,
+                max_query_len=1,
+                eager=False,
+                num_reqs=num_reqs,
+            ),
+        )
+
+    monkeypatch.setattr(model_runner_module, "dispatch_cg_and_sync_dp", _fake_dispatch)
+    runner.prepare_inputs.side_effect = RuntimeError("stop after dispatch")
+
+    with pytest.raises(RuntimeError, match="stop after dispatch"):
+        GPUModelRunner.execute_model(runner, scheduler_output)
+
+    assert seen_dispatch_args == {
+        "num_reqs": 4,
+        "num_reqs_for_dispatch": 2,
+        "num_toks": 2,
+        "uniform_tok_count": 1,
+    }
+
+    from vllm.v1.worker.gpu import dp_utils as dp_utils_module
+
+    monkeypatch.setattr(dp_utils_module, "should_skip_dp_coordination", lambda: True)
+    seen_cg_reqs: list[int] = []
+
+    class _FakeCudaGraphManager:
+        def dispatch(
+            self, num_reqs, num_tokens, uniform_token_count, **kwargs
+        ) -> BatchExecutionDescriptor:
+            seen_cg_reqs.append(num_reqs)
+            return BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                uniform_token_count=uniform_token_count,
+            )
+
+    batch_desc, dp_sync = dp_utils_module.dispatch_cg_and_sync_dp(
+        _FakeCudaGraphManager(),  # type: ignore[arg-type]
+        num_reqs=4,
+        num_tokens=2,
+        uniform_token_count=1,
+        dp_size=2,
+        dp_rank=0,
+        max_query_len=1,
+        num_reqs_for_dispatch=2,
+    )
+    assert seen_cg_reqs == [2, 2]
+    assert batch_desc.num_reqs == 2
+    assert dp_sync is not None
+    assert dp_sync.num_reqs == 4
