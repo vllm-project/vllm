@@ -18,7 +18,7 @@ def test_plugin(
         m.setenv("VLLM_PLUGINS", "")
 
         with pytest.raises(ValueError, match="are not supported for now"):
-            LLM(model=dummy_opt_path, load_format="dummy")
+            LLM(model=dummy_opt_path, load_format="dummy", model_impl="vllm")
 
 
 @create_new_process_for_each_test()
@@ -85,7 +85,6 @@ def test_oot_registration_multimodal(
             model=dummy_llava_path,
             load_format="dummy",
             max_num_seqs=1,
-            trust_remote_code=True,
             max_model_len=4096,
             enforce_eager=True,
             limit_mm_per_prompt={"image": 1},

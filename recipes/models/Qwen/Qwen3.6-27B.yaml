@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3.6 dense multimodal model (27B) with gated delta networks hybrid attention, MTP, and 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-10-12
+  date_updated: 2026-11-17
   tasks:
     - multimodal
     - text
@@ -105,6 +105,14 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "8"
+      arc_pro_b60:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
   fp8:
     model_id: "Qwen/Qwen3.6-27B-FP8"
     precision: fp8
@@ -127,7 +135,6 @@ variants:
     tp: 1
     # SM120 GPUs only reach FlashInfer's XQA decode kernel from 0.28.0.
     min_vllm_version: "0.28.0"
-    nightly_required: true
     description: "NVIDIA ModelOpt NVFP4 checkpoint — MLP linears quantized to NVFP4, attention linears and KV cache in FP8. Single Blackwell GPU, including DGX Spark."
     hardware_overrides:
       dgx_station_gb300:
@@ -246,7 +253,7 @@ guide: |
   ## Prerequisites
 
   - **vLLM version:** >= 0.17.0
-  - **NVFP4 vLLM version:** >= 0.28.0 (currently nightly). 0.24.0 loads the
+  - **NVFP4 vLLM version:** >= 0.28.0. 0.24.0 loads the
     checkpoint, but FlashInfer only selects its XQA decode kernel on SM120
     GPUs from 0.28.0.
   - **Hardware (BF16):** 1x H200, 2x H100, 4x Intel Arc Pro B60, 2x Intel Arc Pro B70
@@ -311,7 +318,7 @@ guide: |
   (W4A16) while the attention linears and KV cache stay FP8, so the ~22 GB
   weights fit a single Blackwell GPU. vLLM auto-detects the ModelOpt
   quantization from the checkpoint, so no `--quantization` flag is needed, but
-  it does need vLLM 0.28.0+ (currently nightly) for FlashInfer's XQA decode path
+  it does need vLLM 0.28.0+ for FlashInfer's XQA decode path
   on SM120. NVIDIA reports near-lossless accuracy versus the FP8 baseline.
 
   Select the NVFP4 variant in the command builder above and switch the hardware
@@ -501,7 +508,7 @@ guide: |
   - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
     (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
   - **Disable reasoning:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
-  - **Prefix Caching (Mamba):** currently experimental in "align" mode.
+  - **Prefix Caching (Mamba):** currently experimental.
 
   ## References
 

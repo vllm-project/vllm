@@ -556,6 +556,9 @@ class MuseGlimmerVisionEncoder(nn.Module):
     def _get_pos_emb_layout(
         self, grid_height: int, grid_width: int
     ) -> tuple[np.ndarray, np.ndarray]:
+        # Matches the trainer reference, which samples the position grid with
+        # `meshgrid(pos_h, pos_w, indexing="xy")`: height and width swap roles.
+        grid_height, grid_width = grid_width, grid_height
         h_grid = (np.arange(grid_height, dtype=np.float32) + np.float32(0.5)) * (
             np.float32(self.pos_emb_height / grid_height)
         ) - np.float32(0.5)

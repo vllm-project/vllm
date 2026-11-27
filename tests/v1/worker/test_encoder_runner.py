@@ -27,6 +27,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
+from vllm.multimodal.utils import get_mm_embedding_modality_masks
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -509,3 +510,60 @@ def test_residency_reservation_tolerates_no_dummy_outputs():
     cache: dict[str, torch.Tensor] = {}
     assert reserve_encoder_cache_residency(cache, [], 1000) == 0
     assert cache == {}
+
+
+def test_gather_attaches_batch_placement():
+    """Each gathered embedding carries the batch positions it fills, so Omni
+    models can rebuild per-modality masks without reading input_ids. Covers an
+    audio-in-video span (shared by both items, split by is_embed) of a second,
+    chunked request."""
+    pattern = ["v", "v", "a", "v", "a", "a", "v", "a"]
+    span_features = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality=modality,
+            identifier=modality,
+            mm_position=PlaceholderRange(
+                offset=2,
+                length=len(pattern),
+                is_embed=torch.tensor([m == modality[0] for m in pattern]),
+            ),
+        )
+        for modality in ("video", "audio")
+    ]
+    image = _feature("image", offset=0, length=4)
+    cache = EncoderCache()
+    cache.mm_features["req0"] = [image]
+    cache.mm_features["req1"] = span_features
+    cache.encoder_outputs["image"] = torch.zeros(4, HIDDEN)
+    for f in span_features:
+        cache.encoder_outputs[f.identifier] = torch.zeros(4, HIDDEN)
+    runner = EncoderRunner(
+        model=None,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+    # req0 schedules 3 image tokens; req1 resumes at token 5 (span index 3).
+    mm_embeds, is_mm_embed = runner.gather_mm_embeddings(
+        req_ids=["req0", "req1"],
+        total_num_scheduled_tokens=8,
+        num_scheduled_tokens=np.array([3, 5]),
+        query_start_loc=np.array([0, 3]),
+        prefill_lens=np.array([1000, 1000]),
+        num_computed_tokens=np.array([0, 5]),
+    )
+
+    masks = get_mm_embedding_modality_masks(mm_embeds, is_mm_embed)
+    assert masks is not None
+    batch = ["i"] * 3 + pattern[3:]
+    for modality, mask in masks.items():
+        assert mask.tolist() == [m == modality[0] for m in batch], modality
+    assert sum(int(m.sum()) for m in masks.values()) == int(is_mm_embed.sum())
+    for embeds, mask in zip(
+        mm_embeds, (masks["image"], masks["video"], masks["audio"])
+    ):
+        assert embeds.shape[0] == int(mask.sum())

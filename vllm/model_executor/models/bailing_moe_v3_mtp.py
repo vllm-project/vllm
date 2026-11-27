@@ -20,6 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.utils import configure_quant_config
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -39,18 +40,10 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings,
+    get_draft_quant_config,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-
-
-def _get_draft_hf_config(vllm_config: VllmConfig) -> PreTrainedConfig:
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is not None:
-        draft_model_config = speculative_config.draft_model_config
-        if draft_model_config is not None:
-            return draft_model_config.hf_config
-    return vllm_config.model_config.hf_config
 
 
 class BailingMoeV3MTPSharedHead(nn.Module):
@@ -81,7 +74,7 @@ class BailingMoeV3MultiTokenPredictorLayer(nn.Module):
         layer_id: int,
     ) -> None:
         super().__init__()
-        config = _get_draft_hf_config(vllm_config)
+        config = vllm_config.model_config.hf_config
         self.config = config
         self.layer_id = layer_id
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -155,7 +148,7 @@ class BailingMoeV3MultiTokenPredictor(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        config = _get_draft_hf_config(vllm_config)
+        config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = nn.ModuleDict(
@@ -237,7 +230,16 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = _get_draft_hf_config(vllm_config)
+        if (speculative_config := vllm_config.speculative_config) is not None:
+            assert speculative_config.draft_model_config is not None
+            quant_config = get_draft_quant_config(vllm_config)
+            if quant_config is not None:
+                configure_quant_config(quant_config, type(self))
+            vllm_config = vllm_config.with_hf_config(
+                speculative_config.draft_model_config.hf_config
+            )
+            vllm_config.quant_config = quant_config
+        self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         _configure_ling_fp8_quant_config(self.quant_config, self.config)
         self.model = BailingMoeV3MultiTokenPredictor(

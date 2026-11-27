@@ -9,6 +9,7 @@ get_input_quant_key, which hides the key when another consumer branch needs the
 original activation.
 """
 
+import math
 from dataclasses import dataclass, replace
 
 import torch
@@ -34,6 +35,22 @@ class QuantizedActivation:
     orig_dtype: torch.dtype
     orig_shape: torch.Size
     quant_key: QuantKey
+
+    def flatten(self) -> "QuantizedActivation":
+        """Return a view with all leading dimensions collapsed into one.
+
+        Scales with one entry per token (per-token or per-group) are flattened
+        with the data; per-tensor and pre-flattened (e.g. swizzled) scales are
+        kept as they are.
+        """
+        data, scale = self.data, self.scale
+        if data.ndim > 2:
+            if scale.ndim == data.ndim:
+                scale = scale.view(-1, scale.shape[-1])
+            data = data.view(-1, data.shape[-1])
+        *lead, hidden = self.orig_shape
+        orig_shape = torch.Size((math.prod(lead), hidden))
+        return replace(self, data=data, scale=scale, orig_shape=orig_shape)
 
     def weak_ref(self) -> "QuantizedActivation":
         """Return a copy with non-owning tensor references for CUDA graph replay."""
