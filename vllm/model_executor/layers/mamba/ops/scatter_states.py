@@ -48,6 +48,7 @@ def _scatter_states_warmup_inputs(
     indices_dtype: torch.dtype,
     max_num_tokens: int,
     src_dtype: torch.dtype | None = None,
+    indices_stride: int = 1,
 ) -> dict[str, object]:
     num_tokens: Any = WarmupIntRange(1, max_num_tokens + 1)
     return dict(
@@ -62,6 +63,7 @@ def _scatter_states_warmup_inputs(
         indices=TritonWarmupTensor(
             indices_dtype,
             shape=(num_tokens,),
+            strides=(indices_stride,),
         ),
     )
 

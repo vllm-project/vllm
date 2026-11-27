@@ -447,6 +447,7 @@ steps:
   - vllm/model_executor/layers/mamba/abstract.py
   - vllm/model_executor/layers/mamba/mamba_mixer2.py
   - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
+  - vllm/model_executor/layers/linear_attention/mamba2/decode/
   - vllm/model_executor/layers/mamba/ops/replayssm_config.py
   - vllm/model_executor/warmup/kernel_warmup.py
   - vllm/model_executor/warmup/replayssm_warmup.py
@@ -477,6 +478,7 @@ steps:
       - vllm/model_executor/layers/mamba/abstract.py
       - vllm/model_executor/layers/mamba/mamba_mixer2.py
       - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
+      - vllm/model_executor/layers/linear_attention/mamba2/decode/
       - vllm/model_executor/layers/mamba/ops/replayssm_config.py
       - vllm/model_executor/layers/mamba/ops/selective_state_update_replayssm_output_only.py
       - vllm/model_executor/layers/mamba/ops/selective_state_update_replayssm_spec.py

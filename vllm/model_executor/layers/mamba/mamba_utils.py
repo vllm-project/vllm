@@ -211,7 +211,7 @@ class MambaStateShapeCalculator:
         n_groups: int,
         tp_world_size: int,
         logical_window: int,
-        backend: MambaBackendEnum,
+        backend: MambaBackendEnum | None,
         num_speculative_tokens: int = 0,
     ) -> tuple[
         tuple[int, int],
