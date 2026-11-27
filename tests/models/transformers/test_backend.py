@@ -41,7 +41,11 @@ from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
-from vllm.model_executor.models.utils import StageMissingLayer, WeightsMapper
+from vllm.model_executor.models.utils import (
+    StageMissingLayer,
+    WeightsMapper,
+    _model_to_pp_missing_layer_names,
+)
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
@@ -1097,7 +1101,8 @@ def test_split_weights_splits_fused_gqa_qkv():
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
     into each projection's size, matched before and named after the renamings. Like
     in Transformers, a longer name that only starts with the pattern is not split,
-    and a quantization scale for the fused tensor is rejected, not split."""
+    and a quantization scale for the fused tensor is rejected, not split. The fused
+    tensor of a skipped module is left for the loader to drop."""
     with torch.device("meta"):
         model = nn.Module()
         model.config = PreTrainedConfig()
@@ -1105,17 +1110,23 @@ def test_split_weights_splits_fused_gqa_qkv():
         model.self_attn.q_proj = nn.Linear(8, 8, bias=False)
         model.self_attn.k_proj = nn.Linear(8, 2, bias=False)
         model.self_attn.v_proj = nn.Linear(8, 2, bias=False)
+        model.vision_tower = StageMissingLayer("vision_tower")
     converter = WeightConverter(
         source_patterns="query_key_value",
         target_patterns=["q_proj", "k_proj", "v_proj"],
         operations=[core_model_loading.Split(dim=0)],
     )
     mapper = WeightsMapper(
-        orig_to_new_renaming=[WeightRenaming(r"^attention\.", "self_attn.")]
+        orig_to_new_renaming=[
+            WeightRenaming(r"^attention\.", "self_attn."),
+            WeightRenaming(r"^vision_model\.", "vision_tower."),
+        ]
     )
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
     weights = SplitWeights(converter, mapper, model)
+    # Cached by `id`, which a model freed by an earlier test may have had
+    _model_to_pp_missing_layer_names.pop(id(model), None)
     other = ("attention.query_key_value_norm.weight", torch.zeros(12))
     pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
 
@@ -1132,3 +1143,6 @@ def test_split_weights_splits_fused_gqa_qkv():
     scale = ("attention.query_key_value.weight_scale", torch.ones(1))
     with pytest.raises(ValueError, match="quantized tensors is not supported"):
         list(weights([scale]))
+
+    skipped = ("vision_model.query_key_value.weight", fused)
+    assert list(weights([skipped])) == [skipped]
