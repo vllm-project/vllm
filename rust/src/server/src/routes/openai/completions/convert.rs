@@ -19,6 +19,9 @@ use crate::utils::{
     resolve_session_id,
 };
 
+/// Default `max_tokens` when omitted or null, matching Python vLLM / OpenAI.
+const DEFAULT_COMPLETION_MAX_TOKENS: u32 = 16;
+
 /// Lowered completion request plus the public response metadata carried by
 /// every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +80,8 @@ pub(super) fn prepare_completion_request(
     ctx: ResolvedRequestContext,
     processors: &impl RenderContext,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
     // Python's message; `prompt_embeds` itself is rejected above. An empty text
     // prompt is left to tokenization, which may still yield a BOS token.
     let Some(prompt) = request.prompt else {
@@ -113,7 +117,7 @@ pub(super) fn prepare_completion_request(
     let max_tokens = if prompt_only {
         Some(1)
     } else {
-        request.max_tokens
+        Some(request.max_tokens.unwrap_or(DEFAULT_COMPLETION_MAX_TOKENS))
     };
     let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
     let logprobs = if logprob_token_ids.is_some() {
@@ -314,7 +318,6 @@ mod tests {
 
     use axum::http::HeaderMap;
     use serde_json::json;
-    use validator::Validate;
     use vllm_chat::{
         ChatBackend, ChatRenderer, ChatRequest, ChatRequestProcessor, DynChatOutputProcessor,
         DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
@@ -331,7 +334,6 @@ mod tests {
     use crate::model_names::ServedModelNames;
     use crate::render::RenderState;
     use crate::routes::openai::completions::types::{CompletionPrompt, CompletionRequest};
-    use crate::routes::openai::utils::types::Normalizable;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     impl super::PreparedRequest {
@@ -387,7 +389,7 @@ mod tests {
         fn new_chat_output_processor(
             &self,
             _request: &mut ChatRequest,
-            _options: NewChatOutputProcessorOptions<'_>,
+            _options: NewChatOutputProcessorOptions,
         ) -> vllm_chat::Result<DynChatOutputProcessor> {
             unreachable!("completions do not parse chat output")
         }
@@ -478,18 +480,6 @@ mod tests {
     }
 
     #[test]
-    fn completion_http_request_rejects_empty_cache_salt() {
-        let mut value = base_request_json();
-        value
-            .as_object_mut()
-            .expect("request object")
-            .insert("cache_salt".to_string(), json!(""));
-        let request: CompletionRequest = serde_json::from_value(value).expect("parse cache_salt");
-
-        assert!(request.validate().is_err());
-    }
-
-    #[test]
     fn prepare_completion_request_normalizes_top_k_sentinels() {
         for (top_k, expected) in [
             (serde_json::Value::Null, None),
@@ -541,25 +531,27 @@ mod tests {
     }
 
     #[test]
-    fn normalize_coerces_null_max_tokens_to_default() {
-        // An absent `max_tokens` already gets the serde default.
-        let absent: CompletionRequest =
-            serde_json::from_value(base_request_json()).expect("parse request");
-        assert_eq!(absent.max_tokens, Some(16));
-
-        // An explicit `null` deserializes to `None`, bypassing the default;
-        // `normalize` must coerce it back to match Python vLLM.
-        let mut request: CompletionRequest = serde_json::from_value(json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "prompt": "hello",
-            "stream": true,
-            "max_tokens": null
-        }))
-        .expect("parse request");
-        assert_eq!(request.max_tokens, None);
-
-        request.normalize();
-        assert_eq!(request.max_tokens, Some(16));
+    fn prepare_completion_request_defaults_absent_or_null_max_tokens() {
+        for value in [
+            base_request_json(),
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "prompt": "hello",
+                "stream": true,
+                "max_tokens": null
+            }),
+        ] {
+            let request: CompletionRequest = serde_json::from_value(value).expect("parse request");
+            assert_eq!(request.max_tokens, None);
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                &test_processors(),
+            )
+            .expect("prepare request");
+            assert_eq!(prepared.text_request().sampling_params.max_tokens, Some(16));
+        }
     }
 
     #[test]

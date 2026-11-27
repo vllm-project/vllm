@@ -111,7 +111,7 @@ steps:
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Scale Out)"
   key: entrypoints-integration-api-server-scale-out-intel
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
     label: production

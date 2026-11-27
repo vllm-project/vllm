@@ -431,6 +431,112 @@ def test_weight_cache_backend_llm_restart(vllm_runner, tmp_path, monkeypatch, ba
             )
 
 
+@pytest.mark.distributed(num_gpus=1)
+def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(vllm_runner, enable_pickle):
+    """A memfd-backed PLE table serves the same outputs as the GPU-resident table."""
+    model = "tiny-random/qwen3.8-flash-next"
+    engram_config = {
+        "cpu_offload": True,
+        "dp_shared_memory": False,
+        "use_thp": False,
+        "disk_offload": False,
+    }
+    attention_config = {"indexer_kv_dtype": "bf16"}
+    kwargs = dict(
+        dtype="bfloat16",
+        kv_cache_dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        max_num_batched_tokens=128,
+        enable_chunked_prefill=True,
+        enable_flashinfer_autotune=False,
+        kv_cache_memory_bytes=64 << 20,
+        gpu_memory_utilization=0.2,
+        compilation_config={"mode": 0},
+        attention_config=attention_config,
+        kernel_config={
+            "moe_backend": "triton",
+            "sparse_indexer_topk_backend": "cooperative",
+        },
+    )
+    sampling = SamplingParams(
+        temperature=0,
+        max_tokens=4,
+        ignore_eos=True,
+        detokenize=False,
+        logprobs=1,
+    )
+    prompt = [3, 4, 5]
+    table_path = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding"
+    with vllm_runner(model, engram_config={"cpu_offload": False}, **kwargs) as runner:
+        assert runner.apply_model(
+            lambda model: model.get_submodule(table_path).weight.device.type
+        ) == ["cuda"]
+        baseline = runner.generate([prompt], sampling, return_logprobs=True)
+    assert len(baseline[0][0][0][0]) == 7
+
+    def check_offloaded_table(model):
+        from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+        table = model.get_submodule(table_path)
+        weight = table.weight
+        assert weight.device.type == "cpu" and weight.is_pinned()
+        assert table._uva_weight.is_cuda
+        assert (
+            table._uva_weight.data_ptr()
+            == get_accelerator_view_from_cpu_tensor(weight).data_ptr()
+        )
+        ranges = (
+            entry.split()[0].split("-")
+            for entry in Path("/proc/self/maps").read_text().splitlines()
+            if "/memfd:vllm_weight_cache " in entry
+        )
+        ptr = weight.data_ptr()
+        assert any(
+            int(start, 16) <= ptr and ptr + weight.nbytes <= int(end, 16)
+            for start, end in ranges
+        ), "The PLE weight does not belong to a weight-cache memfd"
+
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=[
+            "--disable-flashinfer-autotune",
+            "--dtype",
+            "bfloat16",
+            "--kv-cache-dtype",
+            "bfloat16",
+            "--max-model-len",
+            "128",
+            "--max-num-seqs",
+            "1",
+            "--max-num-batched-tokens",
+            "128",
+            "--enable-chunked-prefill",
+            "--engram-config",
+            json.dumps(engram_config),
+            "--attention-config",
+            json.dumps(attention_config),
+            "--kernel-config",
+            json.dumps(kwargs["kernel_config"]),
+        ],
+    ) as daemon:
+        daemon.wait_until_ready()
+        extra_config = {"socket_dir": daemon.socket_dir, "fallback": False}
+        with vllm_runner(
+            model,
+            load_format="ipc_cache",
+            model_loader_extra_config=extra_config,
+            engram_config=engram_config,
+            **kwargs,
+        ) as runner:
+            runner.apply_model(check_offloaded_table)
+            warm = runner.generate([prompt], sampling, return_logprobs=True)
+
+    assert warm == baseline
+
+
 @pytest.mark.distributed(num_gpus=2)
 @pytest.mark.parametrize(
     "after_ready,stop_sibling",
@@ -1287,6 +1393,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
     compiled artifact and run every rank's kernels on rank 0's device."""
     from types import SimpleNamespace
 
+    from vllm.config import AttentionConfig
     from vllm.model_executor.model_loader.weight_cache import daemon
 
     monkeypatch.setattr(
@@ -1304,6 +1411,8 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
             ),
             model_config=SimpleNamespace(is_moe=False),
             cache_config=None,
+            engram_config=None,
+            attention_config=AttentionConfig(),
             kernel_config=None,
         )
         server = daemon.WeightCacheDaemon(
@@ -1664,7 +1773,13 @@ def test_ipc_cache_key_tracks_kv_quantization(
 
     import torch
 
-    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
+    from vllm.config import (
+        AttentionConfig,
+        CacheConfig,
+        KernelConfig,
+        LoadConfig,
+        ParallelConfig,
+    )
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -1689,6 +1804,8 @@ def test_ipc_cache_key_tracks_kv_quantization(
         cache_config=CacheConfig(
             cache_dtype="fp8", kv_cache_dtype_skip_layers=["1", "2"]
         ),
+        engram_config=None,
+        attention_config=AttentionConfig(),
         kernel_config=KernelConfig(),
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
@@ -1745,7 +1862,13 @@ def test_ipc_cache_key_tracks_kernel_backends(
 
     import torch
 
-    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
+    from vllm.config import (
+        AttentionConfig,
+        CacheConfig,
+        KernelConfig,
+        LoadConfig,
+        ParallelConfig,
+    )
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -1768,6 +1891,8 @@ def test_ipc_cache_key_tracks_kernel_backends(
         parallel_config=ParallelConfig(),
         speculative_config=None,
         cache_config=CacheConfig(),
+        engram_config=None,
+        attention_config=AttentionConfig(),
         kernel_config=KernelConfig(moe_backend="flashinfer_cutlass"),
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
