@@ -8,6 +8,7 @@ import pytest
 from tests.models.utils import check_logprobs_close
 from vllm import SamplingParams
 from vllm.outputs import CompletionOutput
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 
 
@@ -55,9 +56,10 @@ def _check_ihc_rows(worker, sequence_parallel):
     model.register_forward_pre_hook(begin_step, with_kwargs=True)
     for layer in model.layers:
         # The fused boundaries replace the pre layers when the op is built.
+        # The ROCm decoder layer has no fused boundaries.
         for boundary, hc_layer in (
-            (layer.ihc_attn_boundary, layer.hc_attn_layer),
-            (layer.ihc_mlp_boundary, layer.hc_mlp_layer),
+            (getattr(layer, "ihc_attn_boundary", None), layer.hc_attn_layer),
+            (getattr(layer, "ihc_mlp_boundary", None), layer.hc_mlp_layer),
         ):
             (boundary or hc_layer.hc_pre).register_forward_pre_hook(
                 partial(check_rows, layer)
@@ -70,14 +72,25 @@ def test_ihc_shards_rows_and_preserves_generation(
 ):
     """Shard iHC rows with and without ShardQ and preserve generation."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    backend = "FLASHMLA_SPARSE"
+    num_heads = 32
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            pytest.skip("fp8_ds_mla sparse MLA requires gfx950")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        backend = "ROCM_AITER_MLA_SPARSE"
+        # ROCm ShardQ needs fewer than 16 heads per rank.
+        num_heads = 16
     config = HYV4Config(
         vocab_size=1024,
         hidden_size=256,
         intermediate_size=512,
         moe_intermediate_size=256,
         num_hidden_layers=2,
-        num_attention_heads=32,
-        num_key_value_heads=32,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_heads,
         q_lora_rank=128,
         n_routed_experts=4,
         n_shared_experts=1,
@@ -113,7 +126,7 @@ def test_ihc_shards_rows_and_preserves_generation(
             block_size=64,
             kv_cache_dtype="fp8_ds_mla",
             attention_config={
-                "backend": "FLASHMLA_SPARSE",
+                "backend": backend,
                 "sparse_mla_shard_q": use_shardq,
                 "sparse_mla_shard_q_min_tokens": 64,
             },

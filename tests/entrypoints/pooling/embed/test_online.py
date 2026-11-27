@@ -147,6 +147,26 @@ def server():
         yield remote_server
 
 
+@pytest.fixture(scope="module")
+def server_with_default_chat_template_kwargs():
+    args = [
+        "--runner",
+        "pooling",
+        "--dtype",
+        DTYPE,
+        "--enforce-eager",
+        "--max-model-len",
+        "512",
+        "--chat-template",
+        "{% if prefix %}{{ prefix }} {% endif %}" + DUMMY_CHAT_TEMPLATE,
+        "--default-chat-template-kwargs",
+        json.dumps({"prefix": "Represent this conversation for retrieval:"}),
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
 @pytest_asyncio.fixture
 async def client(server):
     async with server.get_async_client() as async_client:
@@ -392,6 +412,32 @@ async def test_padding(client: openai.AsyncOpenAI, model_name: str):
             input=input_texts,
             extra_body={"padding": "longest"},
         )
+
+
+def test_chat_request_uses_default_chat_template_kwargs(
+    server_with_default_chat_template_kwargs: RemoteOpenAIServer,
+):
+    """`--default-chat-template-kwargs` applies to chat embedding requests,
+    and request-level `chat_template_kwargs` still take precedence."""
+    server = server_with_default_chat_template_kwargs
+    messages = [{"role": "user", "content": "The cat sat on the mat."}]
+
+    def prompt_tokens(**extra) -> int:
+        response = requests.post(
+            server.url_for("v1/embeddings"),
+            json={"model": MODEL_NAME, "messages": messages, **extra},
+        )
+        response.raise_for_status()
+        return response.json()["usage"]["prompt_tokens"]
+
+    server_default = prompt_tokens()
+    explicit = prompt_tokens(
+        chat_template_kwargs={"prefix": "Represent this conversation for retrieval:"}
+    )
+    overridden = prompt_tokens(chat_template_kwargs={"prefix": ""})
+
+    assert server_default == explicit == 18
+    assert overridden == 9
 
 
 @pytest.mark.asyncio
