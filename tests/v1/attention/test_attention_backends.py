@@ -1035,6 +1035,200 @@ def test_flashinfer_bf16_query_ignores_q_scale(
 
 
 @pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
+    or not current_platform.is_device_capability_family(100),
+    reason="SM100 FlashInfer native fallback test requires SM100-family GPUs",
+)
+@pytest.mark.parametrize("head_size", [256, 512])
+@pytest.mark.parametrize("batch_spec_name", ["small_decode", "small_prefill"])
+@pytest.mark.parametrize(
+    "fallback_mode",
+    ["use_trtllm_false", "batch_invariant", "supports_trtllm_false"],
+)
+def test_flashinfer_fp8_kv_keeps_model_q_dtype_without_trtllm(
+    tmp_path,
+    default_vllm_config,
+    monkeypatch,
+    head_size,
+    batch_spec_name,
+    fallback_mode,
+):
+    """On SM100 with an FP8 KV cache, native FA2 fallback (when TRTLLM-GEN is
+    disabled/unavailable) must keep model-dtype queries instead of quantizing
+    them to FP8 and failing in FlashInfer FA2 prefill/decode."""
+    import vllm.envs as envs
+    from vllm.utils import flashinfer as fi_utils
+
+    def causal_mask_mod(b, h, q_idx, kv_idx, *, context_len):
+        return (q_idx + context_len) >= kv_idx
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=16 * head_size,
+        head_dim=head_size,
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        max_position_embeddings=4096,
+    ).save_pretrained(tmp_path)
+
+    use_trtllm = False if fallback_mode == "use_trtllm_false" else None
+    attention_config = AttentionConfig(
+        use_trtllm_attention=use_trtllm,
+        disable_flashinfer_q_quantization=False,
+    )
+    default_vllm_config.attention_config = attention_config
+    if fallback_mode == "batch_invariant":
+        monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    elif fallback_mode == "supports_trtllm_false":
+        monkeypatch.setattr(
+            fi_utils, "supports_trtllm_attention", lambda is_prefill=False: False
+        )
+
+    _test_backend_correctness(
+        BATCH_SPECS[batch_spec_name],
+        str(tmp_path),
+        [AttentionBackendEnum.FLASHINFER],
+        causal_mask_mod,
+        kv_cache_dtype="fp8",
+        model_dtype=torch.bfloat16,
+        attention_config=attention_config,
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer with CUDA is required.",
+)
+def test_flashinfer_sm100_q_dtype_and_quant_flags(
+    tmp_path, default_vllm_config, monkeypatch
+):
+    """Verify SM100 FP8-Q selection disables FP8-Q when TRTLLM-GEN cannot run,
+    while preserving FP8-Q (including head_dim=512) when TRTLLM-GEN is active."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticTensorSym,
+    )
+    from vllm.utils import flashinfer as fi_utils
+    from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    monkeypatch.setattr(
+        fi.current_platform,
+        "is_device_capability_family",
+        lambda fam: fam == 100,
+    )
+    monkeypatch.setattr(
+        fi.current_platform,
+        "is_device_capability",
+        lambda cap: cap == 100,
+    )
+    monkeypatch.setattr(
+        fi,
+        "get_per_layer_parameters",
+        lambda *_: {
+            "layer": PerLayerParameters(
+                window_left=-1,
+                logits_soft_cap=0.0,
+                sm_scale=512**-0.5,
+                has_sinks=False,
+            )
+        },
+    )
+
+    def make_builder_and_impl(
+        use_trtllm: bool | None,
+        *,
+        num_heads: int = 16,
+        num_kv_heads: int = 2,
+        dcp_size: int = 1,
+    ):
+        model_dir = tmp_path / f"h{num_heads}_kv{num_kv_heads}"
+        if not model_dir.exists():
+            model_dir.mkdir()
+            LlamaConfig(
+                architectures=["LlamaForCausalLM"],
+                hidden_size=num_heads * 512,
+                head_dim=512,
+                num_attention_heads=num_heads,
+                num_key_value_heads=num_kv_heads,
+                num_hidden_layers=1,
+                max_position_embeddings=4096,
+            ).save_pretrained(model_dir)
+        cfg = create_vllm_config(
+            model_name=str(model_dir),
+            max_model_len=4096,
+            dtype=torch.bfloat16,
+            num_gpu_blocks=32,
+            block_size=16,
+            max_num_seqs=4,
+            max_num_batched_tokens=64,
+        )
+        cfg.cache_config.cache_dtype = "fp8"
+        cfg.attention_config = AttentionConfig(use_trtllm_attention=use_trtllm)
+        cfg.parallel_config.decode_context_parallel_size = dcp_size
+        spec = create_standard_kv_cache_spec(cfg)
+        with set_current_vllm_config(cfg):
+            import vllm.distributed.parallel_state as ps
+
+            dcp_pair = (dcp_size, 0) if dcp_size > 1 else (1, 0)
+            monkeypatch.setattr(fi, "get_dcp_world_size_and_rank", lambda *_: dcp_pair)
+            monkeypatch.setattr(ps, "get_dcp_world_size_and_rank", lambda *_: dcp_pair)
+            builder = fi.FlashInferMetadataBuilder(
+                spec, ["layer"], cfg, torch.device("cuda")
+            )
+            impl = fi.FlashInferImpl(
+                num_heads=num_heads,
+                head_size=512,
+                scale=512**-0.5,
+                num_kv_heads=num_kv_heads,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="fp8",
+            )
+        return builder, impl
+
+    monkeypatch.setattr(
+        fi_utils, "supports_trtllm_attention", lambda is_prefill=False: True
+    )
+    b_on, i_on = make_builder_and_impl(True)
+    assert b_on.q_data_type_prefill == torch.float8_e4m3fn
+    assert b_on.q_data_type_decode == torch.float8_e4m3fn
+    assert i_on.supports_quant_query_input is True
+    assert i_on.fused_output_quant_supported(kFp8StaticTensorSym) is True
+
+    b_off, i_off = make_builder_and_impl(False)
+    assert b_off.q_data_type_prefill == torch.bfloat16
+    assert b_off.q_data_type_decode == torch.bfloat16
+    assert i_off.supports_quant_query_input is False
+    assert i_off.fused_output_quant_supported(kFp8StaticTensorSym) is False
+
+    # DCP prefill falls back to native FA2 while decode stays on TRTLLM-GEN.
+    b_dcp, i_dcp = make_builder_and_impl(True, dcp_size=2)
+    assert b_dcp.q_data_type_prefill == torch.bfloat16
+    assert b_dcp.q_data_type_decode == torch.float8_e4m3fn
+    assert i_dcp.supports_quant_query_input is False
+    assert i_dcp.fused_output_quant_supported(kFp8StaticTensorSym) is False
+
+    # Indivisible head ratios fall back to native FA2.
+    b_div, i_div = make_builder_and_impl(True, num_heads=10, num_kv_heads=3)
+    assert b_div.q_data_type_prefill == torch.bfloat16
+    assert b_div.q_data_type_decode == torch.bfloat16
+    assert i_div.supports_quant_query_input is False
+    assert i_div.fused_output_quant_supported(kFp8StaticTensorSym) is False
+
+    # When TRTLLM attention is unavailable (e.g. missing cubins or batch invariant).
+    monkeypatch.setattr(
+        fi_utils, "supports_trtllm_attention", lambda is_prefill=False: False
+    )
+    b_unavail, i_unavail = make_builder_and_impl(None)
+    assert b_unavail.q_data_type_prefill == torch.bfloat16
+    assert b_unavail.q_data_type_decode == torch.bfloat16
+    assert i_unavail.supports_quant_query_input is False
+    assert i_unavail.fused_output_quant_supported(kFp8StaticTensorSym) is False
+
+
+@pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )

@@ -162,6 +162,28 @@ def _use_fa2_native_decode() -> bool:
     return not current_platform.has_device_capability(90)
 
 
+def _can_use_sm100_trtllm_fp8_query(
+    vllm_config: VllmConfig | None,
+    num_qo_heads: int,
+    num_kv_heads: int,
+    *,
+    is_prefill: bool,
+    use_dcp: bool,
+) -> bool:
+    """Return whether SM100 trtllm-gen can consume FP8 queries for this path."""
+    if not current_platform.is_device_capability_family(100):
+        return False
+    if (
+        vllm_config is not None
+        and vllm_config.attention_config.use_trtllm_attention is False
+    ):
+        return False
+    # FP8 KV DCP prefill falls back to native FA2 via BatchDCPPrefillWrapper.
+    if is_prefill and use_dcp:
+        return False
+    return can_use_trtllm_attention(num_qo_heads, num_kv_heads, is_prefill=is_prefill)
+
+
 _KVPair = tuple[torch.Tensor, torch.Tensor]
 
 
@@ -1380,11 +1402,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # FP8-Q requires an fp8 tensor-core attention path. SM90 uses
             # native FA3 for prefill; XQA decode on SM90/SM12x is handled
             # above with model-dtype Q, while SM100 uses trtllm-gen.
-            # Architectures with only fa2 (e.g. SM89, SM120) cannot
-            # consume FP8 queries, so keep the model dtype for Q there.
+            # When trtllm-gen is unavailable (e.g. use_trtllm_attention=False,
+            # VLLM_BATCH_INVARIANT, missing cubins, indivisible head counts,
+            # or FP8 DCP prefill), SM100 falls back to fa2, which cannot consume
+            # FP8 queries, so keep the model dtype for Q.
             if current_platform.is_device_capability(
                 90
-            ) or current_platform.is_device_capability_family(100):
+            ) or _can_use_sm100_trtllm_fp8_query(
+                self.vllm_config,
+                self.num_qo_heads,
+                self.num_kv_heads,
+                is_prefill=is_prefill,
+                use_dcp=self.use_dcp,
+            ):
                 return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
             return self.model_config.dtype
         if cache_dtype.startswith("nvfp4"):
@@ -2414,19 +2444,35 @@ class FlashInferImpl(AttentionImpl):
                 )
             self.sinks = sinks
 
+        vllm_config = get_current_vllm_config_or_none()
         self.supports_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
             num_heads, num_kv_heads, is_prefill=False
+        ) and (
+            vllm_config is None
+            or vllm_config.attention_config.use_trtllm_attention is not False
         )
-        vllm_config = get_current_vllm_config_or_none()
         # Query pre-quantization needs a single dtype for the whole query tensor.
         # SM90 XQA needs BF16/FP16-Q for decode and FP8 for prefill,
         # so only enable this for SM100 trtllm-gen where both use FP8-Q.
+        use_dcp = self.dcp_world_size > 1
         self.supports_quant_query_input = (
-            self.supports_xqa_or_trtllm_gen_decode
-            and is_quantized_kv_cache(self.kv_cache_dtype)
-            and current_platform.is_device_capability_family(100)
+            is_quantized_kv_cache(self.kv_cache_dtype)
             and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
+            and _can_use_sm100_trtllm_fp8_query(
+                vllm_config,
+                num_heads,
+                num_kv_heads,
+                is_prefill=True,
+                use_dcp=use_dcp,
+            )
+            and _can_use_sm100_trtllm_fp8_query(
+                vllm_config,
+                num_heads,
+                num_kv_heads,
+                is_prefill=False,
+                use_dcp=use_dcp,
+            )
         )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
@@ -2476,12 +2522,10 @@ class FlashInferImpl(AttentionImpl):
                 "(FP8 -> BF16 -> o_proj quant); FP8-output fusion is unaffected."
             )
             return False
-        # XQA does not support FP8/NVFP4 output, so require trtllm-gen
-        # (SM100+) here.  Without that we cannot fuse the output quant.
+        # XQA does not support FP8/NVFP4 output, and output-quant fusion requires
+        # trtllm-gen with FP8 queries on both prefill and decode.
         return (
-            self.supports_xqa_or_trtllm_gen_decode
-            and is_quantized_kv_cache(self.kv_cache_dtype)
-            and current_platform.is_device_capability_family(100)
+            self.supports_quant_query_input
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
             # The mm-prefix branch quantizes FP8 outputs only, as the composite.
             and (
