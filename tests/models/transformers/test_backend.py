@@ -1125,8 +1125,8 @@ def test_ignored_unexpected_patterns_match_renamed_keys():
 )
 def test_convert_weights_splits_fused_gqa_qkv(dist_init, default_vllm_config):
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
-    into each projection's size, after the renamings. The fused tensor of a skipped
-    module is left for the loader to drop."""
+    into each projection's size, after the renamings, also into a quantized module.
+    The fused tensor of a skipped module is left for the loader to drop."""
     model = _LoadPathStub()
     model.config = PreTrainedConfig()
     model.self_attn = nn.Module()
@@ -1162,6 +1162,9 @@ def test_convert_weights_splits_fused_gqa_qkv(dist_init, default_vllm_config):
     split = [pieces[f"self_attn.{p}_proj.weight"] for p in "qkv"]
     torch.testing.assert_close(torch.cat(split), fused)
     assert [p.shape[0] for p in split] == [8, 2, 2]
+
+    model.self_attn.q_proj.quant_method = SimpleNamespace(uses_meta_device=False)
+    assert len(list(weights([fused_weight]))) == 3
 
     skipped = ("vision_model.query_key_value.weight", fused)
     assert list(weights([skipped])) == [("vision_tower.q_proj.weight", fused)]
@@ -1231,6 +1234,27 @@ def test_split_into_vllm_fused_qkv(dist_init, default_vllm_config):
     Base.load_weights(stub, [("model.attention.query_key_value.weight", fused)])
 
     torch.testing.assert_close(qkv.weight, fused)
+
+
+def test_joining_into_a_quantized_module_is_rejected():
+    """Converting into a quantized module by joining its sources (Molmo2's `wte`
+    embeddings) is rejected, unless it quantizes online after loading."""
+    model = nn.Module()
+    model.embed_tokens = nn.Embedding(3, 2)
+    concat = WeightConverter(
+        source_patterns=["wte.embedding", "wte.new_embedding"],
+        target_patterns="embed_tokens.weight",
+        operations=[core_model_loading.Concatenate(dim=0)],
+    )
+    convert = _stub_for(model, concat)._apply_conversion_mapping
+    wte = [("model.wte.embedding", torch.rand(2, 2))]
+    wte += [("model.wte.new_embedding", torch.rand(1, 2))]
+
+    model.embed_tokens.quant_method = SimpleNamespace(uses_meta_device=False)
+    with pytest.raises(ValueError, match="quantized tensors is not supported"):
+        list(convert(wte))
+    model.embed_tokens.quant_method.uses_meta_device = True
+    assert [name for name, _ in convert(wte)] == ["model.embed_tokens.weight"]
 
 
 def test_converted_weight_with_no_module_is_left_to_the_loader():
