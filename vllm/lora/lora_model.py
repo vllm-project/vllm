@@ -21,7 +21,7 @@ from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
-SplitRows = Callable[[str], dict[str, int] | None]
+SplitRows = Callable[[str], dict[str, int | None] | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,8 +253,11 @@ class LoRAModel:
             for module_name in list(loras):
                 if rows := split_rows(module_name):
                     lora = loras.pop(module_name)
-                    lora_bs = lora.lora_b.split(list(rows.values()))
-                    for target, lora_b in zip(rows, lora_bs):
+                    sizes = [n for n in rows.values() if n is not None]
+                    # No rows: its pieces aren't on this rank, so nothing here uses it
+                    if len(sizes) < len(rows):
+                        continue
+                    for target, lora_b in zip(rows, lora.lora_b.split(sizes)):
                         loras[target] = LoRALayerWeights(
                             target,
                             lora.rank,
@@ -327,6 +330,7 @@ class LoRAModel:
                 BERT's pooler.dense. LoRA weights on them are unexpected.
             split_rows: Model hook returning the modules a LoRA of a module splits
                 into, with their rows, if the model splits that module's weight.
+                A LoRA whose pieces aren't on this rank (rows `None`) is dropped.
 
         Returns:
             Loaded LoRA Model.

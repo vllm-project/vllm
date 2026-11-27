@@ -34,6 +34,12 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import CompilationMode
+from vllm.lora.layers import (
+    MergedColumnParallelLinearWithLoRA,
+    MergedQKVParallelLinearWithLoRA,
+)
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor import model_loader
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -47,6 +53,7 @@ from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_I
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import (
+    PPMissingLayer,
     ShardId,
     StageMissingLayer,
     WeightsMapper,
@@ -1086,6 +1093,9 @@ class _LoadPathStub(nn.Module):
 
     _apply_conversion_mapping = Base._apply_conversion_mapping
     _drop_ignored_unexpected = Base._drop_ignored_unexpected
+    _split_weights = Base._split_weights
+    _loaded_by = Base._loaded_by
+    _output_size = Base._output_size
 
 
 def _stub_for(model: nn.Module, *conversions) -> _LoadPathStub:
@@ -1341,3 +1351,110 @@ def test_convert_weights_rejects_quantized_tensors_that_dont_split(
 
     with pytest.raises(ValueError, match=f"Cannot split '{module}.weight_scale'"):
         list(convert([(f"{module}.weight_scale", torch.rand(5, 1))]))
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.20"
+)
+@pytest.mark.parametrize("source", ["safetensors", "bin", "memory"])
+def test_lora_is_split_like_converted_weights(
+    source, tmp_path, dist_init, default_vllm_config
+):
+    """A LoRA for a fused checkpoint module (Molmo2's `att_proj` and `ff_proj`) loads
+    into the modules its weight is split into: `lora_B` by rows, with its `lora_A`,
+    rank and scaling (here from `alpha_pattern` and `rank_pattern`). A renamed module's
+    LoRA loads as before, and a split module's on another pipeline rank is dropped."""
+    model = nn.Module()
+    model.language_model = text = nn.Module()
+    text.layers = nn.ModuleList([nn.Module(), PPMissingLayer()])
+    layer = text.layers[0]
+    # Wrapped, as when LoRA is enabled
+    layer.qkv_proj = MergedQKVParallelLinearWithLoRA(
+        QKVParallelLinear(4, head_size=2, total_num_heads=2, total_num_kv_heads=1)
+    )
+    layer.o_proj = ReplicatedLinear(4, 4, bias=False)
+    layer.gate_up_proj = MergedColumnParallelLinearWithLoRA(
+        MergedColumnParallelLinear(4, [3, 3])
+    )
+    split = WeightConverter(
+        source_patterns="att_proj",
+        target_patterns=["q_proj", "k_proj", "v_proj"],
+        operations=[core_model_loading.Split(dim=0)],
+    )
+    chunk = WeightConverter(
+        source_patterns="ff_proj.weight",
+        target_patterns=["up_proj.weight", "gate_proj.weight"],
+        operations=[core_model_loading.Chunk(dim=0)],
+    )
+    for converter in (split, chunk):
+        converter.scope_prefix, converter.base_model_prefix = "language_model", "model"
+    renamings = [
+        WeightRenaming(r"transformer\.", "language_model."),
+        WeightRenaming(r"attn_out", "o_proj"),
+    ]
+    stub = _stub_for(model, *renamings, split, chunk)
+    stacked: dict[str, tuple[str, ShardId]] = {
+        f".{p}_proj": (".qkv_proj", p) for p in "qkv"
+    }
+    stacked |= {".gate_proj": (".gate_up_proj", 0), ".up_proj": (".gate_up_proj", 1)}
+    stub.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=stacked)
+    lora = {
+        "att_proj": (torch.rand(2, 4), torch.rand(8, 2)),
+        "attn_out": (torch.rand(2, 4), torch.rand(4, 2)),
+        "ff_proj": (torch.rand(3, 4), torch.rand(6, 3)),
+    }
+    tensors = {}
+    for i in range(2):
+        for module, (lora_a, lora_b) in lora.items():
+            prefix = f"base_model.model.model.transformer.layers.{i}.{module}"
+            tensors[f"{prefix}.lora_A.weight"] = lora_a.clone()
+            tensors[f"{prefix}.lora_B.weight"] = lora_b.clone()
+    peft_helper = PEFTHelper.from_dict(
+        {
+            "r": 2,
+            "lora_alpha": 2,
+            "target_modules": list(lora),
+            "alpha_pattern": {"att_proj": 4},
+            "rank_pattern": {"ff_proj": 3},
+        }
+    )
+    kwargs = dict(
+        peft_helper=peft_helper,
+        device="cpu",
+        weights_mapper=stub.hf_to_vllm_mapper.get_rename_mapper(),
+        split_rows=partial(Base.lora_split_rows, stub),
+    )
+    expected = {"q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "gate_proj"}
+
+    if source == "safetensors":
+        save_file(tensors, tmp_path / "adapter_model.safetensors")
+    elif source == "bin":
+        torch.save(tensors, tmp_path / "adapter_model.bin")
+    if source != "memory":
+        lora_model = LoRAModel.from_local_checkpoint(
+            str(tmp_path), expected, lora_model_id=1, **kwargs
+        )
+    else:
+        lora_model = LoRAModel.from_lora_tensors(
+            1, tensors, expected_lora_modules=expected, **kwargs
+        )
+
+    loras = {
+        name.removeprefix("model.language_model.layers."): weights
+        for name, weights in lora_model.loras.items()
+    }
+    assert loras.keys() == {f"0.{target}" for target in expected} | {"1.o_proj"}
+    for module, targets, rank, scaling in [
+        ("att_proj", ["q_proj", "k_proj", "v_proj"], 2, 2.0),
+        ("attn_out", ["o_proj"], 2, 1.0),
+        ("ff_proj", ["up_proj", "gate_proj"], 3, 2 / 3),
+    ]:
+        lora_a, lora_b = lora[module]
+        for target in targets:
+            assert loras[f"0.{target}"].rank == rank
+            assert loras[f"0.{target}"].scaling == pytest.approx(scaling)
+            torch.testing.assert_close(
+                loras[f"0.{target}"].lora_a, lora_a, rtol=0, atol=0
+            )
+        pieces = torch.cat([loras[f"0.{target}"].lora_b for target in targets])
+        torch.testing.assert_close(pieces, lora_b, rtol=0, atol=0)

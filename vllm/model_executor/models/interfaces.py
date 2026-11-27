@@ -784,10 +784,11 @@ class SupportsLoRA(Protocol):
     lora_skip_prefixes: ClassVar[list[str]] = []
     lora_manager: "LoRAModelManager | None" = None
 
-    def lora_split_rows(self, module_name: str) -> dict[str, int] | None:
+    def lora_split_rows(self, module_name: str) -> dict[str, int | None] | None:
         """The modules a LoRA of `module_name` (as the model's rename mapper names
         it) splits into, with their rows, if the model splits that module's weight on
-        load (e.g. a fused checkpoint module)."""
+        load (e.g. a fused checkpoint module). Rows are `None` for modules not on this
+        rank, which drops the LoRA."""
         return None
 
 

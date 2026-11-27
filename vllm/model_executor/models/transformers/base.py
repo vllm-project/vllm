@@ -48,6 +48,7 @@ from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
@@ -1045,46 +1046,75 @@ class Base(
         mapper = replace(self.hf_to_vllm_mapper, orig_to_new_renaming=[])
         return loader.load_weights(weights, mapper=mapper)
 
+    def lora_split_rows(self, module_name: str) -> dict[str, int | None] | None:
+        """The modules a converter splits `module_name`'s weight into (e.g. Molmo2's
+        fused `att_proj`), with their rows, `None` for one not on this rank. The LoRA
+        rename mapper has already applied the renamings to `module_name`."""
+        weights = self._split_weights(f"{module_name}.weight", [])
+        if weights is None:
+            return None
+        return {
+            weight.removesuffix(".weight"): (
+                self._output_size(weight) if self._loaded_by(weight) else None
+            )
+            for weight in weights
+        }
+
+    def _split_weights(
+        self, weight: str, renamings: list[WeightRenaming]
+    ) -> list[str] | None:
+        """The weights a converter splits `weight` into, after `renamings`. `None`
+        unless a converter splits it into several."""
+        converters = self.weight_converters
+        renamed, pattern = rename_source_key(weight, renamings, converters)
+        if pattern is None:
+            return None
+        converter = next(c for c in converters if pattern in c.source_patterns)
+        targets = converter.target_patterns
+        if len(targets) < 2:
+            return None
+        return [renamed.replace(targets[0], target) for target in targets]
+
+    def _loaded_by(self, name: str) -> tuple[nn.Module, ShardIds | None] | None:
+        """The module on this rank that loads the weight `name`, and its shard."""
+        mapper = replace(self.hf_to_vllm_mapper, orig_to_new_renaming=[])
+        if (result := mapper._map_name_with_shard(name)) is None:
+            return None
+        fused, shard_id = result
+        if is_pp_missing_parameter(fused, self):
+            return None
+        try:
+            return self.get_submodule(fused.rpartition(".")[0]), shard_id
+        except AttributeError:
+            return None
+
+    def _output_size(self, name: str) -> int:
+        """The full output size of the linear that loads `name`, which `Split` reads.
+        vLLM's linears keep it when sharded or fused."""
+        module, shard_id = self._loaded_by(name) or (None, None)
+        # Once LoRA is enabled, a LoRA layer wraps the linear
+        if isinstance(module, BaseLayerWithLoRA):
+            module = module.base_layer
+        if isinstance(module, LinearBase) and shard_id is None:
+            return module.output_size
+        if isinstance(module, QKVParallelLinear) and isinstance(shard_id, str):
+            kv_heads = module.total_num_kv_heads
+            return {
+                "q": module.total_num_heads * module.head_size,
+                "k": kv_heads * module.head_size,
+                "v": kv_heads * module.v_head_size,
+            }[shard_id]
+        if isinstance(module, MergedColumnParallelLinear) and isinstance(shard_id, int):
+            return module.output_sizes[shard_id]
+        raise ValueError(f"Cannot size {name!r} for `Split` from {module}")
+
     def _apply_conversion_mapping(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
         """Apply the supported Transformers renamings and conversions to the weights."""
         renamings = self.hf_to_vllm_mapper.orig_to_new_renaming
         converters = self.weight_converters
-        mapper = replace(self.hf_to_vllm_mapper, orig_to_new_renaming=[])
         pattern_to_converter = {p: c for c in converters for p in c.source_patterns}
-
-        def loaded_by(name: str) -> tuple[nn.Module, ShardIds | None] | None:
-            if (result := mapper._map_name_with_shard(name)) is None:
-                return None
-            fused, shard_id = result
-            if is_pp_missing_parameter(fused, self):
-                return None
-            try:
-                return self.get_submodule(fused.rpartition(".")[0]), shard_id
-            except AttributeError:
-                return None
-
-        def get_parameter(name: str) -> torch.Tensor:
-            """A tensor with the full output size of the linear that loads `name`,
-            which `Split` reads. vLLM's linears keep it when sharded or fused."""
-            module, shard_id = loaded_by(name) or (None, None)
-            if isinstance(module, LinearBase) and shard_id is None:
-                size = module.output_size
-            elif isinstance(module, QKVParallelLinear) and isinstance(shard_id, str):
-                kv_heads = module.total_num_kv_heads
-                size = {
-                    "q": module.total_num_heads * module.head_size,
-                    "k": kv_heads * module.head_size,
-                    "v": kv_heads * module.v_head_size,
-                }[shard_id]
-            elif isinstance(module, MergedColumnParallelLinear) and isinstance(
-                shard_id, int
-            ):
-                size = module.output_sizes[shard_id]
-            else:
-                raise ValueError(f"Cannot size {name!r} for `Split` from {module}")
-            return torch.empty(size, device="meta")
 
         def split_like_weight(
             name: str, tensor: torch.Tensor
@@ -1094,16 +1124,10 @@ class Base(
             blocks of them, and copy a single value or a 1-D tensor of another length
             (e.g. `weight_shape`) to every piece. `None` if `name` is no such tensor."""
             module, _, param = name.rpartition(".")
-            weight, pattern = rename_source_key(
-                f"{module}.weight", renamings, converters
-            )
-            if param == "weight" or pattern is None or loaded_by(weight) is None:
+            weights = self._split_weights(f"{module}.weight", renamings)
+            if param == "weight" or not weights or not self._loaded_by(weights[0]):
                 return None
-            targets = pattern_to_converter[pattern].target_patterns
-            if len(targets) < 2:
-                return None
-            weights = [weight.replace(targets[0], target) for target in targets]
-            rows = [get_parameter(w).shape[0] for w in weights]
+            rows = [self._output_size(w) for w in weights]
             if tensor.dim() <= 1 and tensor.shape[:1] != (sum(rows),):
                 pieces = (tensor,) * len(rows)
             else:
@@ -1120,7 +1144,11 @@ class Base(
             }
 
         # Stands in for the model whose parameters `Split` reads the sizes of
-        unfused = SimpleNamespace(get_parameter=get_parameter)
+        unfused = SimpleNamespace(
+            get_parameter=lambda name: torch.empty(
+                self._output_size(name), device="meta"
+            )
+        )
         # Each target collects its sources in its own converter copy, as in Transformers
         pending: dict[str, WeightConverter] = {}
         for name, tensor in weights:
@@ -1129,7 +1157,7 @@ class Base(
                 continue
             renamed, converter_pattern = rename_source_key(name, renamings, converters)
             # Left for the loader to drop or report if no module here loads it
-            if converter_pattern is None or loaded_by(renamed) is None:
+            if converter_pattern is None or self._loaded_by(renamed) is None:
                 yield renamed, tensor
                 continue
             converter = pattern_to_converter[converter_pattern]
