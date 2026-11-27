@@ -16,13 +16,16 @@ reason about temporal order.
 
 import itertools
 import math
-from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
+from functools import cached_property
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
 import torch
 from PIL import Image as PILImage
 from torch import nn
+from torch.nn import functional as F
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma4 import (
     Gemma4AudioFeatureExtractor,
@@ -37,6 +40,7 @@ from transformers.models.gemma4.configuration_gemma4 import (
 from transformers.models.gemma4.image_processing_gemma4 import (
     get_aspect_ratio_preserving_size,
 )
+from transformers.models.gemma4.modeling_gemma4 import Gemma4AudioAttention
 
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
@@ -108,6 +112,7 @@ from .vision import (
 )
 
 if TYPE_CHECKING:
+    from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
     from vllm.model_executor.layers.quantization import QuantizationConfig
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
@@ -1066,6 +1071,149 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _pack_audio_lora_rows(
+    layers: Sequence[tuple[str, "ReplicatedLinearWithLoRA"]],
+    features: torch.Tensor | list[torch.Tensor],
+) -> Iterator[None]:
+    if not layers:
+        yield
+        return
+
+    assert all(feature.ndim == 2 for feature in features)
+    lengths = [(feature.shape[0] + 3) // 4 for feature in features]
+    rows = sum(lengths)
+    for wrapper in {layer.punica_wrapper for _, layer in layers}:
+        if wrapper.indices_len[0] is not None and (
+            wrapper.token_lora_indices.numel() != rows
+            or wrapper.sampler_indices.numel() != len(lengths)
+        ):
+            raise ValueError(
+                "Gemma 4 requires an adapter mapping for this audio batch only."
+            )
+
+    stride = max(lengths)
+    if min(lengths) == stride:
+        yield
+        return
+
+    # Only remove padding introduced by batching. Intrinsic masked frames
+    # still have entries in the runner's adapter mapping.
+    indices = async_tensor_h2d(
+        [i * stride + j for i, length in enumerate(lengths) for j in range(length)],
+        device=features[0].device,
+        dtype=torch.long,
+    )
+
+    def pack(module, args):
+        (inputs,) = args
+        assert inputs.ndim == 3 and inputs.shape[:2] == (len(lengths), stride)
+        return (inputs.flatten(0, 1).index_select(0, indices),)
+
+    def unpack(module, args, output):
+        projected = output[0] if isinstance(output, tuple) else output
+        padded = projected.new_zeros(len(lengths) * stride, projected.shape[-1])
+        padded.index_copy_(0, indices, projected)
+        padded = padded.view(len(lengths), stride, -1)
+        return (padded, output[1]) if isinstance(output, tuple) else padded
+
+    with ExitStack() as hooks:
+        for name, layer in layers:
+            if not name.endswith("relative_k_proj"):
+                hooks.enter_context(layer.register_forward_pre_hook(pack))
+                hooks.enter_context(layer.register_forward_hook(unpack, prepend=True))
+        yield
+
+
+class _Gemma4AudioAttentionWithLoRA(Gemma4AudioAttention):
+    # Adapted from Transformers v5.22.2 Gemma4AudioAttention.
+    # Copyright 2026 The HuggingFace Team. Apache License, Version 2.0.
+    def _project_relative_keys(
+        self,
+        position_embeddings: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        relative_proj = self.relative_k_proj
+        # Positions are shared, but their learned projection belongs to each
+        # clip's adapter. The frame mapping cannot be used as a position map.
+        relative_keys = relative_proj.base_layer(position_embeddings)
+        relative_keys = relative_keys.expand(batch_size, -1, -1)
+        wrapper = relative_proj.punica_wrapper
+        if wrapper.indices_len[1] is not None:
+            # The encoder runner supplies one prompt mapping entry per audio item.
+            slots = wrapper.sampler_indices
+            if slots.numel() != batch_size:
+                raise ValueError("Expected one Gemma 4 audio adapter slot per clip.")
+            safe_slots = slots.clamp_min(0)
+            lora_a = relative_proj.lora_a_stacked[0][safe_slots, 0]
+            lora_b = relative_proj.lora_b_stacked[0][safe_slots, 0]
+            shrink = position_embeddings.to(lora_a.dtype) @ lora_a.transpose(-1, -2)
+            delta = (shrink.float() @ lora_b.transpose(-1, -2).float()).to(lora_b.dtype)
+            delta = torch.where((slots >= 0)[:, None, None], delta, 0.0)
+            relative_keys = (relative_keys + delta).to(relative_keys.dtype)
+        return relative_keys
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
+
+        relative_proj = self.relative_k_proj
+        if not isinstance(relative_proj, ReplicatedLinearWithLoRA):
+            return super().forward(hidden_states, position_embeddings, attention_mask)
+
+        batch_size, seq_length, _ = hidden_states.shape
+        hidden_shape = (batch_size, seq_length, self.num_heads, self.head_dim)
+        query_states = self.q_proj(hidden_states).float().view(hidden_shape)
+        key_states = self.k_proj(hidden_states).float().view(hidden_shape)
+        value_states = self.v_proj(hidden_states).float().view(hidden_shape)
+        query_states = query_states * self.q_scale * F.softplus(self.per_dim_scale)
+        key_states = key_states * self.k_scale
+        query_states = self._convert_to_block(query_states)
+        key_states = self._extract_block_context(key_states)
+        value_states = self._extract_block_context(value_states)
+        num_blocks = query_states.shape[1]
+
+        relative_keys = self._project_relative_keys(position_embeddings, batch_size)
+        relative_keys = relative_keys.view(
+            batch_size, -1, self.num_heads, self.head_dim
+        ).to(query_states.dtype)
+
+        queries = query_states.permute(0, 3, 1, 2, 4)
+        matrix_ac = queries @ key_states.permute(0, 3, 1, 4, 2)
+        queries_flat = queries.reshape(batch_size, self.num_heads, -1, self.head_dim)
+        matrix_bd = queries_flat @ relative_keys.permute(0, 2, 3, 1)
+        matrix_bd = matrix_bd.reshape(
+            batch_size, self.num_heads, num_blocks, self.chunk_size, -1
+        )
+        matrix_bd = self._rel_shift(matrix_bd)
+
+        attn_weights = matrix_ac + matrix_bd
+        attn_weights = attn_weights / self.softcap
+        attn_weights = torch.tanh(attn_weights) * self.softcap
+        if attention_mask is not None:
+            masked_positions = (
+                attention_mask.logical_not()
+                if attention_mask.dtype == torch.bool
+                else attention_mask != 0
+            )
+            attn_weights = attn_weights.masked_fill(
+                masked_positions, self.config.attention_invalid_logits_value
+            )
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+            value_states.dtype
+        )
+        attn_output = attn_weights @ value_states.permute(0, 3, 1, 2, 4)
+        attn_output = attn_output.permute(0, 2, 3, 1, 4).reshape(
+            batch_size, num_blocks * self.chunk_size, -1
+        )
+        attn_output = attn_output[:, :seq_length].contiguous()
+        return self.post(attn_output.to(hidden_states.dtype)), attn_weights
+
+
 class Gemma4MultimodalEmbedder(nn.Module):
     """Projects vision/audio soft tokens into LM embedding space.
 
@@ -1227,6 +1375,12 @@ class Gemma4ForConditionalGeneration(
             )
             with self._mark_tower_model(vllm_config, "audio"):
                 self.audio_tower = AutoModel.from_config(config=config.audio_config)
+                if self._enable_mm_lora:
+                    for layer in self.audio_tower.layers:
+                        layer.self_attn = _Gemma4AudioAttentionWithLoRA(
+                            config.audio_config,
+                            layer.self_attn.layer_idx,
+                        )
                 # AutoModel.from_config does NOT call post_init(),
                 # which is needed to initialize buffers that are absent
                 # from the checkpoint (e.g. inv_timescales for relative
@@ -1874,6 +2028,18 @@ class Gemma4ForConditionalGeneration(
     # Audio processing
     # ------------------------------------------------------------------ #
 
+    @cached_property
+    def _audio_lora_layers(self) -> list[tuple[str, "ReplicatedLinearWithLoRA"]]:
+        from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
+
+        assert self.audio_tower is not None and self.embed_audio is not None
+        return [
+            (name, layer)
+            for root in (self.audio_tower, self.embed_audio)
+            for name, layer in root.named_modules()
+            if isinstance(layer, ReplicatedLinearWithLoRA)
+        ]
+
     def _process_audio_input(
         self,
         audio_input: Gemma4AudioInputs,
@@ -1929,9 +2095,18 @@ class Gemma4ForConditionalGeneration(
                 )
             elif modality == "audio":
                 assert isinstance(multimodal_input, Gemma4AudioInputs)
-                multimodal_embeddings.extend(
-                    self._process_audio_input(multimodal_input)
+                # The manager installs LoRA layers after model construction.
+                layers = (
+                    self._audio_lora_layers
+                    if self._enable_mm_lora and self.lora_manager is not None
+                    else ()
                 )
+                with _pack_audio_lora_rows(
+                    layers, multimodal_input["input_features_padded"]
+                ):
+                    multimodal_embeddings.extend(
+                        self._process_audio_input(multimodal_input)
+                    )
 
         return multimodal_embeddings
 
