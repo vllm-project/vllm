@@ -2637,15 +2637,16 @@ async def test_knowline_serves_the_decisions_endpoint():
         "billing",
         "shipping",
     }
-    # The trained prompt renders the stock questions too: options without a
-    # description show their values alone (a choice's JSON-encoded), and
-    # usage sums the reads.
+    # The trained prompt renders the stock questions too: a predicate reads
+    # as the criteria-less trained noul (the probe's own block), options
+    # without a description show their values alone (a choice's
+    # JSON-encoded), and usage sums the reads.
     assert len(engine.generated) == 2
     texts = [tokenizer.decode(p["prompt_token_ids"]) for p, _, _ in engine.generated]
     for text in texts:
         assert text.endswith(f"<assistant>{knowline.ANSWER}")
     # The mock tokenizer splits on whitespace and decodes with spaces.
-    assert any("Options: A. false B. true" in text for text in texts)
+    assert any("Options: A. Yes: yes B. No: no" in text for text in texts)
     assert any('Options: A. "billing" B. "shipping" ' in text for text in texts)
     assert dump["usage"]["input_tokens"] == sum(
         len(p["prompt_token_ids"]) for p, _, _ in engine.generated

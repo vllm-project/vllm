@@ -478,8 +478,8 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   question types (at most 26 options, the stock confidence). An option
   line shows the option's value (a choice's JSON-encoded, a score's
   label), then `:` and its description when it has one; a predicate
-  reads `A. false` and `B. true`. Prefer `/v1/systemone` for the trained
-  answer shapes.
+  reads like a `/v1/systemone` noul question. Prefer `/v1/systemone`
+  for the trained answer shapes.
 
 ### Mammoth-1 and Elephant-1
 

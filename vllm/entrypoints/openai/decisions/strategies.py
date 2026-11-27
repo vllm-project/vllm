@@ -1664,6 +1664,10 @@ class KnowLineStrategy(ReadStrategy):
     #: marker does not carry its own.
     TWICE_MAX_TOKENS = 3000
 
+    #: Always its own types, so the base's stock-registry fallback (None)
+    #: never applies.
+    question_types: Mapping[str, QuestionType]
+
     def __init__(self, context: ReadContext):
         super().__init__(context)
         renderer = context.online_renderer.renderer
@@ -1731,6 +1735,34 @@ class KnowLineStrategy(ReadStrategy):
             "enable_thinking": False,
         }
 
+    def _as_trained(self, question: Question) -> Question:
+        """A foreign question in the trained shapes this model reads.
+
+        The decisions endpoint builds its reads with the stock types, whose
+        labels are the stock ones, not the discovered letters the model
+        replies with: the prompt would show labels the read never scores.
+        Its predicates build a criteria-less noul, whose trained shape is
+        the probe's own block, so the read stays in distribution."""
+        if isinstance(
+            question.type,
+            (knowline.KnowLineChoice, knowline.KnowLineNoul, knowline.KnowLineScore),
+        ):
+            return question
+        if question.type.name == "noul":
+            qtype = self.question_types["noul"]
+            options = tuple(qtype.parse_options(question.id, None))
+        else:
+            qtype = question.type
+            options = question.options
+        return Question(
+            id=question.id,
+            type=qtype,
+            instructions=question.instructions,
+            options=options,
+            labels=tuple(self.labels[: len(question.options)]),
+            raw=question.raw,
+        )
+
     async def read(
         self,
         questions: list[Question],
@@ -1749,6 +1781,7 @@ class KnowLineStrategy(ReadStrategy):
             raise StructuredDecisionError(
                 "this model reads a fixed prompt, so it takes no instructions"
             )
+        questions = [self._as_trained(q) for q in questions]
         rendered = await self._render_prompts(
             self.tokenizer,
             state,
