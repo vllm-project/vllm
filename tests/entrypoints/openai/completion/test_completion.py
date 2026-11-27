@@ -9,6 +9,7 @@ import pytest_asyncio
 import regex as re
 from openai import BadRequestError
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.sampling_params import SamplingParams
@@ -312,6 +313,57 @@ async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
 
     assert len(returned_top_logprobs) == 1
     assert set(returned_top_logprobs[0]) == {"token_id:42", "token_id:5000"}
+
+
+# 8158 is a leading-byte fragment of U+0E58 (Thai digit 8); 3023 and 378 are
+# other leading fragments. All three decode to "" on their own. After "Hello",
+# 8158 is the most likely of the three, so the "" entry is the sampled token's.
+FRAGMENT_REQUEST = dict(
+    model=MODEL_NAME,
+    prompt="Hello",
+    max_tokens=1,
+    temperature=0.0,
+    # Required with logprob_token_ids, which returns every requested token
+    # whatever the count.
+    logprobs=0,
+    extra_body={"allowed_token_ids": [8158], "logprob_token_ids": [3023, 378]},
+)
+
+# The Rust frontend keeps the last of the candidates with the same text until
+# #68488 lands, and decodes byte fragments to "\ufffd" until #63926 lands.
+skip_on_rust_frontend = pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not keep the sampled top_logprobs entry yet",
+)
+
+
+@pytest.mark.asyncio
+@skip_on_rust_frontend
+async def test_top_logprobs_keep_sampled_entry_on_string_collision(
+    client: openai.AsyncOpenAI,
+):
+    completion = await client.completions.create(**FRAGMENT_REQUEST)
+    logprobs = completion.choices[0].logprobs
+    assert logprobs is not None
+    assert logprobs.tokens == [""]
+    assert logprobs.top_logprobs == [{"": logprobs.token_logprobs[0]}]
+
+
+@pytest.mark.asyncio
+@skip_on_rust_frontend
+async def test_top_logprobs_keep_sampled_entry_on_string_collision_stream(
+    client: openai.AsyncOpenAI,
+):
+    stream = await client.completions.create(**FRAGMENT_REQUEST, stream=True)
+    tokens, token_logprobs, top_logprobs = [], [], []
+    async for chunk in stream:
+        logprobs = chunk.choices[0].logprobs
+        if logprobs is not None and logprobs.tokens:
+            tokens += logprobs.tokens
+            token_logprobs += logprobs.token_logprobs
+            top_logprobs += logprobs.top_logprobs
+    assert tokens == [""]
+    assert top_logprobs == [{"": token_logprobs[0]}]
 
 
 @pytest.mark.asyncio

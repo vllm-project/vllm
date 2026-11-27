@@ -153,6 +153,11 @@ class MultiModalInput(_InputOptions):
     `prompt_token_ids`.
     """
 
+    skip_mm_cache: NotRequired[bool]
+    """
+    If true, skip the multimodal processor cache for this request.
+    """
+
 
 def mm_input(
     prompt_token_ids: list[int],

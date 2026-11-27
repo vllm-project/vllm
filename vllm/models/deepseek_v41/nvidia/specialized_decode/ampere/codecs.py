@@ -190,12 +190,6 @@ def e2m1(code: Uint32) -> Float32:
 
 
 @cute.jit
-def exp2_to_f32(exponent: Int32) -> Float32:
-    """`2^exponent` for a normal FP32 exponent."""
-    return f32_from_bits(Uint32(exponent + 127) << 23)
-
-
-@cute.jit
 def ceil_log2(x: Float32) -> Int32:
     """`ceil(log2(x))` of a positive normal FP32 value, exactly."""
     bits = bits_from_f32(x)
