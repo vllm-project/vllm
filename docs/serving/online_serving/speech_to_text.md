@@ -310,7 +310,8 @@ rounding. The KV cache of the session stays bounded by the windows.
   quantized, prefix caching is off (`--disable-prefix-caching`), and the platform
   is CUDA. KV connectors, KV offloading, encoder cache connectors, speculative
   decoding, pipeline parallelism and prefill context parallelism are refused. Any
-  streaming-input session on such a model works the same way.
+  streaming-input session on such a model works the same way, except on models
+  served by the Transformers modeling backend, which are refused.
 - `--max-model-len` must be at least the text window plus 2 KV cache blocks (1024
   tokens on Voxtral, 256 with `--block-size 16`), so `--max-model-len 8192` with
   the default text window of 8192 is refused. It no longer limits the session,
