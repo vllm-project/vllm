@@ -420,6 +420,12 @@ pub struct ServerUnsupportedArgs {
     #[arg(long, env = "VLLM_MAX_TOKENIZE_TOKENS")]
     pub max_tokenize_tokens: Option<Unsupported>,
 
+    /// Enable `features.kwargs_refs` in `/inference/v1/generate`, which loads
+    /// processed multimodal tensors that clients upload to an S3-compatible
+    /// store.
+    #[arg(long)]
+    pub mm_tensor_refs_config: Option<Unsupported>,
+
     /// Enable offline FastAPI documentation for air-gapped environments.
     /// Uses vendored static assets bundled with vLLM.
     ///
