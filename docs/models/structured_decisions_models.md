@@ -427,3 +427,47 @@ vllm serve baselabs/mammoth-1
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
   `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
   choice and returns 400 for score levels with the same label.
+
+### State-First Code-Readout Models (`dm_config.json`)
+
+Causal option-code checkpoints shipping a `dm_config.json` with
+`"layout": "state_first"` (such as
+[`tattrongvu/Jeffan-31b-1710`](https://huggingface.co/tattrongvu/Jeffan-31b-1710))
+are served automatically with `StateFirstStrategy`:
+
+```bash
+vllm serve tattrongvu/Jeffan-31b-1710 --logprobs-mode processed_logprobs
+```
+
+- Each question is scored from the first assistant token's logprobs over
+  up to 255 single-token option codes (`A`..`Z`, `AA`..`IU`) on the
+  checkpoint's `State:` / `Question:` / `Options:` prompt, so picks and
+  probabilities match the checkpoint's reference implementation. `confidence`
+  and `usage` follow the definitions on this page instead.
+- Checkpoints declaring `reread_below` (or `read_twice_tokens`) automatically
+  re-score low-confidence questions on a doubled prompt when it fits within
+  `max_model_len`.
+- Top-level `instructions`, media inputs, and `enable_thinking: true` return
+  400.
+
+### Decider Chat Models (`decider_config.json`)
+
+Checkpoints shipping a `decider_config.json` with `"layout": "chat"` and
+`temperature_by_options` (such as
+[`Mapika/decider-31b`](https://huggingface.co/Mapika/decider-31b)) are served
+automatically with `DeciderChatStrategy`:
+
+```bash
+vllm serve Mapika/decider-31b --logprobs-mode processed_logprobs
+```
+
+- Each question renders `Context:\n<state>\n\nQuestion: ...\nOptions:\n(A) ...`
+  with an assistant prefill `Answer: (` and applies the checkpoint's
+  option-count temperature curve $T(n) = \max(\text{min}, a + b \ln(n))$
+  (plus optional reversed-option `second_reading` averaging when top-1
+  probability falls below `second_reading.below`).
+- JSON states annotate arrays of length $\ge 8$ with `{"_index": i, ...}` and
+  truncate the rendered context to `max_state_tokens` (32,768 tokens).
+- A `choice` supports 2 to 255 options and a `score` supports 2 to 10 levels.
+  Top-level `instructions`, media inputs, and `enable_thinking: true` return
+  400.

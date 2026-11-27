@@ -7,7 +7,7 @@ from argparse import Namespace
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pybase64 as base64
@@ -45,11 +45,13 @@ from vllm.entrypoints.openai.decisions.state import init_decisions_state
 from vllm.entrypoints.openai.decisions.strategies import (
     ClefFlashStrategy,
     D3Strategy,
+    DeciderChatStrategy,
     DiffusionGemmaCanvasStrategy,
     JointSchemaStrategy,
     LiquidStrategy,
     NextTokenStrategy,
     ReadContext,
+    StateFirstStrategy,
     cap_pixels,
     common_prefix_len,
     reply_label_ids,
@@ -1535,3 +1537,304 @@ async def test_joint_reads_on_both_endpoints(dgemma, endpoint):
     assert [c.args[0] for c in engine.check_admission.call_args_list] == [1, 1, 1]
     assert engine.generate.call_count == 3
     assert response.usage.output_tokens == engine.generate.call_args.args[1].max_tokens
+
+
+def test_sidecar_strategy_selection(tmp_path):
+    generate = ("generate",)
+    sf_dir = tmp_path / "jeffan"
+    sf_dir.mkdir()
+    (sf_dir / "dm_config.json").write_text(
+        json.dumps(
+            {
+                "name": "Jeffan-31b-1710",
+                "layout": "state_first",
+                "readout": "code",
+                "attention": "causal",
+            }
+        )
+    )
+    sf_cfg = SimpleNamespace(
+        architecture="Gemma4ForConditionalGeneration",
+        logprobs_mode="processed_logprobs",
+        model=str(sf_dir),
+    )
+    assert select_read_strategy(sf_cfg, generate) is StateFirstStrategy
+
+    dec_dir = tmp_path / "decider"
+    dec_dir.mkdir()
+    (dec_dir / "decider_config.json").write_text(
+        json.dumps(
+            {
+                "version": "chat-gemma4-31b-v1",
+                "layout": "chat",
+                "temperature_by_options": {"a": 10.124, "b": -1.633, "min": 0.05},
+            }
+        )
+    )
+    dec_cfg = SimpleNamespace(
+        architecture="Gemma4ForConditionalGeneration",
+        logprobs_mode="processed_logprobs",
+        model=str(dec_dir),
+    )
+    assert select_read_strategy(dec_cfg, generate) is DeciderChatStrategy
+
+    # Invalid sidecar configs must raise ValueError rather than silently falling back.
+    bad_sf_dir = tmp_path / "bad_sf"
+    bad_sf_dir.mkdir()
+    (bad_sf_dir / "dm_config.json").write_text(
+        json.dumps({"name": "Jeffan", "layout": "state_first", "unknown_flag": True})
+    )
+    with pytest.raises(ValueError, match="not supported"):
+        select_read_strategy(
+            SimpleNamespace(
+                architecture="Gemma4ForConditionalGeneration",
+                logprobs_mode="processed_logprobs",
+                model=str(bad_sf_dir),
+            ),
+            generate,
+        )
+    (bad_sf_dir / "dm_config.json").write_text(json.dumps({"layout": "state_first"}))
+    with pytest.raises(ValueError, match="name"):
+        select_read_strategy(
+            SimpleNamespace(
+                architecture="Gemma4ForConditionalGeneration",
+                logprobs_mode="processed_logprobs",
+                model=str(bad_sf_dir),
+            ),
+            generate,
+        )
+
+    bad_dec_dir = tmp_path / "bad_dec"
+    bad_dec_dir.mkdir()
+    (bad_dec_dir / "decider_config.json").write_text(
+        json.dumps({"layout": "chat", "isolated_levels": True})
+    )
+    with pytest.raises(ValueError, match="isolated_levels"):
+        select_read_strategy(
+            SimpleNamespace(
+                architecture="Gemma4ForConditionalGeneration",
+                logprobs_mode="processed_logprobs",
+                model=str(bad_dec_dir),
+            ),
+            generate,
+        )
+    (bad_dec_dir / "decider_config.json").write_text(
+        json.dumps({"layout": "chat", "temperature": 1.9})
+    )
+    with pytest.raises(ValueError, match="temperature_by_options"):
+        select_read_strategy(
+            SimpleNamespace(
+                architecture="Gemma4ForConditionalGeneration",
+                logprobs_mode="processed_logprobs",
+                model=str(bad_dec_dir),
+            ),
+            generate,
+        )
+
+    # HuggingFace repo IDs resolve sidecar configs via Hub helpers.
+    with (
+        patch(
+            "vllm.entrypoints.openai.decisions.strategies.try_get_local_file",
+            return_value=None,
+        ),
+        patch(
+            "vllm.entrypoints.openai.decisions.strategies._try_download_from_hf_hub",
+            side_effect=lambda repo, fn, rev: (
+                sf_dir / "dm_config.json" if fn == "dm_config.json" else None
+            ),
+        ),
+    ):
+        hf_cfg = SimpleNamespace(
+            architecture="Gemma4ForConditionalGeneration",
+            logprobs_mode="processed_logprobs",
+            model="tattrongvu/Jeffan-31b-1710",
+            revision="main",
+        )
+        assert select_read_strategy(hf_cfg, generate) is StateFirstStrategy
+
+
+@pytest.mark.asyncio
+async def test_state_first_and_decider_chat_strategies(tmp_path, qwen):
+    tokenizer, _ = qwen
+    renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+
+    # 1. StateFirstStrategy (Jeffan-31b-1710 dm_config.json with reads=1)
+    sf_dir = tmp_path / "sf"
+    sf_dir.mkdir()
+    (sf_dir / "dm_config.json").write_text(
+        json.dumps(
+            {
+                "name": "Jeffan-31b-1710",
+                "base": "google/gemma-4-31B-it",
+                "layout": "state_first",
+                "readout": "code",
+                "attention": "causal",
+                "reads": 1,
+            }
+        )
+    )
+    engine = MagicMock(spec=EngineClient)
+    engine.errored = False
+    engine.model_config = SimpleNamespace(
+        model=str(sf_dir),
+        max_model_len=4096,
+        is_hybrid=False,
+        supports_multimodal_inputs=False,
+    )
+
+    calls: list[list[int]] = []
+
+    async def sf_generate(prompt, params, request_id, **kwargs):
+        ids = prompt["prompt_token_ids"]
+        calls.append(ids)
+        c_ids = params.logprob_token_ids
+        if "reread" in request_id:
+            # Second read strongly favors the second code (index 1 = Yes/true for noul)
+            lps = {c_ids[0]: Logprob(-5.0), c_ids[1]: Logprob(-0.01)}
+        else:
+            # First read is uniform (0.5 < 0.9), triggering reread_below
+            lps = {cid: Logprob(-0.7) for cid in c_ids}
+        yield RequestOutput(
+            request_id=request_id,
+            prompt=None,
+            prompt_token_ids=ids,
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="B",
+                    token_ids=[c_ids[1]],
+                    cumulative_logprob=None,
+                    logprobs=[lps],
+                    finish_reason="length",
+                )
+            ],
+            finished=True,
+        )
+
+    engine.generate.side_effect = sf_generate
+    sf_strategy = StateFirstStrategy(
+        ReadContext(engine, SimpleNamespace(renderer=renderer), None, "auto", {})
+    )
+    assert len(sf_strategy.codes) == 255
+    qs = [build_question("q", "noul", "Refund?", None, 255, labeled=False)]
+    reads = await sf_strategy.read(
+        qs,
+        None,
+        sf_strategy.render_state("customer wants refund"),
+        request_id="req-sf",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    assert len(calls) == 2
+    assert len(calls[1]) > len(calls[0])
+    # Code B (index 1) was given -0.01 vs -5.0 on reread, mapped to probs[0] = P(yes)
+    assert reads[0].probs[0] > 0.99
+    assert reads[0].output_tokens == 1
+    assert reads[0].input_tokens == len(calls[1])
+
+    # 2. DeciderChatStrategy (temperature_by_options, >128 options, second_reading)
+    dec_dir = tmp_path / "dec"
+    dec_dir.mkdir()
+    (dec_dir / "decider_config.json").write_text(
+        json.dumps(
+            {
+                "version": "31b-v2",
+                "layout": "chat",
+                "temperature_by_options": {"a": 2.0, "b": 0.0, "min": 0.05},
+                "second_reading": {
+                    "below": 0.6,
+                    "temperature_by_options": {"a": 1.0, "b": 0.0, "min": 0.05},
+                },
+            }
+        )
+    )
+    engine.model_config.model = str(dec_dir)
+
+    async def dec_generate(prompt, params, request_id, **kwargs):
+        ids = prompt["prompt_token_ids"]
+        params._validate_logprobs(
+            SimpleNamespace(max_logprobs=20, get_vocab_size=lambda: 200_000)
+        )
+        c_ids = list(params.logprob_token_ids or [])
+        if not c_ids:
+            yield RequestOutput(
+                request_id=request_id,
+                prompt=None,
+                prompt_token_ids=ids,
+                prompt_logprobs=None,
+                outputs=[],
+                finished=True,
+            )
+            return
+        if "second" in request_id:
+            # Reversed-options second pass favors code 0 (option 1 in original order)
+            lps = {cid: Logprob(-5.0) for cid in c_ids}
+            lps[c_ids[0]] = Logprob(0.0)
+        elif len(c_ids) == 2:
+            # First pass on 2-option question has p1 = 0.731 >= 0.6
+            lps = {c_ids[0]: Logprob(-2.0), c_ids[1]: Logprob(0.0)}
+        else:
+            # First pass on 150-option question has max(p) < 0.6 -> second_reading
+            lps = {cid: Logprob(-2.0) for cid in c_ids}
+            lps[c_ids[1]] = Logprob(0.0)
+        yield RequestOutput(
+            request_id=request_id,
+            prompt=None,
+            prompt_token_ids=ids,
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="B",
+                    token_ids=[c_ids[min(1, len(c_ids) - 1)]],
+                    cumulative_logprob=None,
+                    logprobs=[lps],
+                    finish_reason="length",
+                )
+            ],
+            finished=True,
+        )
+
+    engine.generate.side_effect = dec_generate
+    dec_strategy = DeciderChatStrategy(
+        ReadContext(engine, SimpleNamespace(renderer=renderer), None, "auto", {})
+    )
+    assert len(dec_strategy.codes) == 255
+    choice_q = [
+        build_question(
+            "team",
+            "choice",
+            "Queue?",
+            {"billing": "refunds", "tech": None},
+            255,
+            labeled=False,
+        ),
+        build_question(
+            "wide",
+            "choice",
+            "Many options?",
+            {f"opt_{i}": None for i in range(150)},
+            255,
+            labeled=False,
+        ),
+    ]
+    dec_reads = await dec_strategy.read(
+        choice_q,
+        None,
+        dec_strategy.render_state({"items": list(range(10))}),
+        request_id="req-dec",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    # At T=2.0, logprobs (-2.0, 0.0) scale to (-1.0, 0.0).
+    expected_p1 = 1.0 / (math.exp(-1.0) + 1.0)
+    assert math.isclose(dec_reads[0].probs[1], expected_p1, rel_tol=1e-6)
+    formatted = choice_q[0].type.answer(
+        choice_q[0], dec_reads[0].probs, dec_reads[0].label_mass
+    )
+    assert formatted["choice"] == "tech"
+    assert len(dec_reads[1].probs) == 150
+    assert dec_reads[0].output_tokens == 1 and dec_reads[1].output_tokens == 1
