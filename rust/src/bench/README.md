@@ -858,7 +858,8 @@ The Rust implementation matches Python `vllm bench serve` in:
   delegation cannot silently reject documented flags
 - Stream handling: `tests/benchmarks/stream_cases.json` in the repo root holds
   recorded SSE streams and the result both clients must report for each
-  (success, ITL sample count, text, token counts). `test_stream_cases` in
+  (ITL sample count, text and token counts for a successful stream; for a
+  failed one, that it fails and part of the error). `test_stream_cases` in
   `src/backends/mod.rs` and `tests/benchmarks/test_stream_conformance.py` run
   the same file, handing the client's stream reader one read per fixture
   chunk, and also over a local socket when the result does not depend on the

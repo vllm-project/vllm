@@ -3,7 +3,9 @@
 """Run the stream cases shared with the Rust `vllm-bench` client.
 
 `stream_cases.json` holds recorded SSE streams and the result both benchmark
-clients must report for each. The Rust side runs the same file in
+clients must report for each. A successful case gives the ITL sample count,
+text, output tokens and prompt length; a failed case gives that it fails and
+part of the error. The Rust side runs the same file in
 `rust/src/bench/src/backends/mod.rs`.
 
 Each case is fed to the client one fixture chunk per read, so a case that splits
@@ -44,6 +46,8 @@ ENDPOINTS = {
 # The client-side estimate; a case expects another value only when the stream
 # reports usage.
 CLIENT_PROMPT_LEN = 100
+# What a successful case's expect gives besides success.
+FIELDS = ("itl", "text", "output_tokens", "prompt_len")
 
 
 def _chunks(case: dict[str, Any]) -> list[bytes]:
@@ -156,15 +160,14 @@ def _mismatches(expect: dict[str, Any], got: dict[str, Any]) -> list[str]:
 
 def _gap_got(expect: dict[str, Any], got: dict[str, Any]) -> dict[str, Any]:
     """The `known_gap` entry `got` that describes this output."""
-    fields = ("itl", "text", "output_tokens", "prompt_len")
     if got["success"] and not expect["success"]:
-        return {"success": True, **{key: got[key] for key in fields}}
+        return {"success": True, **{key: got[key] for key in FIELDS}}
     if not got["success"]:
         # The last line names the exception when the error is a traceback.
         lines = [line for line in got["error"].splitlines() if line.strip()]
         return {"success": False, "error_contains": lines[-1] if lines else ""}
     return {
-        key: got[key] for key in fields if key in expect and got[key] != expect[key]
+        key: got[key] for key in FIELDS if key in expect and got[key] != expect[key]
     }
 
 
@@ -186,6 +189,16 @@ def _check(case: dict[str, Any], got: dict[str, Any]) -> list[str]:
         new_got = json.dumps(_gap_got(case["expect"], got))
         return [f"known_gap.python.got no longer matches ({gap['pr']}); got {new_got}"]
     return []
+
+
+def test_cases_give_every_field():
+    missing = [
+        f"{case['name']} lacks {key}"
+        for case in CASES
+        for key in (FIELDS if case["expect"]["success"] else ("error_contains",))
+        if key not in case["expect"]
+    ]
+    assert not missing, "; ".join(missing)
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case["name"] for case in CASES])

@@ -174,7 +174,8 @@
    "data: [DONE]\n\n"
   ],
   "expect": {
-   "success": false
+   "success": false,
+   "error_contains": "Never received a valid chunk"
   }
  },
  {
@@ -185,7 +186,8 @@
    "data: [DONE]\n\n"
   ],
   "expect": {
-   "success": false
+   "success": false,
+   "error_contains": "Never received a valid chunk"
   }
  },
  {
@@ -201,7 +203,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   },
   "known_gap": {
    "python": {
@@ -226,7 +229,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   },
   "known_gap": {
    "python": {
@@ -251,7 +255,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -290,7 +295,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -330,7 +336,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -346,7 +353,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -359,7 +367,8 @@
    "success": true,
    "itl": 2,
    "text": "aaa",
-   "output_tokens": 3
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -376,7 +385,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -392,7 +402,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   },
   "known_gap": {
    "python": {
@@ -448,6 +459,7 @@
   "expect": {
    "success": true,
    "itl": 1,
+   "text": "aa",
    "output_tokens": 2,
    "prompt_len": 100
   },
@@ -472,6 +484,7 @@
    "success": true,
    "itl": 1,
    "text": "aa",
+   "output_tokens": 0,
    "prompt_len": 100
   }
  },
@@ -489,7 +502,8 @@
    "success": true,
    "itl": 2,
    "text": " \nx",
-   "output_tokens": 3
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -499,7 +513,8 @@
    "success": true,
    "itl": 1,
    "text": "\u4e16\u754c",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   },
   "chunks_hex": [
    "646174613a207b2263686f69636573223a5b7b2274657874223a22e4",
@@ -519,7 +534,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -697,7 +713,8 @@
    "data: [DONE]\n\n"
   ],
   "expect": {
-   "success": false
+   "success": false,
+   "error_contains": "Never received a valid chunk"
   }
  },
  {
@@ -708,7 +725,8 @@
    "data: [DONE]\n\n"
   ],
   "expect": {
-   "success": false
+   "success": false,
+   "error_contains": "Never received a valid chunk"
   }
  },
  {
@@ -724,7 +742,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   },
   "known_gap": {
    "python": {
@@ -749,7 +768,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   },
   "known_gap": {
    "python": {
@@ -774,7 +794,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -813,7 +834,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -853,7 +875,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -869,7 +892,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -882,7 +906,8 @@
    "success": true,
    "itl": 2,
    "text": "aaa",
-   "output_tokens": 3
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -899,7 +924,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -915,7 +941,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   },
   "known_gap": {
    "python": {
@@ -971,6 +998,7 @@
   "expect": {
    "success": true,
    "itl": 1,
+   "text": "aa",
    "output_tokens": 2,
    "prompt_len": 100
   },
@@ -995,6 +1023,7 @@
    "success": true,
    "itl": 1,
    "text": "aa",
+   "output_tokens": 0,
    "prompt_len": 100
   }
  },
@@ -1012,7 +1041,8 @@
    "success": true,
    "itl": 2,
    "text": " \nx",
-   "output_tokens": 3
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1022,7 +1052,8 @@
    "success": true,
    "itl": 1,
    "text": "\u4e16\u754c",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   },
   "chunks_hex": [
    "646174613a207b2263686f69636573223a5b7b2264656c7461223a7b22636f6e74656e74223a22e4",
@@ -1042,7 +1073,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1059,7 +1091,8 @@
    "success": true,
    "itl": 2,
    "text": "aa",
-   "output_tokens": 3
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1075,7 +1108,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1092,7 +1127,9 @@
   "expect": {
    "success": true,
    "itl": 2,
-   "text": "aaa"
+   "text": "aaa",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1104,7 +1141,8 @@
    "data: [DONE]\n\n"
   ],
   "expect": {
-   "success": false
+   "success": false,
+   "error_contains": "Never received a valid chunk"
   }
  },
  {
@@ -1121,7 +1159,9 @@
   "expect": {
    "success": true,
    "itl": 2,
-   "text": "aaa"
+   "text": "aaa",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1138,7 +1178,9 @@
   "expect": {
    "success": true,
    "itl": 2,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1155,7 +1197,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1172,7 +1216,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1189,7 +1235,9 @@
   "expect": {
    "success": true,
    "itl": 2,
-   "text": "a"
+   "text": "a",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1205,7 +1253,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": ""
+   "text": "",
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1222,7 +1272,9 @@
   "expect": {
    "success": true,
    "itl": 2,
-   "text": "a"
+   "text": "a",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1238,7 +1290,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": ""
+   "text": "",
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1253,7 +1307,9 @@
   "expect": {
    "success": true,
    "itl": 0,
-   "text": ""
+   "text": "",
+   "output_tokens": 1,
+   "prompt_len": 7
   }
  },
  {
@@ -1270,7 +1326,9 @@
   "expect": {
    "success": true,
    "itl": 2,
-   "text": ""
+   "text": "",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1287,7 +1345,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1302,7 +1362,9 @@
   "expect": {
    "success": true,
    "itl": 0,
-   "text": ""
+   "text": "",
+   "output_tokens": 1,
+   "prompt_len": 7
   }
  },
  {
@@ -1318,7 +1380,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1333,7 +1397,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1363,7 +1429,8 @@
    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n"
   ],
   "expect": {
-   "success": false
+   "success": false,
+   "error_contains": "without a terminal event"
   }
  },
  {
@@ -1374,7 +1441,8 @@
    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
   ],
   "expect": {
-   "success": false
+   "success": false,
+   "error_contains": "Never received a token delta"
   }
  },
  {
@@ -1390,7 +1458,9 @@
   "expect": {
    "success": true,
    "itl": 2,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1405,7 +1475,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": ""
+   "text": "",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1430,7 +1502,8 @@
    "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"generation failed\"}}}\n\n"
   ],
   "expect": {
-   "success": false
+   "success": false,
+   "error_contains": "generation failed"
   }
  },
  {
@@ -1446,7 +1519,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1462,7 +1536,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1477,7 +1553,8 @@
    "success": true,
    "itl": 1,
    "text": "aa",
-   "output_tokens": 2
+   "output_tokens": 2,
+   "prompt_len": 7
   }
  },
  {
@@ -1492,7 +1569,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 3,
+   "prompt_len": 7
   },
   "known_gap": {
    "python": {
@@ -1517,7 +1596,9 @@
   "expect": {
    "success": true,
    "itl": 1,
-   "text": "aa"
+   "text": "aa",
+   "output_tokens": 3,
+   "prompt_len": 7
   }
  },
  {
@@ -1532,6 +1613,8 @@
   "expect": {
    "success": true,
    "itl": 1,
+   "text": "aa",
+   "output_tokens": 2,
    "prompt_len": 100
   },
   "known_gap": {
@@ -1563,6 +1646,7 @@
   "expect": {
    "success": true,
    "itl": 7,
+   "text": "ostringstream\nostringstream\nostringstream\nostringstream\n",
    "output_tokens": 8,
    "prompt_len": 28
   }
@@ -1587,6 +1671,7 @@
   "expect": {
    "success": true,
    "itl": 7,
+   "text": "ostringstream\nostringstream\nostringstream\nostringstream\n",
    "output_tokens": 8,
    "prompt_len": 28
   }
@@ -1610,6 +1695,7 @@
   "expect": {
    "success": true,
    "itl": 7,
+   "text": "ostringstream\nostringstream\nostringstream\nostringstream\n",
    "output_tokens": 0,
    "prompt_len": 100
   }
@@ -1633,6 +1719,7 @@
   "expect": {
    "success": true,
    "itl": 7,
+   "text": " 4, 5, 6",
    "output_tokens": 8,
    "prompt_len": 8
   }
@@ -1656,6 +1743,7 @@
   "expect": {
    "success": true,
    "itl": 7,
+   "text": " 4, 5, 6",
    "output_tokens": 8,
    "prompt_len": 8
   }
@@ -1685,6 +1773,7 @@
   "expect": {
    "success": true,
    "itl": 7,
+   "text": "ostringstream\nostringstream\nostringstream\nostringstream\n",
    "output_tokens": 8,
    "prompt_len": 28
   }
