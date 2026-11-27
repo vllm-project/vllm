@@ -1670,11 +1670,15 @@ def _convert_chat_logprobs_to_completion_logprobs(
         text_offset.append(offset)
         tokens.append(entry.token)
         token_logprobs.append(entry.logprob)
-        top_logprobs_list.append(
-            {t.token: t.logprob for t in entry.top_logprobs}
-            if source.top_logprobs
-            else None
-        )
+        top: dict[str, float] | None = None
+        if source.top_logprobs:
+            # Keep the highest logprob of candidates decoding to the same
+            # string (the earlier one on a tie), as `/v1/completions` does.
+            top = {}
+            for t in entry.top_logprobs:
+                if t.token not in top or t.logprob > top[t.token]:
+                    top[t.token] = t.logprob
+        top_logprobs_list.append(top)
         offset += len(entry.token)
 
     return CompletionLogProbs(

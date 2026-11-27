@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn chat_template_throw_maps_to_invalid_request() {
-        let error = vllm_chat::Error::ChatTemplateThrown {
+        let error = vllm_chat::Error::ChatTemplateRender {
             message: "Unexpected reasoning effort high.".to_string(),
         };
         let api_error = chat_submit_error("failed to submit chat request", error);
@@ -407,6 +407,7 @@ mod tests {
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
         assert_eq!(response.error.message, "Unexpected reasoning effort high.");
+        assert_eq!(response.error.param, None);
     }
 
     #[test]
@@ -426,10 +427,8 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_render_failure_stays_internal() {
-        let error = vllm_chat::Error::ChatTemplate(
-            "failed to render jinja template: unknown function".to_string(),
-        );
+    fn chat_template_failure_stays_internal() {
+        let error = vllm_chat::Error::ChatTemplate("render task join error".to_string());
         let api_error = chat_submit_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }

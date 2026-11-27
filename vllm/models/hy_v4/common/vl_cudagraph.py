@@ -103,6 +103,18 @@ class HYV4VLEncoderCudaGraphMixin:
     def _pixel_key(modality: str) -> str:
         return "pixel_values" if modality == "image" else "pixel_values_videos"
 
+    def _video_enabled(self) -> bool:
+        return (
+            self.multimodal_config is None
+            or self.multimodal_config.get_limit_per_prompt("video") > 0
+        )
+
+    def _axis_keys(self, modality: str) -> dict[str, tuple[str, ...]]:
+        # The modality capture axis exists only when videos are enabled.
+        if not self._video_enabled():
+            return {}
+        return {ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (modality,)}
+
     # -- SupportsEncoderCudaGraph protocol --
 
     def get_max_frames_per_video(self) -> int:
@@ -142,11 +154,7 @@ class HYV4VLEncoderCudaGraphMixin:
         # taxes every replay. Capture separate image and video graphs: image
         # graphs need only one slot per item, video graphs cover multi-frame
         # batches (bounded by the frame charge in the item specs).
-        video_enabled = (
-            self.multimodal_config is None
-            or self.multimodal_config.get_limit_per_prompt("video") > 0
-        )
-        capture_axes = (("image", "video"),) if video_enabled else ()
+        capture_axes = (("image", "video"),) if self._video_enabled() else ()
 
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],
@@ -220,7 +228,7 @@ class HYV4VLEncoderCudaGraphMixin:
             return {
                 self._pixel_key(modality): pixel_values[:0],
                 grid_key: torch.zeros((0, 3), dtype=torch.int64),
-                ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (modality,),
+                **self._axis_keys(modality),
             }
 
         cum_patches = [0]
@@ -232,7 +240,7 @@ class HYV4VLEncoderCudaGraphMixin:
                 [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
             ),
             grid_key: torch.tensor([grids[i] for i in indices], dtype=torch.int64),
-            ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (modality,),
+            **self._axis_keys(modality),
         }
 
     def prepare_encoder_cudagraph_capture_inputs(

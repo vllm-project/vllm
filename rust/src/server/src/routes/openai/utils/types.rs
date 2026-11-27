@@ -4,10 +4,9 @@
 use std::slice;
 
 use indexmap::IndexMap;
-use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
-use vllm_chat::{AllowedToolsMode, ChatTool};
+use serde_json::{Map, Value};
+use vllm_chat::{AllowedToolsMode, ChatTool, InputAudioFormat};
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
@@ -102,7 +101,42 @@ impl StringOrArray {
 
 #[cfg(test)]
 mod tests {
-    use super::ChatMessage;
+    use serde_json::{Value, json};
+    use vllm_chat::ChatTool;
+
+    use super::{ChatMessage, Function, ImageDetail, ImageUrl};
+
+    /// An omitted or `null` schema means none, and is echoed back as `null`.
+    #[test]
+    fn function_parameters_accept_object_null_and_omitted() {
+        for (function, parameters) in [
+            (json!({"name": "f"}), Value::Null),
+            (json!({"name": "f", "parameters": null}), Value::Null),
+            (json!({"name": "f", "parameters": {}}), json!({})),
+            (
+                json!({"name": "f", "parameters": {"type": "object"}}),
+                json!({"type": "object"}),
+            ),
+        ] {
+            let function: Function = serde_json::from_value(function).unwrap();
+            assert_eq!(
+                serde_json::to_value(&function).unwrap().get("parameters"),
+                Some(&parameters)
+            );
+            assert_eq!(ChatTool::from(function).parameters, parameters);
+        }
+    }
+
+    /// OpenAI accepts `"detail": null` as omitted, and `original` as its own value.
+    #[test]
+    fn image_url_detail_reads_null_as_omitted_and_keeps_original() {
+        let detail = |json| serde_json::from_str::<ImageUrl>(json).unwrap().detail;
+        assert_eq!(detail(r#"{"url": "u", "detail": null}"#), None);
+        assert_eq!(
+            detail(r#"{"url": "u", "detail": "original"}"#),
+            Some(ImageDetail::Original)
+        );
+    }
 
     #[test]
     fn assistant_reasoning_aliases_fold_into_reasoning() {
@@ -205,7 +239,30 @@ impl ContentPart {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ImageUrl {
     pub url: String,
+    #[serde(default)]
     pub detail: Option<ImageDetail>,
+}
+
+/// Image `detail` as OpenAI's chat and Responses APIs spell it.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageDetail {
+    Auto,
+    Low,
+    High,
+    Original,
+}
+
+impl From<ImageDetail> for llm_multimodal::ImageDetail {
+    /// Image preprocessing does not read the detail; `original` asks for the full
+    /// resolution, which `high` is closest to.
+    fn from(detail: ImageDetail) -> Self {
+        match detail {
+            ImageDetail::Auto => Self::Auto,
+            ImageDetail::Low => Self::Low,
+            ImageDetail::High | ImageDetail::Original => Self::High,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -219,11 +276,10 @@ pub struct AudioUrl {
 }
 
 /// Base64-encoded audio bytes in OpenAI `input_audio` form.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct InputAudio {
     pub data: String,
-    pub format: Option<String>,
+    pub format: InputAudioFormat,
 }
 
 // ============================================================================
@@ -299,8 +355,10 @@ fn default_function_tool_type() -> String {
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
-    #[serde(default)]
-    pub parameters: Value,
+    /// The JSON Schema of the arguments. Python and OpenAI accept only an
+    /// object here, or `null` and omitted for no schema.
+    #[serialize_always]
+    pub parameters: Option<Map<String, Value>>,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
     /// Whether the schema is loaded on demand via tool search (vLLM extension,
@@ -320,7 +378,7 @@ impl From<Function> for ChatTool {
         Self {
             name,
             description,
-            parameters,
+            parameters: parameters.map_or(Value::Null, Value::Object),
             strict,
             defer_loading,
         }

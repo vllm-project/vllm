@@ -181,6 +181,12 @@ See also: [full example](../../examples/features/structured_outputs/README.md)
 
 You can also use structured outputs with <project:#reasoning-outputs> for reasoning models.
 
+When reasoning is outside the output grammar, the structured-output manager's
+fallback boundary detection activates constraints after the first reasoning-end
+prefix. A later speculative token that reopens thinking does not defer those
+constraints. This path does not support reopening an unconstrained thinking
+block after the boundary; subsequent tokens must satisfy the selected grammar.
+
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r1
 ```
