@@ -341,11 +341,15 @@ def _run_conversation(
         else:
             computed = output = _complete(decode_url, prompt, "conv")
         recompute = _complete(decode_url, prompt, f"recompute-{turn}")
+        expected_cached = _expected_cached(prev_len, hit_unit)
+        if deployment.prefill is not None:
+            # The prefiller stops at the checkpoint, so its hits end a unit lower.
+            expected_cached = max(expected_cached - hit_unit, 0)
         turns.append(
             Turn(
                 prompt_len=len(prompt),
                 cached=_cached(computed),
-                expected_cached=_expected_cached(prev_len, hit_unit),
+                expected_cached=expected_cached,
                 recompute_cached=_cached(recompute),
                 output=_tokens_text_logprobs(output),
                 recompute=_tokens_text_logprobs(recompute),

@@ -159,17 +159,12 @@ impl InferenceServiceImpl {
                         "multimodal gRPC requests must provide token_ids input",
                     ));
                 };
-                let mm_features =
-                    self.state.chat.prepare_media(media, &mut token_ids).await.map_err(
-                        |error| match error.kind() {
-                            vllm_chat::ErrorKind::InvalidRequest { .. } => {
-                                Status::invalid_argument(error.to_report_string())
-                            }
-                            vllm_chat::ErrorKind::Internal => {
-                                Status::internal(error.to_report_string())
-                            }
-                        },
-                    )?;
+                let mm_features = self
+                    .state
+                    .chat
+                    .prepare_media(media, &mut token_ids)
+                    .await
+                    .map_err(chat_error_to_status)?;
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
             }
@@ -392,10 +387,19 @@ async fn generate_stream_responses(
 }
 
 pub(super) fn text_error_to_status(error: vllm_text::Error) -> Status {
-    let message = error.to_report_string();
-    match error.kind() {
+    kind_to_status(error.kind(), error.to_report_string())
+}
+
+/// Like [`text_error_to_status`], for the chat pipeline, which wraps the text
+/// errors.
+pub(super) fn chat_error_to_status(error: vllm_chat::Error) -> Status {
+    kind_to_status(error.kind(), error.to_report_string())
+}
+
+fn kind_to_status(kind: vllm_text::ErrorKind, message: String) -> Status {
+    match kind {
         vllm_text::ErrorKind::InvalidRequest { .. } => Status::invalid_argument(message),
-        vllm_text::ErrorKind::Internal if error.is_unavailable() => Status::unavailable(message),
+        vllm_text::ErrorKind::Unavailable => Status::unavailable(message),
         vllm_text::ErrorKind::Internal => Status::internal(message),
     }
 }

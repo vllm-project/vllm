@@ -20,8 +20,7 @@ use vllm_text::{FinishReason, Prompt, TextDecodeOptions, TextOutputStreamExt as 
 
 use super::questions::{Question, QuestionType, label_softmax};
 use crate::error::{
-    ApiError, bail_invalid_request, chat_submit_error, engine_error, server_error,
-    text_submit_error,
+    ApiError, bail_invalid_request, chat_request_error, engine_error, text_request_error,
 };
 use crate::routes::generative_scoring::label_logprobs;
 
@@ -150,9 +149,9 @@ impl NextTokenReads {
 
             let mut text_request = (chat.request_processor().prepare_for_tokenization(request))
                 .await
-                .map_err(|error| chat_submit_error("failed to render a decision read", error))?;
+                .map_err(|error| chat_request_error("failed to render a decision read", error))?;
             let prompt_token_ids = (text.request_processor().tokenize_in_place(&mut text_request))
-                .map_err(|error| text_submit_error("failed to tokenize a decision read", error))?;
+                .map_err(|error| text_request_error("failed to tokenize a decision read", error))?;
             if !prompt_token_ids.ends_with(&self.tail) {
                 bail_invalid_request!(
                     "these chat options end the prompt differently, so the labels' tokens are \
@@ -161,7 +160,7 @@ impl NextTokenReads {
             }
             prepared.push(
                 text.request_processor().prepare(text_request).map_err(|error| {
-                    text_submit_error("failed to prepare a decision read", error)
+                    text_request_error("failed to prepare a decision read", error)
                 })?,
             );
             question_label_ids.push(label_ids);
@@ -174,14 +173,12 @@ impl NextTokenReads {
         // prefills it again and reports fewer `cached_tokens` than Python.
         let outputs = future::try_join_all(prepared.into_iter().map(|prepared| async {
             let mut streams = (text.generate_prepared_n(prepared, NonZeroU32::MIN).await)
-                .map_err(|error| text_submit_error("failed to submit a decision read", error))?;
+                .map_err(|error| text_request_error("failed to submit a decision read", error))?;
             let stream = streams.pop().expect("one output stream per sample");
-            stream.collect_output().await.map_err(|error| {
-                server_error!(
-                    "failed to collect a decision read: {}",
-                    error.to_report_string()
-                )
-            })
+            stream
+                .collect_output()
+                .await
+                .map_err(|error| text_request_error("failed to collect a decision read", error))
         }))
         .await?;
 
