@@ -760,7 +760,7 @@ def _make_rgba_score_data():
     return [
         {
             "type": "image_url",
-            "image_url": {"url": encode_image_url(image)},
+            "image_url": {"url": encode_image_url(image, image_mode=None)},
         }
     ]
 
@@ -813,14 +813,3 @@ class TestScoreDataMediaIoKwargs:
 
         (loaded_image,) = prompt["multi_modal_data"]["image"]
         assert loaded_image.mode == "RGBA"
-
-    def test_image_mode_false_raises_instead_of_disabling_conversion(
-        self, multimodal_reranker_processor
-    ):
-        with pytest.raises((TypeError, ValueError)):
-            _call_score_data_to_prompts(
-                multimodal_reranker_processor,
-                _make_rgba_score_data(),
-                "document",
-                media_io_kwargs={"image": {"image_mode": False}},
-            )

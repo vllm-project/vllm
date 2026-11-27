@@ -707,6 +707,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if self.num_post_process_tokens:
             tok_params = reserve_tokens(tok_params, self.num_post_process_tokens)
 
+        # Scoring parses media before calling process_for_engine directly,
+        # bypassing the renderer's media-kwargs default merge.
         default_media_io_kwargs = getattr(
             self.model_config.multimodal_config, "media_io_kwargs", None
         )
