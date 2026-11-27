@@ -110,7 +110,8 @@ logger = init_logger(__name__)
 class ConvertWeights:
     """Apply the Transformers renamings, and the conversions that split or concatenate
     checkpoint tensors (e.g. a fused `query_key_value` into `q_proj`, `k_proj` and
-    `v_proj`), to the weights, like Transformers does.
+    `v_proj`), to the weights, like Transformers does, and splits a quantized
+    checkpoint's other tensors of a split weight like the weight.
 
     `Split` sizes each piece like its target parameter, which vLLM may replace (e.g.
     by fusing the projections), so the shapes are recorded on construction."""
@@ -189,7 +190,7 @@ class ConvertWeights:
         """Split another tensor of a module whose weight a converter splits (e.g. a
         quantized checkpoint's `weight_scale`) like the weight: by its rows or by blocks
         of them, and copy a single value or a 1-D tensor of another length (e.g.
-        `g_idx`) to every piece. `None` if `name` is no such tensor."""
+        `weight_shape`) to every piece. `None` if `name` is no such tensor."""
         module, _, param = name.rpartition(".")
         first, source = rename_source_key(
             f"{module}.weight", self.renamings, self.converters

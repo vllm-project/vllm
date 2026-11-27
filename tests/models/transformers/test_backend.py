@@ -1147,9 +1147,6 @@ def test_convert_weights_splits_fused_gqa_qkv():
     assert list(weights([skipped])) == [("vision_tower.q_proj.weight", fused)]
 
 
-@pytest.mark.skipif(
-    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
-)
 def _quantized_split_converter():
     with torch.device("meta"):
         model = nn.Module()
@@ -1176,12 +1173,13 @@ def _quantized_split_converter():
     ("name", "shape", "pieces"),
     [
         ("att_proj.weight_scale", (1,), None),  # FP8 per tensor
+        ("ff_proj.input_scale", (1,), None),
         ("att_proj.input_scale", (), None),  # modelopt FP8
-        ("ff_proj.weight_g_idx", (6,), None),  # GPTQ act-order
+        ("ff_proj.weight_shape", (2,), None),  # int4 pack-quantized
         ("att_proj.weight_scale", (12, 1), [(8, 1), (2, 1), (2, 1)]),  # per channel
-        ("ff_proj.weight_scale", (8,), [(4,), (4,)]),  # 1-D per channel
+        ("ff_proj.weight_packed", (8, 3), [(4, 3), (4, 3)]),
         ("att_proj.weight_scale", (6, 3), [(4, 3), (1, 3), (1, 3)]),  # blocks of 2
-        ("ff_proj.weight_zero_point", (2, 3), [(1, 3), (1, 3)]),  # packed rows
+        ("ff_proj.weight_scale", (8,), [(4,), (4,)]),  # 1-D, the weight's rows
     ],
 )
 def test_convert_weights_splits_quantized_tensors(name, shape, pieces):
