@@ -133,12 +133,16 @@ class _Layer(nn.Module):
         idx: int,
         compressed: str | None = None,
         indexer: str | None = None,
+        bounded_replay: bool = True,
     ):
         super().__init__()
         self.idx = idx
         self.seen: list[torch.Tensor] = []
         self.attn = SimpleNamespace(
-            swa_cache_layer=SimpleNamespace(prefix=f"layers.{idx}.swa"),
+            swa_cache_layer=SimpleNamespace(
+                prefix=f"layers.{idx}.swa",
+                bounded_replay=bounded_replay,
+            ),
             compressed_cache_prefix=compressed,
             indexer=(
                 None
@@ -172,7 +176,7 @@ class _Layer(nn.Module):
         return hidden_states, residual, post_mix, res_mix, pre_mix
 
 
-def _model(monkeypatch):
+def _model(monkeypatch, *, bounded_replay: bool = True, with_kv_insert: bool = True):
     import vllm.models.deepseek_v41.amd.model as amd
 
     monkeypatch.setattr(
@@ -186,14 +190,17 @@ def _model(monkeypatch):
     # Layer 0 sits before the cut, so its keys are not collected. Layer 2
     # shares layer 1's compressed cache. Layer 3 has neither.
     layers = [
-        _Layer(0, "layers.0.compressed", "layers.0.indexer"),
-        _Layer(1, "layers.1.compressed", "layers.1.indexer"),
-        _Layer(2, "layers.1.compressed", "layers.2.indexer"),
-        _Layer(3),
+        _Layer(0, "layers.0.compressed", "layers.0.indexer", bounded_replay),
+        _Layer(1, "layers.1.compressed", "layers.1.indexer", bounded_replay),
+        _Layer(2, "layers.1.compressed", "layers.2.indexer", bounded_replay),
+        _Layer(3, bounded_replay=bounded_replay),
     ]
     # Layer 1 is the KV source, so the replay callback is this layer's write.
-    insert = _RocmKvInsert(FULL)
-    layers[1].write_kv = insert.write
+    insert = _RocmKvInsert(FULL) if with_kv_insert else None
+    if insert is not None:
+        layers[1].write_kv = insert.write
+    else:
+        layers[1].write_kv = lambda *args, **kwargs: None
     monkeypatch.setattr(amd, "make_layers", lambda n, factory, prefix: (0, n, layers))
 
     config = SimpleNamespace(
@@ -226,7 +233,8 @@ def _model(monkeypatch):
     model = amd.DeepseekV4Model(vllm_config=vllm_config)
     # Production requests aux at the first replay layer. Here that id is the cut.
     model.aux_hidden_state_layers = (model.decoder_replay_start,)
-    model.topk_indices_buffer = model.topk_indices_buffer.to(DEVICE)
+    if with_kv_insert:
+        model.topk_indices_buffer = model.topk_indices_buffer.to(DEVICE)
 
     calls: list[torch.Tensor] = []
 
@@ -247,14 +255,15 @@ def _model(monkeypatch):
     model._run_layers = wrapped
     scattered: list[tuple[torch.Tensor, ...]] = []
     replay = model.decoder_replay_layers
-    run = replay._run
+    if replay is not None:
+        run = replay._run
 
-    def wrapped_run(*args, **kwargs):
-        result = run(*args, **kwargs)
-        scattered.append(result)
-        return result
+        def wrapped_run(*args, **kwargs):
+            result = run(*args, **kwargs)
+            scattered.append(result)
+            return result
 
-    replay._run = wrapped_run
+        replay._run = wrapped_run
     return model, layers, calls, saved_aux, scattered, insert
 
 
@@ -328,3 +337,15 @@ def test_amd_replay_forward_trims_to_the_window(monkeypatch):
     assert aux.shape[0] == FULL
     assert torch.equal(aux[ROWS, 0], window_ids)
     assert aux[: FULL - WINDOW].eq(0).all()
+
+
+@pytest.mark.parametrize("bounded_replay", [False, True])
+def test_amd_replay_respects_attention_bounded_replay(monkeypatch, bounded_replay):
+    """Decoder replay follows `swa_cache_layer.bounded_replay` on the cut layer."""
+    model, *_ = _model(monkeypatch, bounded_replay=bounded_replay, with_kv_insert=False)
+    if bounded_replay:
+        assert model.decoder_replay_layers is not None
+        assert model.decoder_replay_start == 1
+    else:
+        assert model.decoder_replay_layers is None
+        assert model.decoder_replay_start == model.end_layer
