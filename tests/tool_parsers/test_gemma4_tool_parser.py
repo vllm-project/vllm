@@ -260,6 +260,19 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args(":[t:[]")
         assert isinstance(result, dict)
 
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ('s:x<|"|>,t:<|"|>y<|"|>', {"s": "x", "t": "y"}),
+            ('o:{s:x<|"|>,t:<|"|>}{<|"|>}', {"o": {"s": "x", "t": "}{"}}),
+            ('a:[x<|"|>,<|"|>]y<|"|>]', {"a": ["x", "]y"]}),
+            ('a:[[x<|"|>,<|"|>]y<|"|>]]', {"a": [["x", "]y"]]}),
+        ],
+    )
+    def test_value_missing_opening_delimiter(self, args, expected):
+        """A bare value closed by `<|"|>` neither keeps it nor opens a string."""
+        assert _parse_gemma4_args(args) == expected
+
 
 class TestParseGemma4Array:
     def test_string_array(self):
@@ -376,6 +389,27 @@ class TestExtractToolCalls:
         assert result.tool_calls[0].function.name == "complex_function"
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"nested": {"inner": "value"}, "list": ["a", "b"]}
+
+    def test_string_value_missing_opening_delimiter(self, parser, mock_request):
+        """Regression test for #39468: an unpaired closing `<|"|>` leaked into
+        the value and merged the next array item into a `},{content` key."""
+        model_output = (
+            "<|tool_call>call:write_todos{todos:["
+            '{content:<|"|>Day 1<|"|>,status:pending<|"|>},'
+            '{content:<|"|>Day 2<|"|>,status:pending<|"|>},'
+            '{content:<|"|>Compare<|"|>,status:<|"|>pending<|"|>}'
+            "]}<tool_call|>"
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {
+            "todos": [
+                {"content": "Day 1", "status": "pending"},
+                {"content": "Day 2", "status": "pending"},
+                {"content": "Compare", "status": "pending"},
+            ]
+        }
 
     def test_tool_call_with_number_and_boolean(self, parser, mock_request):
         model_output = (
@@ -573,6 +607,39 @@ class TestStreamingExtraction:
         assert args_text
         parsed_args = json.loads(args_text)
         assert parsed_args == {"location": "Tokyo", "unit": "celsius"}
+
+    def test_streaming_string_value_missing_opening_delimiter(
+        self, parser, mock_request
+    ):
+        """Streaming counterpart of the #39468 regression test."""
+        chunks = [
+            "<|tool_call>",
+            "call:write_todos{todos:[{content:",
+            '<|"|>',
+            "Day 1",
+            '<|"|>',
+            ",status:pending",
+            '<|"|>',
+            "},{content:",
+            '<|"|>',
+            "Day 2",
+            '<|"|>',
+            ",status:",
+            '<|"|>',
+            "pending",
+            '<|"|>',
+            "}]}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        assert json.loads(self._collect_arguments(results)) == {
+            "todos": [
+                {"content": "Day 1", "status": "pending"},
+                {"content": "Day 2", "status": "pending"},
+            ]
+        }
 
     def test_streaming_no_extra_brace(self, parser, mock_request):
         """Verify the closing } is NOT leaked into arguments (Bug #2)."""
