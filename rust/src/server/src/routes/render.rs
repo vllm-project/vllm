@@ -13,7 +13,6 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
-use thiserror_ext::AsReport as _;
 use vllm_chat::ChatRequest;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
@@ -220,16 +219,7 @@ pub(crate) async fn render_chat<S: RenderContext>(
         // its output grammar is the same for every sample.
         .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(|error| match error {
-            // TODO: remove once client vs server Multimodal errors are split
-            // in `vllm-chat` (alongside the gRPC render mapping in
-            // `grpc/render.rs`); keeps `render_chat` from regressing
-            // 400 -> 500 for this variant in the meantime.
-            vllm_chat::Error::Multimodal(_) => {
-                ApiError::invalid_request(error.to_report_string(), None)
-            }
-            other => chat_submit_error("failed to prepare render chat request", other),
-        })?
+        .map_err(|error| chat_submit_error("failed to prepare render chat request", error))?
         .text_request;
     Ok(Json(lower_render_request(
         state.as_ref(),
