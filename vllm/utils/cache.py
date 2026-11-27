@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import UserDict
 from collections.abc import Callable, Hashable, Iterator, KeysView, Mapping
 from types import MappingProxyType
 from typing import NamedTuple, TypeVar, cast, overload
@@ -18,10 +17,16 @@ class _Sentinel: ...
 ALL_PINNED_SENTINEL = _Sentinel()
 
 
-class _MappingOrderCacheView(UserDict[_K, _V]):
+class _MappingOrderCacheView(Mapping[_K, _V]):
     def __init__(self, data: Mapping[_K, _V], ordered_keys: Mapping[_K, None]):
-        super().__init__(data)
+        self._data = data
         self.ordered_keys = ordered_keys
+
+    def __getitem__(self, key: _K) -> _V:
+        return self._data[key]
+
+    def __len__(self) -> int:
+        return len(self._data)
 
     def __iter__(self) -> Iterator[_K]:
         return iter(self.ordered_keys)
