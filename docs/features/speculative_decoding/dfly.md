@@ -35,7 +35,7 @@ vllm serve tencent/Hy4-flash-FP8 \
   activations, independent of the target's scheme.
 - Matching target and draft KV cache dtype: BF16 (`auto` or `bfloat16`)
   or `fp8_ds_mla`. Omit the draft KV override to inherit the target dtype.
-  `fp8_ds_mla` is CUDA-only; ROCm requires BF16.
+  Both are supported on ROCm (gfx950).
 - Matching target and draft tensor parallelism. Pipeline, prefill context,
   and decode context parallel sizes must be one. HY4 Flash supports data
   parallelism, with each DP replica running a TP-local draft.
