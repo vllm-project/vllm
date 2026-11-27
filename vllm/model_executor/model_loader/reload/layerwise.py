@@ -159,7 +159,7 @@ def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
     for name, tensor in get_layer_tensors(layer).items():
         if name in SKIP_LOAD_TENSORS:
             continue
-        if _get_weight_loader(tensor).__name__ != "online_process_loader":
+        if not _is_online_process_loader(_get_weight_loader(tensor)):
             tensor.weight_loader = make_online_process_loader(layer, name)
 
 
@@ -458,10 +458,15 @@ def _process_loaded_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> N
     info.reset()
 
 
+def _is_online_process_loader(loader: Callable) -> bool:
+    # Loaders may be any callable, e.g. a `functools.partial` without `__name__`
+    return getattr(loader, "__name__", None) == "online_process_loader"
+
+
 def _get_original_loader(tensor: torch.Tensor) -> Callable:
     """Return the weight loader with any layerwise wrappers removed."""
     loader = _get_weight_loader(tensor)
-    while loader.__name__ == "online_process_loader":
+    while _is_online_process_loader(loader):
         loader = loader.__wrapped__  # type: ignore[union-attr]
 
     return loader

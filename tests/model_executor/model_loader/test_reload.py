@@ -5,6 +5,7 @@ import importlib.machinery
 import inspect
 import sys
 import types
+from functools import partial
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.checkpoint_weight_patch import (
     CheckpointWeightPatch,
@@ -968,6 +970,21 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
     assert torch.equal(layer.A, -torch.exp(loaded["A"]))
     assert torch.equal(layer.dt_bias, loaded["dt_bias"])
     assert torch.equal(layer.D, loaded["D"])
+
+
+def test_layerwise_reload_with_partial_weight_loader(dist_init, default_vllm_config):
+    """MiniMax's TP RMSNorm loads through a `functools.partial`, which has no
+    `__name__`."""
+    norm = MiniMaxText01RMSNormTP(8)
+    assert isinstance(norm.weight.weight_loader, partial)
+    loaded_weight = torch.arange(8, dtype=torch.float32)
+
+    record_metadata_for_reloading(norm)
+    initialize_layerwise_reload(norm)
+    norm.weight.weight_loader(norm.weight, loaded_weight)
+    finalize_layerwise_reload(norm, model_config=None)
+
+    assert torch.equal(norm.weight, loaded_weight)
 
 
 class _RecordingQuantMethod(QuantizeMethodBase):
