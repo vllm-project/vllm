@@ -480,4 +480,17 @@ vllm serve model --enable-lora --lora-target-modules o_proj
 vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
-When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+`--lora-target-modules` is an explicit allowlist for module names or suffixes such as `o_proj`, `qkv_proj`, and `gate_proj`. When set, this list takes precedence over `--enable-lora-embedding-modules`.
+
+### Embedding Modules
+
+By default, LoRA skips embedding modules (input embeddings and `lm_head`), so vLLM allocates no LoRA buffers for them.
+Use `--enable-lora-embedding-modules` to enable both alongside the default modules. The Python `LLM` argument is `enable_lora_embedding_modules=True`.
+
+```bash
+vllm serve model --enable-lora --enable-lora-embedding-modules
+```
+
+If an adapter contains weights for an embedding module excluded by default, vLLM logs a warning, skips those weights, and applies the remaining enabled weights. Use an explicit `--lora-target-modules` list for finer control, such as enabling input embedding LoRA without `lm_head`.
+
+Enabling `lm_head` LoRA through either option disables prompt scoring for the deployment. Requests using `prompt_logprobs` (including `0`) or `prompt_logprob_token_ids` receive a validation error. This restriction also applies to base-model requests because they can be batched with LoRA requests. Input embedding LoRA supports prompt scoring when `lm_head` LoRA is disabled.

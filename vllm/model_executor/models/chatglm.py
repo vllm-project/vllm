@@ -150,8 +150,6 @@ class GLMMLP(nn.Module):
     ):
         super().__init__()
 
-        self.add_bias = config.add_bias_linear
-
         # Project to 4h.
         self.dense_h_to_4h = MergedColumnParallelLinear(
             config.hidden_size,

@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import IterationDetails
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics import loggers
+from vllm.v1.metrics.iteration_workload import ScheduledWorkload
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.iteration_timing import (
@@ -118,6 +119,20 @@ def test_record_rides_a_later_output_once_its_gpu_work_completes(gpu):
     assert (first.iteration_index, first.num_generation_tokens) == (0, 3)
     assert (second.iteration_index, second.num_generation_tokens) == (1, 5)
     assert first.elapsed_ms == 4.0 and not first.is_dummy
+
+
+def test_record_carries_the_scheduled_workload(gpu):
+    worker = FakeWorker()
+    workload = ScheduledWorkload(sum_decode_kv_tokens=7)
+    details = IterationDetails(num_decode_tokens=1, scheduled_workload=workload)
+
+    worker.execute_model(SimpleNamespace(iteration_details=details))
+    worker.sample_tokens()
+    worker.execute_dummy_batch()
+    step, dummy = worker.completed()
+
+    assert step.scheduled_workload is workload
+    assert dummy.is_dummy and dummy.scheduled_workload is None
 
 
 def test_dummy_batches_are_timed_and_return_earlier_records(gpu):
