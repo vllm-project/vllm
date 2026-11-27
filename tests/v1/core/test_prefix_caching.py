@@ -732,6 +732,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     config = create_vllm_config(block_size=HISPARSE_BLOCK_SIZE)
     connector = NixlPullConnectorScheduler(config, "test", manager.kv_cache_config)
+    connector.bind_kv_cache_manager(manager)
     request = make_request(
         "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
     )
