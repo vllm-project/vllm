@@ -25,6 +25,8 @@ _HF_MODALITY_PROCESSOR_KWARGS = {
 _MM_HASH_TAG_CONTENT = "content:"
 _MM_HASH_TAG_UUID = "uuid:"
 
+EPD_VIDEO_PARTITION_KEY = "_epd_video_partition"
+
 
 @dataclass(slots=True)
 class ProcessorInputs:
@@ -39,6 +41,7 @@ class ProcessorInputs:
     media_io_kwargs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     cache: BaseMultiModalProcessorCache | None = None
+    mm_hashes_override: MultiModalHashes | None = None
 
     def get_mm_hashes(
         self,

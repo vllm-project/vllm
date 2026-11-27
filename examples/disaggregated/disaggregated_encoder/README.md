@@ -113,8 +113,14 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--ec-consumer-dp-size` | Data-parallel replicas per EC consumer (default 1). |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
-When using `--enable-per-video-kwargs-slicing` with audio extracted from video,
-put per-video `fps` or `num_frames` lists inside
+With `--enable-per-video-kwargs-slicing`, the proxy sends each encoder child its
+original position among the request's videos. Qwen3-VL selects that video's
+`fps` or `num_frames` from the effective processor kwargs. The flag defaults to
+off. Enable it only after updating all encoders to support positional requests,
+with `--trust-request-mm-kwargs` enabled and compatible video cache hashing on
+the EC consumer.
+
+With audio extracted from video, put per-video `fps` or `num_frames` lists inside
 `mm_processor_kwargs.videos_kwargs` so the audio cache keys match across stages.
 
 ### Dynamic registration

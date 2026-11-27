@@ -21,7 +21,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from typing_extensions import TypeVar
 
 from vllm.config import SchedulerConfig
-from vllm.exceptions import PromptUpdateMismatchError
+from vllm.exceptions import PromptUpdateMismatchError, VLLMValidationError
 from vllm.inputs import (
     MultiModalEncDecInput,
     MultiModalHashes,
@@ -41,10 +41,10 @@ from ..inputs import (
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
 )
-from ..parse import MultiModalDataItems, MultiModalUUIDItems
+from ..parse import MultiModalDataItems, MultiModalUUIDItems, VideoProcessorItems
 from .context import BaseProcessingInfo, TimingContext, profiling_media
 from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
-from .inputs import ProcessorInputs
+from .inputs import EPD_VIDEO_PARTITION_KEY, ProcessorInputs
 
 if TYPE_CHECKING:
     from ..cache import BaseMultiModalProcessorCache
@@ -1477,6 +1477,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """Select processor options for the items missing from the cache."""
         return inputs.hf_processor_mm_kwargs
 
+    def _partition_video_kwargs(
+        self, inputs: ProcessorInputs, video_index: int, num_videos: int
+    ) -> ProcessorInputs:
+        raise VLLMValidationError(
+            "This processor does not support EPD video kwargs partitioning.",
+            parameter="mm_processor_kwargs",
+        )
+
     def _merge_mm_kwargs(
         self,
         cache: BaseMultiModalProcessorCache,
@@ -1555,7 +1563,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = self._get_mm_hashes(inputs)
+            mm_hashes = inputs.mm_hashes_override or self._get_mm_hashes(inputs)
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             inputs.mm_data_items,
@@ -1588,7 +1596,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = self._get_mm_hashes(inputs)
+            mm_hashes = inputs.mm_hashes_override or self._get_mm_hashes(inputs)
 
         with timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
@@ -1903,6 +1911,26 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         4. Extract information about the placeholder tokens from the
            processed token IDs.
         """
+        if EPD_VIDEO_PARTITION_KEY in inputs.hf_processor_mm_kwargs:
+            kwargs = dict(inputs.hf_processor_mm_kwargs)
+            partition = kwargs.pop(EPD_VIDEO_PARTITION_KEY)
+            videos = inputs.mm_data_items.get("video")
+            if (
+                not isinstance(partition, list)
+                or len(partition) != 2
+                or any(type(value) is not int for value in partition)
+                or not 0 <= partition[0] < partition[1]
+                or not isinstance(videos, VideoProcessorItems)
+                or len(videos) != 1
+                or videos[0] is None
+            ):
+                raise VLLMValidationError(
+                    "Invalid EPD video position for a single raw video.",
+                    parameter="mm_processor_kwargs",
+                )
+            inputs = self._partition_video_kwargs(
+                replace(inputs, hf_processor_mm_kwargs=kwargs), *partition
+            )
         mm_res = self._cached_apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("apply_prompt_updates"):

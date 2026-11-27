@@ -402,6 +402,7 @@ encoder_rr_lock = asyncio.Lock()
 
 
 MM_TYPES = {"image_url", "audio_url", "input_audio", "video_url"}
+EPD_VIDEO_PARTITION_KEY = "_epd_video_partition"
 
 # The embeds content type each MM item is rewritten to once the encoder has
 # published its embedding out of band.
@@ -572,7 +573,9 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, list[dict]]) -> dict
     return rewritten_request
 
 
-def extract_mm_items(request_data: dict) -> list[dict]:
+def extract_mm_items(
+    request_data: dict, *, include_video_embeds: bool = False
+) -> list[dict]:
     """Return *all* image/audio/video items that appear anywhere in `messages`.
 
     Each returned dict looks like:
@@ -585,7 +588,10 @@ def extract_mm_items(request_data: dict) -> list[dict]:
             continue
 
         for item in content:
-            if item.get("type") in MM_TYPES:
+            item_type = item.get("type")
+            if item_type in MM_TYPES or (
+                include_video_embeds and item_type == "video_embeds"
+            ):
                 items.append(item)
     return items
 
@@ -628,32 +634,29 @@ def _validate_per_video_kwargs(mm_kwargs: Any, num_videos: int) -> None:
             )
 
 
-def _validate_per_video_request(req_data: dict) -> None:
-    num_videos = sum(item["type"] == "video_url" for item in extract_mm_items(req_data))
-    _validate_per_video_kwargs(req_data.get("mm_processor_kwargs"), num_videos)
+def _video_positions(req_data: dict) -> tuple[dict[int, int], int]:
+    """Map fan-out item indices to video positions in the parent request."""
+    positions: dict[int, int] = {}
+    num_videos = item_index = 0
+    for item in extract_mm_items(req_data, include_video_embeds=True):
+        item_type = item["type"]
+        if item_type == "video_url":
+            positions[item_index] = num_videos
+        if item_type in ("video_url", "video_embeds"):
+            num_videos += 1
+        if item_type != "video_embeds":
+            item_index += 1
+    return positions, num_videos
 
 
-def _slice_mm_processor_kwargs(mm_kwargs: Any, video_indices: list[int]) -> Any:
-    """Slice per-video list kwargs down to the videos a child carries.
-
-    `video_indices` are the positions of those videos among the original
-    request's videos. Scalars and unrelated kwargs pass through unchanged, in
-    whatever scope (flat or `videos_kwargs`) the request used. Children without
-    videos keep the original kwargs. The sliced value stays a list so both
-    sides of the transfer fold the same element into the cache hash.
-    """
-    if not isinstance(mm_kwargs, dict) or not video_indices:
-        return mm_kwargs
-
-    child = dict(mm_kwargs)
-    scoped = mm_kwargs.get("videos_kwargs")
-    if isinstance(scoped, dict):
-        child["videos_kwargs"] = dict(scoped)
-
-    # Keep shadowed values intact; the effective list alone is partitioned.
-    for scope, key, value in _per_video_list_options(child):
-        scope[key] = [value[i] for i in video_indices]
-    return child
+def _validate_proxy_request(req_data: dict, enable_slicing: bool) -> None:
+    mm_kwargs = req_data.get("mm_processor_kwargs")
+    if isinstance(mm_kwargs, dict) and EPD_VIDEO_PARTITION_KEY in mm_kwargs:
+        raise HTTPException(400, f"{EPD_VIDEO_PARTITION_KEY} is reserved by EPD")
+    if enable_slicing:
+        video_positions, num_videos = _video_positions(req_data)
+        if video_positions:
+            _validate_per_video_kwargs(mm_kwargs, num_videos)
 
 
 async def fanout_encoder_primer(
@@ -688,14 +691,12 @@ async def fanout_encoder_primer(
     mm_kwargs = orig_request.get("mm_processor_kwargs")
     load_audio = _loads_audio_from_video(mm_kwargs)
 
-    # Per-video kwargs index by position among the videos, not among all
-    # media items, so images interleaved with videos do not shift them.
     video_positions: dict[int, int] = {}
+    num_videos = 0
     if enable_per_video_kwargs_slicing:
-        for idx, item in enumerate(mm_items):
-            if item["type"] == "video_url":
-                video_positions[idx] = len(video_positions)
-        _validate_per_video_kwargs(mm_kwargs, len(video_positions))
+        video_positions, num_videos = _video_positions(orig_request)
+        if video_positions:
+            _validate_per_video_kwargs(mm_kwargs, num_videos)
 
     tasks = []
     item_uuids: dict[int, str] = {}
@@ -760,13 +761,14 @@ async def fanout_encoder_primer(
             "stream": False,
         }
         if "mm_processor_kwargs" in orig_request:
-            kwargs = mm_kwargs
-            if enable_per_video_kwargs_slicing:
-                kwargs = _slice_mm_processor_kwargs(
-                    kwargs,
-                    [video_positions[idx] for idx in indices if idx in video_positions],
-                )
-            encoder_req["mm_processor_kwargs"] = kwargs
+            encoder_req["mm_processor_kwargs"] = mm_kwargs
+        if indices[0] in video_positions and (
+            mm_kwargs is None or isinstance(mm_kwargs, dict)
+        ):
+            encoder_req["mm_processor_kwargs"] = {
+                **(mm_kwargs or {}),
+                EPD_VIDEO_PARTITION_KEY: [video_positions[indices[0]], num_videos],
+            }
         for key in (
             "media_io_kwargs",
             "priority",
@@ -1310,8 +1312,7 @@ async def chat_completions(request: Request):
         req_data = msgspec.json.decode(await request.body())
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
         enable_slicing = app.state.enable_per_video_kwargs_slicing
-        if enable_slicing:
-            _validate_per_video_request(req_data)
+        _validate_proxy_request(req_data, enable_slicing)
 
         e_urls = app.state.e_urls  # we want the full list for fan-out
         p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
@@ -1553,8 +1554,7 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
         req_data = msgspec.json.decode(await request.body())
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
         enable_slicing = config.enable_per_video_kwargs_slicing
-        if enable_slicing:
-            _validate_per_video_request(req_data)
+        _validate_proxy_request(req_data, enable_slicing)
         route = proxy.route(len(extract_mm_items(req_data)))
         args = (
             req_data,
@@ -1666,9 +1666,9 @@ if __name__ == "__main__":
         "--enable-per-video-kwargs-slicing",
         action="store_true",
         help=(
-            "Opt in to slicing per-video fps/num_frames lists. Only enable if "
-            "all encoder and consumer instances use compatible partition-invariant "
-            "per-video hashing (e.g. Qwen3-VL). For videos with audio, put "
+            "Opt in to processor-side per-video kwargs slicing. Only enable "
+            "with updated Qwen3-VL encoders and compatible consumer hashing. "
+            "For videos with audio, put "
             "per-video lists in mm_processor_kwargs.videos_kwargs. Off by default."
         ),
     )

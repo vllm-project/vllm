@@ -638,61 +638,126 @@ def test_dummy_video_covers_request_when_shortest_edge_floor_exceeds_cap() -> No
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 @pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.skip_global_cleanup
 def test_processor_per_video_hashes_survive_partitioning(
-    model_id: str, scoped: bool
+    model_id: str, scoped: bool, configured: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A one-video encoder child must hash its video like the full request.
-
-    The Python EPD proxy fans multi-video requests out to one-video encoder
-    children, slicing per-video lists to the videos each child carries. The
-    cache key of a video may then depend only on its own per-video element,
-    not on the raw list, or the producer and consumer hash the same video
-    differently and every EC transfer misses.
-    """
-    kwargs: dict[str, Any] = {"num_frames": [8, 16]}
-    if scoped:
-        kwargs = {"videos_kwargs": dict(kwargs)}
+    """Actual encoder children produce the corresponding parent keys and grids."""
+    from examples.disaggregated.disaggregated_encoder import disagg_epd_proxy
 
     def scoped_form(flat: dict[str, Any]) -> dict[str, Any]:
         return {"videos_kwargs": dict(flat)} if scoped else dict(flat)
 
+    options = scoped_form({"num_frames": [8, 16]})
+    kwargs = {} if configured else options
+    if scoped and not configured:
+        kwargs["num_frames"] = [24]  # shadowed by the scoped list
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_kwargs=options
+        if configured
+        else scoped_form({"num_frames": [24]}),
         mm_processor_cache_gb=1,
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
     videos = [
         _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
-        for _ in range(2)
+        for _ in range(3)
     ]
     for i, (frames, _) in enumerate(videos):
         frames.fill(i)
 
-    def run(count: int, items, hf_kwargs, uuids):
+    def run(items, hf_kwargs, uuids, *, cache=None):
         return processor(
-            "<|vision_start|><|video_pad|><|vision_end|>" * count,
+            "<|vision_start|><|video_pad|><|vision_end|>" * len(items),
             mm_items=processor.info.parse_mm_data({"video": items}),
             mm_uuid_items={"video": uuids},
             hf_processor_mm_kwargs=hf_kwargs,
+            cache=cache,
         )
 
-    full = run(2, videos, kwargs, ["v0", "v1"])
-    child0 = run(1, [videos[0]], scoped_form({"num_frames": [8]}), ["v0"])
-    child1 = run(1, [videos[1]], scoped_form({"num_frames": [16]}), ["v1"])
-    assert child0["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
-    assert child1["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][1]
+    response = SimpleNamespace(status=200, read=AsyncMock(return_value=b"{}"))
+    post = AsyncMock(return_value=response)
+    monkeypatch.setattr(disagg_epd_proxy, "encode_session", SimpleNamespace(post=post))
+    monkeypatch.setattr(disagg_epd_proxy, "NO_REWRITE", False)
+    body: dict[str, Any] = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": f"http://media/v{i}"},
+                        "uuid": f"v{i}",
+                    }
+                ],
+            }
+            for i in range(2)
+        ],
+    }
+    if kwargs:
+        body["mm_processor_kwargs"] = kwargs
+    asyncio.run(
+        disagg_epd_proxy.fanout_encoder_primer(
+            body, ["http://encoder"], "partition", enable_per_video_kwargs_slicing=True
+        )
+    )
+    full = run(videos[:2], kwargs, ["v0", "v1"])
+    full_grids = full["mm_kwargs"].get_data()["video_grid_thw"]
+    assert not torch.equal(full_grids[0], full_grids[1])
+    assert post.await_count == 2
+    for call in post.await_args_list:
+        child_request = json.loads(call.kwargs["data"])
+        uuid = child_request["messages"][0]["content"][0]["uuid"]
+        index = int(uuid[1:])
+        for child_cache in (None, cache):
+            child = run(
+                [videos[index]],
+                child_request["mm_processor_kwargs"],
+                [uuid],
+                cache=child_cache,
+            )
+            assert child["mm_hashes"]["video"] == [full["mm_hashes"]["video"][index]]
+            assert torch.equal(
+                child["mm_kwargs"].get_data()["video_grid_thw"][0], full_grids[index]
+            )
 
-    # Entries beyond the video count never affect processing, so they must
-    # not affect the cache key either.
-    tail = run(2, videos, scoped_form({"num_frames": [8, 16, 32]}), ["v0", "v1"])
-    assert tail["mm_hashes"] == full["mm_hashes"]
+    # Reuse v0 from the child while the new video still uses position 1.
+    partial = run([videos[0], videos[2]], kwargs, ["v0", "v2"], cache=cache)
+    assert partial["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+    assert partial["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
+    assert torch.equal(partial["mm_kwargs"].get_data()["video_grid_thw"], full_grids)
 
-    # Changing only the second video's effective value must invalidate only its key.
-    changed = run(2, videos, scoped_form({"num_frames": [8, 24]}), ["v0", "v1"])
-    assert changed["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
-    assert changed["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
+    if not configured:
+        tail = run(
+            videos[:2],
+            {**kwargs, **scoped_form({"num_frames": [8, 16, 32]})},
+            ["v0", "v1"],
+        )
+        assert tail["mm_hashes"] == full["mm_hashes"]
+        changed = run(
+            videos[:2],
+            {**kwargs, **scoped_form({"num_frames": [8, 24]})},
+            ["v0", "v1"],
+        )
+        assert changed["mm_hashes"]["video"][0] == full["mm_hashes"]["video"][0]
+        assert changed["mm_hashes"]["video"][1] != full["mm_hashes"]["video"][1]
+
+
+@pytest.mark.parametrize("partition", [[-1, 2], [2, 2], [True, 2], None])
+@pytest.mark.skip_global_cleanup
+def test_processor_rejects_invalid_epd_video_position(partition: object) -> None:
+    ctx = build_model_context(MODEL_ID, limit_mm_per_prompt={"video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    with pytest.raises(VLLMValidationError, match="Invalid EPD video position"):
+        processor(
+            "<|vision_start|><|video_pad|><|vision_end|>",
+            mm_items=processor.info.parse_mm_data(_build_video_mm_data(num_frames=8)),
+            hf_processor_mm_kwargs={"_epd_video_partition": partition},
+        )
 
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
