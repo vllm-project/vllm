@@ -29,7 +29,7 @@ pub enum TokenizeRequest {
 impl<'de> Deserialize<'de> for TokenizeRequest {
     /// Select the variant by `messages` rather than `#[serde(untagged)]`, which
     /// would tokenize `prompt` instead when a body carrying both has a malformed
-    /// chat part.
+    /// chat part, and would replace the chat error with a generic one.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
         let request = if value.get("messages").is_some_and(Value::is_array) {
@@ -134,7 +134,7 @@ impl TokenizeChatRequest {
 
         let tool_context =
             ResolvedToolContext::new(&messages, convert_tools(self.tools)?, None, true).map_err(
-                |error| crate::error::chat_submit_error("failed to resolve request tools", error),
+                |error| crate::error::chat_request_error("failed to resolve request tools", error),
             )?;
 
         Ok(ChatRequest {

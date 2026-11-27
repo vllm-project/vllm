@@ -90,6 +90,9 @@ pub enum ErrorKind {
     /// with the canonical offending parameter name when attributable to a
     /// single field.
     InvalidRequest { param: Option<&'static str> },
+    /// The request could not be taken now, so retrying later may succeed
+    /// (HTTP 503 / gRPC `UNAVAILABLE`).
+    Unavailable,
     /// Server-side or internal failure (HTTP 500 / gRPC `INTERNAL`).
     Internal,
 }
@@ -113,7 +116,8 @@ impl ErrorKind {
 
 impl Error {
     /// Classify this error as a client request-validation failure (with its
-    /// canonical OpenAI `param`, if any) or an internal server failure.
+    /// canonical OpenAI `param`, if any), a request that cannot be taken now,
+    /// or an internal server failure.
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => {
@@ -156,26 +160,15 @@ impl Error {
                 | LlmError::InvalidMultimodalInput { .. }
                 | LlmError::RemoteInvalidRequest { .. } => ErrorKind::invalid_request(),
                 LlmError::EngineCoreClient(error) => engine_core_error_kind(error),
+                LlmError::Unavailable { .. }
+                | LlmError::QueueFull
+                | LlmError::PrefillBacklogFull => ErrorKind::Unavailable,
                 LlmError::SamplingMaskTokenCountMismatch { .. }
                 | LlmError::AuxOutputRows(_)
-                | LlmError::Unavailable { .. }
-                | LlmError::QueueFull
-                | LlmError::PrefillBacklogFull
                 | LlmError::Remote { .. } => ErrorKind::Internal,
             },
             Self::EngineCore(error) => engine_core_error_kind(error),
         }
-    }
-
-    /// Whether the request could not be taken now, so retrying later may
-    /// succeed.
-    pub fn is_unavailable(&self) -> bool {
-        matches!(
-            self,
-            Self::Llm(
-                LlmError::Unavailable { .. } | LlmError::QueueFull | LlmError::PrefillBacklogFull
-            )
-        )
     }
 }
 
