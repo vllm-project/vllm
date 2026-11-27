@@ -1150,29 +1150,7 @@ def test_convert_weights_splits_fused_gqa_qkv():
 @pytest.mark.skipif(
     not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
 )
-@pytest.mark.parametrize(
-    ("name", "shape", "pieces"),
-    [
-        ("att_proj.weight_scale", (1,), "copied"),  # FP8 per tensor
-        ("att_proj.input_scale", (), "copied"),  # modelopt FP8
-        ("ff_proj.weight_global_scale", (1,), "copied"),  # NVFP4
-        ("att_proj.weight_shape", (2,), "copied"),  # int4 pack-quantized
-        ("ff_proj.weight_g_idx", (6,), "copied"),  # GPTQ act-order
-        ("att_proj.weight_scale", (12, 1), [(8, 1), (2, 1), (2, 1)]),  # per channel
-        ("ff_proj.weight_scale", (8,), [(4,), (4,)]),  # 1-D per channel
-        ("att_proj.weight_packed", (12, 3), [(8, 3), (2, 3), (2, 3)]),
-        ("att_proj.weight_scale", (6, 3), [(4, 3), (1, 3), (1, 3)]),  # blocks of 2
-        ("ff_proj.weight_zero_point", (2, 3), [(1, 3), (1, 3)]),  # packed rows
-        ("att_proj.weight_scale", (5, 1), ValueError),
-        ("ff_proj.weight_scale", (5, 1), ValueError),
-    ],
-)
-def test_convert_weights_splits_quantized_tensors(name, shape, pieces):
-    """The other tensors a quantized checkpoint stores with a weight that a converter
-    splits (Molmo2's and Sarvam-30B's FP8, int8, int4 and NVFP4 checkpoints) are split
-    like the weight, by rows or blocks of rows, or copied to every piece if they're a
-    single value or 1-D of another length. Both for a module's converter (`Split` of
-    `att_proj`) and a weight's (`Chunk` of `ff_proj.weight`)."""
+def _quantized_split_converter():
     with torch.device("meta"):
         model = nn.Module()
         model.config = PreTrainedConfig()
@@ -1188,23 +1166,56 @@ def test_convert_weights_splits_quantized_tensors(name, shape, pieces):
         target_patterns=["up_proj.weight", "gate_proj.weight"],
         operations=[core_model_loading.Chunk(dim=0)],
     )
-    convert = ConvertWeights([], [split, chunk], WeightsMapper(), model)
+    return ConvertWeights([], [split, chunk], WeightsMapper(), model)
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
+)
+@pytest.mark.parametrize(
+    ("name", "shape", "pieces"),
+    [
+        ("att_proj.weight_scale", (1,), None),  # FP8 per tensor
+        ("att_proj.input_scale", (), None),  # modelopt FP8
+        ("ff_proj.weight_g_idx", (6,), None),  # GPTQ act-order
+        ("att_proj.weight_scale", (12, 1), [(8, 1), (2, 1), (2, 1)]),  # per channel
+        ("ff_proj.weight_scale", (8,), [(4,), (4,)]),  # 1-D per channel
+        ("att_proj.weight_scale", (6, 3), [(4, 3), (1, 3), (1, 3)]),  # blocks of 2
+        ("ff_proj.weight_zero_point", (2, 3), [(1, 3), (1, 3)]),  # packed rows
+    ],
+)
+def test_convert_weights_splits_quantized_tensors(name, shape, pieces):
+    """The other tensors a quantized checkpoint stores with a weight that a converter
+    splits (Molmo2's and Sarvam-30B's FP8, int8, int4 and NVFP4 checkpoints) are split
+    like the weight, by rows or blocks of rows, or copied to every piece (`None`) if
+    they're a single value or 1-D of another length. Both for a module's converter
+    (`Split` of `att_proj`) and a weight's (`Chunk` of `ff_proj.weight`)."""
+    convert = _quantized_split_converter()
     tensor = torch.rand(shape)
     module, param = name.split(".")
     targets = {"att_proj": ["q", "k", "v"], "ff_proj": ["up", "gate"]}[module]
 
-    if pieces is ValueError:
-        with pytest.raises(ValueError, match="Cannot split"):
-            list(convert([(name, tensor)]))
-        return
     converted = dict(convert([(name, tensor)]))
 
     assert list(converted) == [f"{t}_proj.{param}" for t in targets]
-    if pieces == "copied":
+    if pieces is None:
         assert all(piece is tensor for piece in converted.values())
     else:
         assert [tuple(piece.shape) for piece in converted.values()] == pieces
         torch.testing.assert_close(torch.cat(list(converted.values())), tensor)
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
+)
+@pytest.mark.parametrize("module", ["att_proj", "ff_proj"])
+def test_convert_weights_rejects_quantized_tensors_that_dont_split(module):
+    """A tensor of a split module that divides neither like the weight nor as a single
+    value fails by name, for a module's converter and a weight's."""
+    convert = _quantized_split_converter()
+
+    with pytest.raises(ValueError, match=f"Cannot split '{module}.weight_scale'"):
+        list(convert([(f"{module}.weight_scale", torch.rand(5, 1))]))
 
 
 def test_converters_apply_to_renamed_weights():

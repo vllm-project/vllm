@@ -191,12 +191,10 @@ class ConvertWeights:
         of them, and copy a single value or a 1-D tensor of another length (e.g.
         `g_idx`) to every piece. `None` if `name` is no such tensor."""
         module, _, param = name.rpartition(".")
-        if param == "weight":
-            return None
         first, source = rename_source_key(
             f"{module}.weight", self.renamings, self.converters
         )
-        if source is None or (weight_rows := self.split_rows(first, source)) is None:
+        if source is None or (weight_rows := self.target_rows(first, source)) is None:
             return None
         rows = list(weight_rows.values())
         if tensor.dim() <= 1 and tensor.shape[:1] != (sum(rows),):
@@ -214,9 +212,10 @@ class ConvertWeights:
             for weight_name, piece in zip(weight_rows, pieces)
         }
 
-    def split_rows(self, first: str, source: str) -> dict[str, int] | None:
-        """The rows of each weight that `source`'s converter splits the weight renamed
-        to `first` into, by name. `None` unless it splits it into model tensors."""
+    def target_rows(self, first: str, source: str) -> dict[str, int] | None:
+        """The target weights `source`'s converter splits a weight into, and their
+        rows. `first` is the weight's name renamed to the first target. `None` unless
+        there are several targets and all are tensors of the model."""
         targets = self.pattern_to_converter[source].target_patterns
         if len(targets) < 2:
             return None
