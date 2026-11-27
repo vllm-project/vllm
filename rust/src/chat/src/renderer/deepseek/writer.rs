@@ -13,10 +13,8 @@ use super::{
 };
 use crate::error::{Error, Result};
 
-/// Special tokens the V4.1 template writes, followed by the grounding tokens,
-/// the only special tokens replayed assistant text keeps, as in
-/// deepseek-recipe.
-const SPECIAL_TOKENS: [&str; 17] = [
+/// Special tokens the V4.1 template writes.
+const TEMPLATE_TOKENS: [&str; 9] = [
     BOS_TOKEN,
     EOS_TOKEN,
     SYSTEM_SP_TOKEN,
@@ -26,6 +24,11 @@ const SPECIAL_TOKENS: [&str; 17] = [
     THINKING_END_TOKEN,
     DSML_TOKEN,
     DEEPSEEK_V41_IMAGE_PLACEHOLDER,
+];
+
+/// Grounding tokens, the only special tokens replayed assistant text keeps,
+/// as deepseek-recipe's `ASSISTANT_SPECIAL_TOKENS`.
+const GROUNDING_TOKENS: [&str; 8] = [
     "<｜ref｜>",
     "<｜/ref｜>",
     "<｜box｜>",
@@ -35,34 +38,50 @@ const SPECIAL_TOKENS: [&str; 17] = [
     "<｜polygon｜>",
     "<｜/polygon｜>",
 ];
-const GROUNDING_START: usize = 9;
 
-/// Tokenizer with the added-vocabulary IDs of [`SPECIAL_TOKENS`].
+/// Tokenizer with the added-vocabulary IDs of [`TEMPLATE_TOKENS`] and
+/// [`GROUNDING_TOKENS`].
 pub(in crate::renderer) struct SpecialTokenizer {
     tokenizer: DynTokenizer,
-    ids: [u32; SPECIAL_TOKENS.len()],
+    template_ids: [u32; TEMPLATE_TOKENS.len()],
+    grounding_ids: [u32; GROUNDING_TOKENS.len()],
 }
 
 impl fmt::Debug for SpecialTokenizer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SpecialTokenizer").field("ids", &self.ids).finish()
+        f.debug_struct("SpecialTokenizer")
+            .field("template_ids", &self.template_ids)
+            .field("grounding_ids", &self.grounding_ids)
+            .finish()
     }
 }
 
 impl SpecialTokenizer {
     pub(in crate::renderer) fn new(tokenizer: DynTokenizer) -> Result<Self> {
-        let mut ids = [0; SPECIAL_TOKENS.len()];
-        for (id, token) in ids.iter_mut().zip(SPECIAL_TOKENS) {
-            *id = tokenizer
-                .added_vocab()
-                .iter()
-                .find_map(|(text, id)| (text == token).then_some(*id))
-                .ok_or_else(|| {
-                    Error::ChatTemplate(format!("DeepSeek tokenizer lacks added token {token:?}"))
-                })?;
-        }
-        Ok(Self { tokenizer, ids })
+        Ok(Self {
+            template_ids: added_token_ids(&tokenizer, TEMPLATE_TOKENS)?,
+            grounding_ids: added_token_ids(&tokenizer, GROUNDING_TOKENS)?,
+            tokenizer,
+        })
     }
+}
+
+/// Look up the added-vocabulary ID of each token.
+fn added_token_ids<const N: usize>(
+    tokenizer: &DynTokenizer,
+    tokens: [&str; N],
+) -> Result<[u32; N]> {
+    let mut ids = [0; N];
+    for (id, token) in ids.iter_mut().zip(tokens) {
+        *id = tokenizer
+            .added_vocab()
+            .iter()
+            .find_map(|(text, id)| (text == token).then_some(*id))
+            .ok_or_else(|| {
+                Error::ChatTemplate(format!("DeepSeek tokenizer lacks added token {token:?}"))
+            })?;
+    }
+    Ok(ids)
 }
 
 /// DeepSeek prompt writer, like deepseek-recipe's: the prompt is text plus the
@@ -87,7 +106,8 @@ impl<'a> DsPromptWriter<'a> {
 
     /// Write template text, whose template special tokens stay special.
     pub(super) fn control(&mut self, text: &str) {
-        self.write_marking(text, &SPECIAL_TOKENS[..GROUNDING_START], 0);
+        let ids = self.tokenizer.map(|tokenizer| &tokenizer.template_ids[..]);
+        self.write_recognizing(text, &TEMPLATE_TOKENS, ids);
     }
 
     /// Write client text; every special-token spelling in it is plain text.
@@ -98,7 +118,8 @@ impl<'a> DsPromptWriter<'a> {
     /// Write replayed assistant text or reasoning, whose grounding tokens stay
     /// special.
     pub(super) fn assistant(&mut self, text: &str) {
-        self.write_marking(text, &SPECIAL_TOKENS[GROUNDING_START..], GROUNDING_START);
+        let ids = self.tokenizer.map(|tokenizer| &tokenizer.grounding_ids[..]);
+        self.write_recognizing(text, &GROUNDING_TOKENS, ids);
     }
 
     /// Write the image placeholder of one image part.
@@ -106,8 +127,10 @@ impl<'a> DsPromptWriter<'a> {
         self.control(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
     }
 
-    fn write_marking(&mut self, mut text: &str, tokens: &[&str], first_index: usize) {
-        let Some(tokenizer) = self.tokenizer else {
+    /// Write `text`, each spelling of `tokens` in it as a special token whose
+    /// ID is at the same index of `ids`.
+    fn write_recognizing(&mut self, mut text: &str, tokens: &[&str], ids: Option<&[u32]>) {
+        let Some(ids) = ids else {
             self.text.push_str(text);
             return;
         };
@@ -122,8 +145,7 @@ impl<'a> DsPromptWriter<'a> {
             self.text.push_str(&text[..start]);
             let begin = self.text.len();
             self.text.push_str(tokens[index]);
-            self.special_ranges
-                .push((begin, self.text.len(), tokenizer.ids[first_index + index]));
+            self.special_ranges.push((begin, self.text.len(), ids[index]));
             text = &rest[tokens[index].len()..];
         }
         self.text.push_str(text);
