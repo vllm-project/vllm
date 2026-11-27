@@ -37,7 +37,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -288,11 +288,17 @@ class UMBPStoreConnectorScheduler:
         self.lazy_offload = self.store_enabled and bool(
             extra.get("lazy_offload", False)
         )
-        self.enable_partial_hash_hits = bool(
-            extra.get("enable_partial_hash_hits", False)
-        )
         # Request.block_hashes are computed at this size; keys index into them.
         self.hash_block_size = resolved_hash_block_size
+        # Mamba checkpoints sit on prompt-tail hash boundaries, which
+        # block-granular lookups almost never reach.
+        self.enable_partial_hash_hits = bool(
+            extra.get(
+                "enable_partial_hash_hits",
+                bool(self._boundary_handoff_groups)
+                and self.hash_block_size < self.block_size,
+            )
+        )
         lookup_groups = [
             kv_cache_config.kv_cache_groups[group_id]
             for group_id in kv_cache_config.prefix_cacheable_group_ids
@@ -912,7 +918,7 @@ class UMBPStoreConnectorScheduler:
             and block_state.boundary_state_offloads
         ):
             self._add_boundary_state_plans(
-                block_state.boundary_state_offloads,
+                block_state,
                 meta,
                 set(scheduler_output.finished_req_ids),
                 set(scheduler_output.preempted_req_ids or ()),
@@ -1271,7 +1277,7 @@ class UMBPStoreConnectorScheduler:
 
     def _add_boundary_state_plans(
         self,
-        offloads: dict[str, list[tuple[int, int, int]]],
+        block_state: KVConnectorBlockState,
         meta: UMBPConnectorMetadata,
         finished: set[str],
         preempted: set[str],
@@ -1280,7 +1286,7 @@ class UMBPStoreConnectorScheduler:
         if self.codec is None:
             return
         prefix_groups = set(self.kv_cache_config.prefix_cacheable_group_ids)
-        for request_id, entries in offloads.items():
+        for request_id, entries in block_state.boundary_state_offloads.items():
             if request_id in finished or request_id in preempted:
                 logger.debug(
                     "UMBP boundary offloads dropped request=%s entries=%d: %s",
@@ -1298,8 +1304,27 @@ class UMBPStoreConnectorScheduler:
                     len(entries),
                 )
                 continue
+            boundaries = sorted({boundary for _, _, boundary in entries})
+            # Core hands off only state pages; a boundary inside an attention
+            # block also needs that block's page. It comes from core's current
+            # table: the tracker's grows only with eager stores.
+            pages: list[tuple[int, int, int]] = []
+            block_ids: tuple[list[int], ...] | None = None
+            for group_id in self.kv_cache_config.prefix_cacheable_group_ids:
+                group = self.kv_cache_config.kv_cache_groups[group_id]
+                if not issubclass(group.manager_cls, FullAttentionManager):
+                    continue
+                block_size = self.group_block_sizes[group_id]
+                for boundary in boundaries:
+                    if not boundary % block_size:
+                        continue
+                    if block_ids is None:
+                        block_ids = block_state.get_block_ids(request_id) or ()
+                    index = boundary // block_size
+                    if group_id < len(block_ids) and index < len(block_ids[group_id]):
+                        pages.append((group_id, block_ids[group_id][index], boundary))
             plans: list[BlockTransferPlan] = []
-            for group_id, block_id, boundary_tokens in entries:
+            for group_id, block_id, boundary_tokens in [*entries, *pages]:
                 if group_id not in prefix_groups or block_id == NULL_BLOCK_ID:
                     continue
                 if boundary_tokens <= 0:
@@ -1328,7 +1353,7 @@ class UMBPStoreConnectorScheduler:
                 request_id,
                 len(entries),
                 len(plans),
-                sorted({entry[2] for entry in entries}),
+                boundaries,
             )
             if plans:
                 meta.store_plans.extend(plans)
