@@ -162,6 +162,10 @@ class PendingAuxOutput:
     def process_output(self) -> dict[str, AuxRequestOutput]:
         return self.connector.process_output(self)
 
+    def take_dropped_objects(self) -> list[str] | None:
+        writer = self.connector._writer
+        return (writer.take_dropped() or None) if writer is not None else None
+
 
 class AuxOutputWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""

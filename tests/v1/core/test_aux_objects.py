@@ -983,6 +983,21 @@ def test_only_requests_of_a_namespace_hit_its_blocks(namespace, cache_salt, expe
     engine.close()
 
 
+def test_dropped_object_is_computed_and_written_again():
+    engine = _Engine()
+    _turn(engine, "first", 40)
+    (probe,) = _requests(["probe"], 40, 1)
+    engine.connector.objects_dropped([_block_keys(probe)[1]])
+    assert engine.connector.cap_external_hit(probe, 0, 16) == 16
+    assert engine.connector.cap_external_hit(probe, 0, 32) == 0
+    _add(engine, "second", 40, 1)
+    scheduler_output = engine.schedule()
+    assert scheduler_output.num_scheduled_tokens == {"second": 24}
+    engine.step(scheduler_output, {"second": [0]})
+    assert engine.connector.cap_external_hit(probe, 0, 32) == 32
+    engine.close()
+
+
 @pytest.mark.parametrize(
     "prompt,max_tokens,prompt_start,hit,expected",
     [

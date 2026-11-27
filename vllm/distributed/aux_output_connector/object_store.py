@@ -228,6 +228,7 @@ class AuxObjectWriter:
         self._failing = False
         self._markers: dict[str, bytes] = {}
         self._unwritten_markers: dict[str, bytes] = {}
+        self._dropped: list[str] = []
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="vllm-aux-object-writer"
         )
@@ -308,6 +309,13 @@ class AuxObjectWriter:
         text = str(reason).encode(errors="backslashreplace") or b"?"
         for key, _ in objects:
             self._markers.setdefault(_drop_marker(key), text)
+            self._dropped.append(key)
+
+    def take_dropped(self) -> list[str]:
+        """The keys of the objects dropped since the last call."""
+        with self._cond:
+            dropped, self._dropped = self._dropped, []
+        return dropped
 
     def _write_markers(self, markers: dict[str, bytes]) -> None:
         try:

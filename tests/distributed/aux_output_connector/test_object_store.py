@@ -374,6 +374,7 @@ def test_writer_drops_only_the_batch_it_cannot_write(monkeypatch, failure, reaso
     ((_, _, key, logged), _) = logger.error.call_args
     assert key == "g/0" and isinstance(logged, reason)
     assert logger.error.call_count == 1
+    assert writer.take_dropped() == ["g/0"] and writer.take_dropped() == []
     if refusals:
         # Refusals are retried until the deadline, the last one less than a
         # retry interval before it.

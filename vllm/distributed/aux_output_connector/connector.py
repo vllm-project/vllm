@@ -187,6 +187,7 @@ class AuxOutputSchedulerConnector:
         self._namespaces: dict[str, _NamespaceRequest] = {}
         self._runs: list[str] = []
         self._writes: dict[str, list[AuxObject]] = {}
+        self._dropped: set[bytes] = set()
 
     def build_connector_meta(
         self,
@@ -312,6 +313,10 @@ class AuxOutputSchedulerConnector:
         if writes:
             self._writes.setdefault(request.request_id, []).extend(writes)
             state.written = writes[-1][2]
+            if self._dropped:
+                self._dropped.difference_update(
+                    bytes.fromhex(key.rpartition("/")[2]) for key, _, _ in writes
+                )
 
     def _end_run(
         self, state: _NamespaceRequest, end: int, limit: int, tail: bool = True
@@ -360,7 +365,7 @@ class AuxOutputSchedulerConnector:
 
     def max_cache_hit(self, request: Request) -> int:
         if self._namespace(request) is not None:
-            return request.num_tokens - 1
+            return min(self._before_dropped(request), request.num_tokens - 1)
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -378,7 +383,9 @@ class AuxOutputSchedulerConnector:
         num_hit = num_local + num_external
         if self._namespace(request) is not None:
             hashed = len(request.block_hashes) * self._hash_block_size
-            usable = num_hit % self._object_size == 0 and num_hit <= hashed
+            usable = num_hit % self._object_size == 0 and num_hit <= min(
+                hashed, self._before_dropped(request)
+            )
             return num_external if usable else 0
         if num_hit <= self._emit_start(request):
             for block, keys in islice(
@@ -503,6 +510,22 @@ class AuxOutputSchedulerConnector:
                 self._retained_hashes.extend(keys)
         self._release_unheld()
 
+    def objects_dropped(self, keys: list[str] | None) -> None:
+        """Stop hits on the spans whose objects the writer dropped, until a
+        request computes and writes them again."""
+        for key in keys or ():
+            if not (name := key.rpartition("/")[2]).startswith("tail-"):
+                self._dropped.add(bytes.fromhex(name))
+
+    def _before_dropped(self, request: Request) -> int:
+        """Start of the first object of `request` that was dropped."""
+        if self._dropped:
+            step = self._object_size // self._hash_block_size
+            for end in range(step, len(request.block_hashes) + 1, step):
+                if request.block_hashes[end - 1] in self._dropped:
+                    return (end - step) * self._hash_block_size
+        return request.num_tokens
+
     def loads_failed(self, request_ids: set[str]) -> None:
         """Requests about to end with an error because KV they hold failed to
         load: what their steps in flight compute is not written."""
@@ -587,3 +610,4 @@ class AuxOutputSchedulerConnector:
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()
         self._rowless.clear()
+        self._dropped.clear()

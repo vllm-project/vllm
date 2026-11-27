@@ -319,6 +319,7 @@ class ModelRunnerOutput:
     num_verified_tokens_per_req: list[int] | None = None
 
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
+    aux_dropped_objects: list[str] | None = None
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
