@@ -1330,6 +1330,10 @@ class RocmPlatform(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
+    def is_current_stream_capturing(cls) -> bool:
+        return torch.cuda.is_current_stream_capturing()
+
+    @classmethod
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,

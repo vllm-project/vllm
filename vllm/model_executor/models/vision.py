@@ -601,15 +601,7 @@ def run_dp_sharded_mrope_vision_model(
     return out_embeddings
 
 
-_MAX_POS_EMBED_CACHE_SIZE = 8
-
-
-def _is_stream_capturing(device: torch.device) -> bool:
-    if device.type == "cpu":
-        return False
-    mod = getattr(torch, device.type, None)
-    fn = getattr(mod, "is_current_stream_capturing", None)
-    return bool(fn()) if fn is not None else False
+_MAX_POS_EMBED_CACHE_BYTES = 16 * 1024 * 1024  # 16 MiB per module instance
 
 
 def interpolate_cls_abs_pos(abs_pos: torch.Tensor, tgt_grid: int) -> torch.Tensor:
@@ -641,15 +633,16 @@ def interpolate_cls_abs_pos(abs_pos: torch.Tensor, tgt_grid: int) -> torch.Tenso
 
 
 class InterpolatedPosEmbedCache:
-    """Bounded per-module cache for interpolated positional embeddings.
+    """Memory-bounded per-module cache for interpolated positional embeddings.
 
     Safe across weight loading/reloads (`process_weights_after_loading`),
     encoder graph capture (refreshes entries in place and never evicts live
     entries), and `torch.compile` (bypasses cache reads/writes).
     """
 
-    def __init__(self, max_size: int = _MAX_POS_EMBED_CACHE_SIZE) -> None:
-        self._max_size = max_size
+    def __init__(self, max_bytes: int = _MAX_POS_EMBED_CACHE_BYTES) -> None:
+        self._max_bytes = max_bytes
+        self._cached_bytes = 0
         # (tgt_size, dtype, device) -> (cached_tensor, weight_data_ptr, weight_version)
         self._entries: dict[
             tuple[int, torch.dtype, torch.device],
@@ -676,7 +669,7 @@ class InterpolatedPosEmbedCache:
             if cached_ptr == ptr and cached_version == version:
                 return cached
 
-        if _is_stream_capturing(weight.device):
+        if current_platform.is_current_stream_capturing():
             return compute_fn(weight, tgt_size)
 
         # Materialize outside `inference_mode` so `refresh` can update entries
@@ -689,11 +682,18 @@ class InterpolatedPosEmbedCache:
                     cached.copy_(new_pos_embed)
                     self._entries[key] = (cached, ptr, version)
                     return cached
-                self._entries[key] = (new_pos_embed, ptr, version)
+                delta = new_pos_embed.nbytes - cached.nbytes
+                if self._cached_bytes + delta <= self._max_bytes:
+                    self._entries[key] = (new_pos_embed, ptr, version)
+                    self._cached_bytes += delta
+                else:
+                    del self._entries[key]
+                    self._cached_bytes -= cached.nbytes
                 return new_pos_embed
 
-        if len(self._entries) < self._max_size:
+        if self._cached_bytes + new_pos_embed.nbytes <= self._max_bytes:
             self._entries[key] = (new_pos_embed, ptr, version)
+            self._cached_bytes += new_pos_embed.nbytes
         return new_pos_embed
 
     def refresh(
@@ -706,15 +706,22 @@ class InterpolatedPosEmbedCache:
             return
         ptr = weight.data_ptr()
         version = weight._version
-        with torch.inference_mode(False), torch.no_grad():
+        with torch.no_grad():
             for key, (cached, _, _) in list(self._entries.items()):
                 tgt_size, dtype, device = key
                 if dtype != weight.dtype or device != weight.device:
                     del self._entries[key]
+                    self._cached_bytes -= cached.nbytes
                     continue
                 new_pos_embed = compute_fn(weight, tgt_size).contiguous()
                 if cached.shape == new_pos_embed.shape:
                     cached.copy_(new_pos_embed)
                     self._entries[key] = (cached, ptr, version)
                 else:
-                    self._entries[key] = (new_pos_embed, ptr, version)
+                    delta = new_pos_embed.nbytes - cached.nbytes
+                    if self._cached_bytes + delta <= self._max_bytes:
+                        self._entries[key] = (new_pos_embed, ptr, version)
+                        self._cached_bytes += delta
+                    else:
+                        del self._entries[key]
+                        self._cached_bytes -= cached.nbytes

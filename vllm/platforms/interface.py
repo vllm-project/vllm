@@ -1537,6 +1537,11 @@ class Platform:
         return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"
 
     @classmethod
+    def is_current_stream_capturing(cls) -> bool:
+        """Return whether the current accelerator stream is capturing a graph."""
+        return False
+
+    @classmethod
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,

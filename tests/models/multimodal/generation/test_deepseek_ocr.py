@@ -156,13 +156,16 @@ class TestAbsPosEmbedCache:
             third, ImageEncoderViT._interpolate_abs_pos(sam.pos_embed, 6)
         )
 
-    def test_sam_cache_bounded_without_evicting_live_entries(self):
+    def test_sam_cache_bounded_by_memory_without_evicting_live_entries(self):
         sam = _make_small_sam()
         assert sam.pos_embed is not None
+        # Size 4 has 4*4*16*4 = 1024 bytes; cap at 3000 bytes so size 4 fits
+        # alongside size 5 (1600 bytes), while larger entries are not cached.
+        sam._abs_pos_cache._max_bytes = 3000
 
         with torch.inference_mode():
             pinned = sam.get_abs_pos(sam.pos_embed, 4)
-            for size in range(5, 18):
+            for size in range(5, 12):
                 if size == sam.pos_embed.size(1):
                     continue
                 out = sam.get_abs_pos(sam.pos_embed, size)
@@ -171,7 +174,10 @@ class TestAbsPosEmbedCache:
                 )
             again = sam.get_abs_pos(sam.pos_embed, 4)
 
-        assert len(sam._abs_pos_cache._entries) == 8
+        assert sam._abs_pos_cache._cached_bytes <= 3000
+        assert sam._abs_pos_cache._cached_bytes == sum(
+            t.nbytes for t, _, _ in sam._abs_pos_cache._entries.values()
+        )
         assert again is pinned
 
     def test_deepclip_and_step3_embeddings_cache_and_reload(self):
