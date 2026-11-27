@@ -38,6 +38,7 @@ import os
 import time
 import typing
 from collections import Counter
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -550,6 +551,7 @@ def _execute_preflight(
     work_row: int,
     *,
     view_binding: "RepairViewBinding | None" = None,
+    full_forward: bool = False,
 ) -> _RepairPreflight:
     """The rank-local pre-execution checks, WITHOUT side effects.
 
@@ -613,6 +615,12 @@ def _execute_preflight(
         attn_metadata = get_forward_context().attn_metadata
         assert isinstance(attn_metadata, dict) and attn_metadata
         meta = next(iter(attn_metadata.values()))
+        if full_forward:
+            assert work.layer_end == len(layers), "Mixed repair requires full depth"
+            assert meta.query_start_loc[work_row : work_row + 2].tolist() == [lo, hi]
+            assert int(meta.seq_lens[work_row]) == span_end, (
+                "Repair attention must stop at the hole's end"
+            )
         geometry = _repair_geometry_from_binding(
             view_binding, _repair_cache_views(layers[0])
         )
@@ -885,8 +893,14 @@ def execute_repair_only(
     batch_req_ids: list[str],
     *,
     view_binding: "RepairViewBinding | None" = None,
+    full_forward: Callable[[], Any] | None = None,
 ) -> list[RepairResultReport]:
-    """Execute the repair works of one exclusive repair-only step.
+    """Validate and execute one scheduler-admitted repair.
+
+    With full_forward, validate the repair row in the complete batch and
+    invoke the caller's normal model forward once. Other batch rows retain
+    their normal attention metadata and outputs. Without it, execute the
+    original exclusive partial-layer replay described below.
 
     Runs native layer.forward over each work item's repair span for
     layers [0, layer_end) only, discards the output (no logits, no
@@ -929,7 +943,11 @@ def execute_repair_only(
             "attention-metadata slicing is unsupported, so a multi-work "
             "step cannot be fenced"
         )
-        assert set(works) == set(scheduler_output.num_scheduled_tokens), (
+        assert (
+            set(works) <= set(scheduler_output.num_scheduled_tokens)
+            if full_forward is not None
+            else set(works) == set(scheduler_output.num_scheduled_tokens)
+        ), (
             "hole repair: a repair step must not carry ordinary work "
             f"({len(works)} repair works vs "
             f"{len(scheduler_output.num_scheduled_tokens)} scheduled requests)"
@@ -1028,6 +1046,8 @@ def execute_repair_only(
 
     results: list[RepairResultReport] = []
     for work_row, req_id in enumerate(batch_req_ids):
+        if full_forward is not None and req_id not in works:
+            continue
         # PRE-EXECUTION PREFLIGHT CONSENSUS: the work lookup and every
         # pre-layer check (positions and input shapes, layer bound,
         # attention metadata, cache geometry, the full ownership fence,
@@ -1098,6 +1118,7 @@ def execute_repair_only(
                 hi,
                 work_row,
                 view_binding=view_binding,
+                full_forward=full_forward is not None,
             )
         # The fence flags the commit check reports come from the
         # preflight verbatim: the same ordered battery the loop used to
@@ -1164,9 +1185,18 @@ def execute_repair_only(
                 attn_metadata = get_forward_context().attn_metadata
                 assert isinstance(attn_metadata, dict) and attn_metadata
                 meta = next(iter(attn_metadata.values()))
-                hidden_states = inner.embed_input_ids(input_ids[lo:hi])
-                residual = None
-                for idx, layer in enumerate(layers[: work.layer_end]):
+                if full_forward is not None:
+                    if work.layer_end != len(layers):
+                        raise ValueError("Mixed repair requires all model layers")
+                    full_forward()
+                    executed_layers = work.layer_end
+                    replay_layers = ()
+                    hidden_states = residual = None
+                else:
+                    hidden_states = inner.embed_input_ids(input_ids[lo:hi])
+                    residual = None
+                    replay_layers = layers[: work.layer_end]
+                for idx, layer in enumerate(replay_layers):
                     try:
                         hidden_states, residual = layer(
                             positions[lo:hi], hidden_states, residual

@@ -337,10 +337,13 @@ class SchedulerOutput:
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
-    # req_id -> the repair-only execution descriptor. None on ordinary
-    # steps; a non-None dict means every scheduled request this step is a
-    # scheduler-admitted hole repair (v1: repair steps are exclusive).
+    # Per-request repair descriptors. Full-depth repairs can share a batch
+    # with ordinary requests; partial-depth replay remains exclusive.
     repair_works: dict[str, RepairWork] | None = None
+
+    # Full-depth, attention-only repairs use the ordinary model forward and
+    # may share the batch with healthy prefill/decode requests.
+    repair_full_forward: bool = False
 
     # Requests whose scheduler-side num_computed_tokens moved other than
     # by the ordinary step advance (a repair-plan rollback, a commit

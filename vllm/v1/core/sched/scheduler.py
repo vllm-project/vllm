@@ -59,6 +59,7 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
@@ -944,6 +945,17 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _is_full_forward_repair(self, plan: RecoveryPlan) -> bool:
+        return (
+            self.vllm_config.speculative_config is None
+            and len(self.kv_cache_config.kv_cache_groups) == 1
+            and isinstance(
+                self.kv_cache_config.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec
+            )
+            and plan.layer_end
+            == self.vllm_config.model_config.get_num_layers(self.parallel_config)
+        )
+
     def _recovery_plan_budget(
         self,
         request: Request,
@@ -989,7 +1001,13 @@ class Scheduler(SchedulerInterface):
         # reserving head-room, a scheduled-tokens cap below the span)
         # dissolves immediately instead of deferring forever while the
         # pending-plan drain freezes the whole engine.
-        if request.status == RequestStatus.RUNNING:
+        if self._is_full_forward_repair(plan):
+            # Remaining capacity can defer this request, but cannot make a
+            # feasible repair permanently inadmissible.
+            never_fits = max(plan.est_equivalent_tokens, plan.n_eff) + draft_slots > (
+                self.scheduler_config.max_num_batched_tokens
+            )
+        elif request.status == RequestStatus.RUNNING:
             never_fits = (
                 plan.est_equivalent_tokens + plan.n_eff + draft_slots > input_budget
             )
@@ -1094,11 +1112,12 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int] = {}
         repair_charges: dict[str, int] = {}
         repair_admitted = False
-        # Hole repair: pending plans are the first and only admission of
-        # their step (the layer-limited repair execution cannot share a
-        # forward with ordinary work).
+        repair_exclusive = False
+        # Partial-depth replay still drains an exclusive batch. Full-depth
+        # attention-only repair participates in ordinary admission order.
         repair_pending = any(
-            plan.state == "DETECTED" for plan in self.recovery_plans.values()
+            plan.state == "DETECTED" and not self._is_full_forward_repair(plan)
+            for plan in self.recovery_plans.values()
         )
         token_budget = self.max_num_scheduled_tokens
         spec = self.vllm_config.speculative_config
@@ -1156,9 +1175,10 @@ class Scheduler(SchedulerInterface):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
-            if repair_admitted:
-                # A repair step is exclusive: the layer-limited repair
-                # execution cannot share a forward with ordinary work.
+            if repair_admitted and (
+                repair_exclusive or request.request_id in self.recovery_plans
+            ):
+                # One repair per step; only partial replay blocks healthy rows.
                 num_new_tokens = 0
                 req_index += 1
                 continue
@@ -1218,19 +1238,19 @@ class Scheduler(SchedulerInterface):
             _pending_plan = self.recovery_plans.get(request.request_id)
             if (
                 0 < long_prefill_token_threshold < num_new_tokens
-                # A pending repair plan is exempt from the long-prefill
-                # cap: its step is exclusive (ordinary work is frozen
-                # while the plan drains first), so the cap's starvation
-                # protection has no one to protect, and the repair span
-                # cannot be chunked -- capping it below n_eff would
-                # defer the plan (and freeze the engine) forever.
+                # A repair span must fit whole. Its equivalent-token charge
+                # still shares the ordinary budget with healthy requests.
                 and _pending_plan is None
             ):
                 num_new_tokens = long_prefill_token_threshold
             # Reserve the pending plan's equivalent-token charge before the
             # cap, or the later surcharge debit would not fit the budget.
             _repair_reserve = (
-                _pending_plan.est_equivalent_tokens
+                (
+                    max(0, _pending_plan.est_equivalent_tokens - _pending_plan.n_eff)
+                    if self._is_full_forward_repair(_pending_plan)
+                    else _pending_plan.est_equivalent_tokens
+                )
                 if (_pending_plan is not None and _pending_plan.state == "DETECTED")
                 else 0
             )
@@ -1432,6 +1452,7 @@ class Scheduler(SchedulerInterface):
                 recovery_plan.state = "ADMITTED"
                 recovery_plan.admitted_step = self.current_step
                 repair_admitted = True
+                repair_exclusive = not self._is_full_forward_repair(recovery_plan)
             req_index += 1
             drafts_needed = drafts_needed or not self._drafts_unused(
                 request, request.num_computed_tokens, num_new_tokens
@@ -1540,7 +1561,9 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
-                if repair_admitted:
+                if repair_admitted and (
+                    repair_exclusive or request.request_id in self.recovery_plans
+                ):
                     # One repair per step.
                     skip_request(request_queue)
                     continue
@@ -2150,6 +2173,7 @@ class Scheduler(SchedulerInterface):
                     recovery_plan.state = "ADMITTED"
                     recovery_plan.admitted_step = self.current_step
                     repair_admitted = True
+                    repair_exclusive = not self._is_full_forward_repair(recovery_plan)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)
@@ -2316,9 +2340,8 @@ class Scheduler(SchedulerInterface):
         )
 
         if repair_admitted:
-            # The worker-side descriptors for this step's repair-only
-            # executions: an exclusive repair step carries every scheduled
-            # request.
+            scheduler_output.repair_full_forward = not repair_exclusive
+            # Describe only repairs that remain scheduled after preemption.
             scheduler_output.repair_works = {
                 req_id: RepairWork(
                     request_id=req_id,
@@ -2355,6 +2378,9 @@ class Scheduler(SchedulerInterface):
             assert not (
                 set(scheduler_output.repair_works) & set(scheduled_spec_decode_tokens)
             ), "hole repair: a repair-only step must not schedule drafts"
+            if not scheduler_output.repair_works:
+                scheduler_output.repair_works = None
+                scheduler_output.repair_full_forward = False
 
         if self._pending_rewound_req_ids:
             # Drain the flags of every request scheduled in THIS step:
@@ -3155,6 +3181,9 @@ class Scheduler(SchedulerInterface):
                 # out-of-tree platform runner); suppress it loudly -- the
                 # request's real output continues on the next ordinary
                 # step, after the verdict settled the plan.
+                if scheduler_output.repair_full_forward:
+                    # Only the other rows may emit tokens during repair.
+                    continue
                 logger.error_once(
                     "Suppressing output delivered for req=%s on its "
                     "repair-only step: a repair step produces no tokens "

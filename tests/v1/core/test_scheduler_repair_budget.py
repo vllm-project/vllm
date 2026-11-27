@@ -48,7 +48,7 @@ RESTORED = 3072  # the pre-failure external computed extent
 
 def make_scheduler(**kwargs) -> Scheduler:
     vllm_config = create_vllm_config(
-        model="facebook/opt-125m",
+        model=kwargs.pop("model", "facebook/opt-125m"),
         # Same geometry as the original fixture model (16 hidden
         # layers, long context) so the validation battery's bounds
         # and the prompt-length fixtures are unchanged.

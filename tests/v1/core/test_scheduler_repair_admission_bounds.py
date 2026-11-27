@@ -55,6 +55,64 @@ def _plan_installed(scheduler, request, e=E, span=(96 * BS, 96 * BS + N_EFF)):
     return install_plan(scheduler, request, e, span=span)
 
 
+def test_full_depth_repair_shares_step_with_healthy_decode(tmp_path):
+    """A full-depth repair must not freeze an already decoding request."""
+    from transformers import OPTConfig
+
+    OPTConfig().save_pretrained(tmp_path)
+    scheduler = make_scheduler(
+        model=str(tmp_path),
+        kv_load_failure_policy="repair",
+        max_num_batched_tokens=8192,
+    )
+    damaged = create_request(num_tokens=3328)
+    healthy = create_request(num_tokens=256)
+    scheduler.add_request(damaged)
+    scheduler.add_request(healthy)
+    admit_sync_external_hit(scheduler, damaged, 3072)
+    first = scheduler.schedule()
+    scheduler.update_from_output(
+        first, create_model_runner_output(reqs=[damaged, healthy], use_eos=False)
+    )
+    plan = install_plan(scheduler, damaged, E, layer_end=16)
+    damaged.num_computed_tokens = plan.repair_span[0]
+
+    mixed = scheduler.schedule()
+    assert mixed.num_scheduled_tokens[damaged.request_id] == N_EFF
+    assert mixed.num_scheduled_tokens.get(healthy.request_id) == 1
+    assert mixed.repair_full_forward
+    assert set(mixed.repair_works) == {damaged.request_id}
+
+
+def test_busy_batch_defers_full_depth_repair_without_dissolving(tmp_path):
+    """A decode token can defer a boundary-sized plan without rejecting it."""
+    from transformers import OPTConfig
+
+    OPTConfig().save_pretrained(tmp_path)
+    scheduler = make_scheduler(
+        model=str(tmp_path),
+        kv_load_failure_policy="repair",
+        max_num_batched_tokens=8192,
+    )
+    healthy = create_request(num_tokens=256)
+    damaged = create_request(num_tokens=3328)
+    scheduler.add_request(healthy)
+    scheduler.add_request(damaged)
+    admit_sync_external_hit(scheduler, damaged, 3072)
+    first = scheduler.schedule()
+    scheduler.update_from_output(
+        first, create_model_runner_output(reqs=[healthy, damaged], use_eos=False)
+    )
+    plan = install_plan(scheduler, damaged, 8192, layer_end=16)
+    damaged.num_computed_tokens = plan.repair_span[0]
+
+    busy = scheduler.schedule()
+    assert busy.num_scheduled_tokens[healthy.request_id] > 0
+    assert damaged.request_id not in busy.num_scheduled_tokens
+    assert scheduler.recovery_plans[damaged.request_id] is plan
+    assert plan.state == "DETECTED"
+
+
 def test_admission_arithmetic_of_the_abort_fixture():
     """The abort fixture's arithmetic (max_num_batched_tokens=8192, E=2623,
     n_eff=1536): the static gate passes (max(E, n_eff) = 2623 <= 8192)

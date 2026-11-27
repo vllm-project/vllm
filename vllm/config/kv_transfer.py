@@ -118,8 +118,10 @@ class KVTransferConfig:
     """Policy for handling KV cache load failures.
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)
-    'repair': the scheduler admits a layer-range repair-only step for the
-    failed region (connector must report through get_load_failure_reports)"""
+    'repair': schedule the failed region and reuse the certified suffix.
+    Full-depth attention-only repairs share the normal forward with healthy
+    requests; partial-depth replay remains exclusive. The connector must
+    report through get_load_failure_reports."""
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.
