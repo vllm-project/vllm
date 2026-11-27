@@ -8,8 +8,8 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.transport import Seedable
-from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+from vllm.preload.transport import Seedable
+from vllm.preload.weight_seed.core import (
     MOONCAKE_BACKEND,
     PEER_IPC_BACKEND,
     SeedBackend,
@@ -18,15 +18,10 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     get_mover,
     parse_seed_backend,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-    WeightsSeedPayload,
-    validate_weights_payload,
-)
+from vllm.preload.weight_seed.utils import WeightsSeedPayload, validate_weights_payload
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.weight_cache.daemon import (
-        WeightCacheDaemon,
-    )
+    from vllm.preload.daemon import WeightCacheDaemon
 
 logger = init_logger(__name__)
 

@@ -8,17 +8,12 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
-    MOONCAKE_BACKEND,
-    WeightMover,
-)
+from vllm.preload.weight_seed.core import MOONCAKE_BACKEND, WeightMover
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.network_utils import get_ip
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        StorageRecord,
-    )
+    from vllm.preload.ipc_backends.base import StorageRecord
 
 try:
     from mooncake.engine import TransferEngine

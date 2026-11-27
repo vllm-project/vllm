@@ -14,9 +14,11 @@ from vllm.model_executor.model_loader.base_loader import (
 )
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.model_executor.model_loader.ipc_loader import IpcModelLoader
 from vllm.model_executor.model_loader.modelexpress_loader import (
     ModelExpressModelLoader,
 )
+from vllm.model_executor.model_loader.peer_loader import PeerModelLoader
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )
@@ -26,10 +28,6 @@ from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name,
     get_model_architecture,
     get_model_cls,
-)
-from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
-from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
-    PeerModelLoader,
 )
 
 logger = init_logger(__name__)

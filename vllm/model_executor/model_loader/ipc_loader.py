@@ -24,16 +24,10 @@ from vllm.model_executor.model_loader.utils import (
     build_model_from_processed_weights,
     get_draft_load_config,
 )
-from vllm.model_executor.model_loader.weight_cache.ipc_backends import IPC_BACKENDS
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    rebuild_entries,
-    record_bytes,
-)
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
-    recv_msg,
-    send_msg,
-)
-from vllm.model_executor.model_loader.weight_cache.protocol import (
+from vllm.preload.ipc_backends import IPC_BACKENDS
+from vllm.preload.ipc_backends.base import rebuild_entries, record_bytes
+from vllm.preload.ipc_backends.serial_utils import recv_msg, send_msg
+from vllm.preload.protocol import (
     CacheConfigMismatchError,
     WeightCacheKey,
     WeightCacheState,
@@ -43,15 +37,13 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     get_socket_path,
     verify_socket_owner,
 )
-from vllm.model_executor.model_loader.weight_cache.utils import (
+from vllm.preload.utils import (
     build_weight_cache_key,
     is_draft_model_cacheable,
     record_external_weight_charge,
     record_external_weight_fallback,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-    rebuild_tensors,
-)
+from vllm.preload.weight_seed.utils import rebuild_tensors
 from vllm.tracing import instrument
 
 logger = init_logger(__name__)

@@ -14,18 +14,11 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
     build_model_from_processed_weights,
 )
-from vllm.model_executor.model_loader.weight_cache.protocol import (
-    check_weight_cache_loader_support,
-)
-from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
-from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
-    acknowledge_lease,
-    get_mover,
-)
-from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-    WeightsSeedPayload,
-)
 from vllm.platforms import current_platform
+from vllm.preload.protocol import check_weight_cache_loader_support
+from vllm.preload.transport import SeedTransport
+from vllm.preload.weight_seed.core import acknowledge_lease, get_mover
+from vllm.preload.weight_seed.utils import WeightsSeedPayload
 from vllm.tracing import instrument
 
 logger = init_logger(__name__)

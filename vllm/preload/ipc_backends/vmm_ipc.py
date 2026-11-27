@@ -11,22 +11,16 @@ from typing import cast
 
 import torch
 
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+from vllm.platforms import current_platform
+from vllm.preload.ipc_backends.base import (
     IPCBackendBase,
     StorageEntry,
     StorageRecord,
     storage_bytes,
 )
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.memfd_storage import (
-    materialize_pinned_cpu_storages,
-)
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
-    SharedFileDescriptor,
-)
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
-    export_tensor,
-)
-from vllm.platforms import current_platform
+from vllm.preload.ipc_backends.memfd_storage import materialize_pinned_cpu_storages
+from vllm.preload.ipc_backends.serial_utils import SharedFileDescriptor
+from vllm.preload.ipc_backends.torch_ipc import export_tensor
 from vllm.utils.vmm_driver import (
     MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
     VmmDriver,

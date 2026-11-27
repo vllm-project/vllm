@@ -7,24 +7,13 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    rebuild_entries,
-    record_bytes,
-)
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
-    TorchIPCBackend,
-)
-from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
-    PEER_IPC_BACKEND,
-    WeightMover,
-)
 from vllm.platforms import current_platform
+from vllm.preload.ipc_backends.base import rebuild_entries, record_bytes
+from vllm.preload.ipc_backends.torch_ipc import TorchIPCBackend
+from vllm.preload.weight_seed.core import PEER_IPC_BACKEND, WeightMover
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        IPCBackendBase,
-        StorageRecord,
-    )
+    from vllm.preload.ipc_backends.base import IPCBackendBase, StorageRecord
 
 
 class PeerIpcMover(WeightMover):

@@ -936,7 +936,9 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/entrypoints/cli/preload.py
-  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/preload/
+  - vllm/model_executor/model_loader/ipc_loader.py
+  - vllm/model_executor/model_loader/peer_loader.py
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
@@ -953,7 +955,9 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/entrypoints/cli/preload.py
-      - vllm/model_executor/model_loader/weight_cache/
+      - vllm/preload/
+      - vllm/model_executor/model_loader/ipc_loader.py
+      - vllm/model_executor/model_loader/peer_loader.py
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
       - tests/model_executor/model_loader/test_weight_cache.py
       - vllm/platforms/rocm.py
@@ -971,7 +975,9 @@ steps:
   - tests/model_executor/model_loader/test_weight_cache.py
   - vllm/distributed/mooncake_store.py
   - vllm/entrypoints/cli/preload.py
-  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/preload/
+  - vllm/model_executor/model_loader/ipc_loader.py
+  - vllm/model_executor/model_loader/peer_loader.py
   commands:
   # Mooncake ships in the CI image (hash-locked); verify, never install.
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh

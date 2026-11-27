@@ -28,20 +28,10 @@ import vllm.version
 from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    StorageRecord,
-)
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
-    _LEN_STRUCT,
-    _recv_exact,
-)
-from vllm.model_executor.model_loader.weight_cache.utils import (
-    format_socket_role_suffix,
-)
-from vllm.model_executor.model_loader.weight_utils import (
-    filter_duplicate_safetensors_files,
-)
 from vllm.platforms import current_platform
+from vllm.preload.ipc_backends.base import StorageRecord
+from vllm.preload.ipc_backends.serial_utils import _LEN_STRUCT, _recv_exact
+from vllm.preload.utils import format_socket_role_suffix
 from vllm.utils.hashing import safe_hash
 from vllm.utils.network_utils import split_host_port
 
@@ -314,6 +304,10 @@ def hash_checkpoint(model: str) -> str | None:
         return None
     files = glob.glob(os.path.join(model, "*.safetensors"))
     if os.path.isfile(os.path.join(model, SAFE_WEIGHTS_INDEX_NAME)):
+        from vllm.model_executor.model_loader.weight_utils import (
+            filter_duplicate_safetensors_files,
+        )
+
         files = filter_duplicate_safetensors_files(
             files, model, SAFE_WEIGHTS_INDEX_NAME
         )

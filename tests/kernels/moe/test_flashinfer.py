@@ -645,12 +645,10 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
 
 
 def _check_flashinfer_ipc_weights(entries, expected, device_index):
+    from vllm.model_executor.model_loader.ipc_loader import IpcModelLoader
     from vllm.model_executor.model_loader.utils import _register_processed_tensors
-    from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        WeightCacheState,
-    )
     from vllm.model_executor.utils import weights_already_processed
+    from vllm.preload.protocol import WeightCacheState
 
     torch.accelerator.set_device_index(device_index)
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -690,12 +688,8 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
-        TensorEntry,
-    )
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-        build_manifest,
-    )
+    from vllm.preload.ipc_backends.torch_ipc import TensorEntry
+    from vllm.preload.weight_seed.utils import build_manifest
 
     method, layer = _make_unquantized_flashinfer_test_layer(
         monkeypatch, 192, is_gated=True, device="meta"

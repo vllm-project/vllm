@@ -33,14 +33,9 @@ import torch
 from tests.utils import create_new_process_for_each_test, wait_for_gpu_memory_to_clear
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.model_executor.model_loader.weight_cache.artifact_store import (
-    MooncakeArtifactStore,
-    artifact_key,
-)
-from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-    FlashInferWarmupCache,
-)
 from vllm.platforms import current_platform
+from vllm.preload.artifact_store import MooncakeArtifactStore, artifact_key
+from vllm.preload.warmup_cache.flashinfer_autotune import FlashInferWarmupCache
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_mooncake
 from vllm.utils.network_utils import get_open_port
@@ -52,17 +47,10 @@ pytestmark = pytest.mark.skipif(
 
 
 def _state_for_model(model, backend_name):
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
-        IPC_BACKENDS,
-    )
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        collect_tensors,
-        export_model_attrs,
-    )
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-        build_manifest,
-    )
+    from vllm.preload.ipc_backends import IPC_BACKENDS
+    from vllm.preload.protocol import WeightCacheState
+    from vllm.preload.utils import collect_tensors, export_model_attrs
+    from vllm.preload.weight_seed.utils import build_manifest
 
     backend = IPC_BACKENDS[backend_name]()
     tensors, kinds, aliases = collect_tensors(model)
@@ -73,7 +61,7 @@ def _state_for_model(model, backend_name):
 
 
 def _export_vmm_test_model(connection):
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
+    from vllm.preload.ipc_backends import serial_utils
 
     with connection:
         model = torch.nn.Module()
@@ -106,18 +94,11 @@ def _export_vmm_test_model(connection):
 )
 def test_vmm_weights_survive_producer_exit_and_preserve_views():
     """Packed FD imports share one owner while logical tensor views stay independent."""
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        rebuild_entries,
-        record_bytes,
-    )
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        exported_weight_bytes,
-    )
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-        rebuild_tensors,
-    )
+    from vllm.preload.ipc_backends import serial_utils
+    from vllm.preload.ipc_backends.base import rebuild_entries, record_bytes
+    from vllm.preload.protocol import WeightCacheState
+    from vllm.preload.utils import exported_weight_bytes
+    from vllm.preload.weight_seed.utils import rebuild_tensors
 
     client, server = socket.socketpair()
     ctx = multiprocessing.get_context("spawn")
@@ -188,11 +169,9 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
 )
 def test_vmm_peer_copy_preserves_views_and_current_device():
     """VMM sources can seed a different GPU without redirecting its stream sync."""
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import get_mover
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.peer_ipc import (
-        PeerIpcMover,
-    )
+    from vllm.preload.ipc_backends import serial_utils
+    from vllm.preload.weight_seed.core import get_mover
+    from vllm.preload.weight_seed.peer_ipc import PeerIpcMover
 
     model = torch.nn.Module()
     model.register_buffer("weight", torch.arange(48, device="cuda:0").reshape(6, 8))
@@ -1277,7 +1256,7 @@ def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
     """Each node serves a contiguous global-rank block (DP-major), so without
     DP local GPU i is TP rank r*local+i, and single-node DP launchers offset
     by --data-parallel-start-rank."""
-    from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
+    from vllm.preload.daemon import plan_local_ranks
 
     tp_second_node = _parallel(tensor_parallel_size=8, nnodes=2, node_rank=1)
     assert plan_local_ranks(tp_second_node) == [(i, 0, 0, 4 + i) for i in range(4)]
@@ -1333,9 +1312,7 @@ def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
 
 
 def test_daemon_rejects_unmappable_parallelism():
-    from vllm.model_executor.model_loader.weight_cache.daemon import (
-        _reject_unsupported_parallelism,
-    )
+    from vllm.preload.daemon import _reject_unsupported_parallelism
 
     _reject_unsupported_parallelism(
         _parallel(
@@ -1367,9 +1344,7 @@ def test_daemon_keys_dense_dp_ranks_like_the_engine():
     from types import SimpleNamespace
 
     from vllm.config import ParallelConfig
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        get_engine_dp_placement,
-    )
+    from vllm.preload.utils import get_engine_dp_placement
 
     def daemon_config(is_moe: bool):
         return SimpleNamespace(
@@ -1394,7 +1369,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
     from types import SimpleNamespace
 
     from vllm.config import AttentionConfig
-    from vllm.model_executor.model_loader.weight_cache import daemon
+    from vllm.preload import daemon
 
     monkeypatch.setattr(
         daemon.WeightCacheKey, "from_model_config", lambda *args, **kwargs: None
@@ -1424,7 +1399,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
 def test_weight_cache_key_distinguishes_dp_ranks():
     from dataclasses import replace
 
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+    from vllm.preload.protocol import WeightCacheKey
 
     key = WeightCacheKey(
         checkpoint="ckpt",
@@ -1462,7 +1437,7 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
 
     from vllm.config import CacheConfig
     from vllm.config.quantization import QuantizationConfigArgs
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+    from vllm.preload.protocol import WeightCacheKey
     from vllm.utils.hashing import safe_hash
 
     model_config = SimpleNamespace(
@@ -1530,11 +1505,9 @@ def test_ipc_rope_matching(
     from transformers import DeepseekV2Config, Qwen3VLConfig
 
     from vllm.config import LoadConfig, ModelConfig
-    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        CacheConfigMismatchError,
-        WeightCacheKey,
-    )
+    from vllm.model_executor.model_loader import ipc_loader
+    from vllm.preload import daemon
+    from vllm.preload.protocol import CacheConfigMismatchError, WeightCacheKey
 
     rope_type, theta, factor, max_position, rank, mismatch = case
     rope = dict(rope_type="yarn", rope_theta=10000, factor=2)
@@ -1625,7 +1598,8 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
     import socket
 
     from vllm.config import LoadConfig
-    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader import ipc_loader
+    from vllm.preload import daemon
 
     server = object.__new__(daemon.WeightCacheDaemon)
     server._watchers = []
@@ -1671,10 +1645,8 @@ def test_daemon_capture_releases_registered_model_layers():
     import weakref
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        record_bytes,
-    )
+    from vllm.preload.daemon import WeightCacheDaemon
+    from vllm.preload.ipc_backends.base import record_bytes
 
     config = VllmConfig(model_config=ModelConfig(model=QWEN_CASE.model))
     server = WeightCacheDaemon(config, 0, 0, "tcp://127.0.0.1:0")
@@ -1709,7 +1681,7 @@ def test_daemon_releases_cublas_workspaces():
 
     from vllm.config import ModelConfig, VllmConfig
     from vllm.distributed import init_distributed_environment
-    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+    from vllm.preload.daemon import WeightCacheDaemon
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
     os.environ["TORCH_CUBLAS_WORKSPACE_CACHE"] = "1"
@@ -1740,7 +1712,7 @@ def test_daemon_releases_cublas_workspaces():
 )
 def test_external_weight_fallback_preserves_other_socket(socket_path, fallback_bytes):
     """Only the failed socket's charge is reported, at most once."""
-    from vllm.model_executor.model_loader.weight_cache.utils import (
+    from vllm.preload.utils import (
         ExternalWeightCharges,
         record_external_weight_charge,
         record_external_weight_fallback,
@@ -1780,11 +1752,9 @@ def test_ipc_cache_key_tracks_kv_quantization(
         LoadConfig,
         ParallelConfig,
     )
-    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        WeightCacheKey,
-        WeightCacheState,
-    )
+    from vllm.model_executor.model_loader import ipc_loader
+    from vllm.preload import daemon
+    from vllm.preload.protocol import WeightCacheKey, WeightCacheState
 
     model_config = SimpleNamespace(
         model=str(tmp_path),
@@ -1869,11 +1839,9 @@ def test_ipc_cache_key_tracks_kernel_backends(
         LoadConfig,
         ParallelConfig,
     )
-    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        WeightCacheKey,
-        WeightCacheState,
-    )
+    from vllm.model_executor.model_loader import ipc_loader
+    from vllm.preload import daemon
+    from vllm.preload.protocol import WeightCacheKey, WeightCacheState
 
     model_config = SimpleNamespace(
         model=str(tmp_path),
@@ -1957,7 +1925,7 @@ def test_ipc_cache_key_tracks_skipped_mm_components(
     from transformers import Qwen3OmniMoeConfig
 
     from vllm.config import CacheConfig, ModelConfig
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+    from vllm.preload.protocol import WeightCacheKey
 
     config = Qwen3OmniMoeConfig()
     config.architectures = ["Qwen3OmniMoeForConditionalGeneration"]
@@ -1992,7 +1960,7 @@ def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:
 def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     """The source validates the wire key before touching the filesystem."""
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
+    from vllm.preload.transport import SeedTransport
 
     def handle(request):
         transport = SeedTransport([FlashInferWarmupCache()])
@@ -2041,14 +2009,8 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
     import socket
 
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        recv_json,
-        send_json,
-    )
-    from vllm.model_executor.model_loader.weight_cache.transport import (
-        SeedConfig,
-        SeedTransport,
-    )
+    from vllm.preload.protocol import recv_json, send_json
+    from vllm.preload.transport import SeedConfig, SeedTransport
 
     config_hash = "b" * 64
     table = {"records": {"op": {"shape": 1}}}
@@ -2088,15 +2050,9 @@ def test_transport_cuts_off_trickling_peer(monkeypatch):
     import socket
     import time
 
-    import vllm.model_executor.model_loader.weight_cache.transport as seed_mod
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        recv_json,
-        send_json,
-    )
-    from vllm.model_executor.model_loader.weight_cache.transport import (
-        SeedConfig,
-        SeedTransport,
-    )
+    import vllm.preload.transport as seed_mod
+    from vllm.preload.protocol import recv_json, send_json
+    from vllm.preload.transport import SeedConfig, SeedTransport
 
     monkeypatch.setattr(seed_mod, "_REMOTE_REQUEST_TIMEOUT_S", 0.5)
     transport = SeedTransport([], SeedConfig(listen=("127.0.0.1", 0), token="t"))
@@ -2174,14 +2130,8 @@ def _exercise_lease_shutdown(
     """Graceful source shutdown waits for an active D2D copy acknowledgement."""
     import torch
 
-    from vllm.model_executor.model_loader.weight_cache.transport import (
-        SeedConfig,
-        SeedTransport,
-    )
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
-        acknowledge_lease,
-        get_mover,
-    )
+    from vllm.preload.transport import SeedConfig, SeedTransport
+    from vllm.preload.weight_seed.core import acknowledge_lease, get_mover
 
     transport = SeedTransport(
         seed_config=SeedConfig(source=source_address, token=token)
@@ -2368,9 +2318,7 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
 
 def _oversized_compile_cache(tmp_path: Path) -> Path:
     """A sparse cubin directory one byte over the compiled-cache bundle limit."""
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        BUNDLE_LIMIT,
-    )
+    from vllm.preload.warmup_cache.common import BUNDLE_LIMIT
 
     cache_dir = tmp_path / "cubins"
     cache_dir.mkdir()
@@ -2385,10 +2333,7 @@ def _oversized_compile_cache(tmp_path: Path) -> Path:
 def test_preload_survives_oversized_compile_cache(vllm_runner, tmp_path):
     """A source daemon without a shared store never scans its compiled cache,
     so an oversized one cannot stop it from serving weights."""
-    from vllm.model_executor.model_loader.weight_cache.transport import (
-        SeedConfig,
-        SeedTransport,
-    )
+    from vllm.preload.transport import SeedConfig, SeedTransport
 
     seed_port = get_open_port()
     case = ModelCase(
@@ -2438,11 +2383,7 @@ def test_preload_survives_oversized_compile_cache(vllm_runner, tmp_path):
 
 
 def test_compile_cache_bundle_round_trip(tmp_path):
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        _bundle,
-        _install,
-        _manifest,
-    )
+    from vllm.preload.warmup_cache.common import _bundle, _install, _manifest
 
     source = tmp_path / "source"
     target = tmp_path / "target"
@@ -2457,9 +2398,7 @@ def test_compile_cache_bundle_round_trip(tmp_path):
 
 
 def test_compile_cache_manifest_deduplicates_nested_roots(tmp_path):
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        _manifest,
-    )
+    from vllm.preload.warmup_cache.common import _manifest
 
     workspace = tmp_path / "workspace"
     cubins = workspace / "cubins"
@@ -2481,21 +2420,15 @@ def test_compile_cache_manifest_deduplicates_nested_roots(tmp_path):
 
 
 def test_compile_cache_manifest_rejects_path_traversal():
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        _safe_path,
-    )
+    from vllm.preload.warmup_cache.common import _safe_path
 
     with pytest.raises(ValueError, match="unsafe cache path"):
         _safe_path("../escape")
 
 
 def test_compile_cache_payload_rejects_oversized_bundle():
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        BUNDLE_LIMIT,
-    )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
-        CompileArtifactWarmupCache,
-    )
+    from vllm.preload.warmup_cache.common import BUNDLE_LIMIT
+    from vllm.preload.warmup_cache.compiled import CompileArtifactWarmupCache
 
     payload = {
         "manifest": {
@@ -2535,12 +2468,8 @@ class _MemoryArtifactStore:
 
 def test_compile_cache_shared_store_round_trip(tmp_path, monkeypatch):
     """A target installs the exact bundle its source published to the store."""
-    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
-        STORE_BACKENDS,
-    )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
-        CompileArtifactWarmupCache,
-    )
+    from vllm.preload.artifact_store import STORE_BACKENDS
+    from vllm.preload.warmup_cache.compiled import CompileArtifactWarmupCache
 
     store = _MemoryArtifactStore()
     monkeypatch.setitem(STORE_BACKENDS, store.name, lambda: store)
@@ -2567,9 +2496,7 @@ def test_compile_cache_shared_store_round_trip(tmp_path, monkeypatch):
 def test_compile_cache_resolve_without_stores_is_a_miss(tmp_path, monkeypatch):
     """Without a shared store the source skips the scan, so even an oversized
     cache cannot fail its startup."""
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
-        CompileArtifactWarmupCache,
-    )
+    from vllm.preload.warmup_cache.compiled import CompileArtifactWarmupCache
 
     monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(_oversized_compile_cache(tmp_path)))
     source = CompileArtifactWarmupCache()
@@ -2581,13 +2508,8 @@ def test_compile_cache_resolve_without_stores_is_a_miss(tmp_path, monkeypatch):
 def test_compile_cache_publish_failure_is_a_miss(tmp_path, monkeypatch, failure):
     """A bundle the source cannot collect or publish is a miss, not a startup
     error."""
-    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
-        STORE_BACKENDS,
-        DiskArtifactStore,
-    )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
-        CompileArtifactWarmupCache,
-    )
+    from vllm.preload.artifact_store import STORE_BACKENDS, DiskArtifactStore
+    from vllm.preload.warmup_cache.compiled import CompileArtifactWarmupCache
 
     store_root = tmp_path / "store"
     if failure == "oversized":
@@ -2610,12 +2532,8 @@ def test_compile_cache_publish_failure_is_a_miss(tmp_path, monkeypatch, failure)
 @pytest.mark.parametrize("failure", ["miss", "digest"])
 def test_compile_cache_store_failures_propagate(tmp_path, monkeypatch, failure):
     """Store misses and corrupt bundles must reach the caller for fallback."""
-    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
-        STORE_BACKENDS,
-    )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
-        CompileArtifactWarmupCache,
-    )
+    from vllm.preload.artifact_store import STORE_BACKENDS
+    from vllm.preload.warmup_cache.compiled import CompileArtifactWarmupCache
 
     store = _MemoryArtifactStore()
     monkeypatch.setitem(STORE_BACKENDS, store.name, lambda: store)
@@ -2644,9 +2562,7 @@ def test_compile_cache_store_failures_propagate(tmp_path, monkeypatch, failure):
 
 def _mooncake_peer(key: str, payload: bytes, mode: str) -> None:
     """Second-process body: put/get through a real MooncakeArtifactStore."""
-    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
-        MooncakeArtifactStore,
-    )
+    from vllm.preload.artifact_store import MooncakeArtifactStore
 
     store = MooncakeArtifactStore()
     if mode == "put":
@@ -2781,9 +2697,7 @@ class MooncakeCluster:
 
 def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
     """A real Mooncake cluster shares warmup artifacts across cache instances."""
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
-        CompileArtifactWarmupCache,
-    )
+    from vllm.preload.warmup_cache.compiled import CompileArtifactWarmupCache
 
     with MooncakeCluster(tmp_path, monkeypatch) as cluster:
         kind = FlashInferWarmupCache(store_names=["mooncake"])

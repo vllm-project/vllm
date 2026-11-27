@@ -15,7 +15,7 @@ Engines then load from the daemons with:
     vllm serve /path/to/model --tensor-parallel-size 4 --load-format ipc_cache
 
 Tensor, expert and data parallelism are supported, including across nodes;
-see vllm/model_executor/model_loader/weight_cache/daemon.py for the rank
+see vllm/preload/daemon.py for the rank
 layout and rendezvous details.
 
 A second replica's daemons can instead pull their weights from a loaded
@@ -42,10 +42,8 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.protocol import (
-    check_ipc_platform_support,
-)
-from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+from vllm.preload.protocol import check_ipc_platform_support
+from vllm.preload.weight_seed.utils import (
     SeedAddress,
     mirror_device_indices,
     parse_seed_addresses,
@@ -182,9 +180,7 @@ class PreloadSubcommand(CLISubcommand):
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> None:
-        from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
-            IPC_BACKENDS,
-        )
+        from vllm.preload.ipc_backends import IPC_BACKENDS
 
         EngineArgs.add_cli_args(parser)
         parser.add_argument(
@@ -292,20 +288,16 @@ class PreloadSubcommand(CLISubcommand):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         # Imported here so `vllm --help` and friends stay free of torch.
-        from vllm.model_executor.model_loader.weight_cache.daemon import (
+        from vllm.preload.daemon import (
             _reject_unsupported_parallelism,
             _run_daemon,
             daemon_serves_model,
             get_draft_daemon_config,
             plan_local_ranks,
         )
-        from vllm.model_executor.model_loader.weight_cache.transport import SeedConfig
-        from vllm.model_executor.model_loader.weight_cache.utils import (
-            format_daemon_role,
-        )
-        from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
-            WEIGHT_COPY_LEASE_TIMEOUT_S,
-        )
+        from vllm.preload.transport import SeedConfig
+        from vllm.preload.utils import format_daemon_role
+        from vllm.preload.weight_seed.seed import WEIGHT_COPY_LEASE_TIMEOUT_S
 
         engine_args = EngineArgs.from_cli_args(args)
         # Warmup context for flashinfer autotune.

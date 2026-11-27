@@ -115,13 +115,12 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
 )
 from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.peer_loader import PeerModelLoader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import StorageEntry
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
-    recv_msg,
-    send_msg,
-)
-from vllm.model_executor.model_loader.weight_cache.protocol import (
+from vllm.platforms import current_platform
+from vllm.preload.ipc_backends.base import StorageEntry
+from vllm.preload.ipc_backends.serial_utils import recv_msg, send_msg
+from vllm.preload.protocol import (
     WeightCacheKey,
     WeightCacheState,
     WeightCacheUnavailableError,
@@ -131,11 +130,8 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     get_socket_path,
     verify_peer_is_owner,
 )
-from vllm.model_executor.model_loader.weight_cache.transport import (
-    SeedConfig,
-    SeedTransport,
-)
-from vllm.model_executor.model_loader.weight_cache.utils import (
+from vllm.preload.transport import SeedConfig, SeedTransport
+from vllm.preload.utils import (
     DaemonRole,
     build_weight_cache_key,
     collect_tensors,
@@ -144,29 +140,16 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     format_daemon_role,
     is_draft_model_cacheable,
 )
-from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
-from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
-    CompileArtifactWarmupCache,
-)
-from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-    FlashInferWarmupCache,
-)
-from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
-    PeerModelLoader,
-)
-from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
-    WEIGHT_COPY_LEASE_TIMEOUT_S,
-    WeightShardSeed,
-)
-from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-    build_manifest,
-)
-from vllm.platforms import current_platform
+from vllm.preload.warmup_cache.base import WarmupCache
+from vllm.preload.warmup_cache.compiled import CompileArtifactWarmupCache
+from vllm.preload.warmup_cache.flashinfer_autotune import FlashInferWarmupCache
+from vllm.preload.weight_seed.seed import WEIGHT_COPY_LEASE_TIMEOUT_S, WeightShardSeed
+from vllm.preload.weight_seed.utils import build_manifest
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
 
-logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
+logger = init_logger("vllm.preload.daemon")
 
 
 class WeightCacheDaemon:
@@ -187,9 +170,7 @@ class WeightCacheDaemon:
         warmup_cache_stores: Iterable[str] = (),
         weight_cache_backend: str = "torch_ipc",
     ):
-        from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
-            IPC_BACKENDS,
-        )
+        from vllm.preload.ipc_backends import IPC_BACKENDS
 
         self.backend_name = weight_cache_backend
         self.backend = IPC_BACKENDS[weight_cache_backend]()

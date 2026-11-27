@@ -1552,6 +1552,7 @@ steps:
   - vllm/config/model.py
   - vllm/model_executor
   - vllm/models/deepseek_v32
+  - vllm/preload/
   - tests/model_executor
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - vllm/_aiter_ops.py
@@ -2917,7 +2918,9 @@ steps:
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/preload/
+  - vllm/model_executor/model_loader/ipc_loader.py
+  - vllm/model_executor/model_loader/peer_loader.py
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
   - vllm/platforms/rocm.py

@@ -22,11 +22,8 @@ from vllm.v1.worker.gpu.spec_decode.eagle.config import EagleSpeculatorConfig
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        StorageRecord,
-        TensorKind,
-    )
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+    from vllm.preload.ipc_backends.base import StorageRecord, TensorKind
+    from vllm.preload.protocol import WeightCacheKey
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
@@ -128,9 +125,7 @@ def build_weight_cache_key(
     follows the engine's per-worker view. Draft models always use a single
     pipeline stage.
     """
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        WeightCacheKey,
-    )
+    from vllm.preload.protocol import WeightCacheKey
 
     parallel_config = vllm_config.parallel_config
     tp_size = parallel_config.tensor_parallel_size

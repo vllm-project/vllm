@@ -47,7 +47,7 @@ def test_disabling_extensible_cache_keeps_fallback_budget(
 ):
     """Re-sizing after a disk fallback must not re-charge the daemon's weights."""
     from vllm.config import VllmConfig
-    from vllm.model_executor.model_loader.weight_cache.utils import (
+    from vllm.preload.utils import (
         record_external_weight_charge,
         record_external_weight_fallback,
     )
@@ -109,9 +109,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     """Profiling must use serving's thread count to keep Dynamo guards valid."""
     from torch._dynamo.testing import CompileCounter
 
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        ExternalWeightCharges,
-    )
+    from vllm.preload.utils import ExternalWeightCharges
 
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     # No PP group here; "auto" would set up a PP transport.

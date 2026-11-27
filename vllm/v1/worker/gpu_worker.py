@@ -83,7 +83,6 @@ from vllm.model_executor.model_loader.base_loader import (
     get_bound_model_loader,
     unbind_model_loader,
 )
-from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -91,6 +90,7 @@ from vllm.model_executor.model_loader.weight_checksum import (
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
+from vllm.preload.utils import ExternalWeightCharges
 from vllm.profiler.wrapper import (
     create_graph_capture_profiler,
     create_worker_profiler,
