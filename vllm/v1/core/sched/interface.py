@@ -212,6 +212,11 @@ class SchedulerInterface(ABC):
         for an in-flight one."""
         return self.has_requests()
 
+    def run_idle_work(self) -> bool:
+        """Do a slice of deferrable work while the engine waits for a step's
+        output. Returns whether work remains."""
+        return False
+
     @property
     @abstractmethod
     def pause_state(self) -> PauseState:

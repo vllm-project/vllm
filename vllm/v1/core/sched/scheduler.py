@@ -4,9 +4,10 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
@@ -39,6 +40,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -97,6 +99,21 @@ from vllm.v1.token_buffer import extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+# Reused blocks whose stale cache entries one `Scheduler.run_idle_work` call
+# removes.
+_STALE_CLEAN_BLOCKS = 256
+# Remote KV loads of at least this many blocks have their blocks cached by
+# `run_idle_work`, which holds them back from scheduling for one step.
+_IDLE_CACHE_MIN_BLOCKS = 512
+
+
+@dataclass
+class _LoadedKV:
+    """A finished remote KV load whose blocks are left to `run_idle_work`."""
+
+    request: Request
+    held: bool = False
 
 
 class Scheduler(SchedulerInterface):
@@ -288,6 +305,14 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # VLLM_IDLE_KV_BOOKKEEPING: prefix-cache work for remote KV loads that
+        # `run_idle_work` does while the engine waits for a step's output.
+        self.idle_kv_bookkeeping = (
+            envs.VLLM_IDLE_KV_BOOKKEEPING
+            and self.connector is not None
+            and self.cache_config.enable_prefix_caching
+        )
+        self._loaded_kv_to_cache: dict[str, _LoadedKV] = {}
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -412,6 +437,13 @@ class Scheduler(SchedulerInterface):
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
+        if (
+            self.idle_kv_bookkeeping
+            and not self.enable_kv_cache_events
+            and type(self.kv_cache_manager.block_pool) is BlockPool
+        ):
+            # run_idle_work removes the cache entries of reused blocks.
+            self.kv_cache_manager.block_pool.enable_lazy_eviction()
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         # PP, not with DP, whose busy loop runs a dummy batch on idle steps.
@@ -3789,6 +3821,35 @@ class Scheduler(SchedulerInterface):
         request.replay_start = num_hit_tokens - num_replay_tokens
         return num_replay_tokens
 
+    def run_idle_work(self) -> bool:
+        """Do a slice of the prefix-cache bookkeeping for remote KV loads that
+        `schedule()` would otherwise do: cache the blocks of finished loads, and
+        remove the stale cache entries of blocks that allocation reused.
+
+        Returns:
+            Whether work remains.
+
+        """
+        if not self.idle_kv_bookkeeping:
+            return False
+        while self._loaded_kv_to_cache:
+            request_id, loaded = next(iter(self._loaded_kv_to_cache.items()))
+            request = loaded.request
+            if (
+                request.status != RequestStatus.WAITING_FOR_REMOTE_KVS
+                or request_id not in self.finished_recving_kv_req_ids
+                or request_id in self.failed_recving_kv_req_ids
+            ):
+                # Aborted, or left to schedule() as a failed load.
+                del self._loaded_kv_to_cache[request_id]
+                continue
+            # One call, as _update_waiting_for_remote_kv would make: caching in
+            # parts can retain different sliding-window blocks.
+            self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+            del self._loaded_kv_to_cache[request_id]
+            return True
+        return self.kv_cache_manager.block_pool.clean_stale_hashes(_STALE_CLEAN_BLOCKS)
+
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """KV Connector: update request state after async recv is finished.
 
@@ -3850,6 +3911,13 @@ class Scheduler(SchedulerInterface):
             if request_id not in self.finished_recving_kv_req_ids:
                 logger.debug("%s is still in WAITING_FOR_REMOTE_KVS state.", request_id)
                 return False
+            loaded = self._loaded_kv_to_cache.get(request_id)
+            if loaded is not None:
+                if not loaded.held and request_id not in self.failed_recving_kv_req_ids:
+                    # Leave caching its blocks to run_idle_work for one step.
+                    loaded.held = True
+                    return False
+                del self._loaded_kv_to_cache[request_id]
             # Promote request to waiting or preempted.
             self._update_waiting_for_remote_kv(request)
             self._reserve_parked(request)
@@ -3900,6 +3968,12 @@ class Scheduler(SchedulerInterface):
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
+                if (
+                    self.idle_kv_bookkeeping
+                    and req.num_computed_tokens
+                    >= _IDLE_CACHE_MIN_BLOCKS * self.block_size
+                ):
+                    self._loaded_kv_to_cache[req_id] = _LoadedKV(req)
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._aborted_kv_loads.discard(req_id)

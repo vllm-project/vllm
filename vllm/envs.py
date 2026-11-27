@@ -363,6 +363,7 @@ if TYPE_CHECKING:
     VLLM_PROCESS_NAME_PREFIX: str = "VLLM"
     VLLM_USE_SIMPLE_KV_OFFLOAD: bool = False
     VLLM_USE_SPINLOOP_EXT: bool = False
+    VLLM_IDLE_KV_BOOKKEEPING: bool = False
     VLLM_SKIP_VERSION_SUFFIX: bool = False
 
 
@@ -2433,6 +2434,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
     "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
+    # If set to 1 (default 0), an engine core that loads KV cache from a remote
+    # instance (a KV connector with prefix caching, e.g. the decode side of
+    # disaggregated prefill) does the prefix-cache bookkeeping for those loads
+    # while it waits for a step's output instead of inside schedule(). It
+    # caches the blocks of loads of 512 blocks or more, which then start one
+    # step later, and removes reused blocks' entries from the prefix cache;
+    # with KV cache events enabled, that removal stays in schedule().
+    "VLLM_IDLE_KV_BOOKKEEPING": lambda: bool(
+        int(os.getenv("VLLM_IDLE_KV_BOOKKEEPING", "0"))
+    ),
     # Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection.
     # Must be set together with VLLM_NIC_SELECTION_VARS.
     "VLLM_GPU_NIC_PCIE_MAPPING": lambda: os.getenv("VLLM_GPU_NIC_PCIE_MAPPING", ""),

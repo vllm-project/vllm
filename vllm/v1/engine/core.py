@@ -1997,6 +1997,7 @@ class EngineCoreProc(EngineCore):
         if poll is not None and wait_briefly is not None:
             pending_inputs = self.input_queue.queue
             spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
+            idle_work_left = True
             while not self._deferred_inputs and not poll():
                 if pending_inputs:
                     req = self.input_queue.get_nowait()
@@ -2007,6 +2008,10 @@ class EngineCoreProc(EngineCore):
                             return True
                     else:
                         self._deferred_inputs.append(req)
+                elif idle_work_left and (
+                    idle_work_left := self.scheduler.run_idle_work()
+                ):
+                    pass
                 elif time.monotonic() < spin_deadline:
                     # Spin on something cheaper than poll(), to leave the GIL
                     # free more of the time for the input and output threads.

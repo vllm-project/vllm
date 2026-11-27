@@ -172,6 +172,69 @@ class BlockPool:
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
 
+        # See `enable_lazy_eviction`: block id -> the primary hash the block
+        # held when it was allocated, whose entries in
+        # `cached_block_hash_to_block` are not removed yet (untracked by the
+        # GC, like `cached_block_hash_to_block`), and its secondary hashes.
+        self.lazy_eviction = False
+        self._stale_hashes: dict[int, BlockHashWithGroupId] = gc_untrack({})
+        self._stale_secondary_hashes: dict[int, set[BlockHashWithGroupId]] = {}
+
+    def enable_lazy_eviction(self) -> None:
+        """Make allocation leave the removal of a reused block's cache entries
+        to `clean_stale_hashes`.
+
+        Allocating cached blocks then only resets their hashes, which keeps a
+        large allocation cheap. Until the stale entries are removed, lookups
+        skip entries whose block no longer holds the hash. Not compatible with
+        KV cache events, which must report a removal when it happens.
+        """
+        assert self.enable_caching and not self.enable_kv_cache_events
+        self.lazy_eviction = True
+
+    def clean_stale_hashes(self, max_blocks: int) -> bool:
+        """Remove the stale cache entries of up to `max_blocks` reused blocks.
+
+        Args:
+            max_blocks: The most blocks whose entries to remove in this call.
+
+        Returns:
+            Whether stale entries remain.
+
+        """
+        stale = self._stale_hashes
+        for _ in range(min(max_blocks, len(stale))):
+            # popitem, since popping a dict's first key repeatedly is quadratic.
+            self._drop_stale_hashes(*stale.popitem())
+        return bool(stale)
+
+    def _drop_stale_hashes(self, block_id: int, primary: BlockHashWithGroupId) -> None:
+        cache = self.cached_block_hash_to_block
+        cache.pop(primary, block_id)
+        if self._stale_secondary_hashes:
+            for block_hash in self._stale_secondary_hashes.pop(block_id, ()):
+                cache.pop(block_hash, block_id)
+
+    def _flush_stale_hashes(self, block: KVCacheBlock) -> None:
+        """Remove a block's stale entries before it is cached again."""
+        primary = self._stale_hashes.pop(block.block_id, None)
+        if primary is not None:
+            self._drop_stale_hashes(block.block_id, primary)
+
+    def _live_block(
+        self, key: BlockHashWithGroupId, block: KVCacheBlock | None
+    ) -> KVCacheBlock | None:
+        """Return `block` if it still holds `key`; otherwise drop that stale
+        entry and look again."""
+        cache = self.cached_block_hash_to_block
+        while block is not None and not (
+            block.block_hash == key
+            or key in self.cached_block_hashes_by_block.get(block.block_id, ())
+        ):
+            cache.pop(key, block.block_id)
+            block = cache.get_one_block(key)
+        return block
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -195,6 +258,8 @@ class BlockPool:
             block = self.cached_block_hash_to_block.get_one_block(
                 block_hash_with_group_id
             )
+            if self._stale_hashes and block is not None:
+                block = self._live_block(block_hash_with_group_id, block)
             if not block:
                 return None
             cached_blocks.append(block)
@@ -502,6 +567,8 @@ class BlockPool:
         """
         if block.is_null:
             return None
+        if self._stale_hashes:
+            self._flush_stale_hashes(block)
 
         assert block_size % self.hash_block_size == 0
         block_hash = self._get_partial_block_hash(request, num_tokens)
@@ -644,6 +711,8 @@ class BlockPool:
         block: KVCacheBlock,
         num_tokens: int | None,
     ) -> None:
+        if self._stale_hashes:
+            self._flush_stale_hashes(block)
         if block.block_hash is None:
             # A block without a hash has no entries in the cache yet.
             block.set_block_hash(block_hash_with_group_id, num_tokens=num_tokens)
@@ -699,7 +768,31 @@ class BlockPool:
             self._notify_reuse(ret)
 
         # In order to only iterate the list once, we duplicated code a bit
-        if self.enable_caching:
+        if self.lazy_eviction:
+            stale = self._stale_hashes
+            secondary_by_block = self.cached_block_hashes_by_block
+            metrics = self.metrics_collector
+            for block in ret:
+                if metrics:
+                    metrics.on_block_evicted(block)
+                primary = block.block_hash
+                if primary is not None:
+                    # Caching a block again flushes its stale entries, so a
+                    # block with a hash has none yet. A block holds secondary
+                    # hashes only alongside a primary one.
+                    block_id = block.block_id
+                    block.block_hash = None
+                    block.block_hash_num_tokens = None
+                    stale[block_id] = primary
+                    if secondary_by_block and block_id in secondary_by_block:
+                        self._stale_secondary_hashes[block_id] = secondary_by_block.pop(
+                            block_id
+                        )
+                assert block.ref_cnt == 0
+                block.ref_cnt = 1
+                if metrics:
+                    metrics.on_block_allocated(block)
+        elif self.enable_caching:
             if self.metrics_collector:
                 for block in ret:
                     self._maybe_evict_cached_block(block)
@@ -895,6 +988,8 @@ class BlockPool:
         # new map created after the startup gc.freeze() would not be frozen.
         self.cached_block_hash_to_block.clear()
         self.cached_block_hashes_by_block.clear()
+        self._stale_hashes.clear()
+        self._stale_secondary_hashes.clear()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]

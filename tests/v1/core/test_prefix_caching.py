@@ -4,6 +4,7 @@
 
 import copy
 import gc
+import random
 import weakref
 from collections.abc import Callable
 from dataclasses import replace
@@ -4185,6 +4186,71 @@ def test_maybe_evict_cached_block():
     # Evict block3
     pool._maybe_evict_cached_block(block3)
     assert cache._cache == {}
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_lazy_eviction_matches_eager(seed: int):
+    """Driven by the same random operations, a pool that leaves reused blocks'
+    cache entries to clean_stale_hashes allocates the same blocks and answers
+    every lookup like one that removes them on allocation, and ends with the
+    same cache once the stale entries are cleaned."""
+    rng = random.Random(seed)
+    eager = BlockPool(num_gpu_blocks=200, enable_caching=True, hash_block_size=16)
+    lazy = BlockPool(num_gpu_blocks=200, enable_caching=True, hash_block_size=16)
+    lazy.enable_lazy_eviction()
+    pools = (eager, lazy)
+
+    def block_hash(i: int) -> BlockHash:
+        return BlockHash(i.to_bytes(4, "little"))
+
+    owned: list[list[int]] = []  # Allocations, as block ids.
+    for _ in range(400):
+        op = rng.random()
+        num_free = eager.get_num_free_blocks()
+        if op < 0.3 and num_free > 1:
+            num_blocks = rng.randint(1, min(num_free - 1, 40))
+            allocated = [
+                [block.block_id for block in pool.get_new_blocks(num_blocks)]
+                for pool in pools
+            ]
+            assert allocated[0] == allocated[1]
+            owned.append(allocated[0])
+        elif op < 0.55 and owned:
+            # Few distinct hashes, so blocks share hashes and some get
+            # secondary ones.
+            block_ids = rng.choice(owned)
+            for block_id in rng.sample(block_ids, rng.randint(1, len(block_ids))):
+                key = make_block_hash_with_group_id(block_hash(rng.randrange(60)), 0)
+                for pool in pools:
+                    pool._insert_block_hash(key, pool.blocks[block_id], num_tokens=None)
+        elif op < 0.75 and owned:
+            block_ids = owned.pop(rng.randrange(len(owned)))
+            rng.shuffle(block_ids)
+            for pool in pools:
+                pool.free_blocks([pool.blocks[i] for i in block_ids])
+        elif op < 0.9:
+            hash_ = block_hash(rng.randrange(60))
+            hits = [pool.get_cached_block(hash_, [0]) for pool in pools]
+            assert [b.block_id for b in hits[0] or ()] == [
+                b.block_id for b in hits[1] or ()
+            ]
+            if hits[0] is not None:
+                for pool, hit in zip(pools, hits):
+                    pool.touch(hit)
+                owned.append([hits[0][0].block_id])
+        else:
+            lazy.clean_stale_hashes(rng.randint(1, 30))
+        for a, b in zip(eager.blocks, lazy.blocks):
+            assert (a.block_hash, a.ref_cnt) == (b.block_hash, b.ref_cnt)
+
+    while lazy.clean_stale_hashes(1000):
+        pass
+    eager_cache = eager.cached_block_hash_to_block
+    lazy_cache = lazy.cached_block_hash_to_block
+    assert lazy_cache._cache == eager_cache._cache
+    assert lazy_cache._dup_ids == eager_cache._dup_ids
+    assert lazy.cached_block_hashes_by_block == eager.cached_block_hashes_by_block
+    assert not gc.is_tracked(lazy._stale_hashes)
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])

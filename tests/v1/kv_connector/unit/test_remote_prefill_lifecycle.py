@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.v1.core.utils import uniform_spec
+from vllm.v1.core.sched import scheduler as scheduler_module
 from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
@@ -132,6 +133,43 @@ def test_inflight_kv_loads_start_while_batch_full():
     assert scheduler.running == [remote[0]]
     assert remote[2].status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert list(scheduler.async_kv_waiting) == remote[3:]
+
+
+@pytest.mark.parametrize("idle_kv_bookkeeping", [False, True])
+def test_idle_kv_bookkeeping(monkeypatch, idle_kv_bookkeeping):
+    """With VLLM_IDLE_KV_BOOKKEEPING, run_idle_work caches a finished load's
+    blocks while the engine waits, which holds the request back one step; it
+    then runs on the same blocks, with the same prefix-cache contents."""
+    monkeypatch.setenv("VLLM_IDLE_KV_BOOKKEEPING", str(int(idle_kv_bookkeeping)))
+    monkeypatch.setattr(scheduler_module, "_IDLE_CACHE_MIN_BLOCKS", 2)
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    block_ids = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    model_runner_output = create_model_runner_output(
+        [], finished_recving={request.request_id}
+    )
+
+    num_schedules = 0
+    while not scheduler.running:
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+        model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
+        scheduler_output = scheduler.schedule()
+        num_schedules += 1
+        while scheduler.run_idle_work():
+            pass
+
+    assert num_schedules == 1 + idle_kv_bookkeeping
+    assert scheduler_output.scheduled_new_reqs[0].block_ids == block_ids
+    block_pool = scheduler.kv_cache_manager.block_pool
+    assert len(block_pool.cached_block_hash_to_block) == 3
+    assert block_pool.lazy_eviction == idle_kv_bookkeeping
 
 
 def test_early_kv_load_does_not_overtake_finished_load():

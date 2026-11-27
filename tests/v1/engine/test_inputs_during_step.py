@@ -61,6 +61,7 @@ def make_engine(handle: bool = True) -> tuple[EngineCoreProc, list[Any]]:
     engine.input_queue = queue.Queue()
     engine._deferred_inputs = deque()
     engine.has_work = lambda: True
+    engine.scheduler = mock.Mock(run_idle_work=mock.Mock(return_value=False))
     handled: list[Any] = []
     if handle:
 
@@ -124,6 +125,18 @@ def test_future_without_poll_blocks_for_result():
     assert engine._wait_for_output(future) == "output"
     assert handled == []
     assert engine.input_queue.qsize() == 1
+
+
+def test_idle_work_runs_while_waiting():
+    """The scheduler's deferrable work runs while the step is in flight,
+    between polls, until it reports none left."""
+    engine, _ = make_engine()
+    run_idle_work = mock.Mock(side_effect=[True, True, False])
+    engine.scheduler = mock.Mock(run_idle_work=run_idle_work)
+    future = PollableFuture(ready_after=10)
+    assert engine._wait_for_output(future) == "output"
+    assert run_idle_work.call_count == 3
+    assert future.waits == 7
 
 
 def test_blocks_for_output_after_spin_period():
