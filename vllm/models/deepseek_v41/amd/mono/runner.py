@@ -400,6 +400,7 @@ class DSV41MonoLayer:
                     experts=experts,
                     topk=topk,
                     generic=self.generic,
+                    ffn=True,
                 )
             )
         return self._kernels[key]

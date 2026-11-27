@@ -101,17 +101,20 @@ class MonoBuild:
     swa_width: int = WINDOW
     # the generic code where the tuned paths would apply (the tests' reference)
     generic: bool = False
+    # the FFN launch (`build_mono_ffn`): its MoE and scratch are the generic ones
+    ffn: bool = False
 
     @property
     def tuned(self) -> bool:
-        """A target layer of compress ratio 2 at TP2 on gfx950: its tuned paths
-        are on (bit-exact against the generic ones). Its scratch layout is its
-        own (`scratch_layout`)."""
+        """A target layer at TP2 on gfx950: its tuned paths are on (bit-exact
+        against the generic ones). No tuned path reads the compress ratio, so
+        every ratio takes them. Its scratch layout is its own
+        (`scratch_layout`)."""
         return (
             not GFX942
             and not self.generic
+            and not self.ffn
             and self.tp == 2
-            and self.ratio == 2
             and (self.experts, self.topk, self.ug_groups, self.swa_width)
             == (EXPERTS, TOPK, 2, WINDOW)
             # the shared offload needs that many CTAs (``moe.DSH_RANKS``)
