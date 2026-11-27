@@ -147,8 +147,15 @@ class AttentionConfig:
     the query and the attention output between the layouts. Applies to steps
     with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
     FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
-    KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
-    sharded by head."""
+    KV cache, without PCP or HiSparse. Under DCP (on FlashInfer and SM100, with
+    the DCP group equal to the TP group), each rank attends a gathered copy of
+    its tokens' context instead of the DCP-local cache. A mixed step's decode
+    tokens stay sharded by head (on the DCP path under DCP). On ROCm, models
+    that opt in (currently HY4) shard on `ROCM_AITER_MLA_SPARSE` with an
+    `fp8_ds_mla` KV cache or `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`, and
+    only with fewer than 16 local heads (e.g. HY4 at TP8). DeepSeek-V4.1 on
+    ROCm shards only its indexer prefill this way and all-gathers the top-k
+    back, with its attention sharded by head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most
@@ -201,15 +208,14 @@ class AttentionConfig:
     flex_attn_q_block_size: int | None = None
     """Logical Q block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_m.
-    If None, uses 16 for paged KV attention on PyTorch >= 2.9, and 128
-    for encoder-only attention or older PyTorch versions."""
+    If None, uses 16 for paged KV attention and 128 for encoder-only
+    attention."""
 
     flex_attn_kv_block_size: int | None = None
     """Logical KV block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_n.
-    If None, uses the KV cache block size for paged KV attention on
-    PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
-    versions."""
+    If None, uses the KV cache block size for paged KV attention and 128
+    for encoder-only attention."""
 
     def __post_init__(self) -> None:
         msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {

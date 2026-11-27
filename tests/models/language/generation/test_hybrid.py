@@ -29,15 +29,12 @@ pytestmark = pytest.mark.hybrid_model
 APC_MULTIPLY_BY = 300
 
 SSM_MODELS = [
-    "state-spaces/mamba-130m-hf",
-    "tiiuae/falcon-mamba-tiny-dev",
-    # mamba2-codestral in transformers is broken pending:
-    # https://github.com/huggingface/transformers/pull/40861
-    # "vllm-project/mamba2-codestral-v0.1-tiny-random",
+    "vllm-project/mamba2-130m-hf",
+    "vllm-project/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
-    "ai21labs/Jamba-tiny-dev",
+    "tiiuae/Falcon-H1-Tiny-90M-Instruct",
     "Zyphra/Zamba2-1.2B-instruct",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
@@ -46,12 +43,11 @@ HYBRID_MODELS = [
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
-    "ai21labs/Jamba-tiny-dev",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
 FP32_STATE_MODELS = [
-    "state-spaces/mamba-130m-hf",
+    "vllm-project/mamba2-130m-hf",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
@@ -943,7 +939,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
-@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+@pytest.mark.parametrize("model", [SSM_MODELS[0]])
 def test_same_mamba_output_apc_on_vs_off(
     vllm_runner,
     model: str,
@@ -998,7 +994,7 @@ def test_same_mamba_output_apc_on_vs_off(
 
 # we have to use a real large model to get reasonable results
 # the model can't be a hybrid model as we need block_size 16
-@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+@pytest.mark.parametrize("model", ["vllm-project/mamba2-1.3b-hf"])
 def test_apc_common_prefix_same_batch(
     model: str,
     monkeypatch,
@@ -1110,67 +1106,6 @@ def test_zaya_cca_state(
             )
 
 
-@pytest.mark.parametrize(
-    ("mamba_cache_dtype", "mamba_ssm_cache_dtype", "ssm_state_dtype"),
-    [
-        ("auto", "auto", torch.float32),
-        ("auto", "bfloat16", torch.bfloat16),
-        ("float16", "auto", torch.float16),
-    ],
-)
-def test_mamba_ssm_state_dtype(
-    mamba_cache_dtype, mamba_ssm_cache_dtype, ssm_state_dtype
-) -> None:
-    """The ssm state is float32 unless a cache dtype option asks otherwise."""
-    state_dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
-        torch.bfloat16, mamba_cache_dtype, mamba_ssm_cache_dtype
-    )
-    assert state_dtypes[1] == ssm_state_dtype
-
-
-def test_decode_does_not_drift_from_prefill(vllm_runner) -> None:
-    """Decode must give a token the log-prob prefill gives it, however old the
-    ssm state is, so the gap between the two must not grow along the sequence.
-    Sampled, because greedy output of this length collapses into repetition,
-    which hides a drifting state."""
-    num_tokens, window = 2048, 256
-    sampling_params = SamplingParams(
-        n=8,
-        temperature=1.0,
-        seed=0,
-        max_tokens=num_tokens,
-        min_tokens=num_tokens,
-        logprobs=0,
-    )
-    with vllm_runner(
-        "tiiuae/Falcon-H1-0.5B-Base",
-        max_model_len=num_tokens + 64,
-        max_num_seqs=MAX_NUM_SEQS,
-        # Prefill must recompute the sequence, not resume from a decode state.
-        enable_prefix_caching=False,
-    ) as vllm_model:
-        llm = vllm_model.get_llm()
-        (decoded,) = llm.generate("The history of the Roman aqueducts", sampling_params)
-        prefilled = llm.generate(
-            [
-                {"prompt_token_ids": [*decoded.prompt_token_ids, *out.token_ids]}
-                for out in decoded.outputs
-            ],
-            SamplingParams(max_tokens=1, prompt_logprobs=0),
-        )
-
-    gaps = torch.tensor(
-        [
-            [
-                abs(decode[token].logprob - prefill[token].logprob)
-                for token, decode, prefill in zip(
-                    out.token_ids, out.logprobs, ref.prompt_logprobs[-num_tokens:]
-                )
-            ]
-            for out, ref in zip(decoded.outputs, prefilled)
-        ]
-    )
-    assert gaps[:, -window:].mean() < 2 * gaps[:, :window].mean()
 def test_zaya_cca_exports_state_at_checkpoint() -> None:
     """A checkpoint holds the CCA state of the prefill stopped at its offset.
 
@@ -1247,3 +1182,66 @@ def test_zaya_cca_exports_state_at_checkpoint() -> None:
             state[slot] = plain[slot]
     for state, plain in zip(with_checkpoint, without_checkpoint):
         torch.testing.assert_close(state, plain, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("mamba_cache_dtype", "mamba_ssm_cache_dtype", "ssm_state_dtype"),
+    [
+        ("auto", "auto", torch.float32),
+        ("auto", "bfloat16", torch.bfloat16),
+        ("float16", "auto", torch.float16),
+    ],
+)
+def test_mamba_ssm_state_dtype(
+    mamba_cache_dtype, mamba_ssm_cache_dtype, ssm_state_dtype
+) -> None:
+    """The ssm state is float32 unless a cache dtype option asks otherwise."""
+    state_dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
+        torch.bfloat16, mamba_cache_dtype, mamba_ssm_cache_dtype
+    )
+    assert state_dtypes[1] == ssm_state_dtype
+
+
+def test_decode_does_not_drift_from_prefill(vllm_runner) -> None:
+    """Decode must give a token the log-prob prefill gives it, however old the
+    ssm state is, so the gap between the two must not grow along the sequence.
+    Sampled, because greedy output of this length collapses into repetition,
+    which hides a drifting state."""
+    num_tokens, window = 2048, 256
+    sampling_params = SamplingParams(
+        n=8,
+        temperature=1.0,
+        seed=0,
+        max_tokens=num_tokens,
+        min_tokens=num_tokens,
+        logprobs=0,
+    )
+    with vllm_runner(
+        "tiiuae/Falcon-H1-0.5B-Base",
+        max_model_len=num_tokens + 64,
+        max_num_seqs=MAX_NUM_SEQS,
+        # Prefill must recompute the sequence, not resume from a decode state.
+        enable_prefix_caching=False,
+    ) as vllm_model:
+        llm = vllm_model.get_llm()
+        (decoded,) = llm.generate("The history of the Roman aqueducts", sampling_params)
+        prefilled = llm.generate(
+            [
+                {"prompt_token_ids": [*decoded.prompt_token_ids, *out.token_ids]}
+                for out in decoded.outputs
+            ],
+            SamplingParams(max_tokens=1, prompt_logprobs=0),
+        )
+
+    gaps = torch.tensor(
+        [
+            [
+                abs(decode[token].logprob - prefill[token].logprob)
+                for token, decode, prefill in zip(
+                    out.token_ids, out.logprobs, ref.prompt_logprobs[-num_tokens:]
+                )
+            ]
+            for out, ref in zip(decoded.outputs, prefilled)
+        ]
+    )
+    assert gaps[:, -window:].mean() < 2 * gaps[:, :window].mean()

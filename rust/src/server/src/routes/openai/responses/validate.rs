@@ -4,7 +4,12 @@
 use super::types::ResponsesRequest;
 use crate::error::{ApiError, bail_invalid_request};
 
-/// Enforce the compatibility contract of the Rust Responses API frontend.
+/// Validate Responses API protocol invariants and reject unimplemented request
+/// fields.
+///
+/// Cross-route domain rules (sampling bounds, `max_tokens`, logprobs, token
+/// IDs, `cache_salt`, chat messages/tools) belong in `vllm-text` or
+/// `vllm-chat`, not here.
 ///
 /// Store-dependent features are rejected because the Rust frontend has no
 /// response store (the Python frontend gates them behind
@@ -16,7 +21,27 @@ use crate::error::{ApiError, bail_invalid_request};
 ///   rejected with a 404 like an unknown response ID would be.
 ///
 /// Errors use the shared frontend envelope with numeric HTTP codes.
-pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), ApiError> {
+pub(super) fn validate_request(request: &ResponsesRequest) -> Result<(), ApiError> {
+    if let Some(metadata) = &request.echo.metadata
+        && (metadata.len() > 16
+            || metadata
+                .iter()
+                .any(|(key, value)| key.chars().count() > 64 || value.chars().count() > 512))
+    {
+        bail_invalid_request!(
+            param = "metadata",
+            "metadata supports at most 16 pairs, with keys up to 64 characters and values up to 512 characters"
+        );
+    }
+
+    reject_unsupported_fields(request)?;
+
+    Ok(())
+}
+
+/// Reject request fields that are accepted for deserialization but not yet
+/// implemented in the Rust frontend.
+fn reject_unsupported_fields(request: &ResponsesRequest) -> Result<(), ApiError> {
     if request.background.unwrap_or(false) {
         bail_invalid_request!(
             param = "background",
@@ -42,18 +67,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
 
     if request.prompt.is_some() {
         bail_invalid_request!(param = "prompt", "prompt template is not supported");
-    }
-
-    if let Some(metadata) = &request.echo.metadata
-        && (metadata.len() > 16
-            || metadata
-                .iter()
-                .any(|(key, value)| key.chars().count() > 64 || value.chars().count() > 512))
-    {
-        bail_invalid_request!(
-            param = "metadata",
-            "metadata supports at most 16 pairs, with keys up to 64 characters and values up to 512 characters"
-        );
     }
 
     if let Some(include) = &request.include
@@ -103,6 +116,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
     fn base_request() -> ResponsesRequest {
         serde_json::from_value(json!({
             "input": "hello",
@@ -114,7 +128,7 @@ mod tests {
     fn background_true_is_rejected() {
         let mut request = base_request();
         request.background = Some(true);
-        let error = validate_request_compat(&request).unwrap_err();
+        let error = validate_request(&request).unwrap_err();
         assert!(matches!(error, ApiError::InvalidRequest { .. }));
     }
 
@@ -122,7 +136,7 @@ mod tests {
     fn previous_response_id_is_rejected_with_not_found() {
         let mut request = base_request();
         request.previous_response_id = Some("resp_missing".to_string());
-        let error = validate_request_compat(&request).unwrap_err();
+        let error = validate_request(&request).unwrap_err();
         assert!(matches!(error, ApiError::NotFound { .. }));
         assert_eq!(error.status_code(), axum::http::StatusCode::NOT_FOUND);
     }
@@ -130,14 +144,14 @@ mod tests {
     #[test]
     fn store_true_without_background_is_accepted() {
         let request = serde_json::from_value(json!({"input": "hello", "store": true})).unwrap();
-        assert!(validate_request_compat(&request).is_ok());
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
     fn prompt_template_is_rejected() {
         let mut request = base_request();
         request.prompt = Some(json!({"id": "ptmpl"}));
-        let error = validate_request_compat(&request).unwrap_err();
+        let error = validate_request(&request).unwrap_err();
         assert!(matches!(error, ApiError::InvalidRequest { .. }));
     }
 
@@ -146,7 +160,7 @@ mod tests {
         let mut request = base_request();
         request.previous_input_messages = Some(vec![json!({"role": "user", "content": "hi"})]);
         assert!(matches!(
-            validate_request_compat(&request),
+            validate_request(&request),
             Err(ApiError::InvalidRequest { .. })
         ));
     }
@@ -155,14 +169,14 @@ mod tests {
     fn spaces_between_special_tokens_false_is_accepted() {
         let mut request = base_request();
         request.spaces_between_special_tokens = false;
-        assert!(validate_request_compat(&request).is_ok());
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
     fn max_tool_calls_is_accepted_without_builtin_tools() {
         let mut request = base_request();
         request.echo.max_tool_calls = Some(1);
-        assert!(validate_request_compat(&request).is_ok());
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
@@ -170,7 +184,7 @@ mod tests {
         let mut request = base_request();
         request.previous_input_messages = Some(vec![]);
 
-        assert!(validate_request_compat(&request).is_ok());
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
@@ -182,6 +196,6 @@ mod tests {
             "text": {"verbosity": "low"},
         }))
         .unwrap();
-        assert!(validate_request_compat(&request).is_ok());
+        assert!(validate_request(&request).is_ok());
     }
 }
