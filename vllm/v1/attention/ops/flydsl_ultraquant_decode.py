@@ -826,8 +826,12 @@ def flydsl_ultraquant_decode_attention(
     _q_fp8 = pool_bufs["q_fp8"]
     _q_rot_out = pool_bufs["q_rot"]
 
+    # Verify (width > 1) rotates Q on the host. Its in-kernel WHT repeats in
+    # every partition and costs about 13% of verify time. The host output is
+    # bit-identical to the in-kernel rotation (checked on 6 x 4000 tokens).
     _inkernel_qrot = (
         _FUSE_QROT_INKERNEL
+        and num_verify_tokens == 1
         and int(D) == 256
         and QG in _ULTRAQUANT_FLYDSL_GQA
         and query.dim() == 3
@@ -854,11 +858,6 @@ def flydsl_ultraquant_decode_attention(
 
     # ---- FlyDSL kernel launch --------------------------------------------
     max_bps = int(block_table.shape[1])
-    if num_verify_tokens > 1 and not _inkernel_qrot:
-        raise ValueError(
-            "UltraQuant verify decode requires the in-kernel query rotation. "
-            "The query tensor must be a contiguous head-dim bf16 view."
-        )
     # Width 1 does not read query_start_loc. Pass seq_lens so the kernel
     # argument is a real int32 buffer.
     qsl_for_kernel = query_start_loc if query_start_loc is not None else seq_lens
