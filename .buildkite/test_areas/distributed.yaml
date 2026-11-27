@@ -27,9 +27,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Comm Ops'
+      label: ':amd: (MI300 DPX) Distributed Comm Ops'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 30
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -103,6 +103,8 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
+  - tests/entrypoints/serve/instrumentator/readiness/
+  - vllm/entrypoints/serve/instrumentator/health.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/v1/e2e/general/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/test_sharded_sampling.py
@@ -111,6 +113,7 @@ steps:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - pytest -v -s entrypoints/serve/instrumentator/readiness/test_ready_multi_gpu.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
@@ -218,9 +221,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ':amd: (MI300) Distributed Torchrun + Shutdown'
+      label: ':amd: (MI300 DPX) Distributed Torchrun + Shutdown'
       dind: false
-      device: mi300_2
+      device: mi300_dpx_2
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -574,6 +577,7 @@ steps:
   - vllm/models/hy_v4/nvidia/model.py
   - vllm/models/hy_v4/nvidia/moe.py
   - vllm/models/hy_v4/common/mrope.py
+  - vllm/models/hy_v4/common/sequence_parallel.py
   - vllm/models/hy_v4/weight_utils.py
   - vllm/models/common/ops/sequence_parallel.py
   - vllm/model_executor/layers/attention/
@@ -593,6 +597,39 @@ steps:
     tests/models/deepseek_v32/test_shardq_sequence_parallel.py
     tests/models/hy_v4/test_shardq_sinks.py
     tests/models/hy_v4/test_sequence_parallel.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) HY4 Distributed"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      optional: true
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      working_dir: "/vllm-workspace/tests"
+      source_file_dependencies:
+      - vllm/models/hy_v4/
+      - vllm/models/hy_v4_flash/
+      - vllm/model_executor/layers/attention/
+      - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/backends/mla/indexer.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/ops/shardq.py
+      - vllm/v1/worker/gpu/spec_decode/dfly/
+      - vllm/models/common/ops/sequence_parallel.py
+      - vllm/config/attention.py
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/utils.py
+      - tests/models/hy_v4/test_shardq_sinks.py
+      - tests/models/hy_v4/test_sequence_parallel.py
+      - tests/models/test_hyv4_rocm.py
+      commands:
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/hy_v4/test_shardq_sinks.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/hy_v4/test_sequence_parallel.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300

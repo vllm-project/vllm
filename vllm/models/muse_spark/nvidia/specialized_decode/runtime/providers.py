@@ -102,15 +102,6 @@ class BoundaryProvider(Provider, Protocol):
     ) -> None: ...
 
 
-class AttentionProvider(Provider, Protocol):
-    """The attention: QKV front (QKV GEMM, QK norm, RoPE, KV insert), the
-    attention core with o-norm and sigmoid gate, and o_proj. `x` bf16 [b, H]
-    in; returns the bf16 [b, H] tensor holding this rank's row-parallel o_proj
-    partial (before the all-reduce)."""
-
-    def run(self, step: Step, metadata: Any, x: torch.Tensor) -> torch.Tensor: ...
-
-
 class AttentionBoundaryProvider(Provider, Protocol):
     """The attention boundary: all-reduce of `partial` (bf16 [b, H]),
     post_attn_norm, the gated add into `stream` (fp32 [b, H], in place) and
@@ -119,17 +110,6 @@ class AttentionBoundaryProvider(Provider, Protocol):
     def run(
         self, partial: torch.Tensor, stream: torch.Tensor, out: torch.Tensor
     ) -> None: ...
-
-
-class MoEProvider(Provider, Protocol):
-    """The MoE: router (fp32 GateLinear [b, H] -> [b, NUM_EXPERTS]), routing
-    (`RoutedTopk`), pooler GEMM and gather + pre_expert_norm + quant
-    (`ExpertsInput`), the routed experts (`RoutedExpertsOps` ->
-    `UnfinalizedExperts`), the tail (post_expert_norm, weighted sum, EP
-    combine) and the unpooler GEMM, whose [b, H / tp] column block is published,
-    zero-copy, into the mailbox of the next boundary (bound at build)."""
-
-    def run(self, x: torch.Tensor) -> None: ...
 
 
 class RoutedTopk(NamedTuple):

@@ -1,0 +1,5 @@
+# lmcache caps these below vLLM's security floors (requirements/common.txt).
+# Keep the image's versions; tools/kv_connector_lock.py verifies the same
+# intentional exceptions during the XPU CI job.
+opentelemetry-api
+opentelemetry-exporter-prometheus
