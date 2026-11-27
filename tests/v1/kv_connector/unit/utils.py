@@ -232,8 +232,13 @@ def create_scheduler(
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
     hash_block_size: int | None = None,
+    scheduler_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
-    """Initialize Scheduler For Testing."""
+    """Initialize Scheduler For Testing.
+
+    `scheduler_block_size` defaults to `cache_config.block_size`; pass the LCM
+    of the group block sizes when they differ, as the engine does.
+    """
     block_size = vllm_config.cache_config.block_size
     if kv_cache_config is None:
         kv_cache_config = KVCacheConfig(
@@ -261,7 +266,7 @@ def create_scheduler(
         kv_cache_config=kv_cache_config,
         collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
-        block_size=block_size,
+        block_size=scheduler_block_size or block_size,
         hash_block_size=hash_block_size,
     )
 
@@ -622,6 +627,9 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._bounded_replay = bounded_replay
+    sched._kv_cache_manager = SimpleNamespace(
+        get_state_checkpoint_tokens=lambda num_tokens: 0
+    )
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -674,6 +682,7 @@ def make_nixl_push_scheduler(
     `NixlConnectorScheduler`) and carries push-specific state. Only the
     fields touched by the unit tests are populated.
     """
+    from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
@@ -698,6 +707,9 @@ def make_nixl_push_scheduler(
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
     sched._bounded_replay = False
+    sched._kv_cache_manager = SimpleNamespace(
+        get_state_checkpoint_tokens=lambda num_tokens: 0
+    )
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,

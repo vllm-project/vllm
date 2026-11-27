@@ -22,6 +22,7 @@ from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
 from vllm.transformers_utils.processors.kimi_k3 import encode_k3_text_prompt
 from vllm.utils.async_utils import make_async
 
+from .base import HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
 from .hf import BaseHfRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
@@ -206,6 +207,8 @@ class KimiK3Renderer(BaseHfRenderer[HfTokenizer]):
     """
 
     supports_reasoning_history = True
+
+    _server_owned_chat_template_kwargs = HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS
 
     def __init__(self, config: VllmConfig, tokenizer: HfTokenizer | None) -> None:
         super().__init__(config, tokenizer)

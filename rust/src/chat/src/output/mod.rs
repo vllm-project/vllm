@@ -22,7 +22,7 @@ mod harmony;
 mod structural_tag;
 mod structured;
 
-pub use default::DefaultChatOutputProcessor;
+pub use default::{DefaultChatOutputProcessor, ResolvedParsers};
 pub use harmony::HarmonyChatOutputProcessor;
 pub(crate) use harmony::validate_harmony_parser_overrides;
 pub(crate) use structural_tag::apply_output_grammar;
