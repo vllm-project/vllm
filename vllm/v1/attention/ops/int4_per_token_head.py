@@ -129,37 +129,13 @@ def _reshape_cache_int4_kernel(
     k_min = tl.minimum(k_min, 0.0)
     k_max = tl.maximum(k_max, 0.0)
     k_scale = tl.maximum((k_max - k_min) / 15.0, 1e-6)
-    k_zp_f = tl.clamp(
-        tl.where(
-            -k_min / k_scale >= 0,
-            (-k_min / k_scale + 0.5).to(tl.int32),
-            (-k_min / k_scale - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    k_zp_f = tl.clamp((-k_min / k_scale + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
 
     inv_k = 1.0 / k_scale
     k_even_s = k_even * inv_k + k_zp_f
     k_odd_s = k_odd * inv_k + k_zp_f
-    k_even_q = tl.clamp(
-        tl.where(
-            k_even_s >= 0,
-            (k_even_s + 0.5).to(tl.int32),
-            (k_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    k_odd_q = tl.clamp(
-        tl.where(
-            k_odd_s >= 0,
-            (k_odd_s + 0.5).to(tl.int32),
-            (k_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    k_even_q = tl.clamp((k_even_s + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
+    k_odd_q = tl.clamp((k_odd_s + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
 
     k_zp_int = k_zp_f.to(tl.int32)
     k_scale_bits = k_scale.to(tl.int32, bitcast=True)
@@ -206,37 +182,13 @@ def _reshape_cache_int4_kernel(
     v_min = tl.minimum(v_min, 0.0)
     v_max = tl.maximum(v_max, 0.0)
     v_scale = tl.maximum((v_max - v_min) / 15.0, 1e-6)
-    v_zp_f = tl.clamp(
-        tl.where(
-            -v_min / v_scale >= 0,
-            (-v_min / v_scale + 0.5).to(tl.int32),
-            (-v_min / v_scale - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    v_zp_f = tl.clamp((-v_min / v_scale + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
 
     inv_v = 1.0 / v_scale
     v_even_s = v_even * inv_v + v_zp_f
     v_odd_s = v_odd * inv_v + v_zp_f
-    v_even_q = tl.clamp(
-        tl.where(
-            v_even_s >= 0,
-            (v_even_s + 0.5).to(tl.int32),
-            (v_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    v_odd_q = tl.clamp(
-        tl.where(
-            v_odd_s >= 0,
-            (v_odd_s + 0.5).to(tl.int32),
-            (v_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    v_even_q = tl.clamp((v_even_s + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
+    v_odd_q = tl.clamp((v_odd_s + 0.5).to(tl.int32).to(tl.float32), 0.0, 15.0)
 
     v_zp_int = v_zp_f.to(tl.int32)
     v_scale_bits = v_scale.to(tl.int32, bitcast=True)
