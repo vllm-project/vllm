@@ -1392,8 +1392,7 @@ def test_lora_is_split_like_converted_weights(
     """A LoRA for a fused checkpoint module (Molmo2's `att_proj` and `ff_proj`) loads
     into the modules its weight is split into: `lora_B` by rows, with its `lora_A`,
     rank and scaling (here from `alpha_pattern` and `rank_pattern`). A renamed module's
-    LoRA loads as before, and a split module's on another pipeline rank is dropped.
-    Weights still split into the LoRA-wrapped linears (an in-place reload)."""
+    LoRA loads as before, and a split module's on another pipeline rank is dropped."""
     model = nn.Module()
     model.language_model = text = nn.Module()
     text.layers = nn.ModuleList([nn.Module(), PPMissingLayer()])
@@ -1492,7 +1491,3 @@ def test_lora_is_split_like_converted_weights(
             )
         pieces = torch.cat([loras[f"0.{target}"].lora_b for target in targets])
         torch.testing.assert_close(pieces, lora_b, rtol=0, atol=0)
-
-    att_proj = ("model.transformer.layers.0.att_proj.weight", torch.rand(8, 4))
-    qkv = dict(stub._apply_conversion_mapping([att_proj])).values()
-    assert [tuple(piece.shape) for piece in qkv] == [(4, 4), (2, 4), (2, 4)]

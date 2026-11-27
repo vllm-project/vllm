@@ -1108,9 +1108,6 @@ class Base(
         the rows of its piece of a split tensor or LoRA. vLLM's linears keep it when
         sharded or fused."""
         module, shard_id = self._loaded_by(name) or (None, None)
-        # Once LoRA is enabled, a LoRA layer wraps the linear
-        if isinstance(module, BaseLayerWithLoRA):
-            module = module.base_layer
         if isinstance(module, LinearBase) and shard_id is None:
             return module.output_size
         if isinstance(module, QKVParallelLinear) and isinstance(shard_id, str):
