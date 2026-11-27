@@ -1582,7 +1582,7 @@ presets:
     strategy: pd_cluster
     variants: [mxfp4]
     workload: "Agentic (InferenceX AgentX)"
-    description: "One TP4 prefill engine with a host-DRAM KV tier feeds two TP4 decode engines on one node over Mooncake RDMA, behind vllm-router with consistent-hash routing (12 GPUs), on the minimax-m31-flash-75bc8cf1 image: seven-token DSpark, NVFP4 KV and indexer K caches, breakable CUDA graphs, and DBO on the prefill."
+    description: "One TP4 prefill engine on its own node, with a host-DRAM KV tier, feeds two TP4 decode engines on a second node over Mooncake RDMA, behind vllm-router with consistent-hash routing (12 GPUs on two 8-GPU nodes), on the minimax-m31-flash-75bc8cf1 image: seven-token DSpark, NVFP4 KV and indexer K caches, breakable CUDA graphs, and DBO on the prefill."
     source: { label: "InferenceX #5090", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5090", key: "minimaxm31flash-fp4-mi355x-vllm-disagg-agentic-dspark", revision: cf5c4484503241f3d14332b895513cc053677e6f }
     image: "vllm/vllm-openai-rocm:minimax-m31-flash-75bc8cf1@sha256:f8e8ab239e5edb7c3070c5802fc7fc0cbb889513bf81183dfc98ce1c77e1dfe1"
     select:
