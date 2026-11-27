@@ -59,6 +59,7 @@ def create_transfer_backend(
     protocol: str,
     device_name: str,
     transfer_timeout_s: float | None = None,
+    enable_sleep_mode: bool = False,
     overrides: Mapping[str, Any] | None = None,
 ) -> TransferBackend:
     if kind == TE:
@@ -81,6 +82,7 @@ def create_transfer_backend(
         transfer_timeout_s=DEFAULT_TRANSFER_TIMEOUT_S
         if transfer_timeout_s is None
         else transfer_timeout_s,
+        enable_sleep_mode=enable_sleep_mode,
         overrides=overrides,
     )
 

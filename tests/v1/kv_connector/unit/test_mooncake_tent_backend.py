@@ -75,8 +75,8 @@ class Engine:
     def register_local_memory_batch(self, addrs, sizes) -> None:
         self.registered.append((len(addrs), len(sizes)))
 
-    def unregister_local_memory_batch(self, addrs, sizes) -> None:
-        self.unregistered.append((len(addrs), len(sizes)))
+    def unregister_local_memory_batch(self, addrs, sizes=None) -> None:
+        self.unregistered.append((len(addrs), None if sizes is None else len(sizes)))
 
     def open_segment(self, peer: str) -> Segment:
         self.opened.append(peer)
@@ -118,6 +118,26 @@ class Request:
 
 class MissingStatusEngine(Engine):
     get_transfer_status_list = None
+
+
+class ArrayEngine(Engine):
+    def __init__(self, config_path: str) -> None:
+        super().__init__(config_path)
+        self.array_calls: list[tuple[int, str, object]] = []
+
+    def transfer_sync_arrays(self, src, dst, lengths, target_id, opcode):
+        self.array_calls.append((len(src), target_id.peer, opcode))
+        return np.asarray(self.statuses, dtype=np.uint8)
+
+
+class WaitEngine(Engine):
+    def __init__(self, config_path: str) -> None:
+        super().__init__(config_path)
+        self.waited: tuple[int, int] | None = None
+
+    def wait_transfer(self, batch, timeout_ms):
+        self.waited = (batch, timeout_ms)
+        return self.get_transfer_status_list(batch)
 
 
 def fake_tent_module(engine_cls: type[Engine] = Engine) -> types.ModuleType:
@@ -252,12 +272,54 @@ def test_segment_is_reused(engine) -> None:
     assert backend._engine.opened == ["peer"]
 
 
-def test_segment_is_dropped_on_submit_error(engine) -> None:
+def test_segment_survives_submit_error(engine) -> None:
     backend = make_backend()
     backend._engine.submit_error = RuntimeError("submit failed")
     with pytest.raises(RuntimeError, match="submit failed"):
         backend.transfer("peer", TransferOp.WRITE, two_ranges())
-    assert backend._engine.closed == ["peer"]
+    assert backend._engine.closed == []
+
+
+def test_arrays_binding_skips_batch_lifecycle(engine, monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "tent", fake_tent_module(ArrayEngine))
+    backend = make_backend()
+    backend._engine.statuses = [Status.COMPLETED, Status.FAILED]
+    events = backend.transfer("peer", TransferOp.WRITE, two_ranges())
+    assert [event.state for event in events] == [
+        TransferState.COMPLETED,
+        TransferState.FAILED,
+    ]
+    assert backend._engine.array_calls == [(2, "peer", OpCode.WRITE)]
+    assert backend._engine.freed == 0
+
+
+def test_wait_transfer_replaces_polling(engine, monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "tent", fake_tent_module(WaitEngine))
+    backend = make_backend()
+    backend._engine.statuses = [Status.COMPLETED, Status.COMPLETED]
+    backend._engine.overall = Status.PENDING
+    events = backend.transfer("peer", TransferOp.READ, two_ranges())
+    assert [event.state for event in events] == [TransferState.COMPLETED] * 2
+    assert backend._engine.waited == (7, 5000)
+
+
+def test_transfers_are_rejected_after_shutdown(engine) -> None:
+    backend = make_backend()
+    backend.shutdown()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        backend.transfer("peer", TransferOp.WRITE, two_ranges())
+
+
+def test_nvlink_is_enabled_unless_sleep_mode(engine) -> None:
+    backend = make_backend()
+    assert "nvlink" not in backend._engine.config["transports"]
+    sleeping = TentTransferBackend(
+        hostname="127.0.0.1",
+        protocol="tcp",
+        device_name="",
+        enable_sleep_mode=True,
+    )
+    assert sleeping._engine.config["transports"]["nvlink"] == {"enable": False}
 
 
 def test_register_and_unregister_delegate(engine) -> None:
@@ -265,7 +327,7 @@ def test_register_and_unregister_delegate(engine) -> None:
     backend.register_regions([MemoryRegion(base_addr=1, length=64)] * 2)
     backend.unregister_regions([MemoryRegion(base_addr=1, length=64)])
     assert backend._engine.registered == [(2, 2)]
-    assert backend._engine.unregistered == [(1, 1)]
+    assert backend._engine.unregistered == [(1, None)]
 
 
 def test_timeout_stops_polling(engine) -> None:

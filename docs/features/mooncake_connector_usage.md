@@ -98,14 +98,14 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
 With `transfer_engine: "tent"`, vLLM submits the KV ranges of one request as one TENT batch and reports one outcome per range:
 
-- Each range becomes one TENT task. Ranges that are contiguous on both sides are not folded, so a request made of many small blocks builds one Python request object per block. The array entry point in [Mooncake #5525](https://github.com/kvcache-ai/Mooncake/pull/5525) removes that cost.
-- The batch is submitted once and polled through `get_transfer_status_overall` with 20-50 us backoff until it leaves `PENDING` or `transfer_timeout_s` expires. The backend then reads `get_transfer_status_list` and settles every range: a completed range keeps its data, any other state is reported as failed with the engine state name, and the decoder reschedules the blocks behind those ranges.
+- Each range becomes one TENT task. When the build exposes `transfer_sync_arrays`, the backend passes the ranges as three `uint64` arrays and the engine builds the tasks in C++; otherwise it builds one Python request object per range.
+- The batch is waited in one call when the build exposes `wait_transfer`, and polled through `get_transfer_status_overall` with 20-50 us backoff otherwise, until it leaves `PENDING` or `transfer_timeout_s` expires. The backend then settles every range: a completed range keeps its data, any other state is reported as failed with the engine state name, and the decoder reschedules the blocks behind those ranges.
 - `transfer_timeout_s` caps the wait; `0` waits without a limit. On expiry the backend reads whatever states the engine reports and reports the ranges that have not completed as failed.
-- An engine call that raises while submitting closes that peer's segment and propagates the error, so the transfer fails instead of leaving a partially submitted batch behind.
-- `shutdown` waits up to 5 s for each peer's in-flight submission, closes that peer's segment, and logs a warning when a peer is still busy.
+- A failed transfer leaves that peer's segment open: `closeRemote` drops the segment for every concurrent transfer, so segments are closed only by `shutdown`.
+- `shutdown` stops accepting transfers, waits up to 5 s for the in-flight ones to finish, then closes the peers' segments.
 - The engine names its segment after the configured `rpc_server_hostname`; that name has to be the address peers reach this worker by.
 - TENT metrics are off by default because the connector passes no metrics port; set `tent_config: {"metrics": {"http_port": 9100 + rank}}` to enable the engine's own HTTP metrics without colliding with other ranks on the host.
-- `mooncake_protocol` and `device_name` keep their meaning: the protocol selects the TENT transport, and the whitelist becomes `topology/rdma_whitelist`. A transport the connector did not advertise is disabled in the generated configuration.
+- `mooncake_protocol` and `device_name` keep their meaning: the protocol selects the TENT transport, and the whitelist becomes `topology/rdma_whitelist`. NVLink stays enabled next to RDMA so same-host peers use it; sleep mode turns it off until [Mooncake #5886](https://github.com/kvcache-ai/Mooncake/pull/5886) keeps the logical ranges of moved buffers.
 
 ## Prometheus metrics
 
