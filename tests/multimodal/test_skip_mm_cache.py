@@ -165,7 +165,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
         ):
             engine_input = cast(
-                MultiModalInput, await serving.build_engine_input(request, [])
+                MultiModalInput, await serving.build_engine_input(request)
             )
 
         validate_cache_handles.assert_called_once()
@@ -224,7 +224,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
         ):
             engine_input = cast(
-                MultiModalInput, await serving.build_engine_input(request, [])
+                MultiModalInput, await serving.build_engine_input(request)
             )
 
         serving._mm_tensor_refs.reader.validate.assert_called_once()
@@ -237,7 +237,7 @@ class TestBuildEngineInputSkipMmCache:
         preprocess_completion = AsyncMock(return_value=[expected])
         online_renderer.preprocess_completion = preprocess_completion
 
-        engine_input = await serving.build_engine_input(_make_request(), [])
+        engine_input = await serving.build_engine_input(_make_request())
 
         assert engine_input is expected
         preprocess_completion.assert_awaited_once()
@@ -265,7 +265,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
             pytest.raises(ValueError, match="bad cache handle"),
         ):
-            await serving.build_engine_input(request, [])
+            await serving.build_engine_input(request)
 
     @pytest.mark.asyncio
     async def test_metadata_only_does_not_set_skip_mm_cache(self):
@@ -303,7 +303,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
         ):
             engine_input = cast(
-                MultiModalInput, await serving.build_engine_input(request, [])
+                MultiModalInput, await serving.build_engine_input(request)
             )
 
         meta_item = engine_input["mm_kwargs"]["image"][0]
@@ -361,7 +361,7 @@ class TestBuildEngineInputSkipMmCache:
             ),
         ):
             engine_input = cast(
-                MultiModalInput, await serving.build_engine_input(request, [])
+                MultiModalInput, await serving.build_engine_input(request)
             )
 
         # Tokens before start=10 preserved, followed by rendered content_parts tokens.

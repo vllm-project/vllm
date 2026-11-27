@@ -541,10 +541,11 @@ class ServingTokens(GenerateBaseServing):
     async def build_engine_input(
         self,
         request: GenerateRequest,
-        mm_reservations: list[MMTensorReservation],
+        mm_reservations: list[MMTensorReservation] | None = None,
     ) -> EngineInput:
         engine_input: EngineInput
         features = request.features
+        reservations = mm_reservations if mm_reservations is not None else []
 
         if request.content_parts:
             # Items in features are already expanded; render every token
@@ -612,7 +613,7 @@ class ServingTokens(GenerateBaseServing):
                 # The downloaded bytes and the decoded tensors.
                 reservation = await tensor_refs.memory.reserve(2 * nbytes)
 
-                mm_reservations.append(reservation)
+                reservations.append(reservation)
                 try:
                     mm_kwargs = await run_in_read_slot(
                         tensor_refs.read_slots,
