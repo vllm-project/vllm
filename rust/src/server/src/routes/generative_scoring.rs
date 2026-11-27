@@ -42,7 +42,11 @@ pub async fn generative_scoring(
     request: Result<Json<GenerativeScoringRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = request?;
-    let ctx = resolve_request_context(&headers, request.request_id.as_deref())?;
+    let ctx = resolve_request_context(
+        &headers,
+        "generative-scoring-",
+        request.request_id.as_deref(),
+    )?;
     let lora_resolution = state.resolve_model_with_loras(request.model.as_deref()).await;
     lora_resolution.model_names.check(request.model.as_deref())?;
 
@@ -56,7 +60,7 @@ pub async fn generative_scoring(
         bail_invalid_request!(param = "items", "items must contain at least one item.");
     }
 
-    let request_id = format!("generative-scoring-{}", ctx.request_id);
+    let request_id = ctx.request_id.clone();
     let request_span = tracing::info_span!("generative_scoring", request_id = %request_id);
     let text = state.chat.text();
     let GenerativeScoringRequest {

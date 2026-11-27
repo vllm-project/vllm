@@ -87,7 +87,7 @@ pub(super) fn prepare_chat_request(
     )
     .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
 
-    let request_id = format!("chatcmpl-{}", ctx.request_id);
+    let request_id = ctx.request_id.clone();
     let response_model = lora_resolution.response_model();
     let include_reasoning = request.include_reasoning;
     let echo = request
@@ -525,7 +525,7 @@ mod tests {
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id).expect("valid headers")
+        resolve_request_context(headers, "chatcmpl-", request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {
@@ -1056,7 +1056,7 @@ mod tests {
         let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
+            request_context(&HeaderMap::new(), None),
         )
         .expect("request is valid");
 
@@ -1136,7 +1136,7 @@ mod tests {
         let prepared = prepare_chat_request(
             base_request(),
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
+            request_context(&HeaderMap::new(), None),
         )
         .expect("request is valid");
 

@@ -84,7 +84,7 @@ pub(crate) fn prepare_responses_request(
     lora_resolution.model_names.check(request.model.as_deref())?;
     validate::validate_request(&request)?;
 
-    let request_id = format!("resp_{}", ctx.request_id);
+    let request_id = ctx.request_id.clone();
 
     let ResponsesRequest {
         model: _,
