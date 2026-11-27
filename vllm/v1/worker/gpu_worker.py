@@ -83,6 +83,7 @@ from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
 )
+from vllm.model_executor.models.interfaces import pp_tensors_are_sequence_sharded
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
@@ -285,6 +286,9 @@ class Worker(WorkerBase):
         self._pp_transport: PPTransport | None = None
         # What a non-first PP rank receives into; checked on the NCCL path.
         self._pp_recv_specs: dict[str, RowSpec] = {}
+        # NCCL slices a tensor across TP ranks and all-gathers it on receive.
+        # A sequence-sharded model's TP-local tensors are sent whole instead.
+        self._pp_all_gather_tensors: dict[str, bool] | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -659,9 +663,8 @@ class Worker(WorkerBase):
             from vllm.distributed.pp_transport import create_pp_transport
 
             self._pp_transport = create_pp_transport(self.vllm_config, persistent)
-        self.pp_intermediate_tensors_are_sequence_sharded = getattr(
-            self.get_model(), "pp_intermediate_tensors_are_sequence_sharded", False
-        )
+        if pp_tensors_are_sequence_sharded(self.get_model()):
+            self._pp_all_gather_tensors = {"hidden_states": False, "residual": False}
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1513,19 +1516,13 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        # NCCL sends a TP rank's slice of each tensor and all-gathers them on
-        # receive, unless the tensors already differ across TP ranks.
-        all_gather_group = (
-            None
-            if self.pp_intermediate_tensors_are_sequence_sharded
-            else get_tp_group()
-        )
         if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
             intermediate_tensors = self._pp_transport.recv(get_pp_group())
         elif forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
-                    all_gather_group=all_gather_group,
+                    all_gather_group=get_tp_group(),
+                    all_gather_tensors=self._pp_all_gather_tensors,
                 )
             )
             assert tensor_dict is not None
@@ -1565,7 +1562,8 @@ class Worker(WorkerBase):
             # waited at the top of the next step.
             handles = get_pp_group().isend_tensor_dict(
                 output.tensors,
-                all_gather_group=all_gather_group,
+                all_gather_group=get_tp_group(),
+                all_gather_tensors=self._pp_all_gather_tensors,
             )
             self._pp_send_work = handles[1:]
 

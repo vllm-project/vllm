@@ -664,7 +664,8 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
-        # Rows of each non-last-stage output, per captured graph.
+        # Rows of each non-last-stage output per captured graph; a
+        # sequence-sharded tensor has fewer rows than tokens.
         self.intermediate_tensor_rows: dict[
             BatchExecutionDescriptor, dict[str, int]
         ] = {}
@@ -737,8 +738,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                 # Non-last PP rank.
                 assert isinstance(model_output, IntermediateTensors)
                 intermediate_tensors = model_output
-                # A sequence-sharded model returns fewer rows for its TP-local
-                # tensors.
                 rows = {k: v.shape[0] for k, v in intermediate_tensors.tensors.items()}
                 self.intermediate_tensor_rows[desc] = rows
                 if self.intermediate_tensors is None:

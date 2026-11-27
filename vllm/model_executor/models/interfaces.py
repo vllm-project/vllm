@@ -965,6 +965,19 @@ def _supports_pp_inspect(model: type[object] | object) -> bool:
     return supports_kw(model_forward, "intermediate_tensors")
 
 
+def pp_tensors_are_sequence_sharded(model: nn.Module) -> bool:
+    """Whether the model sets
+    `SupportsPP.pp_intermediate_tensors_are_sequence_sharded`.
+
+    The module that builds the intermediate tensors decides their layout, so
+    the flag counts on any submodule; a wrapper need not forward it.
+    """
+    return any(
+        getattr(module, "pp_intermediate_tensors_are_sequence_sharded", False)
+        for module in model.modules()
+    )
+
+
 @runtime_checkable
 class SupportsHCSP(Protocol):
     """Support sequence-parallel HC without changing MoE parallelism."""

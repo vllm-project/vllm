@@ -63,7 +63,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import log_layer_backends
-from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+from vllm.model_executor.models.interfaces import (
+    pp_tensors_are_sequence_sharded,
+    requires_raw_input_tokens,
+)
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -471,8 +474,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.pp_handler.relay_positions = (
                 self.model_state.positions_depend_on_encoder
             )
-            self.pp_handler.sequence_sharded = getattr(
-                self.model, "pp_intermediate_tensors_are_sequence_sharded", False
+            self.pp_handler.sequence_sharded = pp_tensors_are_sequence_sharded(
+                self.model
             )
 
         self.decode_query_len = (
@@ -2152,7 +2155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     t = received[k][:num_tokens]
                     # Some PP transports receive into the persistent tensors.
                     if t.data_ptr() != v.data_ptr():
-                        # A sequence-sharded model sends only its TP rank's rows.
+                        # A sequence-sharded tensor has fewer rows than tokens.
                         v[: t.shape[0]].copy_(t)
                 assert self.pp_handler is not None
                 self.pp_handler.check_sequence_shard(

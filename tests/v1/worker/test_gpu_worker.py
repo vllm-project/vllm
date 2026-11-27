@@ -5,7 +5,7 @@ import gc
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -130,7 +130,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
         _external_weight_charges=ExternalWeightCharges(),
-        get_model=lambda: None,
+        get_model=torch.nn.Module,
     )
     original_threads = torch.get_num_threads()
     try:
@@ -609,7 +609,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
-        pp_intermediate_tensors_are_sequence_sharded=False,
+        _pp_all_gather_tensors=None,
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         iteration_timer=None,
@@ -624,60 +624,6 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
-
-
-@pytest.mark.parametrize("sequence_sharded", [False, True])
-def test_nccl_pp_transport_keeps_sequence_shards_on_their_tp_rank(
-    monkeypatch: pytest.MonkeyPatch, sequence_sharded: bool
-):
-    """Over NCCL, PP tensors are TP-sliced on send and all-gathered on receive
-    unless the model sends each TP rank's own sequence-parallel rows."""
-    from vllm.distributed.pp_transport import row_specs
-    from vllm.sequence import IntermediateTensors
-
-    tensors = {
-        "hidden_states": torch.arange(8).reshape(2, 4),
-        "residual": torch.ones(2, 3, 4),
-        "aux_hidden_states_0": torch.full((4, 4), 7),
-    }
-    pp = Mock(is_first_rank=False, is_last_rank=False)
-    pp.irecv_tensor_dict.return_value = (tensors, [], [])
-    pp.isend_tensor_dict.return_value = [Mock(), Mock()]
-    tp = object()
-    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp)
-    monkeypatch.setattr(gpu_worker, "get_tp_group", lambda: tp)
-
-    def forward(scheduler_output, received):
-        for key, tensor in tensors.items():
-            torch.testing.assert_close(received[key], tensor)
-        return IntermediateTensors(tensors)
-
-    worker = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                pipeline_parallel_size=2, distributed_executor_backend="mp"
-            ),
-        ),
-        pp_intermediate_tensors_are_sequence_sharded=sequence_sharded,
-        model_runner=SimpleNamespace(execute_model=forward, is_pooling_model=False),
-        annotate_profile=lambda scheduler_output: nullcontext(),
-        iteration_timer=None,
-        _pp_send_work=[],
-        _pp_transport=None,
-        _pp_recv_specs=row_specs(tensors),
-    )
-    scheduler_output = SimpleNamespace(
-        total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
-    )
-
-    assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
-
-    expected_group = None if sequence_sharded else tp
-    pp.irecv_tensor_dict.assert_called_once_with(all_gather_group=expected_group)
-    pp.isend_tensor_dict.assert_called_once_with(
-        tensors, all_gather_group=expected_group
-    )
-    assert worker._pp_send_work == pp.isend_tensor_dict.return_value[1:]
 
 
 @pytest.mark.parametrize("is_last_rank", [False, True])

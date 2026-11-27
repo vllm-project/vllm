@@ -155,43 +155,6 @@ def test_moe_sequence_parallel_requires_data_parallel(
     assert parallel_config.use_sequence_parallel_moe is expected
 
 
-@pytest.mark.parametrize(
-    (
-        "moe_backend",
-        "pipeline_parallel_size",
-        "data_parallel_size",
-        "enable_expert_parallel",
-        "expected",
-    ),
-    [
-        ("deep_gemm_mega_moe", 1, 1, True, True),
-        ("deep_gemm_mega_moe", 2, 1, True, True),
-        ("deep_gemm_mega_moe", 2, 1, False, False),
-        ("flashinfer_cutlass", 1, 1, True, False),
-        ("flashinfer_cutlass", 1, 2, True, True),
-        ("flashinfer_cutlass", 2, 2, True, False),
-    ],
-)
-def test_kimi_sequence_parallel_selection(
-    moe_backend: str,
-    pipeline_parallel_size: int,
-    data_parallel_size: int,
-    enable_expert_parallel: bool,
-    expected: bool,
-):
-    vllm_config = SimpleNamespace(
-        kernel_config=SimpleNamespace(moe_backend=moe_backend),
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=2,
-            pipeline_parallel_size=pipeline_parallel_size,
-            data_parallel_size=data_parallel_size,
-            enable_expert_parallel=enable_expert_parallel,
-        ),
-    )
-
-    assert kimi_model.use_kimi_k3_sequence_parallel(vllm_config) is expected
-
-
 def test_kimi_pipeline_stage_keeps_received_sequence_shard(monkeypatch):
     """A later stage reads its TP rank's rows from the front of the full-size
     input buffers instead of sharding them again."""

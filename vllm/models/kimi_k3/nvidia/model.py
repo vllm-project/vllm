@@ -146,9 +146,8 @@ def use_kimi_k3_sequence_parallel(vllm_config: VllmConfig) -> bool:
     """Select Kimi K3's model-level sequence parallel path.
 
     DeepGEMM MegaMoE requires distinct token shards on the TP/EP ranks, so it
-    keeps sequence parallelism enabled across pipeline stages. Other MoE
-    backends retain the existing DP-only behavior and do not change when PP is
-    enabled.
+    uses sequence parallelism with or without PP. Other MoE backends use it
+    only for DP without PP.
     """
     parallel_config = vllm_config.parallel_config
     use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
@@ -1296,12 +1295,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         if not get_pp_group().is_last_rank:
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            if self.use_sequence_parallel:
+            if self.use_sequence_parallel and aux_hidden_states:
                 # The runner hands earlier stages' aux hidden states to the
                 # speculator as received, so they cross stages unsharded.
-                aux_hidden_states = [
-                    sp_all_gather(t)[:full_num_tokens] for t in aux_hidden_states
-                ]
+                packed_aux = sp_all_gather(torch.cat(aux_hidden_states, dim=-1))
+                aux_hidden_states = list(
+                    packed_aux[:full_num_tokens].split(hidden_states.shape[-1], dim=-1)
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -1816,9 +1816,6 @@ class KimiK3ForConditionalGeneration(
             )
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
-        )
-        self.pp_intermediate_tensors_are_sequence_sharded = (
-            self.language_model.pp_intermediate_tensors_are_sequence_sharded
         )
         self.media_placeholder: int = self.config.media_placeholder_token_id
 

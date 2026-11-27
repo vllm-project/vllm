@@ -109,9 +109,7 @@ class PPHandler:
         # Whether positions depend on encoder outputs, which only the first
         # stage has, so later stages use the first stage's positions.
         self.relay_positions = False
-        # Whether hidden states and residuals cross stages as each TP rank's
-        # sequence-parallel rows; see
-        # SupportsPP.pp_intermediate_tensors_are_sequence_sharded.
+        # The model's SupportsPP.pp_intermediate_tensors_are_sequence_sharded.
         self.sequence_sharded = False
 
     def on_req_idx_freed(self, req_idx: int) -> None:

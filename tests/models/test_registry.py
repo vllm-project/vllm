@@ -395,3 +395,20 @@ def test_structural_pp_model_does_not_require_boundary_layout_attribute():
     assert not hasattr(
         StructuralPPModel(), "pp_intermediate_tensors_are_sequence_sharded"
     )
+
+
+def test_pp_sequence_shard_layout_is_read_through_wrappers():
+    from torch import nn
+
+    from vllm.model_executor.models.interfaces import pp_tensors_are_sequence_sharded
+
+    class Decoder(nn.Module):
+        pp_intermediate_tensors_are_sequence_sharded = True
+
+    class Wrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = Decoder()
+
+    assert pp_tensors_are_sequence_sharded(Wrapper())
+    assert not pp_tensors_are_sequence_sharded(nn.Linear(1, 1))
