@@ -11,6 +11,7 @@ from vllm import (
 )
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import DictPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
@@ -20,6 +21,7 @@ from vllm.renderers.chat_utils.item_tracker import (
     MediaRequestBudgets,
     use_media_request_budgets,
 )
+from vllm.renderers.inputs import EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -286,7 +288,7 @@ class PoolingIOProcessor:
             render_params = cast(EncodeCMPLRenderParams, render_params)
             prompt = render_params["prompts"]
             if isinstance(prompt, dict):
-                prompts = [self.renderer._copy_prompt_dict(prompt)]
+                prompts = [self._copy_prompt_for_render(prompt)]
             else:
                 prompts = [prompt]
             engine_input = self.renderer.render_cmpl(
@@ -305,6 +307,20 @@ class PoolingIOProcessor:
             lora_requests=render_params["lora_requests"],
             priorities=render_params["priorities"],
         )
+
+    @staticmethod
+    def _copy_prompt_for_render(prompt: DictPrompt) -> DictPrompt:
+        # Copy top-level and nested dicts to avoid mutating caller arguments.
+        if "encoder_prompt" in prompt:
+            enc_dec_prompt = cast(EncoderDecoderDictPrompt, prompt)
+            copied = dict(enc_dec_prompt)
+            copied["encoder_prompt"] = dict(enc_dec_prompt["encoder_prompt"])
+            decoder_prompt = enc_dec_prompt["decoder_prompt"]
+            if decoder_prompt is not None:
+                copied["decoder_prompt"] = dict(decoder_prompt)
+            return copied  # type: ignore[return-value]
+
+        return dict(prompt)  # type: ignore[return-value]
 
     def _validate_chat_template(
         self,
