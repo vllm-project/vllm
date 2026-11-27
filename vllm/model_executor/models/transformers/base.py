@@ -56,11 +56,15 @@ from vllm.model_executor.layers.attention import (
 )
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.fused_moe import MoERunner, UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (
     LinearBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
 )
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
@@ -114,6 +118,13 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+UNQUANTIZED_METHODS = (
+    type(None),
+    UnquantizedLinearMethod,
+    UnquantizedEmbeddingMethod,
+    UnquantizedFusedMoEMethod,
+)
 
 VLLM_ATTN_ATTR = "attn"
 """Attribute in which to store the vLLM `Attention` instance that serves a Transformers
@@ -1157,10 +1168,23 @@ class Base(
                 continue
             renamed, converter_pattern = rename_source_key(name, renamings, converters)
             # Left for the loader to drop or report if no module here loads it
-            if converter_pattern is None or self._loaded_by(renamed) is None:
+            if converter_pattern is None or not (loader := self._loaded_by(renamed)):
                 yield renamed, tensor
                 continue
             converter = pattern_to_converter[converter_pattern]
+            quant_method = getattr(loader[0], "quant_method", None)
+            # Online quantization loads unquantized weights and quantizes them after
+            online = getattr(quant_method, "uses_meta_device", False)
+            # Unlike a split's (above), a join's other tensors aren't converted
+            if (
+                len(converter.target_patterns) < 2
+                and not isinstance(quant_method, UNQUANTIZED_METHODS)
+                and not online
+            ):
+                raise ValueError(
+                    f"Cannot convert {name!r} into {converter.target_patterns}: "
+                    "converting quantized tensors is not supported."
+                )
             target = pending.setdefault(renamed, deepcopy(converter))
             target.add_tensor(renamed, name, converter_pattern, tensor)
             if len(target.collected_tensors) == len(converter.source_patterns):
