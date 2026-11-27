@@ -585,6 +585,14 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
+    /// Level at which Python logs each request's JSON body under
+    /// `--enable-log-requests` (default `DEBUG`). Like Python, it is set only
+    /// through `VLLM_REQUEST_BODY_LOG_LEVEL`, and read only when a body is
+    /// logged, so a name that is no logging level is not an error.
+    #[arg(long, hide = true, env = "VLLM_REQUEST_BODY_LOG_LEVEL")]
+    #[serde(default)]
+    pub request_body_log_level: Option<String>,
+
     /// If set to True, log model outputs (generations). Output text and
     /// finish reasons are logged at INFO, while output token IDs are logged at
     /// DEBUG. Requires `--enable-log-requests`.
@@ -1314,6 +1322,11 @@ impl SharedRuntimeArgs {
                 Some(limit) => Some(limit),
             },
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+            request_body_log_level: match self.request_body_log_level.as_deref() {
+                None => Some(LogLevel::Debug),
+                // Like Python, a name that is no logging level logs no bodies.
+                Some(name) => name.parse().ok(),
+            },
         }
     }
 

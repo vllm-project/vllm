@@ -307,6 +307,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        request_body_log_level: None,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
                         max_log_len: None,
@@ -1785,6 +1786,42 @@ fn serve_rejects_log_outputs_without_log_requests() {
     assert!(config(&["--enable-log-outputs", "--enable-log-requests"]).validate().is_ok());
 }
 
+/// The Rust frontend logs no request bodies, so a body log level other than
+/// Python's default DEBUG fails startup where Python would log them: under
+/// `--enable-log-requests`.
+#[test]
+fn request_body_log_level_other_than_debug_fails_under_enable_log_requests() {
+    let config = |flags: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+    };
+    let level = |level| ["--enable-log-requests", "--request-body-log-level", level];
+
+    config(&level("debug")).validate().unwrap();
+    config(&["--request-body-log-level", "INFO"]).validate().unwrap();
+    let error = config(&level("INFO")).validate().unwrap_err();
+    expect!["VLLM_REQUEST_BODY_LOG_LEVEL=INFO is not implemented in Rust frontend, which does not log request bodies; only DEBUG is supported with --enable-log-requests"]
+        .assert_eq(&format!("{error:#}"));
+    // Like Python, which only warns, a name that is no logging level logs no
+    // bodies, so it is accepted, with or without request logging.
+    config(&level("OFF")).validate().unwrap();
+    config(&["--request-body-log-level", "OFF"]).validate().unwrap();
+
+    // Python passes the upper-cased name in `--args-json`.
+    let args = parse_runtime_args_json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","request_body_log_level":"WARNING"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        args.api_server_options().request_body_log_level,
+        Some(LogLevel::Warning)
+    );
+}
+
 #[test]
 fn serve_resolves_output_logging_from_log_flags() {
     let log_outputs = |flags: &[&str]| {
@@ -2508,6 +2545,7 @@ fn frontend_args_accept_json() {
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        request_body_log_level: None,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
                         max_log_len: None,
@@ -3738,6 +3776,7 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        request_body_log_level: None,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
                         max_log_len: None,
@@ -4058,6 +4097,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    request_body_log_level: Some(
+                        Debug,
+                    ),
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4212,6 +4254,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    request_body_log_level: Some(
+                        Debug,
+                    ),
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4472,6 +4517,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    request_body_log_level: Some(
+                        Debug,
+                    ),
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
