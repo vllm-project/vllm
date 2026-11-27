@@ -752,7 +752,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RPC_BASE_PATH": lambda: os.getenv(
         "VLLM_RPC_BASE_PATH", tempfile.gettempdir()
     ),
-    # If true, will load models from ModelScope instead of Hugging Face Hub.
+    # If true, load remote models from ModelScope instead of Hugging Face Hub.
+    # Existing local checkpoints do not require the optional ModelScope package.
     "VLLM_USE_MODELSCOPE": lambda: (
         os.environ.get("VLLM_USE_MODELSCOPE", "False").strip().lower() in ("1", "true")
     ),

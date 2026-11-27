@@ -12,6 +12,7 @@ from typing_extensions import TypeVar
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import maybe_init_modelscope
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
@@ -114,7 +115,7 @@ def resolve_tokenizer_args(
     revision: str | None = kwargs.get("revision")
     download_dir: str | None = kwargs.get("download_dir")
 
-    if envs.VLLM_USE_MODELSCOPE:
+    if maybe_init_modelscope(tokenizer_name):
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         from modelscope.hub.snapshot_download import snapshot_download
@@ -123,19 +124,16 @@ def resolve_tokenizer_args(
         from vllm.model_executor.model_loader.weight_utils import get_lock
 
         # Only set the tokenizer here, model will be downloaded on the workers.
-        if not Path(tokenizer_name).exists():
-            # Use file lock to prevent multiple processes from
-            # downloading the same file at the same time.
-            with get_lock(tokenizer_name, download_dir):
-                tokenizer_path = snapshot_download(
-                    model_id=str(tokenizer_name),
-                    cache_dir=download_dir,
-                    revision=revision,
-                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                    # Ignore weights - we only need the tokenizer.
-                    ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
-                )
-                tokenizer_name = tokenizer_path
+        with get_lock(tokenizer_name, download_dir):
+            tokenizer_path = snapshot_download(
+                model_id=str(tokenizer_name),
+                cache_dir=download_dir,
+                revision=revision,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                # Ignore weights - we only need the tokenizer.
+                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
+            )
+            tokenizer_name = tokenizer_path
 
     if "truncation_side" not in kwargs:
         if runner_type == "generate" or runner_type == "draft":

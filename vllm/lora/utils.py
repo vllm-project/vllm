@@ -378,6 +378,9 @@ def get_adapter_absolute_path(lora_path: str) -> str:
 
     # If the path does not exist locally.
     if envs.VLLM_USE_MODELSCOPE:
+        from vllm.transformers_utils import maybe_init_modelscope
+
+        maybe_init_modelscope(lora_path)
         # If using ModelScope, we assume the path is a ModelScope repo.
         from modelscope.hub.snapshot_download import InvalidParameter, snapshot_download
         from requests import HTTPError

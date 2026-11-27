@@ -11,6 +11,7 @@ from transformers.dynamic_module_utils import (
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import maybe_init_modelscope
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -40,6 +41,7 @@ def try_get_class_from_dynamic_module(
     but ignoring any errors.
     """
     try:
+        maybe_init_modelscope(pretrained_model_name_or_path)
         resolve_trust_remote_code(
             trust_remote_code,
             pretrained_model_name_or_path,
