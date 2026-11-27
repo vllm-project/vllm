@@ -12,7 +12,7 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import MoEBackend, validate_moe_backend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import (
@@ -1919,6 +1919,13 @@ class SpeculativeConfig:
                 sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
                 vllm_config = replace(vllm_config, **{config_name: sub_config})
         return self.apply_draft_eplb_overrides(vllm_config)
+
+    @field_validator("moe_backend")
+    @classmethod
+    def _validate_moe_backend(cls, value: str | None) -> str | None:
+        if value is not None:
+            validate_moe_backend(value)
+        return value
 
     @field_validator("method")
     @classmethod

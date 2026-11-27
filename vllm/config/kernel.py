@@ -3,7 +3,7 @@
 import contextlib
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, fields
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
 from pydantic import Field, field_validator
 
@@ -125,7 +125,7 @@ class IrOpPriorityConfig:
         return cls(**kwargs)
 
 
-MoEBackend = Literal[
+InTreeMoEBackend = Literal[
     "auto",
     "triton",
     "batched_triton",
@@ -153,6 +153,23 @@ MoEBackend = Literal[
     "rdna3",
     "rdna3_int4_int8",
 ]
+# Out-of-tree platforms add names via `Platform.get_moe_backends`.
+MoEBackend = InTreeMoEBackend | str
+
+
+def validate_moe_backend(moe_backend: str) -> None:
+    """Reject names that neither vLLM nor the platform plugin provides."""
+    in_tree = get_args(InTreeMoEBackend)
+    if moe_backend in in_tree:
+        return
+    from vllm.platforms import current_platform
+
+    oot = current_platform.get_moe_backends()
+    if moe_backend not in oot:
+        raise ValueError(
+            f"Unknown moe_backend={moe_backend!r}. Expected one of {[*in_tree, *oot]}."
+        )
+
 
 FLASHINFER_MOE_EP_CUTEDSL = "flashinfer_moe_ep_cutedsl"
 FLASHINFER_MOE_EP_DEEP_GEMM = "flashinfer_moe_ep_mega_deep_gemm"
@@ -330,7 +347,8 @@ class KernelConfig:
     unsupported deployment is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
-    """Backend for MoE expert computation kernels. Available options:
+    """Backend for MoE expert computation kernels. Out-of-tree platforms can
+    add names to the in-tree options:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
@@ -490,6 +508,12 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
+    @field_validator("moe_backend")
+    @classmethod
+    def _validate_moe_backend(cls, value: str) -> str:
+        validate_moe_backend(value)
+        return value
+
     @field_validator("linear_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
@@ -545,6 +569,8 @@ class KernelConfig:
         """Set platform-specific defaults for the kernel config."""
         from vllm.platforms import current_platform
 
+        # `EngineArgs` assigns the field after construction.
+        validate_moe_backend(self.moe_backend)
         if vllm_config.model_config is not None:
             validate_flashinfer_moe_ep_model(
                 self.moe_backend, vllm_config.model_config.architectures
