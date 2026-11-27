@@ -1136,10 +1136,12 @@ class Base(
             blocks of them, and copy a single value or a 1-D tensor of another length
             (e.g. `weight_shape`) to every piece. `None` if `name` is no such tensor."""
             module, _, param = name.rpartition(".")
-            weights = self._split_weights(f"{module}.weight", renamings)
-            if param == "weight" or not weights or not self._loaded_by(weights[0]):
+            if param == "weight":
                 return None
-            rows = [self._output_size(w) for w in weights]
+            weight_names = self._split_weights(f"{module}.weight", renamings)
+            if not weight_names or not self._loaded_by(weight_names[0]):
+                return None
+            rows = [self._output_size(w) for w in weight_names]
             if tensor.dim() <= 1 and tensor.shape[:1] != (sum(rows),):
                 pieces = (tensor,) * len(rows)
             else:
@@ -1152,7 +1154,7 @@ class Base(
                 pieces = tensor.split([r // block for r in rows])
             return {
                 w.removesuffix("weight") + param: piece
-                for w, piece in zip(weights, pieces)
+                for w, piece in zip(weight_names, pieces)
             }
 
         # Stands in for the model whose parameters `Split` reads the sizes of
@@ -1179,15 +1181,19 @@ class Base(
             quant_method = getattr(loader[0], "quant_method", None)
             # Online quantization loads unquantized weights and quantizes them after
             online = getattr(quant_method, "uses_meta_device", False)
-            # Unlike a split's (above), a join's other tensors aren't converted
+            # A split's other tensors are split above, a join's aren't. A tensor stored
+            # unquantized (e.g. one the quantization config ignores by its checkpoint
+            # name) doesn't load into a quantized module either
+            dtype = getattr(getattr(loader[0], "weight", None), "dtype", None)
             if (
-                len(converter.target_patterns) < 2
-                and not isinstance(quant_method, UNQUANTIZED_METHODS)
+                not isinstance(quant_method, UNQUANTIZED_METHODS)
                 and not online
+                and (len(converter.target_patterns) < 2 or tensor.dtype != dtype)
             ):
                 raise ValueError(
-                    f"Cannot convert {name!r} into {converter.target_patterns}: "
-                    "converting quantized tensors is not supported."
+                    f"Cannot convert {name!r} ({tensor.dtype}) into "
+                    f"{converter.target_patterns}: a quantized module only takes a "
+                    "split of a tensor stored quantized."
                 )
             target = pending.setdefault(renamed, deepcopy(converter))
             target.add_tensor(renamed, name, converter_pattern, tensor)
