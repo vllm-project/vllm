@@ -27,7 +27,13 @@ def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Te
     with gpu_sync_allowed():
         chunk_counts = triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
     indices = torch.cat([torch.arange(n) for n in chunk_counts])
-    chunk_indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1)
+    # An empty sequence owns no chunk. Counting chunk starts would reuse
+    # the previous sequence id for every chunk after that hole.
+    seq_ids = torch.repeat_interleave(
+        torch.arange(len(chunk_counts), device=indices.device),
+        torch.tensor(chunk_counts, device=indices.device),
+    )
+    chunk_indices = torch.stack([seq_ids, indices], 1)
     return async_tensor_h2d(
         chunk_indices, device=cu_seqlens.device, dtype=cu_seqlens.dtype
     )
