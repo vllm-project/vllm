@@ -241,8 +241,6 @@ class Qwen4ExpQSAFlashInferPrefillMetadata:
     max_seq_len_kv: int
     # The largest step's, so the caching allocator reuses one block.
     workspace_size: int
-    # FP8 under use_prefill_query_quantization with an FP8 cache, else BF16.
-    query_dtype: torch.dtype
 
 
 @dataclass
@@ -281,12 +279,12 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        self.query_dtype = flashinfer_qsa_query_dtype(
+        query_dtype = flashinfer_qsa_query_dtype(
             kv_cache_spec.dtype, vllm_config.attention_config
         )
         self.use_flashinfer = is_flashinfer_qsa_supported(
             kv_cache_spec.dtype,
-            self.query_dtype,
+            query_dtype,
             self.block_size,
             block_topk,
             kv_cache_spec.head_size,
@@ -310,7 +308,7 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
             self.max_seq_len_kv,
             self.block_size,
             block_topk,
-            self.query_dtype,
+            query_dtype,
             kv_cache_spec.dtype,
             device,
         )
@@ -359,7 +357,6 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
                 block_size=self.block_size,
                 max_seq_len_kv=self.max_seq_len_kv,
                 workspace_size=self.workspace_size,
-                query_dtype=self.query_dtype,
             ),
         )
 
@@ -549,16 +546,17 @@ class Qwen4ExpQSAImpl(
             else:
                 k_scale = v_scale = 1.0
                 if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                    k_scale = layer._k_scale_float
-                    v_scale = layer._v_scale_float
+                    k_scale = cast(float, layer._k_scale_float)
+                    v_scale = cast(float, layer._v_scale_float)
+                query_dtype = cast(torch.dtype, layer.flashinfer_query_dtype)
                 if prefill_query is None:
                     prefill_query = query[prefill_rows]
-                    if prefill_query.dtype != flashinfer_prefill.query_dtype:
+                    if prefill_query.dtype != query_dtype:
                         # The unfused prepare writes BF16 Q. Unit scale: Q is
                         # RMS-normalized, far inside e4m3's range (|Q| <= 19 on
                         # Qwen3.8).
-                        prefill_query = prefill_query.to(flashinfer_prefill.query_dtype)
-                assert prefill_query.dtype == flashinfer_prefill.query_dtype
+                        prefill_query = prefill_query.to(query_dtype)
+                assert prefill_query.dtype == query_dtype
                 qsa_sparse_paged_prefill(
                     prefill_query,
                     kv_cache,
@@ -1055,7 +1053,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if (
             self.index_group is None
             and flashinfer_prefill is not None
-            and flashinfer_prefill.query_dtype == torch.float8_e4m3fn
+            and self.flashinfer_query_dtype == torch.float8_e4m3fn
         ):
             main_fp8_q_start = main_metadata.num_decode_tokens
         selected, main_outputs = self.indexer(
