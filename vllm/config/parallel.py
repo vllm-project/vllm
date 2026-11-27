@@ -209,9 +209,9 @@ class EPLBConfig:
     Interval for logging the balancedness.
     """
     use_async: bool = True
-    """
-    Whether to use non-blocking EPLB.
-    """
+    """Whether to use non-blocking EPLB. Async policy computation runs in a
+    persistent CPU subprocess per worker. The policy and its CPU inputs must
+    be serializable. Synchronous and profiling calls stay in the worker."""
 
     policy: EPLBPolicyOption | str | None = None
     """Built-in or platform-defined policy name. None selects the platform default
