@@ -13372,6 +13372,8 @@ async fn tokenize_selects_chat_by_a_messages_list() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let message = json["error"]["message"].as_str().expect("error message");
+    assert!(message.contains("expected `wav` or `mp3`"), "{message}");
 
     for messages in [serde_json::Value::Null, json!(17)] {
         let (status, json) = post_json(&mut app, "/tokenize", request(messages)).await;
@@ -13380,10 +13382,35 @@ async fn tokenize_selects_chat_by_a_messages_list() {
     }
 }
 
-/// A Responses `input_audio` part without `format` is rejected.
+/// A malformed chat content part reports its own error rather than serde's
+/// generic untagged-enum message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn responses_input_audio_requires_format() {
+async fn chat_malformed_content_part_names_its_error() {
+    let (mut app, _engine_task) = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hi"}, {"type": "image_url", "image_url": {}}],
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let message = json["error"]["message"].as_str().expect("error message");
+    assert!(message.contains("missing field `url`"), "{message}");
+}
+
+/// A Responses `input_audio` part without `format` names the missing field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_input_audio_without_format_names_the_field() {
     let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
@@ -13400,6 +13427,8 @@ async fn responses_input_audio_requires_format() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let message = json["error"]["message"].as_str().expect("error message");
+    assert!(message.contains("missing field `format`"), "{message}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
