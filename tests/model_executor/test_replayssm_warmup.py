@@ -10,6 +10,12 @@ import torch
 from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import CacheConfig
 from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_base import (
+    MambaReplaySSMLayerState,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashinfer import (  # noqa: E501
+    FlashInferReplaySSMKernel,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
@@ -164,20 +170,17 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
         page.fill_(3)
         mixer = MambaMixer2.__new__(MambaMixer2)
         torch.nn.Module.__init__(mixer)
-        mixer.use_replayssm = True
-        mixer.use_flashinfer_replayssm = True
-        mixer.replayssm_buffer_len = 16
+        mixer.ssu_kernel = FlashInferReplaySSMKernel
+        mixer.ssu_state = MambaReplaySSMLayerState(buffer_len=16, num_spec=0)
         mixer.get_state_shape = lambda: spec.shapes
         mixer.get_state_dtype = lambda: spec.dtypes
         mixer.bind_kv_cache(page)
         for tensor in mixer.kv_cache:
             tensor.fill_(3)
-        mixer._replayssm_ring_start = torch.full((5,), 3, dtype=torch.int32)
-        mixer._replayssm_prev_num_accepted = torch.full((5,), 3, dtype=torch.int32)
+        mixer.ssu_state.ring_start = torch.full((5,), 3, dtype=torch.int32)
+        mixer.ssu_state.prev_num_accepted = torch.full((5,), 3, dtype=torch.int32)
         states.extend(mixer.kv_cache)
-        trackers.extend(
-            (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted)
-        )
+        trackers.extend((mixer.ssu_state.ring_start, mixer.ssu_state.prev_num_accepted))
         mixers.append(mixer)
     assert mixers[0].kv_cache[0].data_ptr() == mixers[2].kv_cache[0].data_ptr()
     runner = SimpleNamespace(

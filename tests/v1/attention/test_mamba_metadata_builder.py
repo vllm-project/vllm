@@ -24,13 +24,14 @@ def _make_vllm_config(
         else None
     )
     return SimpleNamespace(
-        use_flashinfer_replayssm=False,
-        use_replayssm_trackers=False,
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=False,
             use_replayssm=False,
             replayssm_buffer_len=16,
+        ),
+        mamba_config=SimpleNamespace(
+            backend=None, enable_stochastic_rounding=False, ssu_algorithm=None
         ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL,
@@ -39,9 +40,12 @@ def _make_vllm_config(
         ),
         speculative_config=speculative_config,
         num_speculative_tokens=num_speculative_tokens,
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            pipeline_parallel_size=1,
+        ),
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
-        model_config=SimpleNamespace(max_model_len=max_model_len),
+        model_config=SimpleNamespace(max_model_len=max_model_len, dtype=None),
     )
 
 
