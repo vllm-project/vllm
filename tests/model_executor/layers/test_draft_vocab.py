@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -225,6 +226,8 @@ def _compare_tp_with_single_rank(dynamic_rows: int):
 )
 def test_token_map_tp_matches_single_rank(monkeypatch, dynamic_rows):
     """Split over TP ranks, the token map drafts the logits of one rank."""
+    # The Ray workers unpickle `run` by importing this module.
+    monkeypatch.setenv("PYTHONPATH", os.path.dirname(__file__), prepend=os.pathsep)
     multi_process_parallel(
         monkeypatch, 2, 1, _compare_tp_with_single_rank(dynamic_rows)
     )
