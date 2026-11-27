@@ -12,12 +12,10 @@
 //! tool-response messages.
 
 use itertools::Itertools as _;
-use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatToolChoice, Error as ChatError, GenerationPromptMode,
-    ResolvedToolContext,
+    ChatOptions, ChatRequest, ChatToolChoice, GenerationPromptMode, ResolvedToolContext,
 };
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
@@ -32,7 +30,7 @@ use super::types::{
     ServiceTier,
 };
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request};
+use crate::error::{ApiError, bail_invalid_request, chat_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::{
@@ -83,8 +81,8 @@ pub(crate) fn prepare_responses_request(
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedResponsesRequest, ApiError> {
-    validate::validate_request_compat(&request)?;
     lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
 
     let request_id = format!("resp_{}", ctx.request_id);
 
@@ -160,18 +158,7 @@ pub(crate) fn prepare_responses_request(
         requested_tool_choice,
         parallel_tool_calls.unwrap_or(true),
     )
-    .map_err(|error| {
-        let param = match &error {
-            ChatError::ToolChoiceRequiresTools | ChatError::ToolChoiceFunctionNotFound { .. } => {
-                "tool_choice"
-            }
-            _ => "tools",
-        };
-        ApiError::invalid_request(
-            format!("failed to resolve request tools: {}", error.as_report()),
-            Some(param),
-        )
-    })?;
+    .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
 
     let tool_choice_echo = echo_tool_choice(&tool_context);
 
@@ -542,20 +529,14 @@ fn convert_content_parts(content: ResponseMessageContent) -> Result<ChatContent,
                         };
                         converted.push(ChatContentPart::ImageUrl {
                             image_url,
-                            detail,
+                            detail: detail.map(Into::into),
                             uuid: None,
                         });
                     }
                     ResponseInputContentPart::InputAudio { input_audio } => {
-                        let Some(format) = input_audio.format else {
-                            bail_invalid_request!(
-                                param = "input",
-                                "input_audio parts require 'input_audio.format'."
-                            );
-                        };
                         converted.push(ChatContentPart::InputAudio {
                             data: input_audio.data,
-                            format: Some(format),
+                            format: Some(input_audio.format),
                             uuid: None,
                         });
                     }
@@ -819,7 +800,7 @@ fn should_continue_final_message(items: &[ResponseInputItem]) -> bool {
 mod tests {
     use expect_test::expect;
     use serde_json::{Value, json};
-    use vllm_chat::{AllowedToolsMode, ChatTokenUsage, ChatTool};
+    use vllm_chat::{AllowedToolsMode, ChatTokenUsage, ChatTool, InputAudioFormat};
     use vllm_llm::TokenUsage;
 
     use super::*;
@@ -1114,6 +1095,21 @@ mod tests {
     }
 
     #[test]
+    fn input_audio_requires_an_openai_format_name() {
+        for input_audio in [
+            json!({"data": "dGVzdA=="}),
+            json!({"data": "dGVzdA==", "format": "WAV"}),
+            json!({"data": "dGVzdA==", "format": "flac"}),
+        ] {
+            let content = json!([{"type": "input_audio", "input_audio": input_audio}]);
+            assert!(
+                serde_json::from_value::<Vec<ResponseInputContentPart>>(content).is_err(),
+                "{input_audio} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn input_audio_uses_the_nested_responses_wire_shape() {
         let content = serde_json::from_value(json!([
             {
@@ -1131,9 +1127,34 @@ mod tests {
             converted,
             ChatContent::Parts(vec![ChatContentPart::InputAudio {
                 data: "dGVzdA==".to_string(),
-                format: Some("wav".to_string()),
+                format: Some(InputAudioFormat::Wav),
                 uuid: None,
             }])
+        );
+    }
+
+    #[test]
+    fn input_image_detail_reads_null_as_omitted_and_original_as_high() {
+        let content = serde_json::from_value(json!([
+            {"type": "input_image", "image_url": "u"},
+            {"type": "input_image", "image_url": "u", "detail": null},
+            {"type": "input_image", "image_url": "u", "detail": "original"}
+        ]))
+        .expect("deserialize Responses image content");
+
+        let converted = convert_content_parts(content).expect("convert Responses image content");
+        let image = |detail| ChatContentPart::ImageUrl {
+            image_url: "u".to_string(),
+            detail,
+            uuid: None,
+        };
+        assert_eq!(
+            converted,
+            ChatContent::Parts(vec![
+                image(None),
+                image(None),
+                image(Some(llm_multimodal::ImageDetail::High))
+            ])
         );
     }
 }

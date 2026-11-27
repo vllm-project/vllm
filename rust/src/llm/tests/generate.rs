@@ -26,7 +26,7 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
-use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::stats::{PrefillStats, SchedulerStats};
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -1233,11 +1233,14 @@ async fn connecting_exports_zero_valued_request_metrics_before_any_request() {
                 || line.starts_with("vllm:prompt_tokens_total")
                 || line.starts_with("vllm:generation_tokens_total")
                 || line.starts_with("vllm:e2e_request_latency_seconds_count")
+                || line.starts_with("vllm:admission_rejections_total")
         })
         .map(|line| line.replace(&model_name, "<model>"))
         .collect();
     series.sort();
     expect_test::expect![[r#"
+        vllm:admission_rejections_total{model_name="<model>",reason="max_num_queued_reqs"} 0
+        vllm:admission_rejections_total{model_name="<model>",reason="max_num_queued_tokens"} 0
         vllm:e2e_request_latency_seconds_count{model_name="<model>",engine="3"} 0
         vllm:generation_tokens_total{model_name="<model>",engine="3"} 0
         vllm:prompt_tokens_total{model_name="<model>",engine="3"} 0
@@ -1297,6 +1300,24 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                                 ]),
                             )
                         }],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
+                // The scheduler also preempted a request that was then aborted,
+                // whose PREEMPTED event never reaches the frontend. Stats are
+                // recorded after a batch's outputs are delivered, so report
+                // them before the final output.
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        engine_index: 4,
+                        scheduler_stats: Some(Box::new(SchedulerStats {
+                            num_preempted_reqs: 2,
+                            ..Default::default()
+                        })),
                         ..Default::default()
                     }
                     .into(),
@@ -1363,8 +1384,10 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     assert!(rendered.contains(&format!(
         "vllm:corrupted_requests_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
+    // The counter follows the scheduler; the event feeds only this request's
+    // histogram.
     assert!(rendered.contains(&format!(
-        "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+        "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 2"
     )));
     assert!(rendered.contains(&format!(
         "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"4\"}} 1.0"

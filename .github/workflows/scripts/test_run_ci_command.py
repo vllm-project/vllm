@@ -1402,6 +1402,34 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIn("running 2 failed step", github.comments[0])
         self.assertIn("Buildkite CI #122", github.comments[0])
 
+    def test_ci_retry_new_head_leaves_shard_coverage_check_to_ci_infra(self) -> None:
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        source_build = {
+            "commit": "old-commit",
+            "created_at": "2026-11-25T18:00:00Z",
+            "finished_at": "2026-11-25T20:00:00Z",
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        buildkite = FakeBuildkite(
+            [[], [source_build]],
+            [
+                [
+                    {"state": "failed", "step_key": key, "type": "script"}
+                    for key in ("examples", "runtime-shard-coverage-check")
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        payload = buildkite.created_builds[0]
+        self.assertEqual(
+            json.loads(payload["env"]["VLLM_CI_ONLY_STEP_KEYS"]), ["examples"]
+        )
+
     def test_ci_retry_new_head_accepts_finished_build_left_blocked(self) -> None:
         # The "Run more tests" picker leaves a finished build in state blocked.
         github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
