@@ -1442,17 +1442,21 @@ def unified_attention(
         tile_size = TILE_SIZE_DECODE
 
     launch_kwargs: dict[str, int] = {}
-    # SM90 with the window in the V load (head size 256): the kernel takes up
-    # to 190 registers per thread, two CTAs per SM. Two stages and a
-    # 168-register cap keep three.
+    # SM90 and SM100 with the window in the V load (head size 256): the kernel
+    # takes up to 196 registers per thread, two CTAs per SM. Two stages and a
+    # 168-register cap keep three. SM100's tuned large-head launch is kept.
     if (
         sliding_window_val > 0
         and use_causal
         and not use_per_seq_causal
         and head_size_padded >= 256
         and not use_td
+        and not tuned_large_head
         and current_platform.is_cuda()
-        and current_platform.is_device_capability(90)
+        and (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(100)
+        )
     ):
         launch_num_stages = 2
         launch_kwargs["maxnreg"] = 168
