@@ -70,7 +70,7 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
-SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+SMI_BIN=$(command -v nvidia-smi || command -v rocm-smi || command -v amd-smi || echo "")
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
@@ -106,16 +106,15 @@ cleanup_instances() {
 }
 
 get_num_gpus() {
-  if [[ "$SMI_BIN" == *"nvidia"* ]]; then
-    $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
-  elif [[ "$SMI_BIN" == *"rocm"* ]]; then
-    $SMI_BIN -l | grep -c GPU
-  else
+  case "$(basename "$SMI_BIN")" in
+    nvidia-smi) $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l ;;
+    rocm-smi)   $SMI_BIN -l | grep -c GPU ;;
+    amd-smi)    $SMI_BIN list | grep -c "^GPU" ;;
     # works for non-cuda platforms,
     # assuming at least 1 device and
     # let system to decide which card to use
-    echo "1"
-  fi
+    *)          echo 1 ;;
+  esac
 }
 
 # Function to run tests for a specific model

@@ -351,7 +351,7 @@ def test_get_kwargs(dummy_config_kwargs):
     json_tip = "Should either be a valid JSON string or JSON keys"
     assert json_tip in kwargs["json_tip"]["help"]
     # nested config should construct the nested config
-    assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
+    assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
 
 
 @pytest.mark.parametrize(
@@ -1137,7 +1137,10 @@ class TestDpDeviceIdSharding:
         from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
         args = argparse.Namespace(
-            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=None
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            device_ids=None,
         )
         assert _build_device_ids(args, local_rank=0) == [0, 1]
         assert _build_device_ids(args, local_rank=1) == [2, 3]
@@ -1149,12 +1152,41 @@ class TestDpDeviceIdSharding:
         from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
         args = argparse.Namespace(
-            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=[4, 5, 6, 7]
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            device_ids=[4, 5, 6, 7],
         )
         assert _build_device_ids(args, local_rank=0) == [4, 5]
         assert _build_device_ids(args, local_rank=1) == [6, 7]
         with pytest.raises(ValueError, match="needs devices"):
             _build_device_ids(args, local_rank=2)
+
+    def test_dp_supervisor_device_ids_accounts_for_pcp(self):
+        """Each DP child needs TP * PP * PCP devices."""
+        import argparse
+
+        from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
+
+        args = argparse.Namespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=2,
+            device_ids=None,
+        )
+        assert _build_device_ids(args, local_rank=0) == [0, 1, 2, 3]
+        assert _build_device_ids(args, local_rank=1) == [4, 5, 6, 7]
+
+        args_with_ids = argparse.Namespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=2,
+            device_ids=[0, 1, 2, 3, 4, 5, 6, 7],
+        )
+        assert _build_device_ids(args_with_ids, local_rank=0) == [0, 1, 2, 3]
+        assert _build_device_ids(args_with_ids, local_rank=1) == [4, 5, 6, 7]
+        with pytest.raises(ValueError, match="needs devices"):
+            _build_device_ids(args_with_ids, local_rank=2)
 
     def test_dp_rank_shards_user_assigned_gpu_ids(self):
         """get_physical_gpu_ids_for_local_dp_rank slices the user-provided

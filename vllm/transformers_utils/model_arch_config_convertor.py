@@ -38,6 +38,7 @@ class ModelArchConfigConvertorBase:
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
         self.revision = revision
+        self.transformers_backend = False
 
     def get_per_layer_hf_configs(
         self,
@@ -298,6 +299,22 @@ class ModelArchConfigConvertorBase:
         return quant_cfg
 
     def is_deepseek_mla(self) -> bool:
+        if self.transformers_backend:
+            config = self.hf_text_config
+            if (kv_lora_rank := getattr(config, "kv_lora_rank", None)) is None:
+                return False
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLACommonBackend,
+            )
+
+            head_size = kv_lora_rank + self._get_qk_rope_head_dim()
+            if not MLACommonBackend.supports_head_size(head_size):
+                logger.info_once(
+                    "MLA does not support latent size %d, using full attention.",
+                    head_size,
+                )
+                return False
+            return True
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
@@ -531,15 +548,6 @@ class FalconModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
         # Use the base implementation which checks n_head_kv, num_kv_heads, etc.
         return super().get_total_num_kv_heads()
-
-
-class DbrxModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_total_num_kv_heads(self) -> int:
-        return getattr(
-            self.hf_text_config.attn_config,
-            "kv_n_heads",
-            self.hf_text_config.num_attention_heads,
-        )
 
 
 class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -848,14 +856,12 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
     "cohere_asr": CohereAsrModelArchConfigConvertor,
-    "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
     "deepseek_v4": DeepseekV4ModelArchConfigConvertor,
     "diffusion_gemma": Gemma4ModelArchConfigConvertor,
     "diffusion_gemma_text": Gemma4ModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
-    "falcon_mamba": MambaModelArchConfigConvertor,
     "gemma4": Gemma4ModelArchConfigConvertor,
     "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
     "gemma4_text": Gemma4ModelArchConfigConvertor,

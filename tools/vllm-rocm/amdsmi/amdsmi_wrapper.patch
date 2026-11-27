@@ -1,0 +1,62 @@
+amdsmi: find libamd_smi in TheRock's rocm-sdk-core from site-packages
+
+TheRock's rocm-sdk-core ships these bindings as sources in
+_rocm_sdk_core/share/amd_smi, and the loader finds libamd_smi.so.27 relative to
+that directory. Installed as their own package, they look in the wrong place, and
+the linker's SONAME lookup only finds the library when LD_LIBRARY_PATH covers it
+or torch has already loaded it. So also try the fixed path the library has when
+the package sits in the same site-packages as rocm-sdk-core. The lookup imports
+nothing: one through rocm_sdk was reverted upstream because rocprofiler-compute's
+import guard rejects it (ROCm/rocm-systems#7808).
+
+Drop this patch once rocm-sdk-core's own loader finds the library from there.
+
+--- a/amdsmi/amdsmi_wrapper.py
++++ b/amdsmi/amdsmi_wrapper.py
+@@ -153,7 +153,7 @@
+ # ---------------------------------------------------------------------------
+ # Dynamic library loading
+ # ---------------------------------------------------------------------------
+-# This wrapper supports three self-contained install paths:
++# This wrapper supports four self-contained install paths:
+ #
+ #   1. pip wheel
+ #      The wheel ships ``libamd_smi_python.so`` next to this file.
+@@ -168,6 +168,10 @@
+ #      Wrapper at ``<root>/share/amd_smi/amdsmi/``, library at
+ #      ``<root>/lib/<SONAME>`` -- resolved by fixed relative path.
+ #
++#   4. pip install beside TheRock's rocm-sdk wheels
++#      Wrapper at ``<site-packages>/amdsmi/``, library at
++#      ``<site-packages>/_rocm_sdk_core/lib/<SONAME>`` -- fixed relative path.
++#
+ # A user installs ONE of these packages. We never combine paths
+ # from them -- no ROCM_HOME / ROCM_PATH ladders, no walking up to a
+ # ROCm root, no LD_LIBRARY_PATH probing. ``AMDSMI_LIB_OVERRIDE`` stays
+@@ -198,7 +202,8 @@
+       1. ``AMDSMI_LIB_OVERRIDE`` env var (ABI-test escape hatch).
+       2. ``libamd_smi_python.so`` next to this file (pip wheel).
+       3. ``<root>/lib/<SONAME>`` relative to this file (relocatable ROCm tree).
+-      4. SONAME via the dynamic linker (system rpm / deb); skipped when
++      4. ``_rocm_sdk_core/lib/<SONAME>`` in the same site-packages (TheRock).
++      5. SONAME via the dynamic linker (system rpm / deb); skipped when
+          _AMDSMI_ALLOW_SYSTEM_FALLBACK is False (pip wheel).
+     """
+     mode = getattr(ctypes, "RTLD_LOCAL", 0)
+@@ -231,6 +236,16 @@
+             except OSError:
+                 pass
+ 
++    # TheRock rocm-sdk wheels: the library sits in the same site-packages.
++    # Found by path, not by importing rocm_sdk, which import guards reject.
++    if len(here.parents) > 1:
++        sdk_core = here.parents[1] / "_rocm_sdk_core" / "lib" / _AMDSMI_LIB_SONAME
++        if sdk_core.exists():
++            try:
++                return ctypes.CDLL(str(sdk_core), mode=mode), str(sdk_core)
++            except OSError:
++                pass
++
+     return ctypes.CDLL(_AMDSMI_LIB_SONAME, mode=mode), _AMDSMI_LIB_SONAME
+ 
+ 

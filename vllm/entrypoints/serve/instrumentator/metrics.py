@@ -66,6 +66,7 @@ def attach_router(app: FastAPI):
             "/metrics",
             "/health",
             "/ready",
+            "/health_generate",
             "/load",
             "/ping",
             "/version",

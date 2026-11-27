@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 
 import vllm.envs as envs
 from vllm.config import config
+from vllm.config.mm_tensor_refs import MMTensorRefsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
@@ -112,8 +113,8 @@ class BaseFrontendArgs:
     """JSON mapping that rewrites a request's reasoning effort to a value the
     chat template supports, for templates that silently fall back on efforts
     they do not recognize. Applies to the effort set through the Chat
-    Completions, Responses and Anthropic Messages APIs; efforts not listed
-    pass through unchanged. Example: '{"medium": "low", "xhigh": "max"}'
+    Completions, Responses, Anthropic Messages and `/tokenize` APIs; efforts
+    not listed pass through unchanged. Example: '{"medium": "low", "xhigh": "max"}'
     for a template that only knows low, high and max."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
@@ -304,6 +305,11 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    mm_tensor_refs_config: MMTensorRefsConfig | None = None
+    """Enable `features.kwargs_refs` in `/inference/v1/generate`, which loads
+    processed multimodal tensors that clients upload to an S3-compatible store.
+    Requires `--enable-scale-out` or `--tokens-only`. Off by default. Example:
+    `'{"s3_allowed_uri_prefix": "s3://bucket/prefix"}'`."""
     grpc_port: int | None = None
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
@@ -438,10 +444,15 @@ class FrontendArgs(BaseFrontendArgs):
 
 def resolve_default_chat_template_kwargs(
     args: argparse.Namespace,
+    tokenizer_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve renderer defaults, including the dedicated Cohere format flag."""
+    """Resolve renderer defaults, including the dedicated Cohere format flag.
+
+    `cohere_format` is only injected for `--tokenizer-mode cohere`; other
+    renderers don't consume it.
+    """
     kwargs = dict(args.default_chat_template_kwargs or {})
-    if getattr(args, "cohere_format", None):
+    if getattr(args, "cohere_format", None) and tokenizer_mode == "cohere":
         kwargs.setdefault("cohere_format", args.cohere_format)
     return kwargs
 
@@ -580,6 +591,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if getattr(args, "mm_tensor_refs_config", None) is not None and not (
+        getattr(args, "enable_scale_out", False) or getattr(args, "tokens_only", False)
+    ):
+        raise ValueError(
+            "Error: --mm-tensor-refs-config requires --enable-scale-out or "
+            "--tokens-only, which serve /inference/v1/generate"
+        )
 
     # SSE keep-alive interval must be zero (disabled) or a positive integer.
     if getattr(args, "sse_keep_alive_interval", 0) < 0:

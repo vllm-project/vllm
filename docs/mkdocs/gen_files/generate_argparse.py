@@ -6,7 +6,6 @@ import inspect
 import logging
 import sys
 import textwrap
-import traceback
 from argparse import SUPPRESS, Action, HelpFormatter
 from collections.abc import Callable, Iterable
 from importlib.machinery import ModuleSpec
@@ -281,13 +280,12 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
         with patch("vllm.config.DeviceConfig.__post_init__"):
             _parser = add_cli_args(parser, **kwargs)
     except ModuleNotFoundError as e:
-        # Auto-mock runtime imports
-        if tb_list := traceback.extract_tb(e.__traceback__):
-            path = Path(tb_list[-1].filename).relative_to(ROOT_DIR)
-            auto_mock(module_name=".".join(path.parent.parts), attr=path.stem)
-            return create_parser(add_cli_args, **kwargs)
-        else:
-            raise e
+        # Auto-mock missing modules that are imported lazily at runtime
+        if not e.name or e.name in sys.modules:
+            raise
+        logger.info("Mocking %s for argparse doc generation", e.name)
+        sys.modules[e.name] = PydanticMagicMock(name=e.name)
+        return create_parser(add_cli_args, **kwargs)
     # add_cli_args might be in-place so return parser if _parser is None
     return _parser or parser
 
