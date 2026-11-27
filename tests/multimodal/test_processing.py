@@ -13,13 +13,14 @@ import pytest
 
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.config.multimodal import MultiModalConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import PromptUpdateMismatchError, VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import (
     BaseProcessingInfo,
     InputProcessingContext,
+    TimingContext,
     _resolve_mm_processor_kwargs,
 )
 from vllm.multimodal.processing.inputs import ProcessorInputs
@@ -1108,6 +1109,9 @@ class _FakeTokenizer:
                 pos += 1
         return token_ids
 
+    def get_added_vocab(self) -> dict[str, int]:
+        return {}
+
     def decode(self, token_ids: list[int], **kwargs) -> str:
         chars = list[str]()
         pos = 0
@@ -1213,6 +1217,30 @@ def test_apply_prompt_updates_falls_back_with_index_targets():
 
     assert new_token_ids == [200, 201, ord("d"), 9]
     assert [p.tokens for p in placeholders["image"]] == [[200, 201], [9]]
+
+
+def test_text_fallback_does_not_turn_text_into_special_tokens():
+    """A prompt missing its placeholder (e.g. after truncation) must not be
+    fixed up by re-encoding the text spelling of special tokens.
+    """
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 1}
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokenizer = processor.info.get_tokenizer()
+    prompt = [
+        token_id
+        for char in "<|vision_start|><|image_pad|><|vision_end|><|im_end|>"
+        for token_id in tokenizer.encode(char, add_special_tokens=False)
+    ]
+    image = random_image(np.random.RandomState(0), min_wh=56, max_wh=57)
+    inputs = ProcessorInputs(
+        prompt=prompt,
+        mm_data_items=processor.info.parse_mm_data({"image": image}),
+    )
+
+    with pytest.raises(PromptUpdateMismatchError, match="special tokens"):
+        processor.apply(inputs, TimingContext(enabled=False))
 
 
 class _TextProcessorKwargs(TypedDict, total=False):

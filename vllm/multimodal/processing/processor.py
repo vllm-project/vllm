@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -1706,9 +1706,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         it is inefficient to search for all possible tokenizations of the
         target in the prompt, we instead perform text-based updates on the
         decoded token IDs, then encode them back.
+
+        Raises `PromptUpdateMismatchError` if the result would gain or lose
+        added tokens other than through the updates themselves, e.g. when
+        the text spelling of a special token in the prompt is re-encoded as
+        that special token.
         """
         tokenizer = self.info.get_tokenizer()
         prompt_text = tokenizer.decode(token_ids)
+        added_ids = set(tokenizer.get_added_vocab().values())
+        expected_added = Counter(t for t in token_ids if t in added_ids)
 
         matched_updates, result = _plan_prompt_updates_with(
             mm_prompt_updates,
@@ -1734,6 +1741,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             out_texts.append(tokenizer.decode(update.content.full))
             prev_end_idx = match.end_idx
 
+            expected_added.update(t for t in update.content.full if t in added_ids)
+            if update.mode == UpdateMode.REPLACE and not isinstance(
+                update.target, PromptIndex
+            ):
+                expected_added.subtract(t for t in update.target if t in added_ids)
+
         out_texts.append(prompt_text[prev_end_idx:])
 
         if encode_segments_separately:
@@ -1747,6 +1760,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         else:
             new_token_ids = tokenizer.encode(
                 "".join(out_texts), add_special_tokens=False
+            )
+
+        if Counter(t for t in new_token_ids if t in added_ids) != expected_added:
+            raise PromptUpdateMismatchError(
+                "Matching multimodal placeholders in the decoded prompt would "
+                "change its special tokens. Make sure the prompt keeps one "
+                "placeholder token per multimodal item (e.g. that "
+                "truncate_prompt_tokens does not remove them)."
             )
 
         return new_token_ids, result
