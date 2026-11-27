@@ -12,6 +12,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | Architecture | Models | CG for Image | CG for Video | Multi-Path Graph |
 | ------------ | ------ | ------------ | ------------ | --------------- |
 | `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
+| `DeepseekOCR2ForCausalLM` | `DeepSeek-OCR-2` | ✅︎ | ❌︎ | ✅︎ |
 | `DeepseekVLV2ForCausalLM` | `DeepSeek-VL2` | ✅︎ | ❌︎ | ❌︎ |
 | `DeepseekV41ForCausalLM` | `DeepSeek-V4.1-Flash` | ✅︎ | ❌︎ | ❌︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
@@ -34,6 +35,17 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ✅︎ |
 | `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
 | `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
+
+Audio encoders use the same manager and protocol:
+
+| Architecture | Models | Graph scope | Attention backends |
+| ------------ | ------ | ----------- | ------------------ |
+| `Qwen3ASRForConditionalGeneration` | `Qwen3-ASR` | Transformer layers and output projection | `FLASH_ATTN`, `TRITON_ATTN` |
+| `Qwen3OmniMoeThinkerForConditionalGeneration` | `Qwen3-Omni` (audio tower) | Transformer layers and output projection | `FLASH_ATTN`, `TRITON_ATTN` |
+
+For these audio towers the conv frontend runs eagerly before each replay; token budgets count encoder output tokens, and the smallest budget is one attention window (104 tokens, 8 s of audio). Other attention backends keep the audio tower eager. `encoder_cudagraph_max_vision_items_per_batch` also caps the number of audio clips per graph.
+
+Audio frontend optimizations also apply when encoder graphs are disabled.
 
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
@@ -78,6 +90,8 @@ The dense default table is affordable for every model because capture buffers ar
 
 Because later captures overwrite a shared buffer, its capture-time contents may belong to another budget. Replay must therefore provide every shared buffer (the manager raises if one is missing), and a custom `padding_logics` entry must write its whole destination buffer.
 
+Qwen3-Omni/ASR audio enable `EncoderCudaGraphConfig.eager_fallback_fast_path` (default `False`) to skip sorting and input concatenation on whole-batch eager fallback. Local outputs are compacted only when they retain excess storage; DP gathering keeps its existing shared-output layout.
+
 Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured encoder path. A path can provide its own minimum token budget and opt into zero-token batches; the manager generates and stores a separate budget graph set for every configured path.
 
 ### Multi-Path Graph Capture
@@ -98,6 +112,12 @@ Both lists are capped at the same `max_budget`.
 **Buffer keys per path.** Global and local paths use different buffer keys. For DeepSeek-OCR, the global path uses `pixel_values` (full images, shape `[B, 3, 1280, 1280]`) while the local path uses `images_crop` (patches, shape `[P, 3, 1024, 1024]`). The manager iterates over each captured graph's own `input_buffers.keys()` rather than a shared `buffer_keys` list, so both paths can use different buffers.
 
 **Post-processing.** The `postprocess_encoder_output` method receives an `outputs` dictionary keyed by path name. The model is responsible for assembling global and local features into the final per-image embedding. For DeepSeek-OCR, it reshapes the global output into `[B, 272, n_embed]`, reshapes the local output into `[P, 100, n_embed]`, assembles patch grids with newline tokens, and concatenating `[patches_grid, global, view_separator]` for each image.
+
+DeepSeek-OCR-2 uses the same two-path capture policy with 256 output tokens per
+global image and 144 per local tile. The local path is skipped for images that
+do not need tiling. Its post-processing concatenates the local tiles in image
+order, the global image features, and the view separator; unlike DeepSeek-OCR,
+it does not insert newline tokens.
 
 !!! note
     The dual-path design enables partial CUDA graph coverage — one path can hit while the other falls back to eager. This avoids wasted compute on zero-padded patch buffers for untiled images and avoids graph invalidation caused by variable `crop_shape` per image.
@@ -158,7 +178,7 @@ Five fields in `CompilationConfig` control encoder CUDA Graphs:
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture on the subdivided grid (see above). User-provided values override auto-inference.
 * `encoder_cudagraph_max_token_budget` (`int | None`, default `5120`) — largest auto-generated token budget. Must be positive or `None`. A batch with more tokens runs eagerly. `None` captures up to the model's largest budget. Ignored when `encoder_cudagraph_token_budgets` is set.
-* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`. A batch with more items runs eagerly in one forward.
+* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images, videos, or audio clips per captured batch. If 0, inferred as `max_budget // min_budget` from the model-provided range, capped by the smallest captured token budget. Larger batches run eagerly.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
 Multi-path mode is configured at the model level through `EncoderCudaGraphConfig.paths`. Each `EncoderCudaGraphPathConfig` can set a path-specific minimum budget and whether zero-token batches are allowed. The manager automatically generates separate budget lists and uses the same execution loop for single- and multi-path models.
@@ -188,6 +208,19 @@ With explicit budgets:
 vllm serve Qwen/Qwen3-VL-32B \
   --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824], "encoder_cudagraph_max_vision_items_per_batch": 8}'
 ```
+
+For DeepSeek-OCR-2, a small capture configuration covers one untiled image or
+one image with up to two local tiles. Larger tile counts use eager execution
+for the local path while the global path can still replay its graph:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-OCR-2 \
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [288], "encoder_cudagraph_max_vision_items_per_batch": 1}'
+```
+
+Batches containing more than one image use eager execution with this configuration.
+Increase both the token budgets and the maximum vision items per batch to capture
+larger batches.
 
 Python example:
 

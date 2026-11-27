@@ -293,7 +293,8 @@ def test_placeholder_str_is_replaced(model_id: str, modality: str):
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 @pytest.mark.parametrize(
-    "image_kwargs", [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}]
+    "image_kwargs",
+    [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}, {"do_resize": False}],
 )
 @pytest.mark.parametrize("video_uuid", [None, "same-video"])
 def test_video_cache_is_independent_of_image_kwargs(
@@ -630,3 +631,68 @@ def test_ple_cache_follows_inputs_device(model_cls):
     model(None, None, inputs_embeds=inputs_embeds)
     assert seen[1].data_ptr() == first.data_ptr()
     assert bool((seen[1] == 1).all())
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, "google/gemma-4-12B-it"])
+@pytest.mark.parametrize(
+    "size,kwargs,expected",
+    [
+        ((528, 1104), {"do_resize": False}, 253),
+        ((17, 4760), {}, 280),
+        (
+            (960, 960),
+            {"images_kwargs": {"do_resize": False, "max_soft_tokens": 560}},
+            400,
+        ),
+    ],
+)
+def test_image_placeholder_count(model_id, size, kwargs, expected):
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    result = processor(
+        processor.info.get_hf_processor().image_token,
+        mm_items=processor.info.parse_mm_data({"image": PILImage.new("RGB", size)}),
+        hf_processor_mm_kwargs=kwargs,
+    )
+    assert result["mm_placeholders"]["image"][0].get_num_embeds() == expected
+
+
+@pytest.mark.parametrize(
+    "size,error",
+    [
+        ((47, 48), "divisible by 48"),
+        ((48, 13488), "max_soft_tokens=280"),
+    ],
+)
+def test_invalid_unresized_image(size, error):
+    ctx = build_model_context(GEMMA4_MODEL_ID, limit_mm_per_prompt={"image": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    with pytest.raises(ValueError, match=error):
+        processor(
+            processor.info.get_hf_processor().image_token,
+            mm_items=processor.info.parse_mm_data({"image": PILImage.new("RGB", size)}),
+            hf_processor_mm_kwargs={"do_resize": False},
+        )
+
+
+@pytest.mark.parametrize("width,valid", [(480, True), (528, False)])
+def test_unresized_video_frame_budget(width, valid):
+    ctx = build_model_context(GEMMA4_MODEL_ID, limit_mm_per_prompt={"video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    frames = np.zeros((2, 336, width, 3), dtype=np.uint8)
+    items = processor.info.parse_mm_data(
+        {"video": [(frames, {"fps": 2.0, "frames_indices": [0, 1]})]}
+    )
+
+    def process():
+        return processor(
+            processor.info.get_hf_processor().video_token,
+            mm_items=items,
+            hf_processor_mm_kwargs={"do_resize": False, "max_soft_tokens": 1120},
+        )
+
+    if valid:
+        assert process()["mm_placeholders"]["video"][0].get_num_embeds() == 140
+    else:
+        with pytest.raises(ValueError, match="fixed video frame limit: 70"):
+            process()
