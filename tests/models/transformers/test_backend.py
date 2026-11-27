@@ -1184,10 +1184,10 @@ def _quantized_split_converter():
 )
 def test_convert_weights_splits_quantized_tensors(name, shape, pieces):
     """The other tensors a quantized checkpoint stores with a weight that a converter
-    splits (Molmo2's and Sarvam-30B's FP8, int8, int4 and NVFP4 checkpoints) are split
-    like the weight, by rows or blocks of rows, or copied to every piece (`None`) if
-    they're a single value or 1-D of another length. Both for a module's converter
-    (`Split` of `att_proj`) and a weight's (`Chunk` of `ff_proj.weight`)."""
+    splits (Molmo2's and Sarvam-30B's quantized checkpoints) are split like the weight,
+    by rows or blocks of rows, or copied to every piece (`None`) if they're a single
+    value or 1-D of another length. Both for a module's converter (`Split` of
+    `att_proj`) and a weight's (`Chunk` of `ff_proj.weight`)."""
     convert = _quantized_split_converter()
     tensor = torch.rand(shape)
     module, param = name.split(".")

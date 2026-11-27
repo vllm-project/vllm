@@ -110,8 +110,8 @@ logger = init_logger(__name__)
 class ConvertWeights:
     """Apply the Transformers renamings, and the conversions that split or concatenate
     checkpoint tensors (e.g. a fused `query_key_value` into `q_proj`, `k_proj` and
-    `v_proj`), to the weights, like Transformers does, and splits a quantized
-    checkpoint's other tensors of a split weight like the weight.
+    `v_proj`), to the weights, like Transformers does. A quantized checkpoint's other
+    tensors of a split weight (e.g. `weight_scale`) are split like the weight.
 
     `Split` sizes each piece like its target parameter, which vLLM may replace (e.g.
     by fusing the projections), so the shapes are recorded on construction."""
