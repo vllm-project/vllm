@@ -38,7 +38,6 @@ Launch Claude Code with environment variables pointing to your vLLM server:
 
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:8000 \
-ANTHROPIC_API_KEY=dummy \
 ANTHROPIC_AUTH_TOKEN=dummy \
 ANTHROPIC_DEFAULT_OPUS_MODEL=my-model \
 ANTHROPIC_DEFAULT_SONNET_MODEL=my-model \
@@ -51,11 +50,12 @@ The environment variables:
 | Variable                         | Description                                                           |
 | -------------------------------- | --------------------------------------------------------------------- |
 | `ANTHROPIC_BASE_URL`             | Points to your vLLM server (default port is 8000)                     |
-| `ANTHROPIC_API_KEY`              | Can be any value since vLLM doesn't require authentication by default |
-| `ANTHROPIC_AUTH_TOKEN`           | Is required. Can be any value.                                        |
+| `ANTHROPIC_AUTH_TOKEN`           | Bearer token sent to vLLM                                             |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Model name for Opus-tier requests                                     |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model name for Sonnet-tier requests                                   |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Model name for Haiku-tier requests                                    |
+
+Use the vLLM server's API key as `ANTHROPIC_AUTH_TOKEN` when a key is configured. A placeholder works when the server has no key.
 
 !!! tip
     You can add these environment variables to your shell profile (e.g., `.bashrc`, `.zshrc`), Claude Code configuration file (`~/.claude/settings.json`), or create a wrapper script for convenience.

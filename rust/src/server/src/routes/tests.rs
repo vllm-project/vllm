@@ -75,6 +75,7 @@ use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
 
+mod anthropic;
 mod decisions;
 mod responses;
 
@@ -1144,8 +1145,6 @@ async fn unimplemented_python_routes_return_not_implemented() {
     let (app, _engine_task) = test_app().await;
 
     for (method, uri) in [
-        ("POST", "/v1/messages"),
-        ("POST", "/v1/messages/count_tokens"),
         ("POST", "/v1/chat/completions/batch"),
         ("POST", "/v1/decisions"),
         ("POST", "/v1/systemone"),
@@ -7776,15 +7775,36 @@ async fn engine_request_errors_map_to_http_status() {
         message: "Invalid structured outputs: Grammar error: bad".to_string(),
         retryable: false,
     };
-    for (error, status, error_type) in [
+    for (error, status, openai_error_type, anthropic_error_type) in [
         (
             paused,
             StatusCode::SERVICE_UNAVAILABLE,
             "ServiceUnavailableError",
+            "overloaded_error",
         ),
-        (invalid, StatusCode::BAD_REQUEST, "BadRequestError"),
+        (
+            invalid,
+            StatusCode::BAD_REQUEST,
+            "BadRequestError",
+            "invalid_request_error",
+        ),
+        (
+            RequestError {
+                code: "unknown".into(),
+                message: "Internal server error".into(),
+                retryable: false,
+            },
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalServerError",
+            "api_error",
+        ),
     ] {
         let cases = [
+            (
+                "/v1/messages",
+                json!({"model": model, "messages": messages, "max_tokens": 10}),
+                status,
+            ),
             (
                 "/v1/completions",
                 json!({"model": model, "prompt": "hello"}),
@@ -7884,12 +7904,20 @@ async fn engine_request_errors_map_to_http_status() {
             let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
             engine_task.await.expect("mock engine task");
             let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-            assert!(
-                text.contains(&format!("\"type\":\"{error_type}\""))
-                    && text.contains(&format!("\"code\":{}", status.as_u16()))
-                    && text.contains(&error.message),
-                "{uri} {request}: {text}"
-            );
+            if uri == "/v1/messages" {
+                let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(
+                    body,
+                    json!({"type": "error", "error": {"type": anthropic_error_type, "message": error.message}})
+                );
+            } else {
+                assert!(
+                    text.contains(&format!("\"type\":\"{openai_error_type}\""))
+                        && text.contains(&format!("\"code\":{}", status.as_u16()))
+                        && text.contains(&error.message),
+                    "{uri} {request}: {text}"
+                );
+            }
             // Like Python, an echoed prompt does not precede the error of the
             // update it belongs to.
             if uri == "/v1/completions" && request["stream"] == true {

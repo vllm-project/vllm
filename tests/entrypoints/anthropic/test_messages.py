@@ -9,6 +9,7 @@ import pytest_asyncio
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -74,11 +75,14 @@ async def test_anthropic_streaming(client: anthropic.AsyncAnthropic):
     )
 
     first_chunk = None
+    final_usage = None
     chunk_count = 0
     async for chunk in resp:
         chunk_count += 1
         if first_chunk is None and chunk.type == "message_start":
             first_chunk = chunk
+        elif chunk.type == "message_delta":
+            final_usage = chunk.usage
         print(chunk.model_dump_json())
 
     assert chunk_count > 0
@@ -88,7 +92,16 @@ async def test_anthropic_streaming(client: anthropic.AsyncAnthropic):
         "first chunk should include usage stats"
     )
     assert first_chunk.message.usage.output_tokens == 0
-    assert first_chunk.message.usage.input_tokens > 5
+    if envs.VLLM_USE_RUST_FRONTEND:
+        assert first_chunk.message.usage.input_tokens == 0
+        assert final_usage is not None
+        assert (
+            final_usage.input_tokens
+            + (final_usage.cache_read_input_tokens or 0)
+            + (final_usage.cache_creation_input_tokens or 0)
+        ) > 5
+    else:
+        assert first_chunk.message.usage.input_tokens > 5
 
 
 @pytest.mark.asyncio
@@ -219,12 +232,16 @@ async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic)
         assert cache_created is not None
         assert cache_created >= 0
         assert cache_read >= 0
-        # As in Anthropic's API, message_start already splits the prompt into
-        # uncached input and cache counts, the same split message_delta reports.
         assert start_usage is not None
-        assert start_usage.input_tokens == usage.input_tokens
-        assert start_usage.cache_read_input_tokens == cache_read
-        assert start_usage.cache_creation_input_tokens == cache_created
+        if envs.VLLM_USE_RUST_FRONTEND:
+            # The Rust frontend reports the prompt split in message_delta.
+            assert start_usage.input_tokens == 0
+            assert start_usage.cache_read_input_tokens is None
+            assert start_usage.cache_creation_input_tokens is None
+        else:
+            assert start_usage.input_tokens == usage.input_tokens
+            assert start_usage.cache_read_input_tokens == cache_read
+            assert start_usage.cache_creation_input_tokens == cache_created
         return usage
 
     request = dict(

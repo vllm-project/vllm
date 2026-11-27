@@ -122,4 +122,22 @@ mod tests {
         let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.num_kv_fetch_reqs_by_stage.counts(), [3, 1, 0]);
     }
+
+    #[test]
+    fn scheduler_stats_decodes_speculation_without_verified_token_counters() {
+        let mut payload = serde_json::to_value(SchedulerStats::default()).unwrap();
+        payload["spec_decoding_stats"] = serde_json::json!({
+            "num_spec_tokens": 3,
+            "num_drafts": 5,
+            "num_draft_tokens": 12,
+            "num_accepted_tokens": 7,
+            "num_accepted_tokens_per_pos": [4, 2, 1],
+        });
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        let speculation = stats.spec_decoding_stats.unwrap();
+        assert_eq!(speculation.num_accepted_tokens, 7);
+        assert_eq!(speculation.num_verified_tokens, 0);
+        assert!(speculation.num_verified_tokens_per_pos.is_empty());
+    }
 }

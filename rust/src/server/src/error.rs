@@ -50,6 +50,26 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::ModelNotFound {
+                model,
+                served_names,
+            } => format!(
+                "The model `{}` does not exist. Valid aliases: {}.",
+                truncate_echoed_model(model),
+                served_names.join(", ")
+            ),
+            Self::InvalidRequest { message, .. }
+            | Self::NotFound { message }
+            | Self::JsonParseError { message, .. }
+            | Self::InvalidQuery { message, .. }
+            | Self::Conflict { message }
+            | Self::ServerError { message }
+            | Self::ServiceUnavailable { message } => message.clone(),
+        }
+    }
+
     /// Return the HTTP status code associated with this API error.
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -65,43 +85,26 @@ impl ApiError {
     /// Convert this error into the vLLM JSON error payload: `type` names the
     /// error class as the Python frontend does, and `code` is the HTTP status.
     pub fn to_error_response(&self) -> ErrorResponse {
-        let (error_type, message, param) = match self {
-            Self::InvalidRequest { message, param } => (
-                "BadRequestError",
-                message.clone(),
-                param.map(str::to_string),
-            ),
-            Self::ModelNotFound {
-                model,
-                served_names,
-            } => (
-                "NotFoundError",
-                format!(
-                    "The model `{}` does not exist. Valid aliases: {}.",
-                    truncate_echoed_model(model),
-                    served_names.join(", ")
-                ),
-                Some("model".to_string()),
-            ),
-            Self::NotFound { message } => ("NotFoundError", message.clone(), None),
+        let (error_type, param) = match self {
+            Self::InvalidRequest { param, .. } => ("BadRequestError", param.map(str::to_string)),
+            Self::ModelNotFound { .. } => ("NotFoundError", Some("model".to_string())),
+            Self::NotFound { .. } => ("NotFoundError", None),
             // Python reports a body or query that fails to parse into the
             // request model through FastAPI's validation handler, which names
             // the HTTP status instead of an error class.
-            Self::JsonParseError { message, param } | Self::InvalidQuery { message, param } => {
-                ("Bad Request", message.clone(), param.clone())
+            Self::JsonParseError { param, .. } | Self::InvalidQuery { param, .. } => {
+                ("Bad Request", param.clone())
             }
             // Python has no error class for 409; like its `HTTPException`
             // handler, name the status.
-            Self::Conflict { message } => ("Conflict", message.clone(), None),
-            Self::ServerError { message } => ("InternalServerError", message.clone(), None),
-            Self::ServiceUnavailable { message } => {
-                ("ServiceUnavailableError", message.clone(), None)
-            }
+            Self::Conflict { .. } => ("Conflict", None),
+            Self::ServerError { .. } => ("InternalServerError", None),
+            Self::ServiceUnavailable { .. } => ("ServiceUnavailableError", None),
         };
 
         ErrorResponse {
             error: ErrorDetail {
-                message,
+                message: self.message(),
                 error_type: error_type.to_string(),
                 param,
                 code: self.status_code().as_u16(),
