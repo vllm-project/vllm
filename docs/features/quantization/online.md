@@ -141,6 +141,12 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 
 Combine with `--moe-backend` to pin a specific kernel family.
 
+With `--moe-backend emulation`, online MXFP4 MoE supports `"activation": null`
+(unquantized activations) and `"activation": "fp8_per_tensor_dynamic"` in
+addition to the default `"mxfp4"`. DeepSeek-V4-style MXFP4 checkpoint experts
+use unquantized activations by default on this backend and accept the same
+explicit overrides. MXFP8 and per-token or per-block FP8 overrides are rejected.
+
 For MXFP4 linear layers on RDNA3/RDNA3.5 (gfx11), `int8_per_group_32` selects
 the W4A8 int8-dot GEMV for decode (batches of up to 8 tokens); larger batches
 run weight-only. On W4A4 checkpoints this replaces the MXFP4 activation

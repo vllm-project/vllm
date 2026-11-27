@@ -5,6 +5,8 @@ import os
 
 import torch
 
+from vllm.config import get_current_vllm_config_or_none
+from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -16,9 +18,6 @@ from vllm.model_executor.layers.fused_moe import (
     SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import (
-    mxfp4_w4a16_moe_quant_config,
-)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
@@ -32,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
     triton_weight,
+    validate_mxfp4_emulation_activation,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -688,6 +688,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 moe
             )
 
+        self.emulation_activation_key = None
+        if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+            # Keep W4A16 by default, even when the checkpoint declares MXFP8.
+            self.emulation_activation_key, _ = user_activation_override(
+                "moe", get_current_vllm_config_or_none()
+            )
+            validate_mxfp4_emulation_activation(self.emulation_activation_key)
+
         self.max_capture_size = moe.max_capture_size
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
@@ -1083,18 +1091,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w1_scale = layer.w13_weight_scale
             w2_scale = layer.w2_weight_scale
 
-        if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
-            # Canonical ``mxfp4`` checkpoints are weight-only W4A16. The
-            # generic EMULATION config is W4A4, so preserve BF16 activations
-            # while the fallback dequantizes only the weights.
-            return mxfp4_w4a16_moe_quant_config(
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_bias=w1_bias,
-                w2_bias=w2_bias,
-                gemm1_clamp_limit=swiglu_limit,
-            )
-
         return make_mxfp4_moe_quant_config(
             mxfp4_backend=self.mxfp4_backend,
             w1_scale=w1_scale,
@@ -1103,6 +1099,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_bias=w2_bias,
             swiglu_limit=swiglu_limit,
             layer=layer,
+            activation_key=self.emulation_activation_key,
         )
 
     def apply(

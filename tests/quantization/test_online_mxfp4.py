@@ -14,12 +14,14 @@ from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
+from vllm.config.quantization import QuantSpec, layer_target_spec_scope
 from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
 from vllm.model_executor.kernels.linear.mxfp4.aiter import (
     AiterMxfp4LinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
@@ -41,12 +43,86 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import PlatformEnum, current_platform
+from vllm.utils.import_utils import has_quark
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not has_quark(),
+    reason="MXFP4 MoE emulation requires a CUDA or ROCm GPU and amd-quark",
+)
+@pytest.mark.parametrize(
+    "activation", ["mxfp8", "fp8_per_token", "fp8_per_block_dynamic"]
+)
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_online_mxfp4_emulation_rejects_unsupported_activation(
+    default_vllm_config, activation
+):
+    """Emulation rejects activation schemes it cannot compute."""
+    layer = FusedMoEFactory(
+        num_experts=4,
+        top_k=2,
+        hidden_size=256,
+        intermediate_size=256,
+        params_dtype=torch.bfloat16,
+    ).routed_experts
+    layer.moe_config.moe_backend = "emulation"
+    spec = QuantSpec(weight="mxfp4", activation=activation)
+    with pytest.raises(
+        NotImplementedError, match=f"cannot honour activation={activation}"
+    ):
+        Mxfp4OnlineMoEMethod(moe=layer.moe_config, activation_quant_key=spec.activation)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not has_quark(),
+    reason="MXFP4 MoE emulation requires a CUDA or ROCm GPU and amd-quark",
+)
+@pytest.mark.parametrize(
+    "target,expected_scheme",
+    [
+        pytest.param(None, "w_mxfp4", id="checkpoint-default"),
+        pytest.param(
+            QuantSpec(activation="fp8_per_tensor_dynamic"),
+            "w_mxfp4_a_fp8",
+            id="layer-override",
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_checkpoint_mxfp4_emulation_activation(
+    default_vllm_config, target, expected_scheme
+):
+    """Checkpoint MXFP8 defaults to W4A16 unless the user overrides it."""
+    layer = FusedMoEFactory(
+        num_experts=4,
+        top_k=2,
+        hidden_size=256,
+        intermediate_size=256,
+        params_dtype=torch.bfloat16,
+    ).routed_experts
+    layer.moe_config.moe_backend = "emulation"
+    with layer_target_spec_scope(target):
+        method = Mxfp4MoEMethod(layer.moe_config, activation_key=kMxfp8Dynamic)
+    method.create_weights(
+        layer=layer,
+        num_experts=4,
+        hidden_size=256,
+        intermediate_size_per_partition=256,
+        params_dtype=torch.bfloat16,
+        weight_loader=default_weight_loader,
+    )
+    config = method.get_fused_moe_quant_config(layer)
+    assert config is not None
+    assert config.ocp_mx_scheme == expected_scheme
 
 
 def fix_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:

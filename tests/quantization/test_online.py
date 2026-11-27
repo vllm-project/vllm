@@ -5,6 +5,7 @@
 import importlib
 import inspect
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -22,6 +23,7 @@ from tests.quantization.utils import (
     quant_config_args,
 )
 from tests.single_rank_group import SingleRankGroup, override_parallel_groups
+from vllm import SamplingParams
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
@@ -55,6 +57,9 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
+from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+    OCP_MXQuantizationEmulationTritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
@@ -198,6 +203,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_trtllm_fused_moe,
 )
+from vllm.utils.import_utils import has_quark
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
@@ -347,13 +353,67 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
     assert method.activation_quant_key == activation_quant_key
     if layer_kind == "linear":
         assert method.kernel.config.activation_quant_key == activation_quant_key
-    elif activation_quant_key != kMxfp4Dynamic:  # The default may run BF16.
-        computed_key = (
-            kMxfp4Dynamic
-            if method.mxfp4_backend == Mxfp4MoeBackend.EMULATION
-            else _backend_activation_key(method.mxfp4_backend)
+    elif (
+        activation_quant_key != kMxfp4Dynamic
+        and method.mxfp4_backend != Mxfp4MoeBackend.EMULATION
+    ):
+        assert _backend_activation_key(method.mxfp4_backend) == activation_quant_key
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not has_quark(),
+    reason="MXFP4 MoE emulation requires a CUDA or ROCm GPU and amd-quark",
+)
+@pytest.mark.parametrize(
+    "activation,expected_scheme",
+    [
+        pytest.param(None, "w_mxfp4", id="weight-only"),
+        pytest.param("fp8_per_tensor_dynamic", "w_mxfp4_a_fp8", id="fp8-per-tensor"),
+    ],
+)
+def test_online_mxfp4_emulation_activation_override(
+    vllm_runner, monkeypatch, activation, expected_scheme
+) -> None:
+    """The requested activation scheme is used by the experts during generation."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    def expert_schemes(model):
+        schemes = set()
+        for layer in model.modules():
+            if isinstance(layer, RoutedExperts):
+                assert isinstance(layer.quant_method, Mxfp4OnlineMoEMethod)
+                kernel = layer.quant_method.moe_kernel
+                assert kernel is not None
+                experts = kernel.fused_experts
+                assert isinstance(experts, OCP_MXQuantizationEmulationTritonExperts)
+                schemes.add(experts.ocp_mx_scheme)
+        return schemes
+
+    with vllm_runner(
+        GRANITE_MODEL_NAME,
+        dtype="bfloat16",
+        quantization="online",
+        quantization_config={"moe": {"weight": "mxfp4", "activation": activation}},
+        moe_backend="emulation",
+        enforce_eager=True,
+        max_model_len=64,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=16 << 20,
+    ) as llm:
+        assert llm.apply_model(expert_schemes) == [{expected_scheme}]
+        outputs = llm.get_llm().generate(
+            [{"prompt_token_ids": [1, 2, 3]}],
+            SamplingParams(temperature=0, max_tokens=2, ignore_eos=True, logprobs=1),
         )
-        assert computed_key == activation_quant_key
+        completion = outputs[0].outputs[0]
+        assert len(completion.token_ids) == 2
+        assert completion.logprobs is not None
+        assert all(
+            math.isfinite(step[token].logprob)
+            for token, step in zip(
+                completion.token_ids, completion.logprobs, strict=True
+            )
+        )
 
 
 def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:
