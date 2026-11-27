@@ -10,6 +10,7 @@ probabilities.
 import math
 import string
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -43,8 +44,9 @@ class Question:
 
 class QuestionType(ABC):
     name: ClassVar[str]
-    #: The labels of a question's options, in option order.
-    label_set: ClassVar[tuple[str, ...]] = LABELS
+    #: The labels of a question's options, in option order. An instance
+    #: attribute, so a strategy can set the set its model was trained with.
+    label_set: tuple[str, ...] = LABELS
     reply_instruction: ClassVar[str] = "Answer with the letter of one option only."
 
     @abstractmethod
@@ -108,10 +110,17 @@ def build_question(
     criteria: Any,
     max_options: int,
     labeled: bool = True,
+    question_types: Mapping[str, QuestionType] | None = None,
 ) -> Question:
     if not qid:
         raise StructuredDecisionError("question ids must be non-empty")
-    qtype = get_question_type(type_name)
+    available = QUESTION_TYPES if question_types is None else question_types
+    try:
+        qtype = available[type_name]
+    except KeyError:
+        raise StructuredDecisionError(
+            f"unknown question type {type_name!r}; supported: {sorted(available)}"
+        ) from None
     options = qtype.parse_options(qid, criteria)
     if not options:
         raise StructuredDecisionError(f"question {qid!r}: needs at least one option")

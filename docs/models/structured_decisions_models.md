@@ -398,6 +398,89 @@ vllm serve LiquidAI/d1-3B
 - When each request carries one question over a state that changes from
   request to request, `--disable-prefix-caching` lowers latency.
 
+### KnowLine
+
+The KnowLine decision models are a Qwen3.5-MoE checkpoint post-trained to
+answer decisions as the first token after a literal `Answer:`. The
+architecture is the stock model's, so the checkpoint opts in with a
+`knowline_config` field in its model config; until the checkpoint ships
+one, the same field can be passed on the command line:
+
+```bash
+vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
+    --hf-overrides '{"knowline_config": {}}' \
+    --compilation-config '{"max_prefill_cudagraph_capture_tokens": 8192}'
+```
+
+- The server writes the prompt the checkpoint was trained on, so picks and
+  probabilities match the reference server shipped with the checkpoint: the
+  state as chat turns (a list of `{role, content}` messages), then one user
+  turn with the instruction, the question and its lettered options (`A.`,
+  `B.`, ...), the assistant opener with thinking off, and `Answer:`. A JSON
+  state is flattened to indented text, not JSON. A chat template that
+  rejects the conversation folds the ask into the last user turn, or
+  renders the whole chat as one user message. A question's `instructions`
+  carry the reference's ask when absent or null; an explicit empty value
+  (`""`, `[]` or `{}`) renders as empty, as the reference server does.
+- The reads score the labels in the serving dtype. Under bf16 the label
+  logprobs move in steps of 0.125 at this checkpoint's logit scale, so
+  close options can tie exactly: a noul of exactly 0.5 is a tie, not a
+  signal. The reference serves FP8 weights with an fp32 LM head: add
+  `--quantization fp8_per_tensor` to the command above and
+  `"head_dtype": "float32"` to the same `--hf-overrides` JSON as the
+  marker. Against that setting the bf16 picks differ only on near-ties.
+- Labels run `A` to `Z`, then two-letter labels from `AA`, skipping any
+  that is not one token right after `Answer:`. A choice can have up to 255
+  options and a score up to 255 levels. With the checkpoint's tokenizer,
+  26 two-letter labels are skipped and the 255th label is `JU`. A
+  tokenizer with fewer than 255 such labels disables the decisions
+  endpoints.
+- This is a hybrid model (GDN linear attention). With prefix caching, vLLM
+  prefills any prompt over one 1088-token mamba block as a single chunk. A
+  chunk larger than every prefill CUDA graph runs the compiled pieces
+  without a graph. The default prefill graphs stop at 512 tokens on H200
+  (8192 on B300). On H200 a 600-token prompt then takes about twice as
+  long to its first token (61 ms against 32 ms). The `--compilation-config`
+  above captures prefill graphs up to 8192 tokens, capped at
+  `--max-num-batched-tokens`; on H200 that takes 1.4 GiB of graph memory
+  instead of 0.9 GiB. From 4k tokens up, graphs made no measurable
+  difference on H200. Longer prompts gain from a larger chunked-prefill
+  budget instead: `--max-num-batched-tokens 16384` took 9-13% off 16k-
+  and 32k-token prompts there.
+- The read asks for the labels' logprobs over the whole vocabulary, so
+  `diagnostics.label_mass` is the labels' share and `argmax_is_label`
+  reports the model's actual first token. One read can ask for up to 256
+  labels, so a question of up to 255 options is one read.
+- A request reads the state and the question a second time when the
+  single-pass request fits the marker's `twice_max_tokens` bound, 3000 by
+  default, as in the reference server. The bound is on the read-once
+  size, which counts the state once, and a request at exactly the bound
+  still doubles; the doubled prompt meters both copies, so
+  `usage.input_tokens` is about twice the logical size under the bound.
+  Setting the bound to 0 serves every request single-pass:
+  `--hf-overrides '{"knowline_config": {"twice_max_tokens": 0}}'`. That
+  is Gen1's prompt layout: Gen1.5 has Gen1's weights, and its model card
+  says of reading twice that "Nothing was trained". Answers and
+  probabilities then differ from the reference server's. A marker that is
+  not a dict, a bound that is negative, boolean or not an integer, or the
+  marker on an architecture other than the Qwen3.5 conditional-generation
+  classes disables the decisions endpoints, with the reason logged. `--hf-overrides` replaces
+  the whole `knowline_config` field; it does not merge with one the
+  checkpoint already ships.
+- Answers keep the trained shapes: a `noul` answers the probability of true
+  alone, with no probabilities or confidence; a `choice`'s and `score`'s
+  `confidence` is a certainty proxy, one minus the normalized entropy of
+  the labels; a `score`'s `legend` echoes the criteria as they came in.
+- The model reads text: `images`, `audio` and `videos` return 400. Top-level
+  `instructions` return 400, since the prompt is fixed. Other
+  `chat_template_kwargs` reach the template, with thinking off.
+- The OpenAI-style `/v1/decisions` serves the model too, with the stock
+  question types (at most 26 options, the stock confidence). An option
+  line shows the option's value (a choice's JSON-encoded, a score's
+  label), then `:` and its description when it has one; a predicate
+  reads like a `/v1/systemone` noul question. Prefer `/v1/systemone`
+  for the trained answer shapes.
+
 ### Mammoth-1 and Elephant-1
 
 Base Labs [`baselabs/mammoth-1`](https://huggingface.co/baselabs/mammoth-1)
