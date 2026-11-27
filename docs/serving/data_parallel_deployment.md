@@ -141,3 +141,22 @@ The coordinator process also runs in this scenario, co-located with the DP rank 
 </figure>
 
 In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+
+## Engine-Aware Routing with vLLM Router
+
+The load-balancing modes above are all handled by vLLM itself. If you want smarter, KV-cache-aware routing — for example, routing every request from the same conversation or agent session to the same DP engine so it can reuse that engine's prefix cache — you can place [vLLM Router](https://github.com/vllm-project/router) in front of a DP deployment instead of, or in addition to, a plain external load balancer.
+
+vLLM Router is aware of vLLM's DP topology: pass `--intra-node-data-parallel-size N` so it treats each worker URL as `N` individually routable engines rather than one opaque endpoint. Combined with `--policy consistent_hash`, requests that share a routing key (such as a session or user ID) are consistently routed to the same underlying DP engine.
+
+This pairs naturally with [Hybrid Load Balancing](#hybrid-load-balancing), where each node already exposes one endpoint fronting several local DP ranks. For example, with 2 nodes each running 4 local DP ranks behind a single per-node endpoint:
+
+```bash
+vllm-router \
+  --worker-urls http://node0:8000 http://node1:8000 \
+  --policy consistent_hash \
+  --intra-node-data-parallel-size 4
+```
+
+This exposes all 8 underlying engines to vLLM Router's scheduler and uses consistent hashing to keep repeat requests for the same session on the same engine, maximizing prefix-cache reuse.
+
+See the [vLLM Router GitHub repo](https://github.com/vllm-project/router) and [announcement blog post](https://vllm.ai/blog/2025-12-13-vllm-router-release) for the full set of routing policies and configuration options, including prefill/decode disaggregation support (also referenced in the [MoRIIOConnector usage guide](../features/moriio_connector_usage.md)).
