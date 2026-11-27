@@ -30,8 +30,9 @@ RDNA4 currently supports head size 256 with 64 rotary dimensions. This applies
 to dense attention and the QSA path. Other head-size/RoPE combinations are
 rejected during geometry validation. The specialized HIP kernels provide
 cache storage and a small fixed set of scalar and WMMA kernels for decode,
-verification, and prefill. This includes grouped-prefill fast paths for GQA
-groups 1 and 2 and GQA-6 reuse paths for all three cache formats. Packed
+verification, and prefill. Streamed and FP16-expanded dense prefill support
+any positive integer ratio of query heads to KV heads per GPU across all
+three Octave cache formats. Packed
 prefill can also use the geometry HIP kernels, which handle sparse QSA
 attention. Both use the existing Octave wire formats and causal
 metadata. QSA supports tagged exact K/V for selected tokens among the first
@@ -50,9 +51,9 @@ packed kernel's 256-split limit. The FP32 output is reserved alongside it.
 Decode and prefill choose splits within that budget. Captured graphs reuse
 the reserved addresses, and native kernels resolve live lengths on the device.
 
-Streamed and FP16-expanded dense prefill support any positive integer ratio of
-query heads to KV heads per GPU. Dispatch chooses between them using the
-chunk size, prefix length, number of query/head tiles, and available workspace.
+Dense prefill dispatch chooses between the streamed and FP16-expanded paths
+using the chunk size, prefix length, number of query/head tiles, and available
+workspace.
 Small chunks, ragged batches, and long, thin prefixes can stream directly from
 packed pages. When the scheduler supplies no sequence-length hint, dispatch uses
 the page table capacity. For standard serving geometry and a positive finite
