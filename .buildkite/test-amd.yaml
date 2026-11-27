@@ -1354,7 +1354,6 @@ steps:
   - csrc/minimax_reduce_rms_kernel.h
   - csrc/ops.h
   - csrc/torch_bindings.cpp
-  - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   optional: true
   commands:
   - pytest -v -s kernels/core/test_minimax_reduce_rms.py
@@ -4516,7 +4515,6 @@ steps:
   - csrc/minimax_reduce_rms_kernel.h
   - csrc/ops.h
   - csrc/torch_bindings.cpp
-  - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   optional: true
   commands:
   - pytest -v -s kernels/core/test_minimax_reduce_rms.py kernels/core/test_fused_allreduce_gemma_rms_norm.py

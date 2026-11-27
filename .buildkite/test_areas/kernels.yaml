@@ -99,7 +99,6 @@ steps:
   - csrc/ops.h
   - csrc/torch_bindings.cpp
   - vllm/model_executor/layers/minimax_rms_norm/
-  - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   - tests/kernels/core/test_minimax_reduce_rms.py
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py

@@ -8,8 +8,8 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
-    MiniMaxText01LinearAttention,
+from vllm.model_executor.layers.mamba.linear.bailing_linear_attn import (
+    BailingMoELinearAttention,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
@@ -17,7 +17,7 @@ from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.models.falcon_h1 import FalconH1ForCausalLM
 from vllm.model_executor.models.granitemoehybrid import GraniteMoeHybridForCausalLM
 from vllm.model_executor.models.zamba2 import Zamba2ForCausalLM
-from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
+from vllm.v1.attention.backends.linear_attn import BailingLinearAttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
@@ -114,18 +114,20 @@ def test_mamba2_config_state_shape_includes_speculative_tokens(model_cls):
             MambaAttentionBackendEnum.MAMBA2,
         ),
         (
-            MiniMaxText01LinearAttention,
+            BailingMoELinearAttention,
             dict(
                 config=SimpleNamespace(
                     hidden_size=256,
                     num_attention_heads=8,
                     head_dim=32,
                     num_hidden_layers=12,
-                    block=64,
+                    max_position_embeddings=2048,
+                    use_bias=False,
+                    use_qkv_bias=False,
                 ),
                 prefix="layers.0.self_attn",
             ),
-            LinearAttentionBackend,
+            BailingLinearAttentionBackend,
             MambaAttentionBackendEnum.LINEAR,
         ),
         (
@@ -149,7 +151,7 @@ def test_mamba_layers_get_attn_backend(
     expected_mamba_type,
 ):
     """Test that Mamba-like layers return the correct attention backend."""
-    if layer_class is MiniMaxText01LinearAttention:
+    if layer_class is BailingMoELinearAttention:
         init_kwargs["vllm_config"] = default_vllm_config
     layer = layer_class(**init_kwargs)
 
@@ -163,8 +165,8 @@ def test_mamba_layers_get_attn_backend(
     [
         (MambaMixer2, Mamba2AttentionBackend, MambaAttentionBackendEnum.MAMBA2),
         (
-            MiniMaxText01LinearAttention,
-            LinearAttentionBackend,
+            BailingMoELinearAttention,
+            BailingLinearAttentionBackend,
             MambaAttentionBackendEnum.LINEAR,
         ),
         (ShortConv, ShortConvAttentionBackend, MambaAttentionBackendEnum.SHORT_CONV),

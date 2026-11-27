@@ -45,12 +45,7 @@ def test_bailing_linear_attention_reports_uniform_batch_cudagraph_support():
 
 
 def test_non_bailing_linear_attention_keeps_single_token_cudagraph_support():
-    vllm_config = create_vllm_config(
-        hf_config_override={
-            "architectures": ["MiniMaxText01ForCausalLM"],
-            "model_type": "minimax_text_01",
-        }
-    )
+    vllm_config = create_vllm_config()
 
     support = LinearAttentionMetadataBuilder.get_cudagraph_support(
         vllm_config, _create_mamba_spec()
