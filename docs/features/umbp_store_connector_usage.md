@@ -39,7 +39,7 @@ Set these options in `kv_connector_extra_config`:
 | `total_capacity_bytes` | | Pool size per engine, split evenly across its workers. Exclusive with `capacity_bytes`. |
 | `lookup_instance` | | Distinguishes independent engines serving the same model on one host. Data-parallel ranks are already distinguished. |
 | `lookup_dir` | `/tmp` | Directory of the per-worker lookup sockets. |
-| `dram_high_watermark`, `dram_low_watermark` | MORI defaults | Pool occupancy at which eviction starts and stops. |
+| `dram_high_watermark`, `dram_low_watermark` | `0.99`, `0.97` | Pool occupancy at which eviction starts and stops. MORI v1.2.3's defaults (`0.9`, `0.7`) keep the pool about 80% full; setting either option keeps MORI's default for the other. |
 | `dram_use_hugepages`, `dram_hugepage_size`, `dram_numa_node`, `dram_prefault` | MORI defaults | Allocation of each worker's pool. |
 
 ## Standalone mode
@@ -68,7 +68,8 @@ every GPU that its clients use, so do not narrow it with
 cannot see crashes the server with a GPU memory fault, which takes the pool
 down for every attached engine. `UMBP_DRAM_*`
 variables control huge pages, NUMA placement, prefaulting, and eviction
-watermarks; see the MORI UMBP documentation.
+watermarks; see the MORI UMBP documentation. Set `UMBP_DRAM_HIGH_WM=0.99` and
+`UMBP_DRAM_LOW_WM=0.97` to match the embedded pool's defaults.
 
 ### Configure the connector
 
@@ -134,7 +135,7 @@ Set these options in `kv_connector_extra_config`:
 | `lazy_offload` | `false` | Store reusable blocks selected from the GPU free queue instead of storing them eagerly after each forward step. The scan runs when that queue changes, and blocks already known to be in the pool are not looked up again until a later recheck. Lazy stores follow the GPU prefix cache, so they include blocks produced by decoding. A lookup that cannot reach the pool, or a failed lazy store, backs off instead of storing the window again. |
 | `lazy_offload_max_blocks` | derived | Maximum number of free-queue blocks examined by each lazy scan. |
 | `rebuild_sliding_window` | `false` | For models with SWA bounded replay (DeepSeek-V4 on ROCm), store only the compressed KV and rebuild the sliding-window state by recomputing the hit's last window. The rebuilt window state is approximate. With `false` every cache group is stored. |
-| `enable_partial_hash_hits` | `false` | Allow hits that end inside a block, at core's prefix-match unit (`cache_config.prefix_match_unit`). |
+| `enable_partial_hash_hits` | `false`; `true` for Mamba hybrid models whose prefix-match unit is finer than the scheduler block | Allow hits that end inside a block, at core's prefix-match unit (`cache_config.prefix_match_unit`). A hybrid model's state checkpoints sit on prompt-tail hash boundaries, which block-granular lookups almost never reach. |
 | `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and the transfer timeout. A synchronous wait that times out fails the step rather than reusing its blocks. |
 | `key_namespace` | derived | Overrides the namespace derived from the model, revision, KV layout, cache groups, parallel topology and draft model. The pool can then hold KV from a different layout, so attention backends that require KV written by their own cache layout fall back as with other connectors. |
 

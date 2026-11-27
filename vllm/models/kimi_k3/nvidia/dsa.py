@@ -66,7 +66,7 @@ from vllm.models.kimi_k3.nvidia.ops.dsa_indexer_mxfp4 import (
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import _encode_layer_name
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, _encode_layer_name
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
 from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
@@ -218,6 +218,9 @@ class KimiK3DSAIndexer(nn.Module):
         # Set by KimiK3DSAAttention to skip scoring dense-MHA prefills.
         self.dense_mha_metadata_layer_name = ""
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+            vllm_config.attention_config.resolve_indexer_logits_dtype("float32")
+        ]
         # PCP gathers the unquantized key inside the op.
         self.use_fused_k_insert = (
             not self.use_pcp
@@ -415,6 +418,7 @@ class KimiK3DSAIndexer(nn.Module):
             self.cp_kv_cache_interleave_size,
             skip_topk_buffer_clear=self.use_fused_k_insert,
             topk_backend=self.topk_backend,
+            logits_dtype=self.logits_dtype,
         )
 
 

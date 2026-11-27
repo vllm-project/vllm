@@ -449,6 +449,81 @@ def test_kwargs_and_metadata_generate_does_not_require_ec():
     assert torch.equal(item["image_grid_thw"].data, image_grid_thw.data)
 
 
+def _referenced_item_features(metadata: dict | None) -> MultiModalFeatures:
+    return MultiModalFeatures.model_validate(
+        {
+            "mm_hashes": {"image": ["ref", "cached"]},
+            "mm_placeholders": {
+                "image": [{"offset": 0, "length": 1}, {"offset": 2, "length": 1}]
+            },
+            "kwargs_refs": {
+                "image": [
+                    {
+                        "uri": "s3://tensor-bucket/tenant/request/image-0",
+                        "format": "safetensors-v1",
+                        "nbytes": 1024,
+                        "digest": "a" * 64,
+                    },
+                    None,
+                ]
+            },
+            "mm_metadata": None
+            if metadata is None
+            else {
+                "image": [encode_mm_kwargs_item(MultiModalKwargsItem(metadata)), None]
+            },
+        }
+    )
+
+
+def test_tensor_reference_loads_item_and_accepts_matching_metadata():
+    _, pixel_values, image_grid_thw = _image_engine_input()
+    loaded: list[tuple[str, str]] = []
+
+    def load(modality, ref):
+        loaded.append((modality, ref.uri))
+        return MultiModalKwargsItem(
+            {"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
+        )
+
+    features = _referenced_item_features({"image_grid_thw": image_grid_thw})
+    with pytest.raises(ValueError, match="reference loader"):
+        mm_kwargs_from_features(features)
+    item, cached = mm_kwargs_from_features(features, reference_loader=load)["image"]
+
+    assert loaded == [("image", "s3://tensor-bucket/tenant/request/image-0")]
+    assert cached is None
+    assert item is not None
+    assert set(item) == {"pixel_values", "image_grid_thw"}
+    assert item["pixel_values"] is pixel_values
+    assert torch.equal(item["image_grid_thw"].data, image_grid_thw.data)
+
+
+@pytest.mark.parametrize("change", ["value", "extra_field"])
+def test_metadata_cannot_change_a_referenced_item(change):
+    """Validated fields of a referenced item can't be overridden by metadata."""
+    _, pixel_values, image_grid_thw = _image_engine_input()
+    if change == "value":
+        metadata = {
+            "image_grid_thw": MultiModalFieldElem(
+                data=image_grid_thw.data * 2, field=image_grid_thw.field
+            )
+        }
+    else:
+        metadata = {"image_grid_thw": image_grid_thw}
+
+    def load(modality, ref):
+        item = {"pixel_values": pixel_values}
+        if change == "value":
+            item["image_grid_thw"] = image_grid_thw
+        return MultiModalKwargsItem(item)
+
+    with pytest.raises(ValueError, match="doesn't match its kwargs_refs object"):
+        mm_kwargs_from_features(
+            _referenced_item_features(metadata), reference_loader=load
+        )
+
+
 def test_cache_hit_null_kwargs_keeps_metadata_slot():
     pixel_values = MultiModalFieldElem(
         data=torch.randn(5, 3, dtype=torch.float32),
@@ -537,3 +612,25 @@ def test_placeholder_roundtrip(is_embed):
 def test_placeholder_rejects_mismatched_is_embed():
     with pytest.raises(ValidationError, match="is_embed"):
         PlaceholderRangeInfo(offset=0, length=4, is_embed=[True])
+
+
+def test_metadata_cannot_change_field_settings_of_a_referenced_item():
+    """Equal data with another field config keeps the loaded item's config."""
+    _, pixel_values, image_grid_thw = _image_engine_input()
+    assert image_grid_thw.field.keep_on_cpu
+    gpu_grid = MultiModalFieldElem(
+        data=image_grid_thw.data, field=MultiModalBatchedField(keep_on_cpu=False)
+    )
+
+    def load(modality, ref):
+        return MultiModalKwargsItem(
+            {"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
+        )
+
+    item, _ = mm_kwargs_from_features(
+        _referenced_item_features({"image_grid_thw": gpu_grid}),
+        reference_loader=load,
+    )["image"]
+
+    assert item is not None
+    assert item["image_grid_thw"].field.keep_on_cpu

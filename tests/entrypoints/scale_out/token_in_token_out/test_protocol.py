@@ -177,6 +177,63 @@ def test_multimodal_features_reject_overlapping_placeholders(placeholders):
         _features(placeholders)
 
 
+def _s3_ref(**overrides) -> dict:
+    return {
+        "uri": "s3://tensor-bucket/tenant/request/image-0",
+        "format": "safetensors-v1",
+        "nbytes": 1024,
+        "digest": "a" * 64,
+        **overrides,
+    }
+
+
+def test_tensor_reference_with_metadata_does_not_require_ec():
+    request = GenerateRequest.model_validate(
+        {
+            **_base_payload(),
+            "features": {
+                "mm_hashes": {"image": ["a"]},
+                "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                "kwargs_refs": {"image": [_s3_ref()]},
+                "mm_metadata": {"image": ["encoded-metadata"]},
+            },
+        }
+    )
+
+    assert request.features is not None
+    assert request.features.kwargs_refs is not None
+    (reference,) = request.features.kwargs_refs["image"]
+    assert reference is not None
+    assert reference.uri == "s3://tensor-bucket/tenant/request/image-0"
+
+
+@pytest.mark.parametrize(
+    ("features", "match"),
+    [
+        ({"kwargs_refs": {"video": [_s3_ref()]}}, "same modalities"),
+        ({"kwargs_refs": {"image": [_s3_ref(), None]}}, "same length"),
+        (
+            {"kwargs_refs": {"image": [_s3_ref()]}, "kwargs_data": {"image": ["x"]}},
+            "both kwargs_data and kwargs_refs",
+        ),
+        ({"kwargs_refs": {"image": [_s3_ref(backend="s3")]}}, "backend"),
+        ({"kwargs_refs": {"image": [_s3_ref(format="pickle")]}}, "format"),
+        ({"kwargs_refs": {"image": [_s3_ref(nbytes=0)]}}, "nbytes"),
+        ({"kwargs_refs": {"image": [_s3_ref(digest="abc")]}}, "digest"),
+        ({"kwargs_refs": {"image": [_s3_ref(endpoint="http://x")]}}, "endpoint"),
+    ],
+)
+def test_multimodal_features_reject_invalid_tensor_references(features, match):
+    with pytest.raises(ValidationError, match=match):
+        MultiModalFeatures.model_validate(
+            {
+                "mm_hashes": {"image": ["a"]},
+                "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                **features,
+            }
+        )
+
+
 def test_generate_request_rejects_placeholder_outside_prompt():
     with pytest.raises(ValueError, match="within the token_ids sequence"):
         GenerateRequest(

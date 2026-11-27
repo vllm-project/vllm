@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import torch
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import DeltaMessage, StreamOptions
@@ -359,14 +360,51 @@ async def test_serve_tokens_rejects_invalid_shm_handle_before_engine_handoff():
         ),
     )
 
-    response = await serving.serve_tokens(request)
+    with pytest.raises(ValueError, match="Invalid SHM handle signature"):
+        await serving.serve_tokens(request)
 
-    assert isinstance(response, ErrorResponse)
     cache.validate_input_item.assert_called_once()
     validated_item, validated_hash = cache.validate_input_item.call_args.args
     assert validated_hash == "image_A"
     assert validated_item["address"].data == 224
     engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_null_kwargs_refs_fall_back_to_inline_data():
+    """`null` references don't need the feature enabled or a read slot."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    item = MultiModalKwargsItem(
+        {
+            "pixel_values": MultiModalFieldElem(
+                data=torch.zeros(1, 4), field=MultiModalBatchedField()
+            )
+        }
+    )
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        features=MultiModalFeatures(
+            mm_hashes={"image": ["image_A"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=1)]},
+            kwargs_data={"image": [encode_mm_kwargs_item(item)]},
+            kwargs_refs={"image": [None]},
+        ),
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateTokensResponse)
+    engine.generate.assert_called_once()
 
 
 @pytest.mark.asyncio
