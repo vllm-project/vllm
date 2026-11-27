@@ -312,6 +312,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
             "fuse_qk_norm_rope_kvcache": False,
+            "fuse_gemm_add_rms": False,
             "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
         },
@@ -333,6 +334,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
             "fuse_qk_norm_rope_kvcache": False,
+            "fuse_gemm_add_rms": False,
             "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
         },
@@ -354,6 +356,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
             "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "fuse_gemm_add_rms": False,
             "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
@@ -375,6 +378,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
             "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "fuse_gemm_add_rms": False,
             "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
@@ -3005,6 +3009,13 @@ class VllmConfig:
                         "num_tokens <= %d.",
                         compile_range_end,
                     )
+
+        if compilation_config.pass_config.fuse_gemm_add_rms:
+            max_token_num = (
+                compilation_config.pass_config.gemm_add_rms_fusion_max_token_num
+            )
+            if compile_range_end is not None and max_token_num < compile_range_end:
+                computed_compile_ranges_endpoints.append(max_token_num)
 
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
