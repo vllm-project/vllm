@@ -2119,6 +2119,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Mamba SSU, and LoRA. Filenames are distinct so one folder can hold all.
     # Each component first checks this folder, then the configs shipped with
     # vLLM (if any). If no JSON matches, it uses a hard-coded heuristic.
+    # A matching LoRA shrink config takes precedence over VLLM_BATCH_INVARIANT
+    # and --lora-split-k-reduction as an explicit user override.
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
     # Opt-in persistence of the startup plan. When enabled, each worker
     # saves the memory-profiling result (the suggested --kv-cache-memory value

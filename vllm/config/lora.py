@@ -34,6 +34,15 @@ class LoRAConfig:
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
+    split_k_reduction: Literal["atomic", "kernel"] = "atomic"
+    """Triton LoRA linear shrink split-K reduction. `atomic` (default):
+    accumulate partial results using atomic adds in one kernel.
+    `kernel` sums FP32 partials in a separate fixed-order kernel.
+    Does not enable model-wide batch invariance or affect fused MoE LoRA.
+    A matching `VLLM_TUNED_CONFIG_FOLDER` shrink config takes precedence, followed
+    by `VLLM_BATCH_INVARIANT=1` (which selects `kernel`), then this option.
+    See https://github.com/vllm-project/vllm/issues/70061.
+    """
     fully_sharded_loras: bool = False
     """By default, only half of the LoRA computation is sharded with tensor
     parallelism. Enabling this will use the fully sharded layers. At high
