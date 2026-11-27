@@ -123,6 +123,7 @@ steps:
   - tests/entrypoints/serve/instrumentator/test_metrics.py
   - tests/entrypoints/serve/lora/test_lora_adapters.py
   - tests/entrypoints/serve/tokenize/test_tokenization.py
+  - tests/entrypoints/serve/tokenize/test_tokenize_matches_chat.py
   - tests/entrypoints/serve/middleware/test_optional_middleware.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/entrypoints/rl/return_routed_experts/test_openai_api.py
@@ -142,6 +143,7 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not multimodal"
   # The Rust frontend does not implement /tokenizer_info.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
+  - pytest -v -s entrypoints/serve/tokenize/test_tokenize_matches_chat.py
   # The Rust frontend loads runtime LoRA paths only under VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES and
   # rejects beam search.
   - VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES=/ pytest -v -s entrypoints/serve/lora/test_lora_adapters.py -k "not test_beam_search_with_lora_adapters"
@@ -176,6 +178,7 @@ steps:
       - tests/entrypoints/serve/instrumentator/test_metrics.py
       - tests/entrypoints/serve/lora/test_lora_adapters.py
       - tests/entrypoints/serve/tokenize/test_tokenization.py
+      - tests/entrypoints/serve/tokenize/test_tokenize_matches_chat.py
       - tests/entrypoints/serve/middleware/test_optional_middleware.py
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
       - tests/entrypoints/rl/return_routed_experts/test_openai_api.py
