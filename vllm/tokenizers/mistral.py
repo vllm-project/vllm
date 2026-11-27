@@ -30,12 +30,17 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 )
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 from pydantic import ValidationError
+from sentencepiece import SentencePieceProcessor
 from transformers.tokenization_mistral_common import MistralCommonBackend
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
+from vllm.tokenizers.detokenizer_utils import (
+    decode_sentencepiece_with_offsets,
+    decode_utf8_with_offsets,
+)
 from vllm.tokenizers.protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -418,8 +423,6 @@ class MistralTokenizer(TokenizerLike):
 
     @cached_property
     def _sentencepiece_offset_decoder(self):
-        from sentencepiece import SentencePieceProcessor
-
         assert isinstance(self.tokenizer, SentencePieceTokenizer)
         return SentencePieceProcessor(model_file=str(self.tokenizer.file_path))
 
@@ -427,11 +430,6 @@ class MistralTokenizer(TokenizerLike):
         self, ids: list[int]
     ) -> tuple[str, list[int]] | None:
         """Return native decode spans; callers must verify the echoed text."""
-        from .detokenizer_utils import (
-            decode_sentencepiece_with_offsets,
-            decode_utf8_with_offsets,
-        )
-
         if self.is_spm:
             try:
                 return decode_sentencepiece_with_offsets(

@@ -180,16 +180,6 @@ Tokenizer-added special tokens are omitted from the text and echoed logprobs;
 special tokens supplied in the text are preserved. Model input IDs, prompt-token
 usage and `return_token_ids` responses retain the full truncated token sequence.
 
-#### Unicode offsets in echoed logprobs
-
-With the Python frontend, `/v1/completions` requests using `echo=true` and
-`logprobs` align prompt `logprobs.text_offset` values to Unicode code point
-positions in the echoed text for supported tokenizers. Tokens that split a UTF-8 character
-share that character's starting offset. The first generated token starts at the
-end of the echoed prompt. For example, if `éx` is tokenized as two bytes for `é`
-and one token for `x`, their offsets are `[0, 0, 1]`, and generation starts at `2`.
-Rust frontend offsets are unchanged.
-
 ### Chat API
 
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);

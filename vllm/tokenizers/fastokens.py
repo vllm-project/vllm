@@ -12,22 +12,22 @@ fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …).
 
 import json
 from importlib.metadata import PackageNotFoundError, version
+from weakref import WeakKeyDictionary
 
 from packaging.version import Version
 
 _MIN_FASTOKENS_VERSION = "0.3.6"
+_decoder_configs: WeakKeyDictionary = WeakKeyDictionary()
 
 
 def get_fastokens_decoder_config(backend) -> dict | None:
     """Read the immutable decoder config hidden by fastokens' decoder shim."""
     if type(backend).__module__.partition(".")[0] != "fastokens":
         return None
-    cache_key = "_vllm_prompt_decoder_config"
     try:
-        if not hasattr(backend, cache_key):
-            config = json.loads(backend.to_str()).get("decoder")
-            setattr(backend, cache_key, config)
-        return getattr(backend, cache_key)
+        if backend not in _decoder_configs:
+            _decoder_configs[backend] = json.loads(backend.to_str()).get("decoder")
+        return _decoder_configs[backend]
     except (AttributeError, TypeError, ValueError):
         return None
 

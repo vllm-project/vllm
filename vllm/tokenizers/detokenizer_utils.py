@@ -7,13 +7,16 @@ import json
 from functools import lru_cache
 from itertools import groupby
 
+from sentencepiece import sentencepiece_pb2
+from tokenizers.decoders import ByteLevel
+from transformers.convert_slow_tokenizer import bytes_to_unicode
+
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.fastokens import get_fastokens_decoder_config
 
 
 @lru_cache(maxsize=1)
 def _byte_level_decoder() -> dict[str, int]:
-    from transformers.convert_slow_tokenizer import bytes_to_unicode
-
     return {char: byte for byte, char in bytes_to_unicode().items()}
 
 
@@ -24,8 +27,6 @@ def decode_token_ids_with_offsets(
 
     Callers must check that the text matches the echo's decoding policy.
     """
-    from tokenizers.decoders import ByteLevel
-
     if skip_special_tokens:
         special_ids = set(tokenizer.all_special_ids)
         visible = [i for i, tid in enumerate(token_ids) if tid not in special_ids]
@@ -55,9 +56,7 @@ def decode_token_ids_with_offsets(
     if not isinstance(backend.decoder, ByteLevel):
         try:
             config = json.loads(backend.decoder.__getstate__())
-        except Exception:
-            from .fastokens import get_fastokens_decoder_config
-
+        except (AttributeError, TypeError, ValueError):
             config = get_fastokens_decoder_config(backend)
         if config is None:
             return None
@@ -100,8 +99,6 @@ def decode_utf8_with_offsets(pieces: list[bytes]) -> tuple[str, list[int]]:
 def decode_sentencepiece_with_offsets(
     sp_model, token_ids: list[int]
 ) -> tuple[str, list[int]]:
-    from sentencepiece import sentencepiece_pb2
-
     proto = sentencepiece_pb2.SentencePieceText.FromString(
         sp_model.decode_ids_as_serialized_proto(token_ids)
     )

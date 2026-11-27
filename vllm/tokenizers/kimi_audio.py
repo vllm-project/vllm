@@ -15,6 +15,7 @@ from transformers.utils import chat_template_utils as hf_chat_utils
 
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
+from vllm.tokenizers.detokenizer_utils import decode_utf8_with_offsets
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -313,8 +314,6 @@ class KimiAudioTokenizer(TokenizerLike):
         return self._tokenizer.decode(ids)
 
     def decode_prompt_with_offsets(self, ids: list[int]) -> tuple[str, list[int]]:
-        from .detokenizer_utils import decode_utf8_with_offsets
-
         return decode_utf8_with_offsets(self._tokenizer.decode_tokens_bytes(ids))
 
     @overload
