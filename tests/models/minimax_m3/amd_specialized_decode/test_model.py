@@ -16,6 +16,7 @@ MXFP4 format and converted by that same path.
   native eager;
 - fail-stop: a late rank fault under FULL graphs returns no token."""
 
+import tempfile
 import zlib
 from types import SimpleNamespace
 
@@ -469,7 +470,16 @@ def _whole_layer_decode_active(worker):
     )
 
 
-def test_m31_umbp_restore_keeps_whole_layer_decode(vllm_runner, monkeypatch, tmp_path):
+@pytest.fixture
+def umbp_lookup_dir():
+    """Keep AF_UNIX paths short regardless of CI's TMPDIR or pytest basetemp."""
+    with tempfile.TemporaryDirectory(prefix="umbp-", dir="/tmp") as directory:
+        yield directory
+
+
+def test_m31_umbp_restore_keeps_whole_layer_decode(
+    vllm_runner, monkeypatch, umbp_lookup_dir
+):
     """M3.1 keeps its whole-layer runner after an external prefix restore."""
     from tests.models.utils import check_logprobs_close
     from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
@@ -502,7 +512,7 @@ def test_m31_umbp_restore_keeps_whole_layer_decode(vllm_runner, monkeypatch, tmp
             "kv_connector_extra_config": {
                 "mode": "embedded",
                 "capacity_bytes": 1 << 30,
-                "lookup_dir": str(tmp_path),
+                "lookup_dir": umbp_lookup_dir,
                 "dram_prefault": False,
                 "load_async": True,
             },
@@ -539,7 +549,7 @@ def test_m31_umbp_restore_keeps_whole_layer_decode(vllm_runner, monkeypatch, tmp
 
 
 @pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])
-def test_umbp_restore_keeps_monokernel(vllm_runner, model_dir, tmp_path, graphs):
+def test_umbp_restore_keeps_monokernel(vllm_runner, model_dir, umbp_lookup_dir, graphs):
     """Restore attention and indexer KV, then decode through the fused FFN."""
     from tests.models.utils import check_logprobs_close
     from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
@@ -563,7 +573,7 @@ def test_umbp_restore_keeps_monokernel(vllm_runner, model_dir, tmp_path, graphs)
             kv_connector_extra_config={
                 "mode": "embedded",
                 "capacity_bytes": 1 << 30,
-                "lookup_dir": str(tmp_path),
+                "lookup_dir": umbp_lookup_dir,
                 "dram_prefault": False,
                 "load_async": True,
             },
