@@ -490,6 +490,7 @@ def test_streaming_input_intervals_use_last_input():
     assert finished.queued_time == pytest.approx(5.0)
     assert finished.prefill_time == pytest.approx(1.0)
     assert finished.inference_time == pytest.approx(2.0)
+    assert finished.decode_time == pytest.approx(1.0)
 
 
 def test_preemption_keeps_first_scheduled_ts():
