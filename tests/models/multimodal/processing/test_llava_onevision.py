@@ -7,6 +7,8 @@ from functools import partial
 import numpy as np
 import pytest
 import torch
+import transformers
+from packaging.version import Version
 from PIL import Image
 from pqdm.threads import pqdm
 
@@ -257,7 +259,7 @@ def test_mm_device_do_normalize(model_id):
 def test_video_budget_rejects_frames_before_sampling(
     monkeypatch: pytest.MonkeyPatch, model_id: str
 ) -> None:
-    """A sampled frame count over the budget must be rejected unsampled."""
+    """The budget counts the frames the sampler returns, before sampling."""
     ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor = processor.info.get_hf_processor()
@@ -273,10 +275,8 @@ def test_video_budget_rejects_frames_before_sampling(
         assert isinstance(pixels, torch.Tensor)
         return pixels
 
-    frame_bytes = process(1)[0].nbytes
-    # Transformers 5.16 samples 14 indices for 13 of 15 frames, so 13 frames'
-    # worth of budget only admits requests for 12.
-    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 13 * frame_bytes)
+    frame_bytes = process(12)[0].nbytes
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 12 * frame_bytes)
     assert process(12).shape[0] == 12
 
     def fail_sampling(*args: object, **kwargs: object):
@@ -285,5 +285,10 @@ def test_video_budget_rejects_frames_before_sampling(
     monkeypatch.setattr(
         type(hf_processor.video_processor), "sample_frames", fail_sampling
     )
+    # Before 5.18, Transformers samples 14 frames for 13 of 15.
+    old_sampler = Version(transformers.__version__) < Version("5.18.0.dev0")
+    sampled = 14 if old_sampler else 13
+    budget = (sampled - 1) * frame_bytes
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
     with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
         process(13)
