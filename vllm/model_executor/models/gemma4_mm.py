@@ -78,6 +78,7 @@ from vllm.multimodal.processing.context import (
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    HFMultiModalInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -676,6 +677,20 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        if "audio" not in hf_inputs.hf_data:
+            return hf_inputs
+
+        # The base class disables truncation for the dummy text, which also
+        # stops the feature extractor from cutting audio at its max length,
+        # while the audio placeholders are capped at `audio_seq_length`.
+        return hf_inputs._replace(hf_kwargs=dict(hf_inputs.hf_kwargs, truncation=True))
 
     def _apply_hf_processor_main(
         self,
