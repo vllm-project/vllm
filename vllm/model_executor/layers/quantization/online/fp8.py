@@ -794,6 +794,8 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
     """Online blockwise FP8 MoE quantization.
     Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
+    _whole_tp_blocks: bool = False
+
     def __init__(
         self,
         *,
@@ -803,8 +805,6 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             weight_block_size=[128, 128],
             moe=moe,
         )
-
-    _whole_tp_blocks: bool = False
 
     def create_weights(self, layer: RoutedExperts, *args, **kwargs):
         from vllm.config import get_current_vllm_config_or_none
@@ -981,7 +981,10 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
 
-    def _quantize_loaded_weights(self, layer: Module):
+    def _quantize_loaded_weights(
+        self, layer: Module
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the block-FP8 `(w13, w2, w13_scale, w2_scale)` of the layer."""
         w13_weight, w2_weight = self.get_weights_for_quantization(layer)
         self._zero_padding(layer, w13_weight, w2_weight)
 

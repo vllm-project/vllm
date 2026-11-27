@@ -3220,15 +3220,18 @@ class rocm_aiter_ops:
     @staticmethod
     @functools.cache
     def supports_fp8_block_silu_limit() -> bool:
-        """ROCm/aiter#7019 routes limited block FP8 to a clamp-capable CK stage."""
+        """Probe whether AITER's block-FP8 MoE applies a finite `swiglu_limit`.
+
+        Added in https://github.com/ROCm/aiter/pull/7019 (>=0.1.30). Older
+        AITER accepts the argument and drops it for block FP8.
+        """
         import inspect
 
         try:
             from aiter.fused_moe import swiglu_limit_tag
             from aiter.ops.moe_op import ck_moe_stage1_fwd
 
-            # Older fused_moe already accepts swiglu_limit but drops it for
-            # block FP8. Check both the dispatcher and the CK stage-1 ABI.
+            # Check both the dispatcher and the CK stage-1 ABI.
             return (
                 callable(swiglu_limit_tag)
                 and "swiglu_limit" in inspect.signature(ck_moe_stage1_fwd).parameters

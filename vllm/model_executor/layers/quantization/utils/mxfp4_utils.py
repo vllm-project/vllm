@@ -591,7 +591,24 @@ def dequantize_mxfp4_weight(
 def repack_mxfp4_fnuz_checkpoint_blocks(
     weight: torch.Tensor, scale: torch.Tensor, *, empty_partition: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Match checkpoint block-FP8 conversion and its ROCm normalization."""
+    """Repack MXFP4 experts into 128x128 block FP8 (e4m3fnuz) without rounding.
+
+    Each block scale comes from the largest E8M0 scale of the block, and the
+    result goes through the ROCm FN-to-FNUZ normalization of the FP8 loader.
+
+    Args:
+        weight: `[E, N, K // 2]` packed E2M1 values, N and K multiples of 128.
+        scale: `[E, N, K // 32]` E8M0 scales.
+        empty_partition: Whether this TP rank holds no checkpoint block.
+
+    Returns:
+        The `[E, N, K]` e4m3fnuz weights and `[E, N // 128, K // 128]` fp32
+        power-of-two block scales.
+
+    Raises:
+        ValueError: If a value is not representable with its block scale.
+
+    """
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -638,8 +655,20 @@ def dequantize_mxfp4_moe_weights(
     w2_scale: torch.Tensor,
     out_dtype: torch.dtype,
 ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-    """Yield `(experts, w13, w2)` dequantized MXFP4 experts in groups of experts,
-    bounding the staging memory, for online requantization."""
+    """Dequantize MXFP4 MoE weights for online requantization.
+
+    Args:
+        w13_weight: `[E, num_w13_shards * I, K // 2]` packed E2M1 values.
+        w13_scale: `[E, num_w13_shards * I, K // 32]` E8M0 scales.
+        w2_weight: `[E, K, I // 2]` packed E2M1 values.
+        w2_scale: `[E, K, I // 32]` E8M0 scales.
+        out_dtype: The dequantized dtype.
+
+    Returns:
+        An iterator of `(experts, w13, w2)` over groups of experts, bounding the
+        staging memory.
+
+    """
     num_experts = w13_weight.shape[0]
     # int64 codes, fp32 values and the `out_dtype` result per unpacked value.
     expert_bytes = (

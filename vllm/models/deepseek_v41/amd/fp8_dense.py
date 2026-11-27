@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Load 1017 MXFP8 dense weights for the block-FP8 expert conversion on gfx942."""
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from vllm import envs
@@ -18,11 +20,16 @@ from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms.rocm import on_gfx942
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+
 
 @register_weight_loader_v2_supported_method
 class Bf16EmulatedLinearMethod(ModelOptLinearMethod):
     @staticmethod
-    def matches(online) -> bool:
+    def matches(online: "OnlineQuantizationConfig") -> bool:
         cfg = get_current_vllm_config_or_none()
         if cfg is None or cfg.model_config is None:
             return False
