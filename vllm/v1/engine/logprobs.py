@@ -25,6 +25,7 @@ from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 logger = init_logger(__name__)
 
 NONES = itertools.repeat(None)
+_MAX_UTF8_CONTEXT = 4
 
 
 @dataclass(slots=True)
@@ -43,6 +44,8 @@ class LogprobsProcessor:
     prompt_token_id_logprobs: np.ndarray | None = None
     # False keeps sample logprobs without decoded token strings.
     detokenize_sample_logprobs: bool = True
+    # The unscored prompt prefix may contain the first bytes of a scored token.
+    prompt_logprob_seed: tuple[int, ...] = ()
 
     @classmethod
     def from_new_request(
@@ -55,11 +58,18 @@ class LogprobsProcessor:
         num_logprobs = sampling_params.num_logprobs
         num_prompt_logprobs = sampling_params.prompt_logprobs
         prompt_logprobs = None
+        prompt_logprob_seed: tuple[int, ...] = ()
         if num_prompt_logprobs is not None:
             prompt_logprobs = create_prompt_logprobs(sampling_params.flat_logprobs)
             # Positions up to prompt_logprob_start are not scored.
             for _ in range(sampling_params.prompt_logprob_start or 0):
                 prompt_logprobs.append(None)
+            if tokenizer is not None and request.prompt_token_ids is not None:
+                end = len(prompt_logprobs)
+                start = max(0, end - _MAX_UTF8_CONTEXT)
+                prompt_logprob_seed = tuple(
+                    map(int, request.prompt_token_ids[start:end])
+                )
         return cls(
             tokenizer=tokenizer,
             cumulative_logprob=(None if num_logprobs is None else 0.0),
@@ -72,6 +82,7 @@ class LogprobsProcessor:
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
             detokenize_sample_logprobs=sampling_params._detokenize_logprobs,
+            prompt_logprob_seed=prompt_logprob_seed,
         )
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
@@ -174,11 +185,13 @@ class LogprobsProcessor:
         for row in sorted(
             {i // width for i, t in enumerate(decoded) if t.endswith("�")}
         ):
-            in_batch = token_ids[max(0, row - 4) : row, 0].tolist()
-            context = (
-                self._get_sampled_context_ids(logprobs_source, 4 - len(in_batch))
-                + in_batch
-            )
+            in_batch = token_ids[max(0, row - _MAX_UTF8_CONTEXT) : row, 0].tolist()
+            needed = _MAX_UTF8_CONTEXT - len(in_batch)
+            previous = self._get_sampled_context_ids(logprobs_source, needed)
+            missing = needed - len(previous)
+            if missing and logprobs_source is self.prompt_logprobs:
+                previous = [*self.prompt_logprob_seed[-missing:], *previous]
+            context = previous + in_batch
             begin, end = row * width, (row + 1) * width
             decoded[begin:end] = self._verify_tokens(
                 decoded_tokens_list=decoded[begin:end],
@@ -205,6 +218,7 @@ class LogprobsProcessor:
         plp = self.prompt_logprobs
         if plp:
             self.prompt_logprobs = []
+            self.prompt_logprob_seed = ()
         return plp
 
     def pop_prompt_token_id_logprobs(self) -> np.ndarray | None:
@@ -216,7 +230,7 @@ class LogprobsProcessor:
     @staticmethod
     def _get_sampled_context_ids(
         logprobs_source: SampleLogprobs | PromptLogprobs | None,
-        max_context: int = 4,
+        max_context: int = _MAX_UTF8_CONTEXT,
     ) -> list[int]:
         """Extract recent sampled token IDs from a logprobs source.
 
@@ -274,7 +288,7 @@ class LogprobsProcessor:
         """
         assert self.tokenizer is not None
 
-        max_ctx = min(len(context_token_ids), 4)
+        max_ctx = min(len(context_token_ids), _MAX_UTF8_CONTEXT)
 
         for num_ctx in range(1, max_ctx + 1):
             context = context_token_ids[-num_ctx:]
