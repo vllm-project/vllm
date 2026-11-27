@@ -388,6 +388,40 @@ def get_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return vllm_config.model_config.max_model_len * factor
 
 
+def _resolve_decode_rows(
+    query_start_loc_cpu: torch.Tensor,
+    num_reqs: int,
+    num_decodes: int,
+    num_decode_tokens: int,
+) -> tuple[int, int, int]:
+    """Return (active_num_decodes, num_decode_tokens, decode_query_len).
+
+    PCP decode sharding leaves a rank that owns no decode request with only
+    its zero-token collective placeholder row, which the local batch pads to
+    another rank token count (FULL-cudagraph replay reports that padded count
+    as num_actual_tokens). Such a batch has no real query token: every row has
+    length zero and num_decode_tokens counts padding only, so it must not
+    produce decode metadata.
+    """
+    if num_decodes == 0:
+        assert num_decode_tokens == 0, num_decode_tokens
+        return 0, 0, 0
+    decode_query_len = int(query_start_loc_cpu[1] - query_start_loc_cpu[0])
+    if decode_query_len == 0:
+        # The PCP manager only emits a zero-length row as the batch sole
+        # placeholder (it skips zero-length chunks), so a zero-length first
+        # row means the whole batch has no real query token. Keep the assert
+        # to document the invariant.
+        real_num_tokens = int(query_start_loc_cpu[num_reqs])
+        assert real_num_tokens == 0, (
+            "a zero-length first row is only valid as the batch's sole PCP "
+            f"collective placeholder, got {real_num_tokens} real token(s)"
+        )
+        return 0, 0, 0
+    assert num_decode_tokens % decode_query_len == 0, num_decode_tokens
+    return num_decode_tokens // decode_query_len, num_decode_tokens, decode_query_len
+
+
 class FlashMLASparseMetadataBuilder(
     SparseMLACommonMetadataBuilder[FlashMLASparseMetadata]
 ):
@@ -526,14 +560,16 @@ class FlashMLASparseMetadataBuilder(
         if num_tokens == 0:
             return FP8Meta()
 
-        decode_query_len = 0
-        active_num_decodes = num_decodes
-        if num_decodes > 0:
-            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-            decode_query_len = (query_start_loc_cpu[1] - query_start_loc_cpu[0]).item()
-            assert decode_query_len > 0
-            active_num_decodes = num_decode_tokens // decode_query_len
-            assert active_num_decodes * decode_query_len == num_decode_tokens
+        (
+            active_num_decodes,
+            num_decode_tokens,
+            decode_query_len,
+        ) = _resolve_decode_rows(
+            common_attn_metadata.query_start_loc_cpu,
+            common_attn_metadata.num_reqs,
+            num_decodes,
+            num_decode_tokens,
+        )
 
         fp8_metadata = FP8Meta(
             num_decodes=active_num_decodes,
@@ -667,7 +703,7 @@ class FlashMLASparseMetadataBuilder(
                 chunks=prefill_chunks,
             )
 
-        if num_decodes > 0:
+        if active_num_decodes > 0:
             if self.pcp_dcp_kv_gather:
                 # Decode rows take the mixed-batch kernel call, which returns
                 # the LSE the DCP merge needs.
@@ -1074,7 +1110,32 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode)
         num_decodes = fp8_metadata.num_decodes
         num_mqa_tokens = q.shape[0]
+        if (
+            fp8_metadata.num_decode_tokens == 0
+            and fp8_metadata.num_prefill_tokens == 0
+        ):
+            # Padding-only batch: this PCP rank owns no token this step, and
+            # the padded row outputs are discarded by the caller. Key this on
+            # the token counts (not the row counts) so inconsistent metadata
+            # fails the asserts below instead of silently zeroing real rows.
+            assert num_decodes == 0
+            # PCP decode sharding is disabled under DCP, so a padding-only
+            # rank only exists in PCP-only configs and never reaches the DCP
+            # merge collective. Mirror the empty-LSE shape of the regular
+            # no-decode fallback (q.shape[1], not self.num_heads).
+            assert not self.pcp_dcp_kv_gather
+            lse = None
+            if self.need_to_return_lse_for_decode:
+                lse = q.new_empty((0, q.shape[1]), dtype=torch.float32)
+            attn_out = q.new_zeros(
+                (num_mqa_tokens, self.num_heads, self.kv_lora_rank),
+                dtype=torch.bfloat16,
+            )
+            return attn_out, lse
         num_decode_tokens = fp8_metadata.num_decode_tokens
+        # Derived from the metadata decode-token count on purpose: a
+        # padding-only batch reports zero decode tokens even though q still
+        # carries padded rows, so it must report zero prefill tokens too.
         num_prefill_tokens = num_mqa_tokens - num_decode_tokens
         assert num_prefill_tokens in (0, fp8_metadata.num_prefill_tokens), (
             "FP8 sparse MLA expects either the decode subset or the full batch"

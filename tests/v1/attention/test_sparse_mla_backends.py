@@ -5405,6 +5405,7 @@ def test_flashmla_fp8_metadata_excludes_zero_token_decode_padding(monkeypatch):
         num_actual_tokens=660,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=torch.arange(7, device=DEVICE_TYPE),
+        num_reqs=7,
     )
     metadata = FlashMLASparseMetadata(
         num_reqs=7,
@@ -6257,3 +6258,226 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
                 rtol=0.01,
                 atol=0.01,
             )
+
+
+def test_resolve_decode_rows_keeps_real_decode_tokens():
+    from vllm.v1.attention.backends.mla.flashmla_sparse import _resolve_decode_rows
+
+    qsl = torch.tensor([0, 1], dtype=torch.int32)
+    assert _resolve_decode_rows(qsl, 1, 1, 1) == (1, 1, 1)
+
+
+def test_resolve_decode_rows_drops_pcp_collective_padding():
+    from vllm.v1.attention.backends.mla.flashmla_sparse import _resolve_decode_rows
+
+    # A PCP rank that owns no decode request: every row is a zero-token
+    # collective placeholder padded to another rank token count, so the padded
+    # token count must not become decode metadata.
+    qsl = torch.zeros(4, dtype=torch.int32)
+    assert _resolve_decode_rows(qsl, 3, 3, 3) == (0, 0, 0)
+
+
+def test_resolve_decode_rows_without_decodes():
+    from vllm.v1.attention.backends.mla.flashmla_sparse import _resolve_decode_rows
+
+    qsl = torch.tensor([0, 512, 1024], dtype=torch.int32)
+    assert _resolve_decode_rows(qsl, 2, 0, 0) == (0, 0, 0)
+
+
+def test_padding_only_pcp_batch_builds_no_decode_metadata(
+    default_vllm_config, dist_init, workspace_init
+):
+    """A PCP rank with no query token must not build decode metadata.
+
+    FULL-cudagraph replay pads a placeholder-only rank to the graph token
+    count, so the split classifies the padded rows as decodes. The formal
+    build() dispatch needs a multi-rank PCP state; the FP8 metadata method is
+    the unit that must reject the batch.
+    """
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        FlashMLASparseMetadata,
+    )
+    from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V3.2",
+        max_model_len=4096,
+        num_gpu_blocks=128,
+        block_size=64,
+        dtype="bfloat16",
+    )
+    vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+    with set_current_vllm_config(vllm_config):
+        mla_attention.MLAAttention(
+            num_heads=128,
+            scale=192**-0.5,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            q_lora_rank=1536,
+            kv_lora_rank=512,
+            kv_b_proj=ColumnParallelLinear(512, 128 * 256, bias=False),
+            cache_config=vllm_config.cache_config,
+            prefix="placeholder",
+            attn_backend=FlashMLASparseBackend,
+            use_sparse=True,
+            topk_indices_buffer=torch.empty((4096, 2048), dtype=torch.int32),
+        )
+        builder = FlashMLASparseBackend.get_builder_cls()(
+            create_standard_kv_cache_spec(vllm_config),
+            ["placeholder"],
+            vllm_config,
+            torch.device(DEVICE_TYPE),
+        )
+        assert builder.pcp_dcp_kv_gather is False
+
+        def _metadata(common, num_decodes):
+            return FlashMLASparseMetadata(
+                num_reqs=common.num_reqs,
+                max_query_len=common.max_query_len,
+                max_seq_len=common.max_seq_len,
+                num_actual_tokens=common.num_actual_tokens,
+                query_start_loc=common.query_start_loc,
+                slot_mapping=common.slot_mapping,
+                block_table=common.block_table_tensor,
+                req_id_per_token=torch.zeros(
+                    common.num_actual_tokens,
+                    dtype=torch.int32,
+                    device=DEVICE_TYPE,
+                ),
+                num_decodes=num_decodes,
+                num_prefills=0,
+                num_decode_tokens=common.num_actual_tokens,
+            )
+
+        common = CommonAttentionMetadata(
+            query_start_loc=torch.zeros(2, dtype=torch.int32),
+            query_start_loc_cpu=torch.zeros(2, dtype=torch.int32),
+            seq_lens=torch.zeros(1, dtype=torch.int32),
+            seq_lens_cpu_upper_bound=torch.zeros(1, dtype=torch.int32),
+            num_reqs=1,
+            num_actual_tokens=1,
+            max_query_len=0,
+            max_seq_len=0,
+            block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+            slot_mapping=torch.full((1,), -1, dtype=torch.int64),
+            is_prefilling=torch.zeros(1, dtype=torch.bool),
+        )
+        assert split_decodes_and_prefills(
+            common,
+            decode_threshold=128,
+            require_uniform=True,
+            treat_short_extends_as_decodes=False,
+        ) == (1, 0, 1, 0)
+        out = builder._build_fp8_separate_prefill_decode(
+            common, _metadata(common, 1)
+        )
+        assert out.num_decodes == 0
+        assert out.num_decode_tokens == 0
+        assert out.decode is None
+        assert out.prefill is None
+
+        # The graph token count is normally >= decode_query_len; pin a padded
+        # count greater than one as well.
+        common_multi = CommonAttentionMetadata(
+            query_start_loc=torch.zeros(5, dtype=torch.int32),
+            query_start_loc_cpu=torch.zeros(5, dtype=torch.int32),
+            seq_lens=torch.zeros(4, dtype=torch.int32),
+            seq_lens_cpu_upper_bound=torch.zeros(4, dtype=torch.int32),
+            num_reqs=4,
+            num_actual_tokens=8,
+            max_query_len=0,
+            max_seq_len=0,
+            block_table_tensor=torch.zeros((4, 1), dtype=torch.int32),
+            slot_mapping=torch.full((8,), -1, dtype=torch.int64),
+            is_prefilling=torch.zeros(4, dtype=torch.bool),
+        )
+        assert split_decodes_and_prefills(
+            common_multi,
+            decode_threshold=128,
+            require_uniform=True,
+            treat_short_extends_as_decodes=False,
+        ) == (4, 0, 8, 0)
+        out = builder._build_fp8_separate_prefill_decode(
+            common_multi, _metadata(common_multi, 4)
+        )
+        assert out.num_decodes == 0
+        assert out.num_decode_tokens == 0
+        assert out.decode is None
+        assert out.prefill is None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(90),
+    reason="Native small-head FlashMLA kernels require SM90",
+)
+def test_fp8_separate_prefill_decode_padding_only_returns_zeros(
+    default_vllm_config, dist_init, workspace_init
+):
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        FlashMLASparseImpl,
+        FlashMLASparseMetadata,
+    )
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V3.2",
+        max_model_len=4096,
+        num_gpu_blocks=128,
+        block_size=64,
+        dtype="bfloat16",
+    )
+    vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+    with set_current_vllm_config(vllm_config):
+        impl = FlashMLASparseImpl(
+            num_heads=2,
+            head_size=576,
+            scale=256**-0.5,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8_ds_mla",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=256,
+            qk_rope_head_dim=64,
+            qk_head_dim=320,
+            v_head_dim=256,
+            kv_b_proj=ColumnParallelLinear(512, 2 * 512, bias=False),
+        )
+    num_mqa_tokens = 8
+    q = torch.empty(num_mqa_tokens, 2, 320, device=DEVICE_TYPE)
+    metadata = FlashMLASparseMetadata(
+        num_reqs=1,
+        max_query_len=0,
+        max_seq_len=0,
+        num_actual_tokens=num_mqa_tokens,
+        query_start_loc=torch.zeros(2, dtype=torch.int32, device=DEVICE_TYPE),
+        slot_mapping=torch.full(
+            (num_mqa_tokens,), -1, dtype=torch.int64, device=DEVICE_TYPE
+        ),
+        block_table=torch.zeros((1, 1), dtype=torch.int32, device=DEVICE_TYPE),
+        req_id_per_token=torch.zeros(
+            num_mqa_tokens, dtype=torch.int32, device=DEVICE_TYPE
+        ),
+        num_decodes=0,
+        num_prefills=0,
+        num_decode_tokens=0,
+        fp8_extra_metadata=(
+            FlashMLASparseMetadata.FP8SeparatePrefillDecode()
+        ),
+    )
+    out, lse = impl._forward_fp8_kv_separate_prefill_decode(
+        q,
+        torch.empty(0, device=DEVICE_TYPE),
+        torch.empty(0, dtype=torch.int32, device=DEVICE_TYPE),
+        metadata,
+    )
+    assert out.shape == (num_mqa_tokens, 2, 512)
+    assert out.dtype == torch.bfloat16
+    assert not bool(out.any())
+    assert lse is None
