@@ -1019,12 +1019,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     @functools.cached_property
     def _exports_checkpoints(self) -> bool:
         # Known only once every layer is built: a Mamba layer that cannot
-        # checkpoint (e.g. Qwen4Exp's PLE short conv) keeps the scheduler
-        # splitting the prefill instead.
-        return (
-            self._checkpoint_alignment is not None
-            and get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
-        )
+        # checkpoint keeps the scheduler splitting the prefill instead.
+        return get_mamba_prefill_checkpoint_alignment(self.vllm_config) is not None
 
     @functools.cached_property
     def _checkpoint_buffer_spec(self) -> tuple[tuple[int, ...], torch.dtype]:

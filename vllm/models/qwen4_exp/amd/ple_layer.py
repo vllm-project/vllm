@@ -526,7 +526,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
 
     def get_cache_checkpoint_alignment(self) -> int | None:
-        return 1 if self.cache_config.enable_prefix_caching else None
+        return 1
 
     def _short_conv_dilated_dispatch(
         self,
