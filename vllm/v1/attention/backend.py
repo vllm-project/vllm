@@ -1146,10 +1146,8 @@ def subclass_attention_backend(
     builder_cls: type[AttentionMetadataBuilder[M]],
 ) -> type[AttentionBackend]:
     """Return a new subclass where `get_builder_cls` returns `builder_cls`."""
-    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
-
-    return type(
-        name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
+    return subclass_attention_backend_with_overrides(
+        name_prefix, attention_backend_cls, {"get_builder_cls": lambda: builder_cls}
     )
 
 
@@ -1159,4 +1157,11 @@ def subclass_attention_backend_with_overrides(
     overrides: dict[str, Any],
 ) -> type[AttentionBackend]:
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
-    return type(name, (attention_backend_cls,), overrides)
+    # Keep the identity of the underlying class: attention groups are keyed by
+    # `full_cls_name()`, so two backends of the same name from different
+    # modules must not share one group.
+    identity = {
+        "__module__": attention_backend_cls.__module__,
+        "__qualname__": name_prefix + attention_backend_cls.__qualname__,
+    }
+    return type(name, (attention_backend_cls,), {**identity, **overrides})

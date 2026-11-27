@@ -18,12 +18,14 @@ from torch import nn
 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.models.inkling2.nvidia.ops import use_sm100_kernels
+from vllm.models.inkling2.nvidia.ops.linear import linear_k_groups
 from vllm.models.inkling2.nvidia.ops.vision import (
     apply_rotary_qk_,
     embed_tokens,
     gather_patches,
     scaled_residual_norm_,
 )
+from vllm.platforms import current_platform
 
 _CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
@@ -32,8 +34,20 @@ _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 _PROCESSOR_CLIP_STD = (0.26862954, 0.2613026, 0.2757771)
 
 
+class _SM120Linear(nn.Linear):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Keep the accumulation order independent of encoder graph padding.
+        out = linear_k_groups(x, self.weight)
+        if self.bias is not None:
+            out = out + self.bias.float()
+        return out.to(x.dtype)
+
+
 def _linear(in_features: int, out_features: int, bias: bool = True) -> nn.Linear:
-    return nn.Linear(in_features, out_features, bias=bias, dtype=torch.bfloat16)
+    cls = (
+        _SM120Linear if current_platform.is_device_capability_family(120) else nn.Linear
+    )
+    return cls(in_features, out_features, bias=bias, dtype=torch.bfloat16)
 
 
 class VisionMetadata(NamedTuple):
@@ -75,9 +89,10 @@ class Inkling2VisionAttention(nn.Module):
 
             out, _ = fa4(q, k, v, **kwargs)
         else:
-            from vllm.vllm_flash_attn import flash_attn_varlen_func as fa3
+            from vllm.vllm_flash_attn import flash_attn_varlen_func
 
-            out = fa3(q, k, v, fa_version=3, **kwargs)
+            version = 3 if current_platform.is_device_capability_family(90) else 2
+            out = flash_attn_varlen_func(q, k, v, fa_version=version, **kwargs)
         return self.out_proj(out.view(hidden.shape))
 
 

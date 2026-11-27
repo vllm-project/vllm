@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Looped multimodal (text and image in, text out) MoE from Thinking Machines Lab with 26B total and 3.5B active parameters and up to 1M context: its 12 middle layers run three passes per token, each with its own KV cache and gated messages from the previous pass. Bundles a DSpark speculator."
   date_added: 2026-11-20
-  date_updated: 2026-11-20
+  date_updated: 2026-11-27
   difficulty: intermediate
   tasks:
     - multimodal
@@ -26,11 +26,7 @@ model:
   # Inkling2LoopForConditionalGeneration is not in v0.34.0; the next release at the earliest.
   min_vllm_version: "0.35.0"
   nightly_required: true
-  docker_image: "vllm/vllm-openai:inkling-2-mini"
-  install:
-    docker:
-      note: "Serve from the `vllm/vllm-openai:inkling-2-mini` image; no pip wheel is available yet."
-    pip: false
+  docker_image: "vllm/vllm-openai:nightly"
   architecture: moe
   parameter_count: "26B"
   active_parameters: "3.5B"
@@ -71,12 +67,17 @@ compatible_strategies:
 hardware_overrides: {}
 
 strategy_overrides:
-  # One GB200 serves the model. Verified with contexts up to 262,144 tokens;
-  # the full 1M context was verified at TP4 (see the guide).
+  # One GPU serves the model's full 1M context (a GB200 holds ~1.8 concurrent
+  # 1M-token requests; ~69 KB of cache per token). H100 (80 GB) and DGX Spark
+  # (128 GB shared with the host) keep a 262,144-token cap.
   single_node_tp:
     tp: 1
     hardware_overrides:
-      blackwell:
+      h100:
+        extra_args:
+          - "--max-model-len"
+          - "262144"
+      dgx_spark_gb10:
         extra_args:
           - "--max-model-len"
           - "262144"
@@ -107,7 +108,8 @@ guide: |
 
   ## Runtime
 
-  Use the `vllm/vllm-openai:inkling-2-mini` image until Inkling 2 Mini support is in a vLLM release.
+  Inkling 2 Mini is supported in vLLM main. Use the `vllm/vllm-openai:nightly` image or a
+  nightly wheel until it is in a vLLM release.
 
   ## Configurations
 
@@ -115,13 +117,16 @@ guide: |
   DGX Spark, and is verified on GB200, B300, GB300, H100, H200 and DGX Spark. The configurations
   below were verified on GB200 with DSpark and the reasoning parser enabled:
 
-  - **One GPU, TP1:** contexts up to 262,144 tokens. This is the most efficient way to serve
-    the model; TP4 gives lower output throughput per GPU.
-  - **TP4 (`--tensor-parallel-size 4 --max-model-len 1048576`):** the full 1,048,576-token
-    context.
+  - **One GPU, TP1:** the full 1,048,576-token context (a GB200 holds about 1.8 concurrent
+    1M-token requests). This is the most efficient way to serve the model; TP4 gives lower
+    output throughput per GPU. On H100 and DGX Spark, the recipe caps the context at 262,144
+    tokens to fit in memory.
 
   On one GPU, the KV cache bounds the number of concurrent long sessions: with 32K, 64K and
   128K-token sessions, about 45, 32 and 20 sessions run at 100 tokens/s per user.
+
+  Ampere and Ada GPUs (SM80, SM86, SM89) are supported, with a BF16 KV cache and BF16 expert
+  activations.
 
   Tool calling uses the `inkling` tool-call parser (opt-in above).
 

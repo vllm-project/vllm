@@ -9,6 +9,7 @@ from vllm.triton_utils import tl, tldevice, triton
 
 from .mxfp8 import _mxfp8_block, _store_mxfp8_block
 from .nvfp4 import FP32_MAX, _quantize_block, _store_block
+from .trtllm_bmm import operand
 
 # Up to this many rows, the kernel lets the next one launch (and wait) as soon
 # as it starts, which hides its launch; with more, the waiting programs would
@@ -231,9 +232,9 @@ def swiglu_quantize(
     max_rows = routed.numel()
     num_warps, maxnreg = (4, None) if max_rows <= 16384 else (2, 72)
     if not nvfp4 and max_rows <= 512:
-        # Few rows: a program per 256 columns.
-        assert n % 256 == 0
-        head, tail, num_warps = 256, 0, 2
+        # Few rows: a program per 256 (or 128) columns.
+        head, tail, num_warps = 256 if n % 256 == 0 else 128, 0, 2
+        assert n % head == 0
     else:
         # Whole rows, as a power-of-two head and tail.
         head = 1 << (n.bit_length() - 1)
@@ -241,15 +242,14 @@ def swiglu_quantize(
         assert tail & (tail - 1) == 0 and (tail == 0 or tail >= 32)
         if not nvfp4:
             num_warps, maxnreg = 2, None
+    # The down projection's GEMM operands.
     if nvfp4:
-        values = torch.empty((num_rows, n // 2), dtype=torch.uint8, device=x.device)
-        scales = torch.empty(
-            (num_rows, n // 16), dtype=torch.float8_e4m3fn, device=x.device
-        )
-        row_scales = torch.empty(num_rows, dtype=torch.float32, device=x.device)
+        values = operand(num_rows, n // 2, dtype=torch.uint8, device=x.device)
+        scales = operand(num_rows, n // 16, dtype=torch.float8_e4m3fn, device=x.device)
+        row_scales = operand(num_rows, dtype=torch.float32, device=x.device)
     else:
-        values = torch.empty((num_rows, n), dtype=torch.float8_e4m3fn, device=x.device)
-        scales = torch.empty((num_rows, n // 32), dtype=torch.uint8, device=x.device)
+        values = operand(num_rows, n, dtype=torch.float8_e4m3fn, device=x.device)
+        scales = operand(num_rows, n // 32, dtype=torch.uint8, device=x.device)
         row_scales = None
     _situ_quantize_kernel[(min(max_rows, 16384), n // (head + tail))](
         x,
