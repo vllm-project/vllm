@@ -80,10 +80,12 @@ class InputProcessor:
 
         self.supports_mm_inputs = model_config.supports_multimodal_inputs
         self.mm_encoder_cache_size = 0
+        self.mm_encoder_budget = 0
         self.skip_prompt_length_check = False
         if self.supports_mm_inputs:
             mm_budget = MultiModalBudget(vllm_config, mm_registry)
             self.mm_encoder_cache_size = mm_budget.encoder_cache_size
+            self.mm_encoder_budget = mm_budget.get_encoder_budget()
             self.skip_prompt_length_check = (
                 mm_budget.processor.info.skip_prompt_length_check
             )
@@ -620,7 +622,7 @@ class InputProcessor:
         max_prompt_len = (
             model_config.max_model_len
             if prompt_type == "decoder"
-            else self.mm_encoder_cache_size
+            else self.mm_encoder_budget
         )
         if prompt_len > max_prompt_len:
             if self.supports_mm_inputs:
@@ -688,14 +690,14 @@ class InputProcessor:
                 ):
                     num_embeds = mm_position.get_num_embeds()
                     num_embeds_by_hash[mm_hash] = num_embeds
-                    if num_embeds > self.mm_encoder_cache_size:
+                    if num_embeds > self.mm_encoder_budget:
                         raise VLLMValidationError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
                             f"with {num_embeds} embedding tokens, which exceeds the "
-                            f"pre-allocated encoder cache size "
-                            f"{self.mm_encoder_cache_size}. Please reduce the input "
-                            f"size or increase the encoder cache size "
-                            f"by setting --limit-mm-per-prompt at startup."
+                            f"encoder budget {self.mm_encoder_budget}. Please "
+                            f"reduce the input size or increase "
+                            f"--max-num-batched-tokens and --encoder-cache-size "
+                            f"at startup."
                         )
 
             # Without chunked prefill, the scheduler encodes all of a prompt's
