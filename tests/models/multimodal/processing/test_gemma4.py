@@ -579,14 +579,8 @@ def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
     model.multimodal_config = SimpleNamespace(mm_processor_kwargs=mm_processor_kwargs)
 
     config = model.get_encoder_cudagraph_config()
-    assert config.capture_axes == ((70, 140, 280, 560),)
     # A batch holds at least one row of its width.
-    assert config.axis_keys_min_tokens == {
-        (70,): 70,
-        (140,): 140,
-        (280,): 280,
-        (560,): 560,
-    }
+    assert config.capture_axes == ({70: 70, 140: 140, 280: 280, 560: 560},)
 
 
 @pytest.mark.parametrize(

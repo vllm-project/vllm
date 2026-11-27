@@ -349,8 +349,7 @@ class TestFindBudgetGraph:
     def test_capture_skips_budgets_below_axis_minimum(self):
         """A budget below a combination's minimum tokens is never replayed."""
         mgr = _make_manager_with_budgets([70, 140, 280, 560])
-        mgr._capture_axes = ((70, 140, 280),)
-        mgr.config.axis_keys_min_tokens = {(w,): w for w in (70, 140, 280)}
+        mgr._capture_axes = ({w: w for w in (70, 140, 280)},)
         captured = []
 
         def fake_capture(token_budget, path="default", axis_keys=()):

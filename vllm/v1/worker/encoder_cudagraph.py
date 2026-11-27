@@ -100,8 +100,8 @@ class EncoderCudaGraphManager:
 
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        self._capture_axes: tuple[CaptureAxisKeys, ...] = tuple(
-            tuple(axis) for axis in self.config.capture_axes
+        self._capture_axes: tuple[dict[Hashable, int], ...] = tuple(
+            dict(axis) for axis in self.config.capture_axes
         )
         if any(len(axis) == 0 for axis in self._capture_axes):
             raise ValueError("Encoder cudagraph capture axes must be non-empty.")
@@ -366,11 +366,13 @@ class EncoderCudaGraphManager:
 
         Without capture axes this is the single empty combination.
         """
-        min_tokens = self.config.axis_keys_min_tokens
         return [
             axis_keys
             for axis_keys in itertools.product(*self._capture_axes)
-            if token_budget >= min_tokens.get(axis_keys, 0)
+            if all(
+                token_budget >= axis[key]
+                for axis, key in zip(self._capture_axes, axis_keys)
+            )
         ]
 
     def _num_graphs_for_budgets(self, budgets: list[int]) -> int:

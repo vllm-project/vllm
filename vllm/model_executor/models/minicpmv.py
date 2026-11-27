@@ -1681,7 +1681,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
             buffer_keys=buffer_keys,
             out_hidden_size=int(self.embed_dim),
             max_frames_per_video=max_frames,
-            capture_axes=(self._mcpmv_patch_grid_keys(),),
+            capture_axes=(dict.fromkeys(self._mcpmv_patch_grid_keys(), 0),),
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
