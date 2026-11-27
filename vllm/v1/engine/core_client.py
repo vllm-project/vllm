@@ -219,6 +219,9 @@ class EngineCoreClient(ABC):
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
+    def invoke_kv_connector(self, payload: bytes) -> bytes | None:
+        raise NotImplementedError
+
     def sleep(
         self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
     ) -> None:
@@ -333,6 +336,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_encoder_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def invoke_kv_connector_async(self, payload: bytes) -> bytes | None:
         raise NotImplementedError
 
     async def sleep_async(
@@ -475,6 +481,9 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
+
+    def invoke_kv_connector(self, payload: bytes) -> bytes | None:
+        return self.engine_core.invoke_kv_connector(payload)
 
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
@@ -1135,6 +1144,9 @@ class SyncMPClient(MPClient):
             "reset_prefix_cache", reset_running_requests, reset_connector
         )
 
+    def invoke_kv_connector(self, payload: bytes) -> bytes | None:
+        return self.call_utility("invoke_kv_connector", payload)
+
     def reset_encoder_cache(self) -> None:
         self.call_utility("reset_encoder_cache")
 
@@ -1431,6 +1443,9 @@ class AsyncMPClient(MPClient):
                 "reset_prefix_cache", reset_running_requests, reset_connector
             )
         )
+
+    async def invoke_kv_connector_async(self, payload: bytes) -> bytes | None:
+        return await self.call_utility_async("invoke_kv_connector", payload)
 
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")

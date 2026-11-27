@@ -250,6 +250,23 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def invoke_kv_connector(self, payload: bytes) -> bytes | None:
+        """Deliver a generic control RPC to the scheduler-side KV connector.
+
+        The payload is opaque to vLLM and forwarded verbatim to the
+        connector's `on_rpc` hook.
+
+        Args:
+            payload: The connector-defined request payload, as raw bytes.
+
+        Returns:
+            The connector's response bytes, or `None` if the connector does
+            not implement the hook.
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError

@@ -222,6 +222,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/systemone` - Structured decisions API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
+- `/v1/kv_connector/rpc` - Generic control RPC to the configured KV connector (hands attacker-controllable bytes to connector code; only meaningful when a KV connector is configured, and the connector is responsible for validating and bounding the payload)
 - `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`; otherwise returns HTTP 403 with instructions to enable it)
 - `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires `VLLM_ENABLE_COHERE_API=1` and either `--enable-scale-out` or `--tokens-only`)
 - `/v2/embed` - Cohere Embed API

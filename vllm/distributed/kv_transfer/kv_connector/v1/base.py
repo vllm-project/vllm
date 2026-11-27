@@ -870,3 +870,32 @@ class KVConnectorBase_V1(ABC):
         )
 
         return None
+
+    def on_rpc(self, payload: bytes) -> bytes | None:
+        """Handle a generic control RPC delivered via the connector channel.
+
+        This is a schema-agnostic `bytes -> bytes` hook. vLLM routes the raw
+        request payload here without parsing it, and returns the response bytes
+        to the caller. The connector owns all (de)serialization and semantics.
+
+        Only the scheduler-side instance (`KVConnectorRole.SCHEDULER`) is
+        invoked. The handler runs synchronously in the EngineCore busy-loop
+        thread between model-execution steps, so it must be fast and
+        non-blocking, exactly like `reset_cache()`.
+
+        Args:
+            payload: The connector-defined request payload, as raw bytes.
+
+        Returns:
+            The response payload as `bytes` (an empty `b""` is a valid
+            success/ack), or `None` if this connector does not implement the
+            hook. The base-class default returns `None` to signal
+            "not implemented".
+
+        """
+        logger.debug(
+            "Connector RPC requested, but %s does not implement on_rpc().",
+            type(self).__name__,
+        )
+
+        return None

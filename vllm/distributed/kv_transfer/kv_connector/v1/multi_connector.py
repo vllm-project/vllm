@@ -840,3 +840,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def reset_cache(self) -> bool:
         results = [c.reset_cache() is not False for c in self._connectors]
         return all(results)
+
+    def on_rpc(self, payload: bytes) -> bytes | None:
+        # Try each wrapped connector in configuration order and return the
+        # first non-None reply (bytes, including b""). If a child raises, the
+        # exception propagates immediately rather than falling through to the
+        # next child, so a payload one connector rejects fails loudly instead
+        # of being silently reinterpreted by an unrelated connector.
+        for connector in self._connectors:
+            result = connector.on_rpc(payload)
+            if result is not None:
+                return result
+        return None

@@ -1308,6 +1308,9 @@ class AsyncLLM(EngineClient):
             reset_running_requests, reset_connector
         )
 
+    async def invoke_kv_connector(self, payload: bytes) -> bytes | None:
+        return await self.engine_core.invoke_kv_connector_async(payload)
+
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 

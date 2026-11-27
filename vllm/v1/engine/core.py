@@ -966,6 +966,9 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def invoke_kv_connector(self, payload: bytes) -> bytes | None:
+        return self.scheduler.invoke_kv_connector(payload)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 

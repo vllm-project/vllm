@@ -3543,6 +3543,14 @@ class Scheduler(SchedulerInterface):
 
         return True
 
+    def invoke_kv_connector(self, payload: bytes) -> bytes | None:
+        if self.connector is None:
+            # Should not happen: the HTTP layer returns 404 before dispatch
+            # when no KV connector is configured. Guard defensively so a
+            # misconfigured caller does not hit an AttributeError.
+            return None
+        return self.connector.on_rpc(payload)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 
